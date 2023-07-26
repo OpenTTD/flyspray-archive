@@ -1,0 +1,285 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(Revision 10045)
++++ src/lang/english.txt	(Arbeitskopie)
+@@ -2663,6 +2663,7 @@
+ STR_8833_CAN_T_INSERT_NEW_ORDER                                 :{WHITE}Can't insert new order...
+ STR_8834_CAN_T_DELETE_THIS_ORDER                                :{WHITE}Can't delete this order...
+ STR_8835_CAN_T_MODIFY_THIS_ORDER                                :{WHITE}Can't modify this order...
++STR_CAN_T_MOVE_THIS_ORDER                                       :{WHITE}Can't move this order...
+ STR_CAN_T_SKIP_ORDER                                            :{WHITE}Can't skip current order...
+ STR_CAN_T_SKIP_TO_ORDER                                         :{WHITE}Can't skip to selected order...
+ STR_8837_CAN_T_MOVE_VEHICLE                                     :{WHITE}Can't move vehicle...
+Index: src/order_cmd.cpp
+===================================================================
+--- src/order_cmd.cpp	(Revision 10045)
++++ src/order_cmd.cpp	(Arbeitskopie)
+@@ -598,7 +598,99 @@
+ 	return 0;
+ }
+ 
++/** Move an order inside the orderlist
++ * @param tile unused
++ * @param p1 the ID of the vehicle
++ * @param p2
++ * 	bit 0-15  : the order to move
++ * 	bit 16-31 : the target order
++ * @note The target order will move one place down in the orderlist
++ *  if you move the order upwards else it'll move it one place down
++ */
++int32 CmdMoveOrder(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++{
++	Vehicle *v;
++	VehicleID veh = p1;
++	VehicleOrderID moving_order, target_order;
++	Order *moving_one, *one_before, *one_past;
+ 
++	moving_order = GB(p2, 0, 16);
++	target_order = GB(p2, 16, 16);
++
++	if (!IsValidVehicleID(veh)) return CMD_ERROR;
++
++	v = GetVehicle(veh);
++	if (!CheckOwnership(v->owner)) return CMD_ERROR;
++
++	/* Don't make senseless movements */
++	if (moving_order >= v->num_orders || target_order >= v->num_orders ||
++			moving_order == target_order || v->num_orders <= 1)
++		return CMD_ERROR;
++
++	moving_one = GetVehicleOrder(v, moving_order);
++	/* Don't move an empty order */
++	if (moving_one == NULL) return CMD_ERROR;
++
++	if (flags & DC_EXEC) {
++		Vehicle *u;
++
++		/* take the moving order out of the pointer-chain */
++		one_before = GetVehicleOrder(v, moving_order - 1);
++		one_past = GetVehicleOrder(v, moving_order + 1);
++
++		if (one_before == NULL) {
++			/* first order edit */
++			v->orders = moving_one->next;
++		} else {
++			one_before->next = moving_one->next;
++		}
++
++		/* Insert the moving_order again in the pointer-chain */
++		one_before = GetVehicleOrder(v, target_order - 1);
++		one_past = GetVehicleOrder(v, target_order);
++
++		moving_one->next = one_past;
++
++		if (one_before == NULL) {
++			/* first order edit */
++			SwapOrders(v->orders, moving_one);
++			v->orders->next = moving_one;
++		} else {
++			one_before->next = moving_one;
++		}
++
++		if (v->type == VEH_ROAD) ClearSlot(v);
++
++		/* Update shared list */
++		u = GetFirstVehicleFromSharedList(v);
++
++		DeleteOrderWarnings(u);
++
++		for (; u != NULL; u = u->next_shared) {
++			/* update the first order */
++			if (u->orders != v->orders) u->orders = v->orders;
++
++			/* update the current order */
++			if (u->cur_order_index == moving_order) {
++				u->cur_order_index = target_order;
++			} else if(u->cur_order_index > moving_order && u->cur_order_index <= target_order) {
++				u->cur_order_index--;
++			} else if(u->cur_order_index < moving_order && u->cur_order_index >= target_order) {
++			u->cur_order_index++;
++			}
++
++			assert(v->orders == u->orders);
++			/* Update any possible open window of the vehicle */
++			InvalidateVehicleOrder(u);
++		}
++
++		/* Make sure to rebuild the whole list */
++		RebuildVehicleLists();
++	}
++
++	return 0;
++}
++
+ /** Modify an order in the orderlist of a vehicle.
+  * @param tile unused
+  * @param flags operation to perform
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(Revision 10045)
++++ src/command.cpp	(Arbeitskopie)
+@@ -176,6 +176,8 @@
+ DEF_COMMAND(CmdRemoveAllVehiclesGroup);
+ DEF_COMMAND(CmdSetGroupReplaceProtection);
+ 
++DEF_COMMAND(CmdMoveOrder);
++
+ /* The master command table */
+ static const Command _command_proc_table[] = {
+ 	{CmdBuildRailroadTrack,                  0}, /*   0 */
+@@ -328,6 +330,7 @@
+ 	{CmdAddSharedVehicleGroup,               0}, /* 124 */
+ 	{CmdRemoveAllVehiclesGroup,              0}, /* 125 */
+ 	{CmdSetGroupReplaceProtection,           0}, /* 126 */
++	{CmdMoveOrder,                           0}, /* 127 */
+ };
+ 
+ /* This function range-checks a cmd, and checks if the cmd is not NULL */
+Index: src/order_gui.cpp
+===================================================================
+--- src/order_gui.cpp	(Revision 10045)
++++ src/order_gui.cpp	(Arbeitskopie)
+@@ -44,6 +44,13 @@
+ 	ORDER_WIDGET_RESIZE,
+ };
+ 
++/**
++ * Return the memorised selected order.
++ *
++ * @param w current window
++ * @return the memorised order if it is a vaild one
++ *  else return the number of orders
++ */
+ static int OrderGetSel(const Window *w)
+ {
+ 	const Vehicle *v = GetVehicle(w->window_number);
+@@ -52,6 +59,33 @@
+ 	return (num >= 0 && num < v->num_orders) ? num : v->num_orders;
+ }
+ 
++/**
++ * Calculate the selected order.
++ * The calculation is based on the relative (to the window) y click position and
++ *  the position of the scrollbar.
++ *
++ * @param w current window
++ * @param y Y-value of the click relative to the window origin
++ * @param v current vehicle
++ * @return the new selected order if the order is valid else return that
++ *  an invalid one has been selected.
++ */
++static int GetOrderFromOrderWndPt(Window *w, int y, const Vehicle *v)
++{
++	/*
++	 * Calculation description:
++	 * 15 = 14 (w->widget[ORDER_WIDGET_ORDER_LIST].top) + 1 (frame-line)
++	 * 10 = order text hight
++	 */
++	int sel = (y - 15) / 10;
++
++	if ((uint)sel >= w->vscroll.cap) return INVALID_ORDER;
++
++	sel += w->vscroll.pos;
++
++	return (sel <= v->num_orders && sel >= 0) ? sel : INVALID_ORDER;
++}
++
+ static StringID StationOrderStrings[] = {
+ 	STR_8806_GO_TO,
+ 	STR_8807_GO_TO_TRANSFER,
+@@ -455,14 +489,14 @@
+ 		break;
+ 
+ 	case WE_CLICK: {
+-		Vehicle *v = GetVehicle(w->window_number);
++		const Vehicle *v = GetVehicle(w->window_number);
+ 		switch (e->we.click.widget) {
+ 		case ORDER_WIDGET_ORDER_LIST: {
+-			int sel = (e->we.click.pt.y - 15) / 10;
++			ResetObjectToPlace();
+ 
+-			if ((uint)sel >= w->vscroll.cap) return;
++			int sel = GetOrderFromOrderWndPt(w, e->we.click.pt.y, v);
+ 
+-			sel += w->vscroll.pos;
++			if (sel == INVALID_ORDER) return;
+ 
+ 			if (_ctrl_pressed && sel < v->num_orders) {
+ 				const Order *ord = GetVehicleOrder(v, sel);
+@@ -477,10 +511,21 @@
+ 
+ 				if (xy != 0) ScrollMainWindowToTile(xy);
+ 				return;
++			} else {
++				if (sel == WP(w,order_d).sel) {
++					/* Deselect clicked order */
++					WP(w,order_d).sel = -1;
++				} else {
++					/* Select clicked order */
++					WP(w,order_d).sel = sel;
++
++					if (v->owner == _local_player) {
++						/* Activate drag and drop */
++						SetObjectToPlaceWnd(SPR_CURSOR_MOUSE, PAL_NONE, 4, w);
++					}
++				}
+ 			}
+ 
+-			if (sel == WP(w,order_d).sel) sel = -1;
+-			WP(w,order_d).sel = sel;
+ 			SetWindowDirty(w);
+ 		} break;
+ 
+@@ -520,6 +565,31 @@
+ 		}
+ 	} break;
+ 
++	case WE_DRAGDROP: {
++		const Vehicle *v = GetVehicle(w->window_number);
++
++		switch (e->we.click.widget) {
++			case ORDER_WIDGET_ORDER_LIST: {
++				int from_order = OrderGetSel(w);
++				int to_order = GetOrderFromOrderWndPt(w, e->we.dragdrop.pt.y, v);
++
++				if (!(from_order == to_order || from_order == INVALID_ORDER || from_order > v->num_orders || to_order == INVALID_ORDER || to_order > v->num_orders) &&
++						DoCommandP(v->tile, v->index, from_order | (to_order << 16), NULL, CMD_MOVE_ORDER | CMD_MSG(STR_CAN_T_MOVE_THIS_ORDER))) {
++					WP(w, order_d).sel = -1;
++				}
++
++				break;
++			}
++
++			case ORDER_WIDGET_DELETE:
++				OrderClick_Delete(w, v);
++				break;
++		}
++
++		ResetObjectToPlace();
++		break;
++	}
++
+ 	case WE_KEYPRESS: {
+ 		Vehicle *v = GetVehicle(w->window_number);
+ 		uint i;
+Index: src/command.h
+===================================================================
+--- src/command.h	(Revision 10045)
++++ src/command.h	(Arbeitskopie)
+@@ -143,6 +143,7 @@
+ 	CMD_MASS_START_STOP              = 117,
+ 	CMD_DEPOT_SELL_ALL_VEHICLES      = 118,
+ 	CMD_DEPOT_MASS_AUTOREPLACE       = 119,
++
+ 	CMD_CREATE_GROUP                 = 120,
+ 	CMD_DELETE_GROUP                 = 121,
+ 	CMD_RENAME_GROUP                 = 122,
+@@ -150,6 +151,8 @@
+ 	CMD_ADD_SHARED_VEHICLE_GROUP     = 124,
+ 	CMD_REMOVE_ALL_VEHICLES_GROUP    = 125,
+ 	CMD_SET_GROUP_REPLACE_PROTECTION = 126,
++
++	CMD_MOVE_ORDER                   = 127,
+ };
+ 
+ enum {

@@ -1,0 +1,1112 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 11226)
++++ src/settings.cpp	(working copy)
+@@ -1564,6 +1564,7 @@
+ 	SDT_CONDVAR(Patches,      tree_placer,              SLE_UINT8,  30, SL_MAX_VERSION, 0, MS,   2,                   0,    2,               0, STR_CONFIG_PATCHES_TREE_PLACER,              NULL),
+ 	SDT_VAR    (Patches,      heightmap_rotation,       SLE_UINT8,                      S, MS,   0,                   0,    1,               0, STR_CONFIG_PATCHES_HEIGHTMAP_ROTATION,       NULL),
+ 	SDT_VAR    (Patches,      se_flat_world_height,     SLE_UINT8,                      S, 0,    0,                   0,   15,               0, STR_CONFIG_PATCHES_SE_FLAT_WORLD_HEIGHT,     NULL),
++	SDT_CONDVAR(Patches,      seafloor,                 SLE_UINT8,  SAVEVERSION_SEALEVEL, SL_MAX_VERSION, 0, MS,   1,                   0,    2,               0, STR_CONFIG_PATCHES_SEAFLOORMODE,     NULL),
+ 
+ 	SDT_END()
+ };
+Index: src/water_map.h
+===================================================================
+--- src/water_map.h	(revision 11226)
++++ src/water_map.h	(working copy)
+@@ -27,6 +27,8 @@
+ 
+ static inline WaterTileType GetWaterTileType(TileIndex t)
+ {
++	assert(IsTileType(t, MP_WATER));
++
+ 	if (_m[t].m5 == 0) return WATER_TILE_CLEAR;
+ 	if (_m[t].m5 == 1) return WATER_TILE_COAST;
+ 	if (IS_INT_INSIDE(_m[t].m5, LOCK_MIDDLE, LOCK_END)) return WATER_TILE_LOCK;
+@@ -35,11 +37,18 @@
+ 	return WATER_TILE_DEPOT;
+ }
+ 
++/** IsWater return true if any type of clear water like ocean, river, canal */
+ static inline bool IsWater(TileIndex t)
+ {
+ 	return GetWaterTileType(t) == WATER_TILE_CLEAR;
+ }
+ 
++static inline bool IsSea(TileIndex t)
++{
++	if (!IsTileOwner(t, OWNER_WATER)) return false; // = canal
++	return GetWaterTileType(t) == WATER_TILE_CLEAR;
++}
++
+ static inline bool IsCoast(TileIndex t)
+ {
+ 	return GetWaterTileType(t) == WATER_TILE_COAST;
+@@ -52,7 +61,11 @@
+ 
+ static inline bool IsClearWaterTile(TileIndex t)
+ {
+-	return IsTileType(t, MP_WATER) && IsWater(t) && GetTileSlope(t, NULL) == SLOPE_FLAT;
++	/*
++	 * This used to check TileSlope == flat too.
++	 * But none of the uses actually requires flat water, just (clear)Water (canal, river, sea)
++	 */
++	return IsTileType(t, MP_WATER) && IsWater(t);
+ }
+ 
+ static inline TileIndex GetOtherShipDepotTile(TileIndex t)
+@@ -109,6 +122,7 @@
+ 
+ static inline void MakeCanal(TileIndex t, Owner o)
+ {
++	assert(o != OWNER_WATER);
+ 	SetTileType(t, MP_WATER);
+ 	SetTileOwner(t, o);
+ 	_m[t].m2 = 0;
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 11226)
++++ src/lang/english.txt	(working copy)
+@@ -1090,6 +1090,12 @@
+ STR_CONFIG_PATCHES_HEIGHTMAP_ROTATION_CLOCKWISE                 :Clockwise
+ STR_CONFIG_PATCHES_SE_FLAT_WORLD_HEIGHT                         :{LTBLUE}The height level a flat scenario map gets: {ORANGE}{STRING1}
+ 
++STR_SEAFLOORMODE                                                :{BLACK}Sea floor mode:
++STR_CONFIG_PATCHES_SEAFLOORMODE                                 :{LTBLUE}Sea floor mode: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_SEAFLOORMODE_NORMAL                          :Sea level is 0
++STR_CONFIG_PATCHES_SEAFLOORMODE_RAISEALL                        :Raised sea floor
++STR_CONFIG_PATCHES_SEAFLOORMODE_RAISESEA                        :Raised sea level
++
+ STR_CONFIG_PATCHES_STATION_SPREAD                               :{LTBLUE}Max station spread: {ORANGE}{STRING1} {RED}Warning: High setting slows game
+ STR_CONFIG_PATCHES_SERVICEATHELIPAD                             :{LTBLUE}Service helicopters at helipads automatically: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_LINK_TERRAFORM_TOOLBAR                       :{LTBLUE}Link landscape toolbar to rail/road/water/airport toolbars: {ORANGE}{STRING1}
+@@ -1910,6 +1916,7 @@
+ STR_3805_COAST_OR_RIVERBANK                                     :Coast or riverbank
+ STR_3806_SHIP_DEPOT                                             :Ship depot
+ STR_3807_CAN_T_BUILD_ON_WATER                                   :{WHITE}...Can't build on water
++STR_3808_MUST_BE_BUILT_ON_SHALLOW_WATER                         :{WHITE}...must be built on shallow water
+ STR_MUST_DEMOLISH_CANAL_FIRST                                   :{WHITE}Must demolish canal first
+ 
+ ##id 0x4000
+@@ -3277,6 +3284,10 @@
+ STR_FLAT_WORLD_HEIGHT_QUERY_CAPT                                :{WHITE}Change height of flat land
+ STR_FLAT_WORLD_HEIGHT                                           :{BLACK}Height of flat land:
+ STR_FLAT_WORLD_HEIGHT_NUM                                       :{NUM}
++STR_SE_LOWERSEA                                                 :{BLACK}Lower sea
++STR_SE_LOWERSEA_TOOLTIP                                         :{BLACK}Lower the global sea level
++STR_SE_RAISESEA                                                 :{BLACK}Raise sea
++STR_SE_RAISESEA_TOOLTIP                                         :{BLACK}Raise the global sea level
+ 
+ STR_SMALLMAP_CENTER                                             :{BLACK}Center the smallmap on the current position
+ 
+Index: src/genworld_gui.cpp
+===================================================================
+--- src/genworld_gui.cpp	(revision 11226)
++++ src/genworld_gui.cpp	(working copy)
+@@ -93,13 +93,15 @@
+ 	GLAND_WATER_TEXT,
+ 	GLAND_WATER_PULLDOWN,
+ 	GLAND_SMOOTHNESS_TEXT,
+-	GLAND_SMOOTHNESS_PULLDOWN
++	GLAND_SMOOTHNESS_PULLDOWN,
++	GLAND_SEAFLOOR_TEXT,
++	GLAND_SEAFLOOR_PULLDOWN
+ };
+ 
+ static const Widget _generate_landscape_widgets[] = {
+ {  WWT_CLOSEBOX,  RESIZE_NONE, 13,   0,  10,   0,  13, STR_00C5,                     STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION, RESIZE_NONE, 13,  11, 337,   0,  13, STR_WORLD_GENERATION_CAPTION, STR_NULL},
+-{      WWT_PANEL, RESIZE_NONE, 13,   0, 337,  14, 267, 0x0,                          STR_NULL},
++{      WWT_PANEL, RESIZE_NONE, 13,   0, 337,  14, 285, 0x0,                          STR_NULL},
+ 
+ {   WWT_IMGBTN_2, RESIZE_NONE, 12,  10,  86,  24,  78, SPR_SELECT_TEMPERATE,         STR_030E_SELECT_TEMPERATE_LANDSCAPE},
+ {   WWT_IMGBTN_2, RESIZE_NONE, 12,  90, 166,  24,  78, SPR_SELECT_SUB_ARCTIC,        STR_030F_SELECT_SUB_ARCTIC_LANDSCAPE},
+@@ -119,7 +121,7 @@
+ {      WWT_PANEL, RESIZE_NONE, 15, 114, 207, 152, 163, 0x0,                          STR_RANDOM_SEED_HELP}, // Edit box for seed
+ {    WWT_TEXTBTN, RESIZE_NONE, 12, 216, 326, 152, 163, STR_RANDOM,                   STR_RANDOM_HELP},
+ 
+-{    WWT_TEXTBTN, RESIZE_NONE,  6, 243, 326, 228, 257, STR_GENERATE,                 STR_NULL}, // Generate button
++{    WWT_TEXTBTN, RESIZE_NONE,  6, 243, 326, 246, 275, STR_GENERATE,                 STR_NULL}, // Generate button
+ 
+ {     WWT_IMGBTN, RESIZE_NONE, 12, 216, 227, 112, 123, SPR_ARROW_DOWN,               STR_029E_MOVE_THE_STARTING_DATE},
+ {      WWT_PANEL, RESIZE_NONE, 12, 228, 314, 112, 123, 0x0,                          STR_NULL},
+@@ -139,6 +141,8 @@
+ {    WWT_TEXTBTN, RESIZE_NONE, 12, 220, 231, 228, 239, STR_0225,                     STR_NULL}, // Water quantity
+ {      WWT_PANEL, RESIZE_NONE, 12, 113, 219, 246, 257, 0x0,                          STR_NULL},
+ {    WWT_TEXTBTN, RESIZE_NONE, 12, 220, 231, 246, 257, STR_0225,                     STR_NULL}, // Map smoothness
++{      WWT_PANEL, RESIZE_NONE, 12, 113, 219, 264, 275, 0x0,                          STR_NULL},
++{    WWT_TEXTBTN, RESIZE_NONE, 12, 220, 231, 264, 275, STR_0225,                     STR_NULL}, // Sea floor adjust
+ {   WIDGETS_END},
+ };
+ 
+@@ -218,6 +222,7 @@
+ 	static const StringID landscape[]   = {STR_CONFIG_PATCHES_LAND_GENERATOR_ORIGINAL, STR_CONFIG_PATCHES_LAND_GENERATOR_TERRA_GENESIS, INVALID_STRING_ID};
+ 	static const StringID num_towns[]   = {STR_NUM_VERY_LOW, STR_6816_LOW, STR_6817_NORMAL, STR_6818_HIGH, INVALID_STRING_ID};
+ 	static const StringID num_inds[]    = {STR_26816_NONE, STR_NUM_VERY_LOW, STR_6816_LOW, STR_6817_NORMAL, STR_6818_HIGH, INVALID_STRING_ID};
++	static const StringID seafloor[]    = {STR_CONFIG_PATCHES_SEAFLOORMODE_NORMAL, STR_CONFIG_PATCHES_SEAFLOORMODE_RAISEALL, STR_CONFIG_PATCHES_SEAFLOORMODE_RAISESEA, INVALID_STRING_ID};
+ 
+ 	/* Data used for the generate seed edit box */
+ 	static querystr_d _genseed_query;
+@@ -306,6 +311,9 @@
+ 
+ 			DrawString( 12, 247, STR_SMOOTHNESS, 0);
+ 			DrawString(118, 247, smoothness[_patches_newgame.tgen_smoothness], 0x10);
++
++			DrawString( 12, 265, STR_SEAFLOORMODE, 0);
++			DrawString(118, 265, seafloor[_patches_newgame.seafloor], 0x10);
+ 		} else {
+ 			char buffer[512];
+ 
+@@ -431,6 +439,9 @@
+ 		case GLAND_SMOOTHNESS_TEXT: case GLAND_SMOOTHNESS_PULLDOWN: // Map smoothness
+ 			ShowDropDownMenu(w, smoothness, _patches_newgame.tgen_smoothness, GLAND_SMOOTHNESS_PULLDOWN, 0, 0);
+ 			break;
++		case GLAND_SEAFLOOR_TEXT: case GLAND_SEAFLOOR_PULLDOWN: // Seafloor adjustment
++			ShowDropDownMenu(w, seafloor, _patches_newgame.seafloor, GLAND_SEAFLOOR_PULLDOWN, 0, 0);
++			break;
+ 		}
+ 		break;
+ 
+@@ -454,6 +465,7 @@
+ 			case GLAND_MAPSIZE_Y_PULLDOWN:  _patches_newgame.map_y = e->we.dropdown.index + 6; break;
+ 			case GLAND_TREE_PULLDOWN:       _patches_newgame.tree_placer = e->we.dropdown.index; break;
+ 			case GLAND_SMOOTHNESS_PULLDOWN: _patches_newgame.tgen_smoothness = e->we.dropdown.index;  break;
++			case GLAND_SEAFLOOR_PULLDOWN:   _patches_newgame.seafloor = e->we.dropdown.index; break;
+ 
+ 			case GLAND_TOWN_PULLDOWN:
+ 				_opt_newgame.diff.number_towns = e->we.dropdown.index;
+@@ -510,7 +522,7 @@
+ }
+ 
+ static const WindowDesc _generate_landscape_desc = {
+-	WDP_CENTER, WDP_CENTER, 338, 268, 338, 268,
++	WDP_CENTER, WDP_CENTER, 338, 286, 338, 286,
+ 	WC_GENERATE_LANDSCAPE, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS,
+ 	_generate_landscape_widgets,
+Index: src/saveload.cpp
+===================================================================
+--- src/saveload.cpp	(revision 11226)
++++ src/saveload.cpp	(working copy)
+@@ -29,7 +29,7 @@
+ #include "strings.h"
+ #include <list>
+ 
+-extern const uint16 SAVEGAME_VERSION = 79;
++extern const uint16 SAVEGAME_VERSION = SAVEVERSION_SEALEVEL; // Before merging in trunk, grep all SAVEVERSION_SEALEVEL with the right number
+ uint16 _sl_version;       ///< the major savegame version identifier
+ byte   _sl_minor_version; ///< the minor savegame version, DO NOT USE!
+ 
+Index: src/station_cmd.cpp
+===================================================================
+--- src/station_cmd.cpp	(revision 11226)
++++ src/station_cmd.cpp	(working copy)
+@@ -31,6 +31,7 @@
+ #include "depot.h"
+ #include "train.h"
+ #include "roadveh.h"
++#include "clear_map.h"
+ #include "water_map.h"
+ #include "industry_map.h"
+ #include "newgrf_callbacks.h"
+@@ -43,6 +44,7 @@
+ #include "cargotype.h"
+ #include "strings.h"
+ #include "autoslope.h"
++#include "water.h"
+ 
+ DEFINE_OLD_POOL_GENERIC(Station, Station)
+ DEFINE_OLD_POOL_GENERIC(RoadStop, RoadStop)
+@@ -1769,7 +1771,11 @@
+ {
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
++	/* Check the site, must be shallow flat water */
+ 	if (!IsClearWaterTile(tile) || tile == 0) return_cmd_error(STR_304B_SITE_UNSUITABLE);
++	uint sealevelpixels = _map_sealevel * TILE_HEIGHT;
++	uint h;
++	if (GetTileSlope(tile, &h) != SLOPE_FLAT || (IsSea(tile) && h != sealevelpixels)) return_cmd_error(STR_3808_MUST_BE_BUILT_ON_SHALLOW_WATER);
+ 	if (MayHaveBridgeAbove(tile) && IsBridgeAbove(tile)) return_cmd_error(STR_5007_MUST_DEMOLISH_BRIDGE_FIRST);
+ 
+ 	/* allocate and initialize new station */
+@@ -2088,7 +2094,7 @@
+ 		DrawTramCatenary(ti, axis == AXIS_X ? ROAD_X : ROAD_Y);
+ 	}
+ 
+-	if (IsBuoyTile(ti->tile) && (ti->z != 0 || !IsTileOwner(ti->tile, OWNER_WATER))) DrawCanalWater(ti->tile);
++	if (IsCanalBuoyTile(ti->tile)) DrawCanalWater(ti->tile);
+ 
+ 	const DrawTileSeqStruct *dtss;
+ 	foreach_draw_tile_seq(dtss, t->seq) {
+@@ -2764,7 +2770,11 @@
+ {
+ 	Station* st = GetStationByTile(tile);
+ 
+-	MakeWater(tile);
++	if (TileHeight(tile) <= _map_sealevel) {
++		MakeWater(tile);
++	} else {
++		DoClearSquare(tile);
++	}
+ 
+ 	st->dock_tile = 0;
+ 	st->airport_tile = 0;
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revision 11226)
++++ src/town_cmd.cpp	(working copy)
+@@ -42,6 +42,7 @@
+ #include "newgrf_townname.h"
+ #include "misc/autoptr.hpp"
+ #include "autoslope.h"
++#include "water.h"
+ 
+ /* Initialize the town-pool */
+ DEFINE_OLD_POOL_GENERIC(Town, Town)
+@@ -776,7 +777,10 @@
+ 
+ 	/* First try up, then down */
+ 	if (!TerraformTownTile(tile, ~tileh & 0xF, 1)) {
+-		TerraformTownTile(tile, tileh & 0xF, 0);
++		/* Try down only when above sea level */
++		if (GetMinTileHeight(tile) > _map_sealevel) {
++			TerraformTownTile(tile, tileh & 0xF, 0);
++		}
+ 	}
+ }
+ 
+Index: src/ship_cmd.cpp
+===================================================================
+--- src/ship_cmd.cpp	(revision 11226)
++++ src/ship_cmd.cpp	(working copy)
+@@ -34,6 +34,7 @@
+ #include "date.h"
+ #include "spritecache.h"
+ #include "misc/autoptr.hpp"
++#include "water.h"
+ 
+ static const uint16 _ship_sprites[] = {0x0E5D, 0x0E55, 0x0E65, 0x0E6D};
+ 
+@@ -756,7 +757,7 @@
+ 	dir = ShipGetNewDirection(v, gp.x, gp.y);
+ 	v->x_pos = gp.x;
+ 	v->y_pos = gp.y;
+-	v->z_pos = GetSlopeZ(gp.x, gp.y);
++	v->z_pos = GetSlopeZ_WaterSurface(TileVirtXY(gp.x, gp.y), gp.x, gp.y);
+ 
+ getout:
+ 	v->UpdateDeltaXY(dir);
+Index: src/misc.cpp
+===================================================================
+--- src/misc.cpp	(revision 11226)
++++ src/misc.cpp	(working copy)
+@@ -23,6 +23,7 @@
+ #include "date.h"
+ #include "cargotype.h"
+ #include "group.h"
++#include "water.h"
+ 
+ char _name_array[512][32];
+ 
+@@ -103,6 +104,8 @@
+ {
+ 	AllocateMap(size_x, size_y);
+ 
++	_map_sealevel = 0;
++
+ 	AddTypeToEngines(); // make sure all engines have a type
+ 
+ 	SetObjectToPlace(SPR_CURSOR_ZZZ, PAL_NONE, 0, WC_MAIN_WINDOW, 0);
+@@ -346,6 +349,7 @@
+ static const SaveLoadGlobVarList _map_dimensions[] = {
+ 	SLEG_CONDVAR(_map_dim_x, SLE_UINT32, 6, SL_MAX_VERSION),
+ 	SLEG_CONDVAR(_map_dim_y, SLE_UINT32, 6, SL_MAX_VERSION),
++	SLEG_CONDVAR(_map_sealevel, SLE_UINT8, SAVEVERSION_SEALEVEL, SL_MAX_VERSION),
+ 	    SLEG_END()
+ };
+ 
+Index: src/water.h
+===================================================================
+--- src/water.h	(revision 0)
++++ src/water.h	(revision 0)
+@@ -0,0 +1,22 @@
++/* $Id: water.h 0 2007-10-08 00:00:00Z boekabart $ */
++
++/** @file water.h */
++
++#ifndef WATER_H
++#define WATER_H
++
++/** The global sea leavel */
++extern uint8 _map_sealevel;
++
++/**
++ * Functions to get the slope-shape and height for the surface of water.
++ * Since this can be different than the shape/height of the sea floor
++ *  if the water is deep
++ */
++
++extern uint GetSlopeZ_WaterSurface(TileIndex tile, uint x, uint y);
++extern Slope GetSlopeTileh_WaterSurface(TileIndex tile, Slope tileh);
++extern void RaiseSeaLevel();
++extern void LowerSeaLevel();
++
++#endif /* WATER_H */
+Index: src/tile.h
+===================================================================
+--- src/tile.h	(revision 11226)
++++ src/tile.h	(working copy)
+@@ -52,6 +52,8 @@
+ Slope GetTileSlope(TileIndex tile, uint *h);
+ uint GetTileZ(TileIndex tile);
+ uint GetTileMaxZ(TileIndex tile);
++uint GetMaxTileHeight(TileIndex tile);
++uint GetMinTileHeight(TileIndex tile);
+ 
+ /**
+  * Returns the height of a tile
+Index: src/water_cmd.cpp
+===================================================================
+--- src/water_cmd.cpp	(revision 11226)
++++ src/water_cmd.cpp	(working copy)
+@@ -49,7 +49,22 @@
+ 	0
+ };
+ 
++/* The global sea level */
++uint8 _map_sealevel;
+ 
++/**
++ * These constants map Steep-Slope values with their deepest corner flooded
++ * to their equivalent with that deepest corner one level up, for choosing
++ * the correct shore-sprite to draw.
++ */
++const uint _map_steep_coast[] = {
++	0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
++	0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
++// steep:
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
++	0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x04, 0x00
++};
++
+ static Vehicle *FindFloodableVehicleOnTile(TileIndex tile);
+ static void FloodVehicle(Vehicle *v);
+ 
+@@ -71,9 +86,16 @@
+ 
+ 	tile2 = tile + (axis == AXIS_X ? TileDiffXY(1, 0) : TileDiffXY(0, 1));
+ 
+-	if (!IsClearWaterTile(tile) || !IsClearWaterTile(tile2))
++	if (!IsClearWaterTile(tile) || !IsClearWaterTile(tile2)) {
+ 		return_cmd_error(STR_3801_MUST_BE_BUILT_ON_WATER);
++	}
+ 
++	uint sealevelpixels = _map_sealevel * TILE_HEIGHT;
++	uint h;
++
++	if (GetTileSlope(tile, &h) != SLOPE_FLAT || (IsSea(tile) && h != sealevelpixels)) return_cmd_error(STR_3808_MUST_BE_BUILT_ON_SHALLOW_WATER);
++	if (GetTileSlope(tile2, &h) != SLOPE_FLAT || (IsSea(tile2) && h != sealevelpixels)) return_cmd_error(STR_3808_MUST_BE_BUILT_ON_SHALLOW_WATER);
++
+ 	if (IsBridgeAbove(tile) || IsBridgeAbove(tile2)) return_cmd_error(STR_5007_MUST_DEMOLISH_BRIDGE_FIRST);
+ 
+ 	ret = DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
+@@ -237,8 +259,16 @@
+ 	int sx, sy;
+ 
+ 	if (p1 >= MapSize()) return CMD_ERROR;
++
++	/* Determine the type of water to create */
++	bool make_canal = !HASBIT(p2, 0);
++	/* As long as we don't support rivers, above sea level only canals */ 
++	if (GetMaxTileHeight(tile) > _map_sealevel) make_canal = true;
++
++	bool make_sea = !make_canal;
++
+ 	/* Outside of the editor you can only build canals, not oceans */
+-	if (HASBIT(p2, 0) && _game_mode != GM_EDITOR) return CMD_ERROR;
++	if (!make_canal && _game_mode != GM_EDITOR) return CMD_ERROR;
+ 
+ 	x = TileX(tile);
+ 	y = TileY(tile);
+@@ -258,19 +288,23 @@
+ 	BEGIN_TILE_LOOP(tile, size_x, size_y, TileXY(sx, sy)) {
+ 		CommandCost ret;
+ 
+-		if (GetTileSlope(tile, NULL) != SLOPE_FLAT) {
++		Slope slope = GetTileSlope(tile, NULL);
++		/* Canal: only flat. sea: anything (tileheight checked already) */
++		if (slope != SLOPE_FLAT && make_canal) {
+ 			return_cmd_error(STR_0007_FLAT_LAND_REQUIRED);
+ 		}
+ 
+-		/* can't make water of water! */
+-		if (IsTileType(tile, MP_WATER) && (!IsTileOwner(tile, OWNER_WATER) || HASBIT(p2, 0))) continue;
++		/* Can't make same water of same water! */
++		bool iscanal = IsTileType(tile, MP_WATER) && IsCanal(tile);
++		bool isnaturalwater = IsTileType(tile, MP_WATER) && IsSea(tile);
++		if ((iscanal && make_canal) || (isnaturalwater && !make_canal)) continue;
+ 
+ 		ret = DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
+ 		if (CmdFailed(ret)) return ret;
+ 		cost.AddCost(ret);
+ 
+ 		if (flags & DC_EXEC) {
+-			if (TileHeight(tile) == 0 && HASBIT(p2, 0)) {
++			if (make_sea) {
+ 				MakeWater(tile);
+ 			} else {
+ 				MakeCanal(tile, _current_player);
+@@ -304,7 +338,9 @@
+ 			/* Make sure no vehicle is on the tile */
+ 			if (!EnsureNoVehicle(tile)) return CMD_ERROR;
+ 
+-			if (GetTileOwner(tile) != OWNER_WATER && GetTileOwner(tile) != OWNER_NONE && !CheckTileOwnership(tile)) return CMD_ERROR;
++			/* Water can flood water always */
++			if (_current_player != OWNER_WATER)
++				if (GetTileOwner(tile) != OWNER_WATER && GetTileOwner(tile) != OWNER_NONE && !CheckTileOwnership(tile)) return CMD_ERROR;
+ 
+ 			if (flags & DC_EXEC) DoClearSquare(tile);
+ 			return CommandCost(_price.clear_water);
+@@ -452,25 +488,62 @@
+ 	}
+ }
+ 
++inline bool IsSouthernNeighbourTileBelowSea(TileIndex t, int dx, int dy)
++{
++	assert(dx == 0 || dx == 1);
++	assert(dy == 0 || dy == 1);
++	assert(dx + dy != 0);
++	TileIndex target = TILE_ADDXY(t, dx, dy);
++	if (IsTileType(target, MP_WATER) && IsSea(target)) return false;
++	if (TileHeight(target) < _map_sealevel) return true;
++	if (dx != dy && TileHeight(TILE_ADDXY(target, dy, dx)) < _map_sealevel) return true;
++	return false;
++}
++
+ static void DrawTile_Water(TileInfo *ti)
+ {
+ 	switch (GetWaterTileType(ti->tile)) {
+-		case WATER_TILE_CLEAR:
+-			DrawGroundSprite(SPR_FLAT_WATER_TILE, PAL_NONE);
+-			if (ti->z != 0 || !IsTileOwner(ti->tile, OWNER_WATER)) DrawCanalWater(ti->tile);
+-			DrawBridgeMiddle(ti);
+-			break;
++		case WATER_TILE_CLEAR: {
++			int dz = (_map_sealevel * TILE_HEIGHT) - ti->z;
+ 
+-		case WATER_TILE_COAST:
+-			assert(!IsSteepSlope(ti->tileh));
+-			if (_coast_base != 0) {
+-				DrawGroundSprite(_coast_base + ti->tileh, PAL_NONE);
++			if (dz <= 0 || !IsSea(ti->tile)) {
++				DrawGroundSprite(SPR_FLAT_WATER_TILE, PAL_NONE);
++				if (IsCanal(ti->tile)) DrawCanalWater(ti->tile);
+ 			} else {
+-				DrawGroundSprite(_water_shore_sprites[ti->tileh], PAL_NONE);
++				DrawGroundSpriteAt(SPR_FLAT_WATER_TILE, PAL_NONE, ti->x, ti->y, ti->z + dz);
++				if (HASBIT(_transparent_opt, TO_WATER)) {
++					SpriteID image = SPR_SELECT_TILE + _tileh_to_sprite[ti->tileh];
++					SETBIT(image, PALETTE_MODIFIER_TRANSPARENT);
++					AddSortableSpriteToDraw(image, PALETTE_TO_TRANSPARENT, ti->x, ti->y, 16, 16, 0, ti->z + 7);
++				}
++				/* At bottom edges, draw extra seafloor water tile to prevent glitches.
++				 * Also draw them when tiles +1 to y and/or x (below on screen) are not sea (yet)
++				 * and their tileheight in my direction is below sea */
++				if (_map_sealevel > 0) {
++					if (((TileX(ti->tile) == MapMaxX() - 1) || (TileY(ti->tile) == MapMaxY() - 1)) ||
++						IsSouthernNeighbourTileBelowSea(ti->tile, 1, 0) ||
++						IsSouthernNeighbourTileBelowSea(ti->tile, 1, 1) ||
++						IsSouthernNeighbourTileBelowSea(ti->tile, 0, 1)) {
++						DrawGroundSprite(SPR_FLAT_WATER_TILE, PAL_NONE);
++					}
++				}
+ 			}
+ 			DrawBridgeMiddle(ti);
+ 			break;
++		}
+ 
++		case WATER_TILE_COAST: {
++			/* Replace tiles that are partly flooded and steep by their coastal equivalent. */
++			uint draw_slope = _map_steep_coast[ti->tileh];
++			SpriteID coastsprite = (_coast_base != 0) ? _coast_base + draw_slope : _water_shore_sprites[draw_slope];
++			/* Compensate for the change in Slope above by moving steep slopes up 1 tileheight. */
++			uint coast_dz = IsSteepSlope(ti->tileh) ? TILE_HEIGHT : 0;
++			DrawGroundSpriteAt(coastsprite, PAL_NONE, ti->x, ti->y, ti->z + coast_dz);
++
++			DrawBridgeMiddle(ti);
++			break;
++		}
++
+ 		case WATER_TILE_LOCK: {
+ 			const WaterDrawTileStruct *t = _shiplift_display_seq[GetSection(ti->tile)];
+ 			DrawWaterStuff(ti, t, 0, ti->z > t[3].delta_y ? 24 : 0);
+@@ -495,6 +568,31 @@
+ }
+ 
+ 
++uint GetSlopeZ_WaterSurface(TileIndex tile, uint x, uint y)
++{
++	if (!IsTileType(tile, MP_WATER)) {
++		return GetSlopeZ(x, y);
++	}
++
++	uint z;
++	Slope tileh = GetTileSlope(tile, &z);
++
++	if (IsSea(tile)) {
++		return max(_map_sealevel * (uint)TILE_HEIGHT, z);
++	}
++
++	return z + GetPartialZ(x & 0xF, y & 0xF, tileh);
++}
++
++Slope GetSlopeTileh_WaterSurface(TileIndex tile, Slope tileh)
++{
++	assert(IsTileType(tile, MP_WATER));
++	if (IsSea(tile)) {
++		return SLOPE_FLAT;
++	}
++	return tileh;
++}
++
+ static uint GetSlopeZ_Water(TileIndex tile, uint x, uint y)
+ {
+ 	uint z;
+@@ -517,7 +615,7 @@
+ {
+ 	switch (GetWaterTileType(tile)) {
+ 		case WATER_TILE_CLEAR:
+-			if (TilePixelHeight(tile) == 0 || IsTileOwner(tile, OWNER_WATER)) {
++			if (!IsCanal(tile)) {
+ 				td->str = STR_3804_WATER;
+ 			} else {
+ 				td->str = STR_LANDINFO_CANAL;
+@@ -537,22 +635,74 @@
+ 	/* not used */
+ }
+ 
++static inline bool IsTileOnEdge(TileIndex tile)
++{
++	return !IS_INT_INSIDE(TileX(tile), 1, MapMaxX() - 1) || !IS_INT_INSIDE(TileY(tile), 1, MapMaxY() - 1);
++}
++
+ static void TileLoopWaterHelper(TileIndex tile, const TileIndexDiffC *offs)
+ {
+ 	TileIndex target = TILE_ADD(tile, ToTileIndexDiff(offs[0]));
+ 
+-	/* type of this tile mustn't be water already. */
+-	if (IsTileType(target, MP_WATER)) return;
++	/* Don't flood edges */
++	if (IsTileOnEdge(target)) return;
+ 
+-	if (TileHeight(TILE_ADD(tile, ToTileIndexDiff(offs[1]))) != 0 ||
+-			TileHeight(TILE_ADD(tile, ToTileIndexDiff(offs[2]))) != 0) {
++	/* Don't try to re-flood SEA. rest: yes (even coast, if it's below sea level!) */
++	if (IsTileType(target, MP_WATER)) {
++		if (IsSea(target)) return;
++	}
++
++	/* Don't flood uphill/sidehill */
++	if (TileHeight(TILE_ADD(tile, ToTileIndexDiff(offs[1]))) > _map_sealevel ||
++			TileHeight(TILE_ADD(tile, ToTileIndexDiff(offs[2]))) > _map_sealevel) {
+ 		return;
+ 	}
+ 
+-	if (TileHeight(TILE_ADD(tile, ToTileIndexDiff(offs[3]))) != 0 ||
+-			TileHeight(TILE_ADD(tile, ToTileIndexDiff(offs[4]))) != 0) {
++	/* Don't flood on-water industries like oilrig if they exactly are on sealevel */
++	if (IsTileType(target, MP_INDUSTRY)) {
++		IndustyBehaviour ind_behav = GetIndustrySpec(GetIndustryType(target))->behaviour;
++		if (ind_behav & INDUSTRYBEH_BUILT_ONWATER) {
++			if (TileHeight(target) == _map_sealevel)
++				return;
++		}
++	}
++
++	/* If all points are on sea level, make sea not coast */
++	uint targetmaxtileheight = GetMaxTileHeight(target);
++	Slope target_tile_slope = GetTileSlope(target, NULL);
++
++	if (target_tile_slope != SLOPE_FLAT && targetmaxtileheight > _map_sealevel) {
+ 		/* make coast.. */
++		switch(target_tile_slope) {
++			/* Normal slopes always allowed */
++			case SLOPE_W:
++			case SLOPE_S:
++			case SLOPE_E:
++			case SLOPE_N:
++			case SLOPE_NW:
++			case SLOPE_SW:
++			case SLOPE_SE:
++			case SLOPE_NE:
++				break;
++
++			/* Steep slopes only if the middle hight = sea level */
++			case SLOPE_STEEP_W:
++			case SLOPE_STEEP_S:
++			case SLOPE_STEEP_E:
++			case SLOPE_STEEP_N:
++				if (targetmaxtileheight != _map_sealevel + 1U) {
++					return;
++				}
++				break;
++
++			/* All other slopes are impossible */
++			default:
++				return;
++		}
+ 		switch (GetTileType(target)) {
++			case MP_WATER:
++				return; // coast already
++
+ 			case MP_RAILWAY: {
+ 				TrackBits tracks;
+ 				Slope slope;
+@@ -623,7 +773,7 @@
+ 		return NULL;
+ 	}
+ 
+-	if (!IsBridgeTile(tile)) return FindVehicleOnTileZ(tile, 0);
++	if (!IsBridgeTile(tile)) return FindVehicleOnTileZ(tile, TilePixelHeight(tile));
+ 
+ 	TileIndex end = GetOtherBridgeEnd(tile);
+ 	byte z = GetBridgeHeight(tile);
+@@ -719,8 +869,10 @@
+ 		{{ 0, -1}, {0, 0}, {1, 0}, { 0, -1}, { 1, -1}}
+ 	};
+ 
+-	/* Ensure sea-level canals and buoys on canal borders do not flood */
+-	if ((IsTileType(tile, MP_WATER) || IsBuoyTile(tile)) && !IsTileOwner(tile, OWNER_WATER)) return;
++	/* Ensure buoys on canal borders do not flood */
++	if (IsCanalBuoyTile(tile)) return;
++	/* Ensure only sea and coast floods, not canals or rivers */
++	if (IsTileType(tile, MP_WATER) && !(IsSea(tile) || IsCoast(tile))) return;
+ 
+ 	if (IS_INT_INSIDE(TileX(tile), 1, MapSizeX() - 3 + 1) &&
+ 			IS_INT_INSIDE(TileY(tile), 1, MapSizeY() - 3 + 1)) {
+@@ -829,3 +981,55 @@
+ 	GetFoundation_Water,      /* get_foundation_proc */
+ 	TerraformTile_Water,      /* terraform_tile_proc */
+ };
++
++/** Functions that handle the global raising of sea level by gui */
++void RaiseSeaLevel()
++{
++	assert(_map_sealevel < 4);
++	uint8 _old_sealevel = _map_sealevel;
++	_map_sealevel++;
++	/* Remove oil rigs from previous sea level
++	 * note that also buoys should be removed, but they don't exist in scenario editor */
++	TileIndex tile;
++	for (tile = 0; tile != MapSize(); tile++) {
++		if (IsTileOnEdge(tile)) continue;
++		switch(GetTileType(tile)) {
++			case MP_INDUSTRY:
++				if (GetIndustrySpec(GetIndustryType(tile))->behaviour & INDUSTRYBEH_BUILT_ONWATER)
++					if (TileHeight(tile) == _old_sealevel)
++						DoCommand(tile, 0, 0, DC_EXEC, CMD_LANDSCAPE_CLEAR);
++				break;
++			default:
++				break;
++		}
++	}
++}
++
++void LowerSeaLevel()
++{
++	assert(_map_sealevel);
++	uint8 _old_sealevel = _map_sealevel;
++	_map_sealevel--;
++
++	/* Clean out / dry up all water from previous sea level
++	 * note that also buoys should be removed, but they don't exist in scenario editor */
++	TileIndex tile;
++	for (tile = 0; tile != MapSize(); tile++) {
++		if (IsTileOnEdge(tile)) continue;
++		switch(GetTileType(tile)) {
++			case MP_INDUSTRY:
++				if (GetIndustrySpec(GetIndustryType(tile))->behaviour & INDUSTRYBEH_BUILT_ONWATER)
++					if (TileHeight(tile) == _old_sealevel)
++						DoCommand(tile, 0, 0, DC_EXEC, CMD_LANDSCAPE_CLEAR);
++				break;
++			case MP_WATER:
++				if (!IsSea(tile) && !IsCoast(tile)) continue;
++				if (TileHeight(TILE_ADDXY(tile, 0, 0)) == _old_sealevel || TileHeight(TILE_ADDXY(tile, 1, 0)) == _old_sealevel ||
++					TileHeight(TILE_ADDXY(tile, 0, 1)) == _old_sealevel || TileHeight(TILE_ADDXY(tile, 1, 1)) == _old_sealevel)
++					DoCommand(tile, 0, 0, DC_EXEC, CMD_LANDSCAPE_CLEAR);
++				break;
++			default:
++				break;
++		}
++	}
++}
+Index: src/variables.h
+===================================================================
+--- src/variables.h	(revision 11226)
++++ src/variables.h	(working copy)
+@@ -247,6 +247,8 @@
+ 
+ 	bool exclusive_rights;   ///< allow buying exclusive rights
+ 	bool give_money;         ///< allow giving other players money
++
++	uint8 seafloor;          ///< Terragen seafloor modes: flat, raise all (diggable), raise sea only
+ };
+ 
+ VARDEF Patches _patches;
+@@ -290,7 +292,7 @@
+ VARDEF int _autosave_ctr;
+ 
+ VARDEF byte _display_opt;
+-VARDEF byte _transparent_opt;
++VARDEF uint32 _transparent_opt;
+ VARDEF int _caret_timer;
+ VARDEF uint32 _news_display_opt;
+ VARDEF bool _news_ticker_sound;
+@@ -351,4 +353,5 @@
+ /* Forking stuff */
+ VARDEF bool _dedicated_forks;
+ 
++static const int SAVEVERSION_SEALEVEL = 80; // remove when final
+ #endif /* VARIABLES_H */
+Index: src/transparency_gui.cpp
+===================================================================
+--- src/transparency_gui.cpp	(revision 11226)
++++ src/transparency_gui.cpp	(working copy)
+@@ -24,6 +24,7 @@
+ 	TTW_WIDGET_BRIDGES,      ///< Make bridges transparent
+ 	TTW_WIDGET_STRUCTURES,   ///< Make unmovable structures transparent
+ 	TTW_WIDGET_LOADING,      ///< Make loading indicators transperent
++	TTW_WIDGET_WATER,        ///< Make water transparent
+ 	TTW_WIDGET_END,          ///< End of toggle buttons
+ };
+ 
+@@ -60,8 +61,8 @@
+ 
+ static const Widget _transparency_widgets[] = {
+ { WWT_CLOSEBOX,   RESIZE_NONE,  7,   0,  10,   0,  13, STR_00C5,                 STR_018B_CLOSE_WINDOW},
+-{  WWT_CAPTION,   RESIZE_NONE,  7,  11, 184,   0,  13, STR_TRANSPARENCY_TOOLB,   STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{WWT_STICKYBOX,   RESIZE_NONE,  7, 185, 196,   0,  13, STR_NULL,                 STR_STICKY_BUTTON},
++{  WWT_CAPTION,   RESIZE_NONE,  7,  11, 206,   0,  13, STR_TRANSPARENCY_TOOLB,   STR_018C_WINDOW_TITLE_DRAG_THIS},
++{WWT_STICKYBOX,   RESIZE_NONE,  7, 207, 218,   0,  13, STR_NULL,                 STR_STICKY_BUTTON},
+ 
+ /* transparency widgets:
+  * transparent signs, trees, houses, industries, player's buildings, bridges, unmovable structures and loading indicators */
+@@ -73,12 +74,13 @@
+ {   WWT_IMGBTN,   RESIZE_NONE,  7, 110, 152,  14,  35, SPR_IMG_BRIDGE,       STR_TRANSPARENT_BRIDGES_DESC},
+ {   WWT_IMGBTN,   RESIZE_NONE,  7, 153, 174,  14,  35, SPR_IMG_TRANSMITTER,  STR_TRANSPARENT_STRUCTURES_DESC},
+ {   WWT_IMGBTN,   RESIZE_NONE,  7, 175, 196,  14,  35, SPR_IMG_TRAINLIST,    STR_TRANSPARENT_LOADING_DESC},
++{   WWT_IMGBTN,   RESIZE_NONE,  7, 197, 218,  14,  35, SPR_IMG_BUILDWATER,   STR_NULL},
+ 
+ {   WIDGETS_END},
+ };
+ 
+ static const WindowDesc _transparency_desc = {
+-	WDP_ALIGN_TBR, 58+36, 197, 36, 197, 36,
++	WDP_ALIGN_TBR, 58+36, 219, 36, 219, 36,
+ 	WC_TRANSPARENCY_TOOLBAR, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_STICKY_BUTTON,
+ 	_transparency_widgets,
+Index: src/openttd.h
+===================================================================
+--- src/openttd.h	(revision 11226)
++++ src/openttd.h	(working copy)
+@@ -193,6 +193,7 @@
+ 	TO_BRIDGES,
+ 	TO_STRUCTURES,
+ 	TO_LOADING,
++	TO_WATER,
+ };
+ 
+ /* Landscape types */
+Index: src/landscape.cpp
+===================================================================
+--- src/landscape.cpp	(revision 11226)
++++ src/landscape.cpp	(working copy)
+@@ -22,6 +22,7 @@
+ #include "water_map.h"
+ #include "tgp.h"
+ #include "genworld.h"
++#include "water.h"
+ 
+ extern const TileTypeProcs
+ 	_tile_type_clear_procs,
+@@ -537,7 +538,7 @@
+ 
+ 	for (tile = 0; tile < MapSize(); ++tile) {
+ 		slope = GetTileSlope(tile, &z);
+-		if (IsTileType(tile, MP_CLEAR) && z == 0) {
++		if (IsTileType(tile, MP_CLEAR) && z <= _map_sealevel * (uint)TILE_HEIGHT) {
+ 			/* Make both water for tiles at level 0
+ 			 * and make shore, as that looks much better
+ 			 * during the generation. */
+Index: src/tile.cpp
+===================================================================
+--- src/tile.cpp	(revision 11226)
++++ src/tile.cpp	(working copy)
+@@ -64,3 +64,22 @@
+ 
+ 	return h * TILE_HEIGHT;
+ }
++
++uint GetMaxTileHeight(TileIndex tile)
++{
++	assert(TileX(tile) < MapMaxX());
++	assert(TileY(tile) < MapMaxY());
++	return max(
++		max(TileHeight(TILE_ADDXY(tile, 0, 0)), TileHeight(TILE_ADDXY(tile, 1, 0))),
++		max(TileHeight(TILE_ADDXY(tile, 0, 1)), TileHeight(TILE_ADDXY(tile, 1, 1))));
++}
++
++uint GetMinTileHeight(TileIndex tile)
++{
++	assert(TileX(tile) < MapMaxX());
++	assert(TileY(tile) < MapMaxY());
++	return min(
++		min(TileHeight(TILE_ADDXY(tile, 0, 0)), TileHeight(TILE_ADDXY(tile, 1, 0))),
++		min(TileHeight(TILE_ADDXY(tile, 0, 1)), TileHeight(TILE_ADDXY(tile, 1, 1))));
++}
++
+Index: src/genworld.cpp
+===================================================================
+--- src/genworld.cpp	(revision 11226)
++++ src/genworld.cpp	(working copy)
+@@ -20,6 +20,7 @@
+ #include "settings.h"
+ #include "heightmap.h"
+ #include "date.h"
++#include "water.h"
+ 
+ void GenerateClearTile();
+ void GenerateIndustries();
+@@ -75,6 +76,36 @@
+ }
+ 
+ /**
++ * Apply the selected sea level mode; raising sea level or sea floor (= entire terrain)
++ */
++static void ApplySealevelMode()
++{
++	/* If original behavious was selected, do nothing */
++	if (_patches.seafloor == 0) return;
++	/* Raise sea level for starters */
++	_map_sealevel = 1;
++
++	/* If only sea level was raised, 
++	 * make tiles now on or under new sealevel water
++	 */
++	if (_patches.seafloor == 2) {
++		ConvertGroundTilesIntoWaterTiles();
++		return;
++	}
++
++	/* Now raise the entire map (except for edges of course) by 1 */
++	TileIndex tile = MapSizeX() + 1;
++	int sizex = MapSizeX() - TileX(tile) - 1;
++	int sizey = MapSizeY() - TileY(tile) - 1;
++
++	BEGIN_TILE_LOOP(tile2, sizex, sizey, tile) {
++		uint th = TileHeight(tile2);
++		if (th == 15) continue;
++		SetTileHeight(tile2, th + 1);
++	} END_TILE_LOOP(tile2, sizex, sizey, tile)
++}
++
++/**
+  * The internal, real, generate function.
+  */
+ static void *_GenerateWorld(void *arg)
+@@ -102,6 +133,7 @@
+ 		IncreaseGeneratingWorldProgress(GWP_UNMOVABLE);
+ 	} else {
+ 		GenerateLandscape(_gw.mode);
++		ApplySealevelMode();
+ 		GenerateClearTile();
+ 
+ 		/* only generate towns, tree and industries in newgame mode. */
+Index: src/station_map.h
+===================================================================
+--- src/station_map.h	(revision 11226)
++++ src/station_map.h	(working copy)
+@@ -154,7 +154,17 @@
+ 	return IsTileType(t, MP_STATION) && IsBuoy(t);
+ }
+ 
++static inline bool IsCanalBuoyTile(TileIndex t)
++{
++	return IsBuoyTile(t) && !IsTileOwner(t, OWNER_WATER);
++}
+ 
++static inline bool IsSeaBuoyTile(TileIndex t)
++{
++	extern uint8 _map_sealevel;
++	return IsBuoyTile(t) && IsTileOwner(t, OWNER_WATER) && TileHeight(t) <= _map_sealevel;
++}
++
+ static inline bool IsHangarTile(TileIndex t)
+ {
+ 	return IsTileType(t, MP_STATION) && IsHangar(t);
+Index: src/industry_cmd.cpp
+===================================================================
+--- src/industry_cmd.cpp	(revision 11226)
++++ src/industry_cmd.cpp	(working copy)
+@@ -38,6 +38,7 @@
+ #include "newgrf_callbacks.h"
+ #include "misc/autoptr.hpp"
+ #include "autoslope.h"
++#include "water.h"
+ 
+ void ShowIndustryViewWindow(int industry);
+ void BuildOilRig(TileIndex tile);
+@@ -1085,7 +1086,7 @@
+ static bool CheckNewIndustry_OilRig(TileIndex tile)
+ {
+ 	if (_game_mode == GM_EDITOR && _ignore_restrictions) return true;
+-	if (TileHeight(tile) == 0 &&
++	if (TileHeight(tile) == _map_sealevel &&
+ 			DistanceFromEdge(TILE_ADDXY(tile, 1, 1)) < _patches.oil_refinery_limit) return true;
+ 
+ 	_error_message = STR_483B_CAN_ONLY_BE_POSITIONED;
+@@ -1230,6 +1231,10 @@
+ 			if (HASBIT(its->callback_flags, CBM_INDT_SHAPE_CHECK)) {
+ 				custom_shape = true;
+ 				if (!PerformIndustryTileSlopeCheck(tile, cur_tile, its, type, gfx, itspec_index)) return false;
++				/* Also check if the water tile is flat and shallow */
++				uint h;
++				if (GetTileSlope(cur_tile, &h) != SLOPE_FLAT) return false;
++				if (TileHeight(cur_tile) != _map_sealevel) return false;
+ 			} else {
+ 				if (ind_behav & INDUSTRYBEH_BUILT_ONWATER) {
+ 					/* As soon as the tile is not water, bail out.
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 11226)
++++ src/openttd.cpp	(working copy)
+@@ -1625,7 +1625,7 @@
+ 						if (GB(_m[t].m5, 3, 2) == 0) {
+ 							MakeClear(t, CLEAR_GRASS, 3);
+ 						} else {
+-							MakeCanal(t, GetTileOwner(t));
++							(MakeCanal(t, GetTileOwner(t) == OWNER_WATER) ? OWNER_NONE : GetTileOwner(t));
+ 						}
+ 					}
+ 					SetBridgeMiddle(t, axis);
+@@ -2159,6 +2159,18 @@
+ 		FOR_ALL_INDUSTRIES(i) i->founder = OWNER_NONE;
+ 	}
+ 
++	/* From version SAVEVERSION_SEALEVEL, old style canals (above sealevel (0), WATER owner) are no longer supported.
++	    Replace the owner for those by OWNER_NONE. */
++	if (CheckSavegameVersion(SAVEVERSION_SEALEVEL)) {
++		for (TileIndex t = 0; t < map_size; t++) {
++			if (!IsTileType(t, MP_WATER)) continue;
++			if (GetWaterTileType(t) != WATER_TILE_CLEAR) continue;
++			if (GetTileOwner(t) != OWNER_WATER) continue;
++			if (TileHeight(t) == 0 ) continue;
++			SetTileOwner(t, OWNER_NONE);
++		}
++	}
++
+ 	/* Recalculate */
+ 	Group *g;
+ 	FOR_ALL_GROUPS(g) {
+Index: src/main_gui.cpp
+===================================================================
+--- src/main_gui.cpp	(revision 11226)
++++ src/main_gui.cpp	(working copy)
+@@ -47,6 +47,7 @@
+ #include "network/network_server.h"
+ #include "network/network_gui.h"
+ #include "industry.h"
++#include "water.h"
+ 
+ static int _rename_id = 1;
+ static int _rename_what = -1;
+@@ -159,13 +160,13 @@
+ /** Toggle all transparency options, except for signs */
+ static void ToggleTransparency()
+ {
+-	static byte trans_opt = ~0;
++	static uint32 trans_opt = ~0;
+ 
+-	if (GB(_transparent_opt, 1, 7) == 0) {
+-		SB(_transparent_opt, 1, 7, GB(trans_opt, 1, 7));
++	if (GB(_transparent_opt, 1, 8) == 0) {
++		SB(_transparent_opt, 1, 8, GB(trans_opt, 1, 8));
+ 	} else {
+ 		trans_opt = _transparent_opt;
+-		SB(_transparent_opt, 1, 7, 0);
++		SB(_transparent_opt, 1, 8, 0);
+ 	}
+ 
+ 	MarkWholeScreenDirty();
+@@ -1174,7 +1175,7 @@
+ {  WWT_CLOSEBOX,   RESIZE_NONE,     7,     0,    10,     0,    13, STR_00C5,                  STR_018B_CLOSE_WINDOW},
+ {   WWT_CAPTION,   RESIZE_NONE,     7,    11,   169,     0,    13, STR_0223_LAND_GENERATION,  STR_018C_WINDOW_TITLE_DRAG_THIS},
+ { WWT_STICKYBOX,   RESIZE_NONE,     7,   170,   181,     0,    13, STR_NULL,                  STR_STICKY_BUTTON},
+-{     WWT_PANEL,   RESIZE_NONE,     7,     0,   181,    14,   102, 0x0,                       STR_NULL},
++{     WWT_PANEL,   RESIZE_NONE,     7,     0,   181,    14,   115, 0x0,                       STR_NULL},
+ {    WWT_IMGBTN,   RESIZE_NONE,    14,     2,    23,    16,    37, SPR_IMG_DYNAMITE,          STR_018D_DEMOLISH_BUILDINGS_ETC},
+ {    WWT_IMGBTN,   RESIZE_NONE,    14,    24,    45,    16,    37, SPR_IMG_TERRAFORM_DOWN,    STR_018E_LOWER_A_CORNER_OF_LAND},
+ {    WWT_IMGBTN,   RESIZE_NONE,    14,    46,    67,    16,    37, SPR_IMG_TERRAFORM_UP,      STR_018F_RAISE_A_CORNER_OF_LAND},
+@@ -1187,6 +1188,8 @@
+ {    WWT_IMGBTN,   RESIZE_NONE,    14,   139,   150,    58,    69, SPR_ARROW_DOWN,            STR_0229_DECREASE_SIZE_OF_LAND_AREA},
+ {   WWT_TEXTBTN,   RESIZE_NONE,    14,    24,   157,    76,    87, STR_SE_NEW_WORLD,          STR_022A_GENERATE_RANDOM_LAND},
+ {   WWT_TEXTBTN,   RESIZE_NONE,    14,    24,   157,    89,   100, STR_022B_RESET_LANDSCAPE,  STR_RESET_LANDSCAPE_TOOLTIP},
++{   WWT_TEXTBTN,   RESIZE_NONE,    14,    24,    90,   102,   113, STR_SE_LOWERSEA,           STR_SE_LOWERSEA_TOOLTIP},
++{   WWT_TEXTBTN,   RESIZE_NONE,    14,    92,   157,   102,   113, STR_SE_RAISESEA,           STR_SE_RAISESEA_TOOLTIP},
+ {   WIDGETS_END},
+ };
+ 
+@@ -1363,6 +1366,18 @@
+ 			  NULL,
+ 			  ResetLandscapeConfirmationCallback);
+ 			break;
++		case 16:
++			if (_map_sealevel > 0) {
++				LowerSeaLevel();
++				MarkWholeScreenDirty();
++			}
++			break;
++		case 17:
++			if (_map_sealevel < 4) {
++				RaiseSeaLevel();
++				MarkWholeScreenDirty();
++			}
++			break;
+ 		}
+ 		break;
+ 
+@@ -1406,7 +1421,7 @@
+ }
+ 
+ static const WindowDesc _scen_edit_land_gen_desc = {
+-	WDP_AUTO, WDP_AUTO, 182, 103, 182, 103,
++	WDP_AUTO, WDP_AUTO, 182, 116, 182, 116,
+ 	WC_SCEN_LAND_GEN, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_STICKY_BUTTON,
+ 	_scen_edit_land_gen_widgets,
+@@ -2258,6 +2273,7 @@
+ 			case '5' | WKC_CTRL:
+ 			case '6' | WKC_CTRL:
+ 			case '7' | WKC_CTRL:
++			case '8' | WKC_CTRL:
+ 				/* Transparency toggle hot keys */
+ 				TOGGLEBIT(_transparent_opt, e->we.keypress.keycode - ('1' | WKC_CTRL));
+ 				MarkWholeScreenDirty();
+@@ -2417,3 +2433,4 @@
+ 
+ 
+ 
++
+Index: source.list
+===================================================================
+--- source.list	(revision 11226)
++++ source.list	(working copy)
+@@ -199,6 +199,7 @@
+ vehicle.h
+ vehicle_gui.h
+ viewport.h
++water.h
+ waypoint.h
+ music/win32_m.h
+ sound/win32_s.h

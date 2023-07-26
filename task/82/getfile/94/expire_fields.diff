@@ -1,0 +1,99 @@
+Index: clear_cmd.c
+===================================================================
+--- clear_cmd.c	(revision 4073)
++++ clear_cmd.c	(working copy)
+@@ -655,9 +655,14 @@
+ 				SetClearCounter(tile, 0);
+ 			}
+ 
+-			field_type = GetFieldType(tile);
+-			field_type = (field_type < 8) ? field_type + 1 : 0;
+-			SetFieldType(tile, field_type);
++			if (_m[tile].m2 == 0xFFFF) {
++				/* Remove field */
++				MakeClear(tile, CL_GRASS, 0);
++			} else {
++				field_type = GetFieldType(tile);
++				field_type = (field_type < 8) ? field_type + 1 : 0;
++				SetFieldType(tile, field_type);
++			}
+ 			break;
+ 		}
+ 
+Index: industry_cmd.c
+===================================================================
+--- industry_cmd.c	(revision 4073)
++++ industry_cmd.c	(working copy)
+@@ -880,6 +880,18 @@
+ 		}
+ 	END_TILE_LOOP(tile_cur, i->width, i->height, i->xy);
+ 
++	if (i->type == IT_FARM || i->type == IT_FARM_2) {
++		/* Clear our ID from our farmland */
++		/* This should only really clear the area around the farm, not the whole map */
++		BEGIN_TILE_LOOP(tile_cur, MapSizeX(), MapSizeY(), 0);
++		if (IsTileType(tile_cur, MP_CLEAR) && IsClearGround(tile_cur, CL_FIELDS)) {
++			if (_m[tile_cur].m2 == i->index) {
++				_m[tile_cur].m2 = 0xFFFF;
++			}
++		}
++		END_TILE_LOOP(tile_cur, MapSizeX(), MapSizeY(), 0);
++	}
++
+ 	i->xy = 0;
+ 	_industry_sort_dirty = true;
+ 	DeleteSubsidyWithIndustry(i->index);
+@@ -928,7 +940,7 @@
+ 	} while (--size);
+ }
+ 
+-static void PlantFarmField(TileIndex tile)
++static void PlantFarmField(TileIndex tile, uint16 industry)
+ {
+ 	uint size_x, size_y;
+ 	uint32 r;
+@@ -968,7 +980,7 @@
+ 	BEGIN_TILE_LOOP(cur_tile, size_x, size_y, tile)
+ 		cur_tile = TILE_MASK(cur_tile);
+ 		if (!IsBadFarmFieldTile2(cur_tile)) {
+-			MakeField(cur_tile, field_type);
++			MakeField(cur_tile, field_type, industry);
+ 			SetClearCounter(cur_tile, counter);
+ 			MarkTileDirtyByTile(cur_tile);
+ 		}
+@@ -991,7 +1003,7 @@
+ 		int x = i->width  / 2 + Random() % 31 - 16;
+ 		int y = i->height / 2 + Random() % 31 - 16;
+ 		TileIndex tile = TileAddWrap(i->xy, x, y);
+-		if (tile != INVALID_TILE) PlantFarmField(tile);
++		if (tile != INVALID_TILE) PlantFarmField(tile, i->index);
+ 	}
+ }
+ 
+@@ -1490,7 +1502,7 @@
+ 			int y = Random() % 31 - 16;
+ 			TileIndex new_tile = TileAddWrap(tile, x, y);
+ 
+-			if (new_tile != INVALID_TILE) PlantFarmField(new_tile);
++			if (new_tile != INVALID_TILE) PlantFarmField(new_tile, i->index);
+ 		}
+ 	}
+ 	_industry_sort_dirty = true;
+Index: clear_map.h
+===================================================================
+--- clear_map.h	(revision 4073)
++++ clear_map.h	(working copy)
+@@ -56,11 +56,11 @@
+ }
+ 
+ 
+-static inline void MakeField(TileIndex t, uint field_type)
++static inline void MakeField(TileIndex t, uint field_type, uint16 industry)
+ {
+ 	SetTileType(t, MP_CLEAR);
+ 	SetTileOwner(t, OWNER_NONE);
+-	_m[t].m2 = 0;
++	_m[t].m2 = industry;
+ 	_m[t].m3 = field_type;
+ 	_m[t].m4 = 0 << 5 | 0 << 2;
+ 	SetClearGroundDensity(t, CL_FIELDS, 3);

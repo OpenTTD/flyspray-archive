@@ -1,0 +1,386 @@
+Index: src/industry_cmd.cpp
+===================================================================
+--- src/industry_cmd.cpp	(revision 10032)
++++ src/industry_cmd.cpp	(working copy)
+@@ -1518,19 +1518,20 @@
+ /** This function is the one who really do the creation work
+  * of random industries during game creation
+  * @param type IndustryType of the desired industry
+- * @param amount of industries that need to be built */
+-static void PlaceInitialIndustry(IndustryType type, int amount)
++ * @param amount Amount of industries to build
++ * @return Amount of industries built
++ */
++static uint16 PlaceInitialIndustry(IndustryType type, uint16 amount)
+ {
+-	int num = _numof_industry_table[_opt.diff.number_industries][amount];
+-	const IndustrySpec *ind_spc = GetIndustrySpec(type);
++	if (amount > 60000) amount = 60000;
++	if (amount <= 0) return 0;
+ 
+-	/* These are always placed next to the coastline, so we scale by the perimeter instead. */
+-	num = (ind_spc->check_proc == CHECK_REFINERY || ind_spc->check_proc == CHECK_OIL_RIG) ? ScaleByMapSize1D(num) : ScaleByMapSize(num);
++	uint16 amount_created = 0;
+ 
+ 	if (_opt.diff.number_industries != 0) {
+ 		PlayerID old_player = _current_player;
+ 		_current_player = OWNER_NONE;
+-		assert(num > 0);
++		assert(amount > 0);
+ 
+ 		do {
+ 			uint i;
+@@ -1538,14 +1539,77 @@
+ 			IncreaseGeneratingWorldProgress(GWP_INDUSTRY);
+ 
+ 			for (i = 0; i < 2000; i++) {
+-				if (CreateNewIndustry(RandomTile(), type) != NULL) break;
++				if (CreateNewIndustry(RandomTile(), type) != NULL) {
++					amount_created++;
++					break;
++				}
+ 			}
+-		} while (--num);
++		} while (--amount);
+ 
+ 		_current_player = old_player;
+ 	}
++
++	return amount_created;
+ }
+ 
++/* Tries to create specified amount of random industries
++ * amount_wanted is not affected by map size or difficulty
++ * @param amount_wanted The amount of industries the user wants to create
++ * @return Amount of industries actually created
++ * @author Unaimed
++ */
++uint16 GenerateIndustries(uint16 amount_wanted)
++{
++	if (amount_wanted > 60000) amount_wanted = 60000;
++	if (amount_wanted <= 0) return 0;
++
++	IndustryType it;
++	const IndustrySpec *ind_spc;
++
++	uint16 amount_appear  = 0;
++	uint16 amount_created = 0;
++
++	SetGeneratingWorldProgress(GWP_INDUSTRY, amount_wanted);
++
++	/* Get the amount of industries to build based on their appear amount */
++	for (it = IT_COAL_MINE; it < NUM_INDUSTRYTYPES; it++) {
++		ind_spc = GetIndustrySpec(it);
++		if (ind_spc->enabled) {
++			amount_appear += ind_spc->appear_creation[_opt.landscape];
++		}
++	}
++
++	/* Add the industries to the list */
++	IndustryType create_list[amount_appear];
++	uint8 create_list_counter = 0;
++	for (it = IT_COAL_MINE; it < NUM_INDUSTRYTYPES; it++) {
++		ind_spc = GetIndustrySpec(it);
++		if (ind_spc->enabled) {
++			for (uint8 i = 0; i < ind_spc->appear_creation[_opt.landscape]; i++) {
++				create_list[create_list_counter++] = it;
++			}
++		}
++	}
++
++	/* Randomly sort the list */
++	for (uint16 i = 0, rand; i < amount_appear; i++) {
++		rand = Random() % amount_appear;
++		uint8 temp = create_list[rand];
++		create_list[rand] = create_list[i];
++		create_list[i] = temp;
++	}
++
++	/* Create the industries*/
++	for (uint16 i = 0, j = 0; i < amount_wanted; i++, j++) {
++		if (j >= amount_appear) {
++			j = 0;
++		}
++		amount_created += PlaceInitialIndustry(create_list[j], 1);
++	}
++
++	return amount_created;
++}
++
+ /** This function will create ramdon industries during game creation.
+  * It will scale the amount of industries by map size as well as difficulty level */
+ void GenerateIndustries()
+@@ -1579,13 +1643,21 @@
+ 	for (it = IT_COAL_MINE; it < NUM_INDUSTRYTYPES; it++) {
+ 		/* Once the number of industries has been determined, let's really create them.
+ 		 * The test for chance allows us to try create industries that are available only
+-		 * for this landscape.
+-		 * @todo :  Do we really have to pass chance as un-scaled value, since we've already
+-		 *          processed that scaling above? No, don't think so.  Will find a way. */
++		 * for this landscape. */
+ 		ind_spc = GetIndustrySpec(it);
+ 		if (ind_spc->enabled) {
+ 			chance = ind_spc->appear_creation[_opt.landscape];
+-			if (chance > 0) PlaceInitialIndustry(it, chance);
++			if (chance > 0) {
++				/* once the chance of appearance is determind, it have to be scaled by
++				 * the difficulty level. The "chance" in question is more an index into
++				 * the _numof_industry_table,in fact */
++				int num = _numof_industry_table[_opt.diff.number_industries][chance];
++
++				/* These are always placed next to the coastline, so we scale by the perimeter instead. */
++				num = (ind_spc->check_proc == CHECK_REFINERY || ind_spc->check_proc == CHECK_OIL_RIG) ? ScaleByMapSize1D(num) : ScaleByMapSize(num);
++
++				PlaceInitialIndustry(it, num);
++			}
+ 		}
+ 	};
+ }
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 10032)
++++ src/lang/english.txt	(working copy)
+@@ -1227,8 +1227,14 @@
+ STR_MANY_RANDOM_TOWNS                                           :{BLACK}Many random towns
+ STR_RANDOM_TOWNS_TIP                                            :{BLACK}Cover the map with randomly placed towns
+ STR_MANY_RANDOM_INDUSTRIES                                      :{BLACK}Many random industries
+-STR_RANDOM_INDUSTRIES_TIP                                       :{BLACK}Cover the map with randomly placed industries
++STR_RANDOM_INDUSTRIES_TIP                                       :{BLACK}Cover the map with randomly placed industries where the number of industries is based on difficulty and map size
+ STR_CAN_T_GENERATE_INDUSTRIES                                   :{WHITE}Can't generate industries...
++STR_AMOUNT_RANDOM_INDUSTRIES                                    :{BLACK}random industries
++STR_AMOUNT_RANDOM_INDUSTRIES_TIP                                :{BLACK}Cover the map with set number of randomly placed industries
++STR_NUMBER_BETWEEN_0_AND_60000                                  :{WHITE}Please specify a number from 0 and to 60000.
++STR_COULDN_T_GENERATE_ALL_INDUSTRIES                            :{WHITE}Only generated {COMMA} industr{P y ies} out of {COMMA}.
++STR_COULDN_T_GENERATE_ANY_INDUSTRIES                            :{WHITE}Couldn't generate any industries...
++STR_COULDN_T_GENERATE_INDUSTRIES_EXPLANATION                    :{WHITE}Probably due to lack of space or towns.
+ 
+ STR_LANDSCAPING_TOOLBAR_TIP                                     :{BLACK}Open the landscaping toolbar to raise/lower land, plant trees, etc.
+ STR_LANDSCAPING_TOOLBAR                                         :{WHITE}Landscaping
+Index: src/main_gui.cpp
+===================================================================
+--- src/main_gui.cpp	(revision 10032)
++++ src/main_gui.cpp	(working copy)
+@@ -55,6 +55,7 @@
+ static int _scengen_town_size = 1; // depress medium-sized towns per default
+ 
+ extern void GenerateIndustries();
++extern uint16 GenerateIndustries(uint16 amount);
+ extern bool GenerateTowns();
+ 
+ 
+@@ -1550,19 +1551,21 @@
+ {      WWT_PANEL,   RESIZE_NONE,     7,     0,   169,    14,   224, 0x0,                          STR_NULL},
+ 
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    16,    27, STR_MANY_RANDOM_INDUSTRIES,   STR_RANDOM_INDUSTRIES_TIP},
++{      WWT_PANEL,   RESIZE_NONE,    15,     2,    48,    29,    40, 0x0,                          STR_NULL},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,    50,   167,    29,    40, STR_AMOUNT_RANDOM_INDUSTRIES, STR_AMOUNT_RANDOM_INDUSTRIES_TIP},
+ 
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    42,    53, STR_0240_COAL_MINE,           STR_0262_CONSTRUCT_COAL_MINE},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    55,    66, STR_0241_POWER_STATION,       STR_0263_CONSTRUCT_POWER_STATION},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    68,    79, STR_0242_SAWMILL,             STR_0264_CONSTRUCT_SAWMILL},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    81,    92, STR_0243_FOREST,              STR_0265_PLANT_FOREST},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    94,   105, STR_0244_OIL_REFINERY,        STR_0266_CONSTRUCT_OIL_REFINERY},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   107,   118, STR_0245_OIL_RIG,             STR_0267_CONSTRUCT_OIL_RIG_CAN_ONLY},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   120,   131, STR_0246_FACTORY,             STR_0268_CONSTRUCT_FACTORY},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   133,   144, STR_0247_STEEL_MILL,          STR_0269_CONSTRUCT_STEEL_MILL},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   146,   157, STR_0248_FARM,                STR_026A_CONSTRUCT_FARM},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   159,   170, STR_0249_IRON_ORE_MINE,       STR_026B_CONSTRUCT_IRON_ORE_MINE},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   172,   183, STR_024A_OIL_WELLS,           STR_026C_CONSTRUCT_OIL_WELLS},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   185,   196, STR_024B_BANK,                STR_026D_CONSTRUCT_BANK_CAN_ONLY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    53,    64, STR_0240_COAL_MINE,           STR_0262_CONSTRUCT_COAL_MINE},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    66,    77, STR_0241_POWER_STATION,       STR_0263_CONSTRUCT_POWER_STATION},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    79,    90, STR_0242_SAWMILL,             STR_0264_CONSTRUCT_SAWMILL},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    92,   103, STR_0243_FOREST,              STR_0265_PLANT_FOREST},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   105,   116, STR_0244_OIL_REFINERY,        STR_0266_CONSTRUCT_OIL_REFINERY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   118,   129, STR_0245_OIL_RIG,             STR_0267_CONSTRUCT_OIL_RIG_CAN_ONLY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   131,   142, STR_0246_FACTORY,             STR_0268_CONSTRUCT_FACTORY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   144,   155, STR_0247_STEEL_MILL,          STR_0269_CONSTRUCT_STEEL_MILL},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   157,   168, STR_0248_FARM,                STR_026A_CONSTRUCT_FARM},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   170,   181, STR_0249_IRON_ORE_MINE,       STR_026B_CONSTRUCT_IRON_ORE_MINE},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   183,   194, STR_024A_OIL_WELLS,           STR_026C_CONSTRUCT_OIL_WELLS},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   196,   207, STR_024B_BANK,                STR_026D_CONSTRUCT_BANK_CAN_ONLY},
+ {   WIDGETS_END},
+ };
+ 
+@@ -1573,18 +1576,20 @@
+ {      WWT_PANEL,   RESIZE_NONE,     7,     0,   169,    14,   224, 0x0,                            STR_NULL},
+ 
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    16,    27, STR_MANY_RANDOM_INDUSTRIES,     STR_RANDOM_INDUSTRIES_TIP},
++{      WWT_PANEL,   RESIZE_NONE,    15,     2,    48,    29,    40, 0x0,                            STR_NULL},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,    50,   167,    29,    40, STR_AMOUNT_RANDOM_INDUSTRIES,   STR_AMOUNT_RANDOM_INDUSTRIES_TIP},
+ 
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    42,    53, STR_0240_COAL_MINE,             STR_0262_CONSTRUCT_COAL_MINE},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    55,    66, STR_0241_POWER_STATION,         STR_0263_CONSTRUCT_POWER_STATION},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    68,    79, STR_024C_PAPER_MILL,            STR_026E_CONSTRUCT_PAPER_MILL},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    81,    92, STR_0243_FOREST,                STR_0265_PLANT_FOREST},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    94,   105, STR_0244_OIL_REFINERY,          STR_0266_CONSTRUCT_OIL_REFINERY},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   107,   118, STR_024D_FOOD_PROCESSING_PLANT, STR_026F_CONSTRUCT_FOOD_PROCESSING},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   120,   131, STR_024E_PRINTING_WORKS,        STR_0270_CONSTRUCT_PRINTING_WORKS},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   133,   144, STR_024F_GOLD_MINE,             STR_0271_CONSTRUCT_GOLD_MINE},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   146,   157, STR_0248_FARM,                  STR_026A_CONSTRUCT_FARM},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   159,   170, STR_024B_BANK,                  STR_0272_CONSTRUCT_BANK_CAN_ONLY},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   172,   183, STR_024A_OIL_WELLS,             STR_026C_CONSTRUCT_OIL_WELLS},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    53,    64, STR_0240_COAL_MINE,             STR_0262_CONSTRUCT_COAL_MINE},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    66,    77, STR_0241_POWER_STATION,         STR_0263_CONSTRUCT_POWER_STATION},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    79,    90, STR_024C_PAPER_MILL,            STR_026E_CONSTRUCT_PAPER_MILL},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    92,   103, STR_0243_FOREST,                STR_0265_PLANT_FOREST},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   105,   116, STR_0244_OIL_REFINERY,          STR_0266_CONSTRUCT_OIL_REFINERY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   118,   129, STR_024D_FOOD_PROCESSING_PLANT, STR_026F_CONSTRUCT_FOOD_PROCESSING},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   131,   142, STR_024E_PRINTING_WORKS,        STR_0270_CONSTRUCT_PRINTING_WORKS},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   144,   155, STR_024F_GOLD_MINE,             STR_0271_CONSTRUCT_GOLD_MINE},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   157,   168, STR_0248_FARM,                  STR_026A_CONSTRUCT_FARM},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   170,   181, STR_024B_BANK,                  STR_0272_CONSTRUCT_BANK_CAN_ONLY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   183,   194, STR_024A_OIL_WELLS,             STR_026C_CONSTRUCT_OIL_WELLS},
+ {   WIDGETS_END},
+ };
+ 
+@@ -1594,20 +1599,22 @@
+ {      WWT_PANEL,   RESIZE_NONE,     7,     0,   169,    14,   224, 0x0,                             STR_NULL},
+ 
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    16,    27, STR_MANY_RANDOM_INDUSTRIES,      STR_RANDOM_INDUSTRIES_TIP},
++{      WWT_PANEL,   RESIZE_NONE,    15,     2,    48,    29,    40, 0x0,                             STR_NULL},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,    50,   167,    29,    40, STR_AMOUNT_RANDOM_INDUSTRIES,    STR_AMOUNT_RANDOM_INDUSTRIES_TIP},
+ 
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    42,    53, STR_0250_LUMBER_MILL,            STR_0273_CONSTRUCT_LUMBER_MILL_TO},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    55,    66, STR_0251_FRUIT_PLANTATION,       STR_0274_PLANT_FRUIT_PLANTATION},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    68,    79, STR_0252_RUBBER_PLANTATION,      STR_0275_PLANT_RUBBER_PLANTATION},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    81,    92, STR_0244_OIL_REFINERY,           STR_0266_CONSTRUCT_OIL_REFINERY},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    94,   105, STR_024D_FOOD_PROCESSING_PLANT,  STR_026F_CONSTRUCT_FOOD_PROCESSING},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   107,   118, STR_0246_FACTORY,                STR_0268_CONSTRUCT_FACTORY},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   120,   131, STR_0253_WATER_SUPPLY,           STR_0276_CONSTRUCT_WATER_SUPPLY},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   133,   144, STR_0248_FARM,                   STR_026A_CONSTRUCT_FARM},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   146,   157, STR_0254_WATER_TOWER,            STR_0277_CONSTRUCT_WATER_TOWER_CAN},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   159,   170, STR_024A_OIL_WELLS,              STR_026C_CONSTRUCT_OIL_WELLS},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   172,   183, STR_024B_BANK,                   STR_0272_CONSTRUCT_BANK_CAN_ONLY},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   185,   196, STR_0255_DIAMOND_MINE,           STR_0278_CONSTRUCT_DIAMOND_MINE},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   198,   209, STR_0256_COPPER_ORE_MINE,        STR_0279_CONSTRUCT_COPPER_ORE_MINE},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    53,    64, STR_0250_LUMBER_MILL,            STR_0273_CONSTRUCT_LUMBER_MILL_TO},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    66,    77, STR_0251_FRUIT_PLANTATION,       STR_0274_PLANT_FRUIT_PLANTATION},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    79,    90, STR_0252_RUBBER_PLANTATION,      STR_0275_PLANT_RUBBER_PLANTATION},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    92,   103, STR_0244_OIL_REFINERY,           STR_0266_CONSTRUCT_OIL_REFINERY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   105,   116, STR_024D_FOOD_PROCESSING_PLANT,  STR_026F_CONSTRUCT_FOOD_PROCESSING},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   118,   129, STR_0246_FACTORY,                STR_0268_CONSTRUCT_FACTORY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   131,   142, STR_0253_WATER_SUPPLY,           STR_0276_CONSTRUCT_WATER_SUPPLY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   144,   155, STR_0248_FARM,                   STR_026A_CONSTRUCT_FARM},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   157,   168, STR_0254_WATER_TOWER,            STR_0277_CONSTRUCT_WATER_TOWER_CAN},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   170,   181, STR_024A_OIL_WELLS,              STR_026C_CONSTRUCT_OIL_WELLS},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   183,   194, STR_024B_BANK,                   STR_0272_CONSTRUCT_BANK_CAN_ONLY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   196,   207, STR_0255_DIAMOND_MINE,           STR_0278_CONSTRUCT_DIAMOND_MINE},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   209,   220, STR_0256_COPPER_ORE_MINE,        STR_0279_CONSTRUCT_COPPER_ORE_MINE},
+ {   WIDGETS_END},
+ };
+ 
+@@ -1617,18 +1624,20 @@
+ {      WWT_PANEL,   RESIZE_NONE,     7,     0,   169,    14,   224, 0x0,                          STR_NULL},
+ 
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    16,    27, STR_MANY_RANDOM_INDUSTRIES,   STR_RANDOM_INDUSTRIES_TIP},
++{      WWT_PANEL,   RESIZE_NONE,    15,     2,    48,    29,    40, 0x0,                          STR_NULL},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,    50,   167,    29,    40, STR_AMOUNT_RANDOM_INDUSTRIES, STR_AMOUNT_RANDOM_INDUSTRIES_TIP},
+ 
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    42,    53, STR_0257_COTTON_CANDY_FOREST, STR_027A_PLANT_COTTON_CANDY_FOREST},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    55,    66, STR_0258_CANDY_FACTORY,       STR_027B_CONSTRUCT_CANDY_FACTORY},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    68,    79, STR_0259_BATTERY_FARM,        STR_027C_CONSTRUCT_BATTERY_FARM},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    81,    92, STR_025A_COLA_WELLS,          STR_027D_CONSTRUCT_COLA_WELLS},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    94,   105, STR_025B_TOY_SHOP,            STR_027E_CONSTRUCT_TOY_SHOP},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   107,   118, STR_025C_TOY_FACTORY,         STR_027F_CONSTRUCT_TOY_FACTORY},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   120,   131, STR_025D_PLASTIC_FOUNTAINS,   STR_0280_CONSTRUCT_PLASTIC_FOUNTAINS},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   133,   144, STR_025E_FIZZY_DRINK_FACTORY, STR_0281_CONSTRUCT_FIZZY_DRINK_FACTORY},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   146,   157, STR_025F_BUBBLE_GENERATOR,    STR_0282_CONSTRUCT_BUBBLE_GENERATOR},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   159,   170, STR_0260_TOFFEE_QUARRY,       STR_0283_CONSTRUCT_TOFFEE_QUARRY},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   172,   183, STR_0261_SUGAR_MINE,          STR_0284_CONSTRUCT_SUGAR_MINE},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    53,    64, STR_0257_COTTON_CANDY_FOREST, STR_027A_PLANT_COTTON_CANDY_FOREST},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    66,    77, STR_0258_CANDY_FACTORY,       STR_027B_CONSTRUCT_CANDY_FACTORY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    79,    90, STR_0259_BATTERY_FARM,        STR_027C_CONSTRUCT_BATTERY_FARM},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,    92,   103, STR_025A_COLA_WELLS,          STR_027D_CONSTRUCT_COLA_WELLS},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   105,   116, STR_025B_TOY_SHOP,            STR_027E_CONSTRUCT_TOY_SHOP},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   118,   129, STR_025C_TOY_FACTORY,         STR_027F_CONSTRUCT_TOY_FACTORY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   131,   142, STR_025D_PLASTIC_FOUNTAINS,   STR_0280_CONSTRUCT_PLASTIC_FOUNTAINS},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   144,   155, STR_025E_FIZZY_DRINK_FACTORY, STR_0281_CONSTRUCT_FIZZY_DRINK_FACTORY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   157,   168, STR_025F_BUBBLE_GENERATOR,    STR_0282_CONSTRUCT_BUBBLE_GENERATOR},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   170,   181, STR_0260_TOFFEE_QUARRY,       STR_0283_CONSTRUCT_TOFFEE_QUARRY},
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     2,   167,   183,   194, STR_0261_SUGAR_MINE,          STR_0284_CONSTRUCT_SUGAR_MINE},
+ {   WIDGETS_END},
+ };
+ 
+@@ -1682,14 +1691,24 @@
+ {
+ 	int button;
+ 
++	static querystr_d _indgen_query;
++	static char       _indgen_buffer[6];
++
+ 	switch (e->event) {
++	case WE_CREATE:
++		strcpy(_indgen_buffer, "25"); //@todo What should the default value be?
++		InitializeTextBuffer(&_indgen_query.text, _indgen_buffer, lengthof(_indgen_buffer), 50);
++		_indgen_query.afilter = CS_NUMERAL;
++		break;
++
+ 	case WE_PAINT:
+ 		DrawWindowWidgets(w);
++		DrawEditBox(w, &_indgen_query, 4);
+ 		break;
+ 
+ 	case WE_CLICK:
+-		if (e->we.click.widget == 3) {
+-			HandleButtonClick(w, 3);
++		if (e->we.click.widget == 3 || e->we.click.widget == 5) {
++			HandleButtonClick(w, e->we.click.widget);
+ 
+ 			if (!AnyTownExists()) {
+ 				ShowErrorMessage(STR_0286_MUST_BUILD_TOWN_FIRST, STR_CAN_T_GENERATE_INDUSTRIES, 0, 0);
+@@ -1697,15 +1716,42 @@
+ 			}
+ 
+ 			_generating_world = true;
+-			GenerateIndustries();
++			if (e->we.click.widget == 3) {
++				GenerateIndustries();
++			}
++			else {
++				const uint32 amount_wanted = atoi(_indgen_buffer);
++				if (amount_wanted <= 0 || amount_wanted >= 60000) {
++					ShowErrorMessage(STR_NUMBER_BETWEEN_0_AND_60000, STR_NULL, 0, 0);
++				} else {
++					uint16 amount_created = GenerateIndustries((uint16)amount_wanted);
++					if (amount_created < amount_wanted && amount_created != 0) {
++						SetDParam(0, amount_created);
++						SetDParam(1, amount_wanted);
++						ShowErrorMessage(STR_COULDN_T_GENERATE_INDUSTRIES_EXPLANATION, STR_COULDN_T_GENERATE_ALL_INDUSTRIES, 0, 0);
++					}
++					else if (amount_created == 0) {
++						ShowErrorMessage(STR_COULDN_T_GENERATE_INDUSTRIES_EXPLANATION, STR_COULDN_T_GENERATE_ANY_INDUSTRIES, 0, 0);
++					}
++				}
++			}
+ 			_generating_world = false;
+ 		}
+ 
+-		if ((button=e->we.click.widget) >= 4) {
++		if ((button=e->we.click.widget) >= 6) {
+ 			if (HandlePlacePushButton(w, button, SPR_CURSOR_INDUSTRY, 1, NULL))
+-				_industry_type_to_place = _industry_type_list[_opt.landscape][button - 4];
++				_industry_type_to_place = _industry_type_list[_opt.landscape][button - 6];
+ 		}
+ 		break;
++
++	case WE_MOUSELOOP:
++		HandleEditBox(w, &_indgen_query, 4);
++		break;
++
++	case WE_KEYPRESS:
++		HandleEditBoxKey(w, &_indgen_query, 4, e);
++		break;
++
+ 	case WE_PLACE_OBJ: {
+ 		int type;
+ 
+@@ -1735,6 +1781,8 @@
+ 	case WE_TIMEOUT:
+ 		RaiseWindowWidget(w, 3);
+ 		InvalidateWidget(w, 3);
++		RaiseWindowWidget(w, 5);
++		InvalidateWidget(w, 5);
+ 		break;
+ 	}
+ }

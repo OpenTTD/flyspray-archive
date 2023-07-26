@@ -1,0 +1,523 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 10233)
++++ src/settings.cpp	(working copy)
+@@ -1349,6 +1349,7 @@
+ 	SDT_VAR(Patches,scrollwheel_multiplier,SLE_UINT8,S, 0, 5,  1, 15, 1, STR_CONFIG_PATCHES_SCROLLWHEEL_MULTIPLIER,NULL),
+ 	SDT_BOOL(Patches, pause_on_newgame,              S, 0, false,        STR_CONFIG_PATCHES_PAUSE_ON_NEW_GAME,     NULL),
+ 	SDT_BOOL(Patches, advanced_vehicle_list,         S, 0, true,        STR_CONFIG_PATCHES_ADVANCED_VEHICLE_LISTS,     NULL),
++	SDT_BOOL(Patches, loading_indicators,            S, 0, true,        STR_CONFIG_PATCHES_LOADING_INDICATORS,    RedrawScreen),
+ 
+ 	/***************************************************************************/
+ 	/* Construction section of the GUI-configure patches window */
+Index: src/functions.h
+===================================================================
+--- src/functions.h	(revision 10233)
++++ src/functions.h	(working copy)
+@@ -80,9 +80,11 @@
+ 
+ /* texteff.cpp */
+ void MoveAllTextEffects();
+-void AddTextEffect(StringID msg, int x, int y, uint16 duration);
++int16 AddTextEffect(StringID msg, int x, int y, uint16 duration, TextEffectMode mode);
+ void InitTextEffects();
+ void DrawTextEffects(DrawPixelInfo *dpi);
++void UpdateTextEffect(int16 effect_id, StringID msg);
++void RemoveTextEffect(int16 effect_id);
+ 
+ void InitTextMessage();
+ void DrawTextMessage();
+@@ -142,6 +144,10 @@
+ void ShowCostOrIncomeAnimation(int x, int y, int z, int32 cost);
+ void ShowFeederIncomeAnimation(int x, int y, int z, int32 cost);
+ 
++int16 ShowFillingPercent(int x, int y, int z, int32 percent);
++void UpdateFillingPercent(int16 handle, int32 percent);
++void HideFillingPercent(int16 handle);
++
+ bool CheckIfAuthorityAllows(TileIndex tile);
+ Town *ClosestTownFromTile(TileIndex tile, uint threshold);
+ void ChangeTownRating(Town *t, int add, int max);
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 10233)
++++ src/lang/english.txt	(working copy)
+@@ -1103,6 +1103,7 @@
+ STR_CONFIG_PATCHES_SCROLLWHEEL_MULTIPLIER                       :{LTBLUE}Map scrollwheel speed: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_PAUSE_ON_NEW_GAME                            :{LTBLUE}Automatically pause when starting a new game: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_ADVANCED_VEHICLE_LISTS                       :{LTBLUE}Use the advanced vehicle list: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_LOADING_INDICATORS                           :{LTBLUE}Use loading indicators: {ORANGE}{STRING1} 
+ 
+ STR_CONFIG_PATCHES_MAX_TRAINS                                   :{LTBLUE}Max trains per player: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_MAX_ROADVEH                                  :{LTBLUE}Max road vehicles per player: {ORANGE}{STRING1}
+@@ -3262,7 +3263,11 @@
+ STR_TRANSPARENT_BUILDINGS_DESC                                  :{BLACK}Toggle transparency for buildables like stations, depots, waypoints and catenary
+ STR_TRANSPARENT_BRIDGES_DESC                                    :{BLACK}Toggle transparency for bridges
+ STR_TRANSPARENT_STRUCTURES_DESC                                 :{BLACK}Toggle transparency for structures like lighthouses and antennas, maybe in future for eyecandy
++STR_TRANSPARENT_LOADING_DESC                                    :{BLACK}Toggle transparency for loading indicators
+ 
++STR_PERCENT_FULL_SMALL                                          :{TINYFONT}{WHITE}{NUM}%
++STR_PERCENT_FULL                                                :{WHITE}{NUM}%
++
+ ##### Mass Order
+ STR_GROUP_NAME_FORMAT                                           :Group {COMMA}
+ STR_GROUP_TINY_NAME                                             :{TINYFONT}{GROUP}
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 10233)
++++ src/settings_gui.cpp	(working copy)
+@@ -652,6 +652,7 @@
+ 	"scrollwheel_multiplier",
+ 	"pause_on_newgame",
+ 	"advanced_vehicle_list",
++	"loading_indicators",
+ };
+ 
+ static const char *_patches_construction[] = {
+Index: src/misc_gui.cpp
+===================================================================
+--- src/misc_gui.cpp	(revision 10233)
++++ src/misc_gui.cpp	(working copy)
+@@ -633,7 +633,7 @@
+ 		msg = STR_0803_INCOME;
+ 	}
+ 	SetDParam(0, cost);
+-	AddTextEffect(msg, pt.x, pt.y, 0x250);
++	AddTextEffect(msg, pt.x, pt.y, 0x250, TE_RISING);
+ }
+ 
+ void ShowFeederIncomeAnimation(int x, int y, int z, int32 cost)
+@@ -641,9 +641,30 @@
+ 	Point pt = RemapCoords(x,y,z);
+ 
+ 	SetDParam(0, cost);
+-	AddTextEffect(STR_FEEDER, pt.x, pt.y, 0x250);
++	AddTextEffect(STR_FEEDER, pt.x, pt.y, 0x250, TE_RISING);
+ }
+ 
++int16 ShowFillingPercent(int x, int y, int z, int32 percent)
++{
++	Point pt = RemapCoords(x, y, z);
++
++	SetDParam(0, percent);
++	return AddTextEffect(STR_PERCENT_FULL, pt.x, pt.y, 0xFFFF, TE_STATIC);
++}
++
++void UpdateFillingPercent(int16 handle, int32 percent)
++{
++	SetDParam(0, percent);
++	UpdateTextEffect(handle, STR_PERCENT_FULL);
++}
++
++void HideFillingPercent(int16 handle)
++{
++	if (handle >= 0) {
++		RemoveTextEffect(handle);
++	}
++}
++
+ static const Widget _tooltips_widgets[] = {
+ {      WWT_PANEL,   RESIZE_NONE,    14,     0,   199,     0,    31, 0x0, STR_NULL},
+ {   WIDGETS_END},
+Index: src/vehicle.h
+===================================================================
+--- src/vehicle.h	(revision 10233)
++++ src/vehicle.h	(working copy)
+@@ -245,6 +245,8 @@
+ 	int8 y_offs;             // y offset for vehicle sprite
+ 	EngineID engine_type;
+ 
++	int16 fill_percent_handle; // a handle to a loading indicator object (usually a text effect)
++
+ 	/* for randomized variational spritegroups
+ 	 * bitmask used to resolve them; parts of it get reseeded when triggers
+ 	 * of corresponding spritegroups get matched */
+@@ -502,6 +504,7 @@
+ void *VehicleFromPosXY(int x, int y, void *data, VehicleFromPosProc *proc);
+ void CallVehicleTicks();
+ Vehicle *FindVehicleOnTileZ(TileIndex tile, byte z);
++int32 CalcPercentVehicleFilled(Vehicle *v);
+ 
+ void InitializeTrains();
+ byte VehicleRandomBits();
+Index: src/texteff.cpp
+===================================================================
+--- src/texteff.cpp	(revision 10233)
++++ src/texteff.cpp	(working copy)
+@@ -22,7 +22,7 @@
+ 
+ enum {
+ 	MAX_TEXTMESSAGE_LENGTH = 200,
+-	MAX_TEXT_MESSAGES      =  30,
++	INIT_NUM_TEXT_MESSAGES =  20,
+ 	MAX_CHAT_MESSAGES      =  10,
+ 	MAX_ANIMATED_TILES     = 256,
+ };
+@@ -36,6 +36,7 @@
+ 	uint16 duration;
+ 	uint32 params_1;
+ 	uint32 params_2;
++	TextEffectMode mode;
+ };
+ 
+ 
+@@ -45,12 +46,13 @@
+ 	Date end_date;
+ };
+ 
+-static TextEffect _text_effect_list[MAX_TEXT_MESSAGES];
++static TextEffect *_text_effect_list = NULL;
+ static TextMessage _textmsg_list[MAX_CHAT_MESSAGES];
+ TileIndex _animated_tile_list[MAX_ANIMATED_TILES];
+ 
+ static bool _textmessage_dirty = false;
+ static bool _textmessage_visible = false;
++static int _num_text_effects = INIT_NUM_TEXT_MESSAGES;
+ 
+ /* The chatbox grows from the bottom so the coordinates are pixels from
+  * the left and pixels from the bottom. The height is the maximum height */
+@@ -259,33 +261,79 @@
+ 	);
+ }
+ 
+-void AddTextEffect(StringID msg, int x, int y, uint16 duration)
++int16 AddTextEffect(StringID msg, int x, int y, uint16 duration, TextEffectMode mode)
+ {
+-	TextEffect *te;
++	TextEffect te;
+ 	int w;
+ 	char buffer[100];
++	int16 i;
+ 
+-	if (_game_mode == GM_MENU) return;
++	if (_game_mode == GM_MENU) return -1;
+ 
+-	for (te = _text_effect_list; te->string_id != INVALID_STRING_ID; ) {
+-		if (++te == endof(_text_effect_list)) return;
++	/* look for a free spot in the text effect array */
++	for (i = 0; i < _num_text_effects; i++) {
++		TextEffect te = _text_effect_list[i];
++	    if (te.string_id == INVALID_STRING_ID) {
++			break;
++		}
++    }
++	
++	/* if there is none found, we grow the array */
++	if (i == _num_text_effects) {
++		_num_text_effects += 25;
++		_text_effect_list = (TextEffect*) realloc(_text_effect_list, _num_text_effects * sizeof(TextEffect));
++		for ( ; i < _num_text_effects; i++ ) {
++			_text_effect_list[i].string_id = INVALID_STRING_ID;
++		}
++		i = _num_text_effects - 1;
+ 	}
+ 
+-	te->string_id = msg;
+-	te->duration = duration;
+-	te->y = y - 5;
+-	te->bottom = y + 5;
+-	te->params_1 = GetDParam(0);
+-	te->params_2 = GetDParam(4);
++	/* start defining this object */
++	te.string_id = msg;
++	te.duration = duration;
++	te.y = y - 5;
++	te.bottom = y + 5;
++	te.params_1 = GetDParam(0);
++	te.params_2 = GetDParam(4);
++	te.mode = mode;
+ 
+ 	GetString(buffer, msg, lastof(buffer));
+ 	w = GetStringBoundingBox(buffer).width;
+ 
+-	te->x = x - (w >> 1);
+-	te->right = x + (w >> 1) - 1;
+-	MarkTextEffectAreaDirty(te);
++	te.x = x - (w >> 1);
++	te.right = x + (w >> 1) - 1;
++	MarkTextEffectAreaDirty(&te);
++
++	/* finally put it into the array */
++	_text_effect_list[i] = te;
++
++	return i;
+ }
+ 
++void UpdateTextEffect(int16 effect_id, StringID msg)
++{
++	TextEffect te;
++
++	/* update details */
++	te = _text_effect_list[effect_id];
++	te.string_id = msg;
++	te.params_1 = GetDParam(0);
++	te.params_2 = GetDParam(4);
++	_text_effect_list[effect_id] = te;
++
++	MarkTextEffectAreaDirty(&te);
++}
++
++void RemoveTextEffect(int16 effect_id)
++{
++	TextEffect te;
++
++	te = _text_effect_list[effect_id];
++	MarkTextEffectAreaDirty(&te);
++	te.string_id = INVALID_STRING_ID;
++	_text_effect_list[effect_id] = te;
++}
++
+ static void MoveTextEffect(TextEffect *te)
+ {
+ 	if (te->duration < 8) {
+@@ -300,47 +348,57 @@
+ 
+ void MoveAllTextEffects()
+ {
+-	TextEffect *te;
+-
+-	for (te = _text_effect_list; te != endof(_text_effect_list); te++) {
+-		if (te->string_id != INVALID_STRING_ID) MoveTextEffect(te);
++	for (int i = 0; i < _num_text_effects; i++) {
++		TextEffect te = _text_effect_list[i];
++		if ((te.string_id != INVALID_STRING_ID) && (te.mode == TE_RISING)) {
++			MoveTextEffect(&te);
++			_text_effect_list[i] = te;
++		}
+ 	}
+ }
+ 
+ void InitTextEffects()
+ {
+-	TextEffect *te;
++	int i;
+ 
+-	for (te = _text_effect_list; te != endof(_text_effect_list); te++) {
+-		te->string_id = INVALID_STRING_ID;
++	if (_text_effect_list == NULL) {
++		_text_effect_list = (TextEffect*) malloc(_num_text_effects * sizeof(TextEffect));
+ 	}
++
++	for ( i=0; i < _num_text_effects; i++ ) {
++		_text_effect_list[i].string_id = INVALID_STRING_ID;
++	}
+ }
+ 
+ void DrawTextEffects(DrawPixelInfo *dpi)
+ {
+-	const TextEffect* te;
+-
+ 	switch (dpi->zoom) {
+ 		case ZOOM_LVL_NORMAL:
+-			for (te = _text_effect_list; te != endof(_text_effect_list); te++) {
+-				if (te->string_id != INVALID_STRING_ID &&
+-						dpi->left <= te->right &&
+-						dpi->top  <= te->bottom &&
+-						dpi->left + dpi->width  > te->x &&
+-						dpi->top  + dpi->height > te->y) {
+-					AddStringToDraw(te->x, te->y, te->string_id, te->params_1, te->params_2);
++			for (int i = 0; i < _num_text_effects; i++) {
++				TextEffect te = _text_effect_list[i];
++				if (te.string_id != INVALID_STRING_ID &&
++						dpi->left <= te.right &&
++						dpi->top  <= te.bottom &&
++						dpi->left + dpi->width  > te.x &&
++						dpi->top  + dpi->height > te.y) {
++					if ((te.mode == TE_RISING) or (_patches.loading_indicators and !HASBIT(_transparent_opt, TO_LOADING))) {
++						AddStringToDraw(te.x, te.y, te.string_id, te.params_1, te.params_2);
++					}
+ 				}
+ 			}
+ 			break;
+ 
+ 		case ZOOM_LVL_OUT_2X:
+-			for (te = _text_effect_list; te != endof(_text_effect_list); te++) {
+-				if (te->string_id != INVALID_STRING_ID &&
+-						dpi->left <= te->right  * 2 - te->x &&
+-						dpi->top  <= te->bottom * 2 - te->y &&
+-						dpi->left + dpi->width  > te->x &&
+-						dpi->top  + dpi->height > te->y) {
+-					AddStringToDraw(te->x, te->y, (StringID)(te->string_id-1), te->params_1, te->params_2);
++			for (int i = 0; i < _num_text_effects; i++) {
++				TextEffect te = _text_effect_list[i];
++				if (te.string_id != INVALID_STRING_ID &&
++						dpi->left <= te.right  * 2 - te.x &&
++						dpi->top  <= te.bottom * 2 - te.y &&
++						dpi->left + dpi->width  > te.x &&
++						dpi->top  + dpi->height > te.y) {
++					if ((te.mode == TE_RISING) or (_patches.loading_indicators and !HASBIT(_transparent_opt, TO_LOADING))) {
++						AddStringToDraw(te.x, te.y, (StringID)(te.string_id-1), te.params_1, te.params_2);
++					}
+ 				}
+ 			}
+ 			break;
+Index: src/economy.cpp
+===================================================================
+--- src/economy.cpp	(revision 10233)
++++ src/economy.cpp	(working copy)
+@@ -1720,6 +1720,21 @@
+ 		}
+ 	}
+ 
++	/* loading indicators: calculate fill percent and display */
++	if (_patches.loading_indicators) {
++		if (_game_mode != GM_MENU) {
++			if (v->owner == _local_player) {
++				int percent;
++				percent = CalcPercentVehicleFilled(v);
++				if (v->fill_percent_handle == -1) {
++					v->fill_percent_handle = ShowFillingPercent(v->x_pos, v->y_pos, v->z_pos+20, percent);
++				} else {
++					UpdateFillingPercent(v->fill_percent_handle, percent);
++				}
++			}
++		}
++	}
++
+ 	v->load_unload_time_rem = unloading_time;
+ 
+ 	if (completely_empty) {
+Index: src/variables.h
+===================================================================
+--- src/variables.h	(revision 10233)
++++ src/variables.h	(working copy)
+@@ -133,6 +133,7 @@
+ 	byte liveries;                      // Options for displaying company liveries, 0=none, 1=self, 2=all
+ 	bool prefer_teamchat;               // Choose the chat message target with <ENTER>, true=all players, false=your team
+ 	bool advanced_vehicle_list;         // Use the "advanced" vehicle list
++	bool loading_indicators;			// Show loading indicators
+ 
+ 	uint8 toolbar_pos;                  // position of toolbars, 0=left, 1=center, 2=right
+ 	uint8 window_snap_radius;           // Windows snap at each other if closer than this
+Index: src/transparency_gui.cpp
+===================================================================
+--- src/transparency_gui.cpp	(revision 10233)
++++ src/transparency_gui.cpp	(working copy)
+@@ -23,6 +23,7 @@
+ 	TTW_WIDGET_BUILDINGS,    ///< Make player buildings and structures transparent
+ 	TTW_WIDGET_BRIDGES,      ///< Make bridges transparent
+ 	TTW_WIDGET_STRUCTURES,   ///< Make unmovable structures transparent
++	TTW_WIDGET_LOADING,      ///< Make loading indicators transperent
+ 	TTW_WIDGET_END,          ///< End of toggle buttons
+ };
+ 
+@@ -59,11 +60,11 @@
+ 
+ static const Widget _transparency_widgets[] = {
+ { WWT_CLOSEBOX,   RESIZE_NONE,  7,   0,  10,   0,  13, STR_00C5,                 STR_018B_CLOSE_WINDOW},
+-{  WWT_CAPTION,   RESIZE_NONE,  7,  11, 162,   0,  13, STR_TRANSPARENCY_TOOLB,   STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{WWT_STICKYBOX,   RESIZE_NONE,  7, 163, 174,   0,  13, STR_NULL,                 STR_STICKY_BUTTON},
++{  WWT_CAPTION,   RESIZE_NONE,  7,  11, 184,   0,  13, STR_TRANSPARENCY_TOOLB,   STR_018C_WINDOW_TITLE_DRAG_THIS},
++{WWT_STICKYBOX,   RESIZE_NONE,  7, 185, 196,   0,  13, STR_NULL,                 STR_STICKY_BUTTON},
+ 
+ /* transparency widgets:
+- * transparent signs, trees, houses, industries, player's buildings, bridges and unmovable structures */
++ * transparent signs, trees, houses, industries, player's buildings, bridges, unmovable structures and loading indicators */
+ {   WWT_IMGBTN,   RESIZE_NONE,  7,   0,  21,  14,  35, SPR_IMG_SIGN,         STR_TRANSPARENT_SIGNS_DESC},
+ {   WWT_IMGBTN,   RESIZE_NONE,  7,  22,  43,  14,  35, SPR_IMG_PLANTTREES,   STR_TRANSPARENT_TREES_DESC},
+ {   WWT_IMGBTN,   RESIZE_NONE,  7,  44,  65,  14,  35, SPR_IMG_TOWN,         STR_TRANSPARENT_HOUSES_DESC},
+@@ -71,12 +72,13 @@
+ {   WWT_IMGBTN,   RESIZE_NONE,  7,  88, 109,  14,  35, SPR_IMG_COMPANY_LIST, STR_TRANSPARENT_BUILDINGS_DESC},
+ {   WWT_IMGBTN,   RESIZE_NONE,  7, 110, 152,  14,  35, SPR_IMG_BRIDGE,       STR_TRANSPARENT_BRIDGES_DESC},
+ {   WWT_IMGBTN,   RESIZE_NONE,  7, 153, 174,  14,  35, SPR_IMG_TRANSMITTER,  STR_TRANSPARENT_STRUCTURES_DESC},
++{   WWT_IMGBTN,   RESIZE_NONE,  7, 175, 196,  14,  35, SPR_IMG_TRAINLIST,    STR_TRANSPARENT_LOADING_DESC},
+ 
+ {   WIDGETS_END},
+ };
+ 
+ static const WindowDesc _transparency_desc = {
+-	WDP_ALIGN_TBR, 58+36, 175, 36,
++	WDP_ALIGN_TBR, 58+36, 197, 36,
+ 	WC_TRANSPARENCY_TOOLBAR, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_STICKY_BUTTON,
+ 	_transparency_widgets,
+Index: src/openttd.h
+===================================================================
+--- src/openttd.h	(revision 10233)
++++ src/openttd.h	(working copy)
+@@ -192,6 +192,7 @@
+ 	TO_BUILDINGS,
+ 	TO_BRIDGES,
+ 	TO_STRUCTURES,
++	TO_LOADING,
+ };
+ 
+ /* Landscape types */
+@@ -688,6 +689,14 @@
+ 	MSG_OTTD_SAVETHREAD_ERROR,
+ };
+ 
++/** Text effect modes
++ * Used in texteff.cpp and main_gui.cpp
++ */
++enum TextEffectMode {
++	TE_RISING = 1,
++	TE_STATIC = 2,
++};
++
+ void OTTD_SendThreadMessage(ThreadMsg msg);
+ 
+ #endif /* OPENTTD_H */
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 10233)
++++ src/vehicle.cpp	(working copy)
+@@ -228,6 +228,7 @@
+ 	FOR_ALL_VEHICLES(v) {
+ 		v->UpdateDeltaXY(v->direction);
+ 
++		v->fill_percent_handle = -1;
+ 		v->first = NULL;
+ 		if (v->type == VEH_TRAIN) v->u.rail.first_engine = INVALID_ENGINE;
+ 		if (v->type == VEH_ROAD)  v->u.road.first_engine = INVALID_ENGINE;
+@@ -295,6 +296,7 @@
+ 	v->depot_list  = NULL;
+ 	v->random_bits = 0;
+ 	v->group_id = DEFAULT_GROUP;
++	v->fill_percent_handle = -1;
+ 
+ 	return v;
+ }
+@@ -2262,6 +2264,32 @@
+ 	return false;
+ }
+ 
++/** 
++ * Calculates how full a Vehicle is
++ *
++ * @param v The Vehicle to check. For trains, use the first engine
++ * @return A percentage of how full the Vehicle is
++*/
++int32 CalcPercentVehicleFilled(Vehicle *v) {
++	
++	int count = 0;
++	int max = 0;
++
++	/* Count up max and used */
++	do {
++		count += v->cargo_count;
++		max += v->cargo_cap;
++	} while ((v = v->next) != NULL);
++
++	/* Train without capacity */
++	if (max == 0) {
++		return 100;
++	}
++
++	/* Return the percentage */
++	return (count * 100) / max;
++}
++
+ void VehicleEnterDepot(Vehicle *v)
+ {
+ 	switch (v->type) {
+@@ -3096,6 +3124,9 @@
+ 	current_order.type = OT_LEAVESTATION;
+ 	current_order.flags = 0;
+ 	GetStation(this->last_station_visited)->loading_vehicles.remove(this);
++
++	HideFillingPercent(this->fill_percent_handle);
++	this->fill_percent_handle = -1;
+ }
+ 
+ 

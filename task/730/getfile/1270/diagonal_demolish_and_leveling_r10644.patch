@@ -1,0 +1,679 @@
+Index: src/airport_gui.cpp
+===================================================================
+--- src/airport_gui.cpp	(revision 10644)
++++ src/airport_gui.cpp	(working copy)
+@@ -96,7 +96,7 @@
+ 
+ 	case WE_PLACE_MOUSEUP:
+ 		if (e->we.place.pt.x != -1 && e->we.place.select_proc == DDSP_DEMOLISH_AREA) {
+-			DoCommandP(e->we.place.tile, e->we.place.starttile, 0, CcPlaySound10, CMD_CLEAR_AREA | CMD_MSG(STR_00B5_CAN_T_CLEAR_THIS_AREA));
++			GUIPlaceProcDragXY(e);
+ 		}
+ 		break;
+ 
+Index: src/viewport.h
+===================================================================
+--- src/viewport.h	(revision 10644)
++++ src/viewport.h	(working copy)
+@@ -141,6 +141,9 @@
+ 	byte select_proc;
+ 
+ 	TileIndex redsq;
++
++	bool diagonal;     ///< true if dragging a 45° rotated rectangle
++	bool new_diagonal;
+ };
+ 
+ 
+Index: src/terraform_gui.cpp
+===================================================================
+--- src/terraform_gui.cpp	(revision 10644)
++++ src/terraform_gui.cpp	(working copy)
+@@ -106,10 +106,10 @@
+ 
+ 	switch (e->we.place.select_proc) {
+ 		case DDSP_DEMOLISH_AREA:
+-			DoCommandP(end_tile, start_tile, 0, CcPlaySound10, CMD_CLEAR_AREA | CMD_MSG(STR_00B5_CAN_T_CLEAR_THIS_AREA));
++			DoCommandP(end_tile, start_tile, _ctrl_pressed, CcPlaySound10, CMD_CLEAR_AREA | CMD_MSG(STR_00B5_CAN_T_CLEAR_THIS_AREA));
+ 			break;
+ 		case DDSP_LEVEL_AREA:
+-			DoCommandP(end_tile, start_tile, 0, CcPlaySound10, CMD_LEVEL_LAND | CMD_AUTO);
++			DoCommandP(end_tile, start_tile, _ctrl_pressed, CcPlaySound10, CMD_LEVEL_LAND | CMD_AUTO);
+ 			break;
+ 		case DDSP_CREATE_ROCKS:
+ 			GenerateRockyArea(end_tile, start_tile);
+Index: src/clear_cmd.cpp
+===================================================================
+--- src/clear_cmd.cpp	(revision 10644)
++++ src/clear_cmd.cpp	(working copy)
+@@ -358,65 +358,158 @@
+ }
+ 
+ 
+-/** Levels a selected (rectangle) area of land
++/** Levels a selected area of land
+  * @param tile end tile of area-drag
+  * @param flags for this command type
+  * @param p1 start tile of area drag
+- * @param p2 unused
++ * @param p2 0 if leveling a normal rectangle, 1 if leveling a 45° rotated (diagonal) rectangle
+  * @return  error or cost of terraforming
+  */
+ CommandCost CmdLevelLand(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+-	int size_x, size_y;
+-	int ex;
+-	int ey;
+-	int sx, sy;
+-	uint h, curh;
+-	CommandCost money;
+-	CommandCost ret;
+-	CommandCost cost;
+-
+ 	if (p1 >= MapSize()) return CMD_ERROR;
+ 
+-	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
++	/* x y coordinates of startpoint */
++	int sx = TileX(p1);
++	int sy = TileY(p1);   	
+ 
+-	/* remember level height */
++	/* x y coordinates of endpoint */
++	int ex = TileX(tile);
++	int ey = TileY(tile);
++	
++	uint curh, h; 
++	
++	/* h - remember level height */
+ 	h = TileHeight(p1);
++	         	
++	CommandCost ret, cost, money;
+ 
+-	/* make sure sx,sy are smaller than ex,ey */
+-	ex = TileX(tile);
+-	ey = TileY(tile);
+-	sx = TileX(p1);
+-	sy = TileY(p1);
+-	if (ex < sx) Swap(ex, sx);
+-	if (ey < sy) Swap(ey, sy);
+-	tile = TileXY(sx, sy);
++	money.AddCost(GetAvailableMoneyForCommand());
+ 
+-	size_x = ex - sx + 1;
+-	size_y = ey - sy + 1;
++	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+-	money.AddCost(GetAvailableMoneyForCommand());
++	if (!p2) { // If (!p2) we are leveling in a simple rectangle. Pretty straightforward!
++		/* make sure sx,sy are smaller than ex, ey */
++		if (ex < sx) Swap(ex, sx);
++		if (ey < sy) Swap(ey, sy);
++		tile = TileXY(sx, sy);
+ 
+-	BEGIN_TILE_LOOP(tile2, size_x, size_y, tile) {
+-		curh = TileHeight(tile2);
+-		while (curh != h) {
+-			ret = DoCommand(tile2, 8, (curh > h) ? 0 : 1, flags & ~DC_EXEC, CMD_TERRAFORM_LAND);
+-			if (CmdFailed(ret)) break;
++		int size_x = ex - sx + 1;
++		int size_y = ey - sy + 1;
+ 
+-			if (flags & DC_EXEC) {
+-				money.AddCost(-ret.GetCost());
+-				if (money.GetCost() < 0) {
+-					_additional_cash_required = ret.GetCost();
+-					return cost;
++		BEGIN_TILE_LOOP(tile2, size_x, size_y, tile) {
++			curh = TileHeight(tile2);
++			while (curh != h) {
++				ret = DoCommand(tile2, 8, (curh > h) ? 0 : 1, flags & ~DC_EXEC, CMD_TERRAFORM_LAND);
++				if (CmdFailed(ret)) break;
++				
++				/* To be able to determine how much the operation will cost, add the cost to cost. */
++				cost.AddCost(ret);
++
++				if (flags & DC_EXEC) {
++					money.AddCost(-ret.GetCost());
++					if (money.GetCost() < 0) {
++						_additional_cash_required = ret.GetCost();
++						
++						/* Remove cost for not executed DoCommand from cost. So it is not billed anyway.*/
++						cost.AddCost(-ret.GetCost());
++						return cost;
++					}
++					DoCommand(tile2, 8, (curh > h) ? 0 : 1, flags, CMD_TERRAFORM_LAND);
+ 				}
+-				DoCommand(tile2, 8, (curh > h) ? 0 : 1, flags, CMD_TERRAFORM_LAND);
++
++				curh += (curh > h) ? -1 : 1;
+ 			}
++		} END_TILE_LOOP(tile2, size_x, size_y, tile)
++	} else { // If (p2) we are leveling in a 45° rotated rectangle.
++		int dx =  ex - sx, dy =  ey - sy;           // distance between begin and endpoints
++		int fx = (dx + dy) / 2, fy = (dx - dy) / 2; // x and y coordinate in rotated coordinate system (for diagonal clearing)
++		int x2, y2;
+ 
+-			cost.AddCost(ret);
+-			curh += (curh > h) ? -1 : 1;
++		/* get sign of fx and fy, and make them abs
++		 * note that sfx and sfy will be 1 in case of fx/fx==0, doesn't matter in the code after
++		 */
++		int sfx, sfy;
++		if (fx < 0) {
++			sfx = -1;
++			fx = -fx;
++		} else sfx = 1;
++
++		if (fy < 0) {
++			sfy = -1;
++			fy = -fy;
++		} else sfy = 1;
++
++		/** fx,fy form a diagonal coordinate system.
++		 * fx counts the number of diagonals in 1 direction, fy in another.
++		 * However with this method you only count half the squares. Compare with a checkboard with
++		 * alternating black and white squares. You only count one color.
++		 * That is why we clear two squares in every loop. The principal one and one square next to that
++		 * To avoid leveling squares outside our drag-area we need some complex if's.
++		 */
++	 	for (int ix = 0; ix <= fx; ix += 1) {
++			for (int iy = 0; iy <= fy; iy += 1) {
++				int x = sx + sfx * ix + sfy * iy;
++				int y = sy + sfx * ix - sfy * iy;
++				x2 = x; y2 = y;
++
++				curh = TileHeight(TileXY(x,y));
++				while (curh != h) {
++					ret = DoCommand(TileXY(x,y), 8, (curh > h) ? 0 : 1, flags & ~DC_EXEC, CMD_TERRAFORM_LAND);
++					if (CmdFailed(ret)) {
++						money.AddCost(-ret.GetCost());
++						curh += (curh > h) ? -1 : 1;
++						continue;
++					}
++
++					/* To be able to determine how much the operation will cost, add the cost to cost. */
++					cost.AddCost(ret);
++
++					if (flags & DC_EXEC) {
++						if (money.GetCost() < 0) {
++							_additional_cash_required = ret.GetCost();
++							/* Remove cost for not executed DoCommand from cost. So it is not billed anyway.*/
++							return cost;
++						}
++						DoCommand(TileXY(x,y), 8, (curh > h) ? 0 : 1, flags, CMD_TERRAFORM_LAND);
++					}
++					curh += (curh > h) ? -1 : 1;
++				}
++
++				if (abs(dx) > abs(dy) && ((ix != fx && iy != fy) || (dx + dy) % 2!=0)) {
++					ex >= sx ? x += 1 : x -= 1;
++				}
++
++				if (abs(dx) < abs(dy) && ((ix != fx && iy != fy) || (dx + dy) % 2!=0)) {
++					ey >= sy ? y += 1 : y -= 1;
++				}
++
++				if (x != x2 || y != y2) { // Do only when there's a change (to avoid screwing cost estimate)
++					curh = TileHeight(TileXY(x,y));
++					while (curh != h) {
++						ret = DoCommand(TileXY(x,y), 8, (curh > h) ? 0 : 1, flags & ~DC_EXEC, CMD_TERRAFORM_LAND);
++						if (CmdFailed(ret)) {curh += (curh > h) ? -1 : 1; continue;}
++
++						/* To be able to determine how much the operation will cost, add the cost to cost. */
++						cost.AddCost(ret);
++
++						if (flags & DC_EXEC) {
++							money.AddCost(-ret.GetCost());
++							if (money.GetCost() < 0) {
++								_additional_cash_required = ret.GetCost();
++								
++								
++								cost.AddCost(-ret.GetCost());
++								return cost;
++							}
++							DoCommand(TileXY(x,y), 8, (curh > h) ? 0 : 1, flags, CMD_TERRAFORM_LAND);
++						}
++						curh += (curh > h) ? -1 : 1;
++					}
++				}
++			}
+ 		}
+-	} END_TILE_LOOP(tile2, size_x, size_y, tile)
+-
++	}
+ 	return (cost.GetCost() == 0) ? CMD_ERROR : cost;
+ }
+ 
+Index: src/road_gui.cpp
+===================================================================
+--- src/road_gui.cpp	(revision 10644)
++++ src/road_gui.cpp	(working copy)
+@@ -340,7 +340,7 @@
+ 					break;
+ 
+ 				case DDSP_DEMOLISH_AREA:
+-					DoCommandP(end_tile, start_tile, 0, CcPlaySound10, CMD_CLEAR_AREA | CMD_MSG(STR_00B5_CAN_T_CLEAR_THIS_AREA));
++					GUIPlaceProcDragXY(e);
+ 					break;
+ 
+ 				case DDSP_PLACE_ROAD_NE:
+Index: src/landscape.cpp
+===================================================================
+--- src/landscape.cpp	(revision 10644)
++++ src/landscape.cpp	(working copy)
+@@ -377,54 +377,170 @@
+  * @param tile end tile of area dragging
+  * @param p1 start tile of area dragging
+  * @param flags of operation to conduct
+- * @param p2 unused
++ * @param p2 0 if leveling a normal rectangle, 1 if leveling a 45° rotated (diagonal) rectangle
+  */
+ CommandCost CmdClearArea(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+-	CommandCost cost, ret, money;
+-	int ex;
+-	int ey;
+-	int sx, sy;
+-	int x, y;
++	if (p1 >= MapSize()) return CMD_ERROR;
++
++	/* x,y coordinates of startpoint */
++	int sx = TileX(p1);
++	int sy = TileY(p1);
++	
++	/* x,y coordinates of endpoint */
++	int ex = TileX(tile);
++	int ey = TileY(tile);
++	
++	CommandCost ret, cost, money;
+ 	bool success = false;
+ 
+-	if (p1 >= MapSize()) return CMD_ERROR;
++	money.AddCost(GetAvailableMoneyForCommand());
+ 
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+-	/* make sure sx,sy are smaller than ex,ey */
+-	ex = TileX(tile);
+-	ey = TileY(tile);
+-	sx = TileX(p1);
+-	sy = TileY(p1);
+-	if (ex < sx) Swap(ex, sx);
+-	if (ey < sy) Swap(ey, sy);
++	if (!p2) {
++		/* make sure sx, sy are smaller than ex, ey */
++		if (ex < sx) Swap(ex, sx);
++		if (ey < sy) Swap(ey, sy);
+ 
+-	money.AddCost(GetAvailableMoneyForCommand());
++		for (int x = sx; x <= ex; ++x) {
++			for (int y = sy; y <= ey; ++y) {
++				/* This first tests if there is enough money to clear the selected tile, then clears it. */
++				ret = DoCommand(TileXY(x, y), 0, 0, flags & ~DC_EXEC, CMD_LANDSCAPE_CLEAR);
++				if (CmdFailed(ret)) continue;
++				
++				/* To be able to determine how much the operation will cost, add the cost to cost. */
++				cost.AddCost(ret);
++				success = true;
+ 
+-	for (x = sx; x <= ex; ++x) {
+-		for (y = sy; y <= ey; ++y) {
+-			ret = DoCommand(TileXY(x, y), 0, 0, flags & ~DC_EXEC, CMD_LANDSCAPE_CLEAR);
+-			if (CmdFailed(ret)) continue;
+-			success = true;
++				if (flags & DC_EXEC) {
++					money.AddCost(-ret.GetCost());
++					if (ret.GetCost() > 0 && money.GetCost() < 0) {
++						_additional_cash_required = ret.GetCost();
++						return cost;
++					}
+ 
+-			if (flags & DC_EXEC) {
+-				money.AddCost(-ret.GetCost());
+-				if (ret.GetCost() > 0 && money.GetCost() < 0) {
+-					_additional_cash_required = ret.GetCost();
+-					return cost;
++					DoCommand(TileXY(x, y), 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++					/* draw explosion animation... */
++					if ((x == sx || x == ex) && (y == sy || y == ey)) {
++						/* big explosion in each corner, or small explosion for single tiles */
++						CreateEffectVehicleAbove(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, 2,
++							sy == ey && sx == ex ? EV_EXPLOSION_SMALL : EV_EXPLOSION_LARGE
++						);
++					}
+ 				}
+-				DoCommand(TileXY(x, y), 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++			}
++		}
++	} else {
++		int dx = ex - sx, dy =  ey - sy; // distance between begin and endpoints
++		int fx = (dx + dy) / 2, fy = (dx - dy) / 2; // x and y coordinate in rotated coordinate system (for diagonal clearing)
++		
++		/** The following code determines the upper and the lower corner coordinates in a rotated rectangle.
++		 * The upper and lower corner coordinates are used to display an explosion effect. 
++		 */
++		int ux, uy; // Upper corner coordinates
++		int lx, ly; // Lower corner coordinates
++		 
++	  	ux = ex - fx;
++		uy = ey - fx;
++		lx = ex - fy;
++		ly = ey + fy;
+ 
+-				/* draw explosion animation... */
+-				if ((x == sx || x == ex) && (y == sy || y == ey)) {
+-					/* big explosion in each corner, or small explosion for single tiles */
+-					CreateEffectVehicleAbove(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, 2,
+-						sy == ey && sx == ex ? EV_EXPLOSION_SMALL : EV_EXPLOSION_LARGE
+-					);
++		/* get sign of fx and fy, and make them abs
++		 * note that sfx and sfy will be 1 in case of fx/fx==0, doesn't matter in the code after
++		 */
++		int sfx, sfy;
++		if (fx < 0) {
++			sfx = -1;
++			fx = -fx;
++		} else sfx = 1;
++
++		if (fy < 0) {
++			sfy = -1;
++			fy = -fy;
++		} else sfy = 1;
++
++		
++		/** fx, fy form a diagonal coordinate system.
++		 * fx counts the number of diagonals in 1 direction, fy in another.
++		 * However with this method you only count half the squares. Compare with a checkboard with
++		 * alternating black and white squares. You only count one color.
++		 * That is why we clear two squares in every loop. The principal one and one square next to that
++		 * To avoid clearing squares outside our drag-area we need some complex if's.
++		 */
++		for (int ix = 0; ix <= fx; ix += 1) {
++			for (int iy = 0; iy <= fy; iy += 1) {
++				int x = sx + sfx * ix + sfy * iy;
++				int y = sy + sfx * ix - sfy * iy;
++				int x2 = x;
++				int y2 = y;
++
++				ret = DoCommand(TileXY(x, y), 0, 0, flags & ~DC_EXEC, CMD_LANDSCAPE_CLEAR);
++				if (CmdFailed(ret)) continue;
++
++				/* To be able to determine how much the operation will cost, add the cost to cost. */
++				cost.AddCost(ret);
++				success = true;
++
++				if (flags & DC_EXEC) {
++					money.AddCost(-ret.GetCost());
++					if (ret.GetCost() > 0 && money.GetCost() < 0) {
++						_additional_cash_required = ret.GetCost();
++						
++						/* Remove cost for not executed DoCommand from cost. So it is not billed anyway.*/
++						cost.AddCost(-ret.GetCost());
++						return cost;
++					}
++
++					DoCommand(TileXY(x, y), 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++					/* draw explosion animation... */
++					if (((x == sx || x == ex) && (y == sy || y == ey)) || (x == ux && y == uy) || (x == lx && y == ly)) {
++						/* big explosion in each corner, or small explosion for single tiles */
++						CreateEffectVehicleAbove(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, 2,
++							sy == ey && sx == ex ? EV_EXPLOSION_SMALL : EV_EXPLOSION_LARGE
++						);
++					}
+ 				}
++
++				if (abs(dx) > abs(dy) && ((ix != fx && iy != fy) || (dx + dy) % 2 != 0)) {
++					ex >= sx ? x += 1 : x -= 1;
++				}
++
++				if (abs(dx) < abs(dy) && ((ix != fx && iy != fy) || (dx + dy) % 2 != 0)) {
++					ey >= sy ? y += 1 : y -= 1;
++				}
++
++				if (x != x2 || y != y2) {
++					/* Do only when there's a change (to avoid screwing cost estimate) */
++					ret = DoCommand(TileXY(x,y), 0, 0, flags & ~DC_EXEC, CMD_LANDSCAPE_CLEAR);
++					if (CmdFailed(ret)) continue;
++
++					/* To be able to determine how much the operation will cost, add the cost to cost. */
++					cost.AddCost(ret);
++					success = true;
++
++					if (flags & DC_EXEC) {
++					money.AddCost(-ret.GetCost());
++					if (ret.GetCost() > 0 && money.GetCost() < 0) {
++						_additional_cash_required = ret.GetCost();
++						
++						/* Remove cost for not executed DoCommand from cost. So it is not billed anyway.*/
++						cost.AddCost(-ret.GetCost());
++						return cost;
++						}
++
++						DoCommand(TileXY(x, y), 0, 0, flags, CMD_LANDSCAPE_CLEAR);				
++					
++					/* draw explosion animation... */
++						if (((x == sx || x == ex) && (y == sy || y == ey)) || (x == ux && y == uy) || (x == lx && y == ly)) {
++							/* big explosion in each corner, or small explosion for single tiles */
++							CreateEffectVehicleAbove(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, 2,
++								sy == ey && sx == ex ? EV_EXPLOSION_SMALL : EV_EXPLOSION_LARGE
++							);
++						}
++					}
++				}
+ 			}
+-			cost.AddCost(ret);
+ 		}
+ 	}
+ 
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 10644)
++++ src/viewport.cpp	(working copy)
+@@ -649,6 +649,21 @@
+ 
+ #include "table/autorail.h"
+ 
++bool IsInsideRotatedRectangle(int x, int y)
++{
++	int fx = (_thd.size.x + _thd.size.y); // Rotated coordinate system for selected rectangle
++	int fy = (_thd.size.x - _thd.size.y); // We don't have to divide by 2. It's all relative!
++	int xx = ((x - _thd.pos.x) + (y - _thd.pos.y)); // Rotated coordinate system for the point under scrutiny
++	int yy = ((x - _thd.pos.x) - (y - _thd.pos.y));
++
++	if (((fx >= 0 && xx <= fx && xx >= 0) || (fx < 0 && xx >= fx && xx <= 0)) &&
++			((fy >= 0 && yy <= fy && yy >= 0) || (fy < 0 && yy >= fy && yy <= 0))) {
++		return true;
++	} else {
++		return false;
++	}
++}
++
+ /**
+  * Checks if the specified tile is selected and if so draws selection using correct selectionstyle.
+  * @param *ti TileInfo Tile that is being drawn
+@@ -667,6 +682,26 @@
+ 	/* no selection active? */
+ 	if (_thd.drawstyle == 0) return;
+ 
++	if (_thd.diagonal) { // We're drawing a 45° rotated (diagonal) rectangle
++		if (IsInsideRotatedRectangle((int)ti->x, (int)ti->y)) {
++			if (_thd.drawstyle & HT_RECT) { // highlighting a square (clear land)
++				image = SPR_SELECT_TILE + _tileh_to_sprite[ti->tileh];
++				DrawSelectionSprite(image, _thd.make_square_red ? PALETTE_SEL_TILE_RED : PAL_NONE, ti);
++			}else { // highlighting a dot (level land)
++				/* Figure out the Z coordinate for the single dot. */
++				byte z = ti->z;
++				if (ti->tileh & 8) {
++					z += 8;
++					if (!(ti->tileh & 2) && (ti->tileh & 0x10)) {
++						z += 8;
++					}
++				}
++				DrawGroundSpriteAt(_cur_dpi->zoom != 2 ? SPR_DOT : SPR_DOT_SMALL, PAL_NONE, ti->x, ti->y, z);
++			}
++		}
++		return;
++	}
++
+ 	/* Inside the inner area? */
+ 	if (IS_INSIDE_1D(ti->x, _thd.pos.x, _thd.size.x) &&
+ 			IS_INSIDE_1D(ti->y, _thd.pos.y, _thd.size.y)) {
+@@ -804,7 +839,6 @@
+ 	} while (--height);
+ }
+ 
+-
+ static void ViewportAddTownNames(DrawPixelInfo *dpi)
+ {
+ 	Town *t;
+@@ -1496,26 +1530,62 @@
+ 	x_size = _thd.size.x;
+ 	y_size = _thd.size.y;
+ 
+-	if (_thd.outersize.x) {
+-		x_size += _thd.outersize.x;
+-		x += _thd.offs.x;
+-		y_size += _thd.outersize.y;
+-		y += _thd.offs.y;
+-	}
++	if (!_thd.diagonal) { // Selecting in a straigth rectangle (or a single square)
++		if (_thd.outersize.x) {
++			x_size += _thd.outersize.x;
++			x += _thd.offs.x;
++			y_size += _thd.outersize.y;
++			y += _thd.offs.y;
++		}
++		assert(x_size > 0);
++		assert(y_size > 0);
+ 
+-	assert(x_size > 0);
+-	assert(y_size > 0);
++		x_size += x;
++		y_size += y;
+ 
+-	x_size += x;
+-	y_size += y;
++		do {
++			int y_bk = y;
++			do {
++				MarkTileDirty(x, y);
++			} while ((y += TILE_SIZE) != y_size);
++			y = y_bk;
++		} while ((x += TILE_SIZE) != x_size);
++	} else { // Selecting in a 45° rotated (diagonal) rectangle.
++		int fx = (x_size + y_size) / 2, fy = (x_size - y_size) / 2; // fx,fy describe rotated coordinate axis
+ 
+-	do {
+-		int y_bk = y;
+-		do {
+-			MarkTileDirty(x, y);
+-		} while ( (y += TILE_SIZE) != y_size);
+-		y = y_bk;
+-	} while ( (x += TILE_SIZE) != x_size);
++		/* get sign of fx and fy, and make them abs                                              *
++		 * note that sfx and sfy will be 1 in case of fx/fx==0, doesn't matter in the code after */
++		int sfx, sfy;
++		if (fx < 0) {
++			sfx = -1;
++			fx = -fx;
++		} else sfx = 1;
++
++		if (fy < 0) {
++			sfy = -1;
++			fy = -fy;
++		} else sfy = 1;
++
++		for (int ix =- TILE_SIZE; ix <= fx; ix += TILE_SIZE) {
++			for (int iy =- TILE_SIZE; iy <= fy; iy += TILE_SIZE) {
++				x = _thd.pos.x + sfx * ix + sfy * iy;
++				y = _thd.pos.y + sfx * ix - sfy * iy;
++				MarkTileDirty(x, y);
++				/* Need to Mark odd and even tiles (compare with checkerboard: black and white squares) */
++				if (abs(x_size) > abs(y_size)) {
++					if ((ix != abs(fx) && iy != abs(fy)) || (x_size + y_size) % 2 != 0) {
++						x_size >= 0 ? x += TILE_SIZE : x -= TILE_SIZE;
++					}
++				}
++				if (abs(x_size) < abs(y_size)) {
++					if ((ix != fx && iy != fy) || (x_size - y_size) % 2 != 0) {
++						y_size >= 0 ? y += TILE_SIZE : y -= TILE_SIZE;
++					}
++				}
++				MarkTileDirty(x, y);
++			}
++		}
++	}
+ }
+ 
+ 
+@@ -1934,6 +2004,12 @@
+ 	return HT_RAIL | _AutorailPiece[x & 0xF][y & 0xF];
+ }
+ 
++static inline bool DraggingDiagonal()
++{
++	return _ctrl_pressed && ((_thd.select_proc == DDSP_DEMOLISH_AREA && _thd.select_method == VPM_X_AND_Y) ||
++								(_thd.select_proc == DDSP_LEVEL_AREA && _thd.select_method == VPM_X_AND_Y));
++}
++
+ /**
+  * Updates tile highlighting for all cases.
+  * Uses _thd.selstart and _thd.selend and _thd.place_mode (set elsewhere) to determine _thd.pos and _thd.size
+@@ -1942,12 +2018,14 @@
+  * _thd is TileHighlightData, found in viewport.h
+  * Called by MouseLoop() in windows.cpp
+  */
++
+ void UpdateTileSelection()
+ {
+ 	int x1;
+ 	int y1;
+ 
+ 	_thd.new_drawstyle = 0;
++	_thd.new_diagonal = false;
+ 
+ 	if (_thd.place_mode == VHM_SPECIAL) {
+ 		x1 = _thd.selend.x;
+@@ -1958,12 +2036,20 @@
+ 			x1 &= ~0xF;
+ 			y1 &= ~0xF;
+ 
+-			if (x1 >= x2) Swap(x1, x2);
+-			if (y1 >= y2) Swap(y1, y2);
++			if ( DraggingDiagonal() )
++				_thd.new_diagonal = true;
++			else {
++				if (x1 >= x2) Swap(x1,x2);
++				if (y1 >= y2) Swap(y1,y2);
++			}
+ 			_thd.new_pos.x = x1;
+ 			_thd.new_pos.y = y1;
+-			_thd.new_size.x = x2 - x1 + TILE_SIZE;
+-			_thd.new_size.y = y2 - y1 + TILE_SIZE;
++			_thd.new_size.x = x2 - x1;
++			_thd.new_size.y = y2 - y1;
++			if (!_thd.new_diagonal) {
++				_thd.new_size.x += TILE_SIZE;
++				_thd.new_size.y += TILE_SIZE;
++			}
+ 			_thd.new_drawstyle = _thd.next_drawstyle;
+ 		}
+ 	} else if (_thd.place_mode != VHM_NONE) {
+@@ -1993,7 +2079,8 @@
+ 			_thd.pos.x != _thd.new_pos.x || _thd.pos.y != _thd.new_pos.y ||
+ 			_thd.size.x != _thd.new_size.x || _thd.size.y != _thd.new_size.y ||
+ 			_thd.outersize.x != _thd.new_outersize.x ||
+-			_thd.outersize.y != _thd.new_outersize.y) {
++			_thd.outersize.y != _thd.new_outersize.y ||
++			_thd.diagonal    != _thd.new_diagonal) {
+ 		/* clear the old selection? */
+ 		if (_thd.drawstyle) SetSelectionTilesDirty();
+ 
+@@ -2001,6 +2088,7 @@
+ 		_thd.pos = _thd.new_pos;
+ 		_thd.size = _thd.new_size;
+ 		_thd.outersize = _thd.new_outersize;
++		_thd.diagonal = _thd.new_diagonal;
+ 		_thd.dirty = 0xff;
+ 
+ 		/* draw the new selection? */

@@ -1,0 +1,213 @@
+Index: src/spritecache.cpp
+===================================================================
+--- src/spritecache.cpp	(revision 10040)
++++ src/spritecache.cpp	(working copy)
+@@ -13,7 +13,7 @@
+ #include "helpers.hpp"
+ 
+ #ifndef SPRITE_CACHE_SIZE
+-# define SPRITE_CACHE_SIZE 2*1024*1024
++# define SPRITE_CACHE_SIZE 64*1024*1024
+ #endif /* SPRITE_CACHE_SIZE */
+ 
+ 
+Index: src/screenshot.cpp
+===================================================================
+--- src/screenshot.cpp	(revision 10040)
++++ src/screenshot.cpp	(working copy)
+@@ -242,8 +242,8 @@
+ 		y += n;
+ 
+ 		/* write them to png */
+-		for (i = 0; i != n; i++)
+-			png_write_row(png_ptr, buff + i * w);
++//		for (i = 0; i != n; i++)
++//			png_write_row(png_ptr, buff + i * w);
+ 	} while (y != h);
+ 
+ 	png_write_end(png_ptr, info_ptr);
+@@ -563,8 +563,28 @@
+ 			current_screenshot_type = SC_NONE;
+ 			return MakeSmallScreenshot();
+ 		case SC_WORLD:
++			{
++	LARGE_INTEGER count1,count2,delta;
++	BOOL success = QueryPerformanceCounter( &count1 );
++	assert(success);
+ 			current_screenshot_type = SC_NONE;
+-			return MakeWorldScreenshot();
++			bool rv = MakeWorldScreenshot();
++	success = QueryPerformanceCounter( &count2 );
++	assert(success);
++	FILE * f = fopen("d:\\temp\\out.txt","a+");
++	char buf[128];
++	delta.QuadPart = count2.QuadPart - count1.QuadPart;
++	static int run=0;
++	run++;
++#ifdef DEBUG
++	sprintf( buf, "DBG run %i (%s) %i ticks\n", run, _patches.ai_in_multiplayer?"old":"new", delta.LowPart );
++#else
++	sprintf( buf, "run %i (%s) %i ticks\n", run, _patches.ai_in_multiplayer?"old":"new", delta.LowPart );
++#endif
++	fwrite( buf, strlen(buf), 1, f );
++	fclose(f);
++			return rv;
++			}
+ 		default: return false;
+ 	}
+ }
+Index: src/gfx.cpp
+===================================================================
+--- src/gfx.cpp	(revision 10040)
++++ src/gfx.cpp	(working copy)
+@@ -790,8 +790,10 @@
+ 	}
+ }
+ 
++void GfxBlitTileZoomIn(BlitterParams *bp);
+ static void GfxBlitTileZoom(BlitterParams *bp, ZoomLevel zoom)
+ {
++	if(_patches.ai_in_multiplayer && zoom==ZOOM_LVL_NORMAL) { GfxBlitTileZoomIn(bp); return; }
+ 	const byte *src_o = bp->sprite;
+ 	const byte *src;
+ 	int num, skip;
+@@ -1533,3 +1535,139 @@
+ {
+ 	qsort(_resolutions, count, sizeof(_resolutions[0]), compare_res);
+ }
++
++static void GfxBlitTileZoomIn(BlitterParams *bp)
++{
++	const byte *src_o = bp->sprite;
++	const byte *src;
++	int num, skip;
++	byte done;
++	Pixel *dst;
++	const byte *ctab;
++
++	src_o += ReadLE16Aligned(src_o + bp->start_y * 2);
++	switch (bp->mode) {
++		case BM_COLOUR_REMAP:
++			do {
++				do {
++					done = src_o[0];
++					num = done & 0x7F;
++					skip = src_o[1];
++					src = src_o + 2;
++					src_o += num + 2;
++
++					dst = bp->dst;
++
++					if ( (skip -= bp->start_x) > 0) {
++						dst += skip;
++					} else {
++						src -= skip;
++						num += skip;
++						if (num <= 0) continue;
++						skip = 0;
++					}
++
++					skip = skip + num - bp->width;
++					if (skip > 0) {
++						num -= skip;
++						if (num <= 0) continue;
++					}
++
++					ctab = _color_remap_ptr;
++
++					for (; num >= 4; num -=4) {
++						dst[3] = ctab[src[3]];
++						dst[2] = ctab[src[2]];
++						dst[1] = ctab[src[1]];
++						dst[0] = ctab[src[0]];
++						dst += 4;
++						src += 4;
++					}
++					for (; num != 0; num--) *dst++ = ctab[*src++];
++				} while (!(done & 0x80));
++
++				bp->dst += bp->pitch;
++			} while (--bp->height != 0);
++			break;
++
++		case BM_TRANSPARENT:
++			do {
++				do {
++					done = src_o[0];
++					num = done & 0x7F;
++					skip = src_o[1];
++					src_o += num + 2;
++
++					dst = bp->dst;
++
++					if ( (skip -= bp->start_x) > 0) {
++						dst += skip;
++					} else {
++						num += skip;
++						if (num <= 0) continue;
++						skip = 0;
++					}
++
++					skip = skip + num - bp->width;
++					if (skip > 0) {
++						num -= skip;
++						if (num <= 0) continue;
++					}
++
++					ctab = _color_remap_ptr;
++					for (; num != 0; num--) {
++						*dst = ctab[*dst];
++						dst++;
++					}
++				} while (!(done & 0x80));
++
++				bp->dst += bp->pitch;
++			} while (--bp->height != 0);
++			break;
++
++		default:
++			do {
++				do {
++					done = src_o[0];
++					num = done & 0x7F;
++					skip = src_o[1];
++					src = src_o + 2;
++					src_o += num + 2;
++
++					dst = bp->dst;
++
++					if ( (skip -= bp->start_x) > 0) {
++						dst += skip;
++					} else {
++						src -= skip;
++						num += skip;
++						if (num <= 0) continue;
++						skip = 0;
++					}
++
++					skip = skip + num - bp->width;
++					if (skip > 0) {
++						num -= skip;
++						if (num <= 0) continue;
++					}
++#if defined(_WIN32)
++					if (num & 1) *dst++ = *src++;
++					if (num & 2) { *(uint16*)dst = *(uint16*)src; dst += 2; src += 2; }
++					if (num >>= 2) {
++						do {
++							*(uint32*)dst = *(uint32*)src;
++							dst += 4;
++							src += 4;
++						} while (--num != 0);
++					}
++#else
++					memcpy(dst, src, num);
++#endif
++				} while (!(done & 0x80));
++
++				bp->dst += bp->pitch;
++			} while (--bp->height != 0);
++			break;
++	}
++}
++

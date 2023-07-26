@@ -1,0 +1,227 @@
+Index: src/autoreplace_gui.cpp
+===================================================================
+--- src/autoreplace_gui.cpp	(revision 22729)
++++ src/autoreplace_gui.cpp	(working copy)
+@@ -29,7 +29,7 @@
+ #include "table/strings.h"
+ 
+ uint GetEngineListHeight(VehicleType type);
+-void DrawEngineList(VehicleType type, int x, int r, int y, const GUIEngineList *eng_list, uint16 min, uint16 max, EngineID selected_id, bool show_count, GroupID selected_group);
++void DrawEngineList(VehicleType type, int x, int r, int y, const GUIEngineList *eng_list, uint16 min, uint16 max, EngineID selected_id, bool show_count, GroupID selected_group, Owner owner);
+ 
+ /** Widget numbers of the autoreplace GUI. */
+ enum ReplaceVehicleWindowWidgets {
+@@ -348,7 +348,7 @@
+ 
+ 				/* Do the actual drawing */
+ 				DrawEngineList((VehicleType)this->window_number, r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, r.top + WD_FRAMERECT_TOP,
+-						&this->engines[side], start, end, this->sel_engine[side], side == 0, this->sel_group);
++						&this->engines[side], start, end, this->sel_engine[side], side == 0, this->sel_group, this->owner);
+ 				break;
+ 			}
+ 		}
+Index: src/build_vehicle_gui.cpp
+===================================================================
+--- src/build_vehicle_gui.cpp	(revision 22729)
++++ src/build_vehicle_gui.cpp	(working copy)
+@@ -832,8 +832,9 @@
+  * @param selected_id what engine to highlight as selected, if any
+  * @param show_count Whether to show the amount of engines or not
+  * @param selected_group the group to list the engines of
++ * @param owner Owner of the vehicles in the list
+  */
+-void DrawEngineList(VehicleType type, int l, int r, int y, const GUIEngineList *eng_list, uint16 min, uint16 max, EngineID selected_id, bool show_count, GroupID selected_group)
++void DrawEngineList(VehicleType type, int l, int r, int y, const GUIEngineList *eng_list, uint16 min, uint16 max, EngineID selected_id, bool show_count, GroupID selected_group, Owner owner)
+ {
+ 	static const int sprite_widths[]  = { 60, 60, 76, 67 };
+ 	static const int sprite_y_offsets[] = { -1, -1, -2, -2 };
+@@ -858,12 +859,11 @@
+ 
+ 	for (; min < max; min++, y += step_size) {
+ 		const EngineID engine = (*eng_list)[min];
+-		/* Note: num_engines is only used in the autoreplace GUI, so it is correct to use _local_company here. */
+-		const uint num_engines = GetGroupNumEngines(_local_company, selected_group, engine);
++		const uint num_engines = GetGroupNumEngines(owner, selected_group, engine);
+ 
+ 		SetDParam(0, engine);
+ 		DrawString(text_left, text_right, y + normal_text_y_offset, STR_ENGINE_NAME, engine == selected_id ? TC_WHITE : TC_BLACK);
+-		DrawVehicleEngine(l, r, sprite_x, y + sprite_y_offset, engine, (show_count && num_engines == 0) ? PALETTE_CRASH : GetEnginePalette(engine, _local_company));
++		DrawVehicleEngine(l, r, sprite_x, y + sprite_y_offset, engine, (show_count && num_engines == 0) ? PALETTE_CRASH : GetEnginePalette(engine, owner));
+ 		if (show_count) {
+ 			SetDParam(0, num_engines);
+ 			DrawString(text_left, text_right, y + small_text_y_offset, STR_TINY_BLACK_COMA, TC_FROMSTRING, SA_RIGHT);
+@@ -890,7 +890,7 @@
+ 	int details_height;                         ///< Minimal needed height of the details panels (found so far).
+ 	Scrollbar *vscroll;
+ 
+-	BuildVehicleWindow(const WindowDesc *desc, TileIndex tile, VehicleType type) : Window()
++	BuildVehicleWindow(const WindowDesc *desc, TileIndex tile, VehicleType type, Owner owner) : Window()
+ 	{
+ 		this->vehicle_type = type;
+ 		this->window_number = tile == INVALID_TILE ? (int)type : tile;
+@@ -921,6 +921,8 @@
+ 		/* If we are just viewing the list of vehicles, we do not need the Build button.
+ 		 * So we just hide it, and enlarge the Rename buton by the now vacant place. */
+ 		if (this->listview_mode) this->GetWidget<NWidgetStacked>(BUILD_VEHICLE_WIDGET_BUILD_SEL)->SetDisplayedPlane(SZSP_NONE);
++		/* If spectating, we can't rename engines. */
++		if (_local_company == COMPANY_SPECTATOR) this->GetWidget<NWidgetLeaf>(BUILD_VEHICLE_WIDGET_RENAME)->SetDisabled(true);
+ 
+ 		NWidgetCore *widget = this->GetWidget<NWidgetCore>(BUILD_VEHICLE_WIDGET_LIST);
+ 		widget->tool_tip = STR_BUY_VEHICLE_TRAIN_LIST_TOOLTIP + type;
+@@ -937,7 +939,8 @@
+ 
+ 		this->FinishInitNested(desc, tile == INVALID_TILE ? (int)type : tile);
+ 
+-		this->owner = (tile != INVALID_TILE) ? GetTileOwner(tile) : _local_company;
++		assert(tile == INVALID_TILE || GetTileOwner(tile) == owner);
++		this->owner = owner;
+ 
+ 		this->eng_list.ForceRebuild();
+ 		this->GenerateBuildList(); // generate the list, since we need it in the next line
+@@ -1033,7 +1036,7 @@
+ 			const RailVehicleInfo *rvi = &e->u.rail;
+ 
+ 			if (this->filter.railtype != RAILTYPE_END && !HasPowerOnRail(rvi->railtype, this->filter.railtype)) continue;
+-			if (!IsEngineBuildable(eid, VEH_TRAIN, _local_company)) continue;
++			if (!IsEngineBuildable(eid, VEH_TRAIN, this->owner)) continue;
+ 
+ 			/* Filter now! So num_engines and num_wagons is valid */
+ 			if (!FilterSingleEngine(eid)) continue;
+@@ -1073,7 +1076,7 @@
+ 		const Engine *e;
+ 		FOR_ALL_ENGINES_OF_TYPE(e, VEH_ROAD) {
+ 			EngineID eid = e->index;
+-			if (!IsEngineBuildable(eid, VEH_ROAD, _local_company)) continue;
++			if (!IsEngineBuildable(eid, VEH_ROAD, this->owner)) continue;
+ 			if (!HasBit(this->filter.roadtypes, HasBit(EngInfo(eid)->misc_flags, EF_ROAD_TRAM) ? ROADTYPE_TRAM : ROADTYPE_ROAD)) continue;
+ 			*this->eng_list.Append() = eid;
+ 
+@@ -1091,7 +1094,7 @@
+ 		const Engine *e;
+ 		FOR_ALL_ENGINES_OF_TYPE(e, VEH_SHIP) {
+ 			EngineID eid = e->index;
+-			if (!IsEngineBuildable(eid, VEH_SHIP, _local_company)) continue;
++			if (!IsEngineBuildable(eid, VEH_SHIP, this->owner)) continue;
+ 			*this->eng_list.Append() = eid;
+ 
+ 			if (eid == this->sel_engine) sel_id = eid;
+@@ -1115,7 +1118,7 @@
+ 		const Engine *e;
+ 		FOR_ALL_ENGINES_OF_TYPE(e, VEH_AIRCRAFT) {
+ 			EngineID eid = e->index;
+-			if (!IsEngineBuildable(eid, VEH_AIRCRAFT, _local_company)) continue;
++			if (!IsEngineBuildable(eid, VEH_AIRCRAFT, this->owner)) continue;
+ 			/* First VEH_END window_numbers are fake to allow a window open for all different types at once */
+ 			if (!this->listview_mode && !CanVehicleUseStation(eid, st)) continue;
+ 
+@@ -1284,7 +1287,7 @@
+ 	{
+ 		switch (widget) {
+ 			case BUILD_VEHICLE_WIDGET_LIST:
+-				DrawEngineList(this->vehicle_type, r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, r.top + WD_FRAMERECT_TOP, &this->eng_list, this->vscroll->GetPosition(), min(this->vscroll->GetPosition() + this->vscroll->GetCapacity(), this->eng_list.Length()), this->sel_engine, false, DEFAULT_GROUP);
++				DrawEngineList(this->vehicle_type, r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, r.top + WD_FRAMERECT_TOP, &this->eng_list, this->vscroll->GetPosition(), min(this->vscroll->GetPosition() + this->vscroll->GetCapacity(), this->eng_list.Length()), this->sel_engine, false, DEFAULT_GROUP, this->owner);
+ 				break;
+ 
+ 			case BUILD_VEHICLE_WIDGET_SORT_ASSENDING_DESCENDING:
+@@ -1363,7 +1366,7 @@
+ 	_nested_build_vehicle_widgets, lengthof(_nested_build_vehicle_widgets)
+ );
+ 
+-void ShowBuildVehicleWindow(TileIndex tile, VehicleType type)
++void ShowBuildVehicleWindow(TileIndex tile, VehicleType type, Owner owner)
+ {
+ 	/* We want to be able to open both Available Train as Available Ships,
+ 	 *  so if tile == INVALID_TILE (Available XXX Window), use 'type' as unique number.
+@@ -1375,5 +1378,5 @@
+ 
+ 	DeleteWindowById(WC_BUILD_VEHICLE, num);
+ 
+-	new BuildVehicleWindow(&_build_vehicle_desc, tile, type);
++	new BuildVehicleWindow(&_build_vehicle_desc, tile, type, owner);
+ }
+Index: src/depot_gui.cpp
+===================================================================
+--- src/depot_gui.cpp	(revision 22729)
++++ src/depot_gui.cpp	(working copy)
+@@ -702,7 +702,7 @@
+ 
+ 			case DEPOT_WIDGET_BUILD: // Build vehicle
+ 				ResetObjectToPlace();
+-				ShowBuildVehicleWindow(this->window_number, this->type);
++				ShowBuildVehicleWindow(this->window_number, this->type, this->owner);
+ 				break;
+ 
+ 			case DEPOT_WIDGET_CLONE: // Clone button
+Index: src/group_gui.cpp
+===================================================================
+--- src/group_gui.cpp	(revision 22729)
++++ src/group_gui.cpp	(working copy)
+@@ -349,10 +349,7 @@
+ 		 *  verify, whether you are the owner of the vehicle,
+ 		 *  so it doesn't have to be disabled
+ 		 */
+-		this->SetWidgetsDisabledState(_local_company != this->vli.company,
+-				GRP_WIDGET_CREATE_GROUP,
+-				GRP_WIDGET_AVAILABLE_VEHICLES,
+-				WIDGET_LIST_END);
++		this->SetWidgetDisabledState(GRP_WIDGET_CREATE_GROUP, _local_company != this->vli.company);
+ 
+ 		/* If not a default group and the group has replace protection, show an enabled replace sprite. */
+ 		uint16 protect_sprite = SPR_GROUP_REPLACE_OFF_TRAIN;
+@@ -483,7 +480,7 @@
+ 				break;
+ 
+ 			case GRP_WIDGET_AVAILABLE_VEHICLES:
+-				ShowBuildVehicleWindow(INVALID_TILE, this->vli.vtype);
++				ShowBuildVehicleWindow(INVALID_TILE, this->vli.vtype, this->owner);
+ 				break;
+ 
+ 			case GRP_WIDGET_MANAGE_VEHICLES_DROPDOWN: {
+Index: src/vehicle_gui.cpp
+===================================================================
+--- src/vehicle_gui.cpp	(revision 22729)
++++ src/vehicle_gui.cpp	(working copy)
+@@ -1181,10 +1181,10 @@
+ 	EndContainer(),
+ 
+ 	NWidget(NWID_HORIZONTAL),
++		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, VLW_WIDGET_AVAILABLE_VEHICLES), SetMinimalSize(106, 12), SetFill(0, 1),
++						SetDataTip(STR_BLACK_STRING, STR_VEHICLE_LIST_AVAILABLE_ENGINES_TOOLTIP),
+ 		NWidget(NWID_SELECTION, INVALID_COLOUR, VLW_WIDGET_HIDE_BUTTONS),
+ 			NWidget(NWID_HORIZONTAL),
+-				NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, VLW_WIDGET_AVAILABLE_VEHICLES), SetMinimalSize(106, 12), SetFill(0, 1),
+-								SetDataTip(STR_BLACK_STRING, STR_VEHICLE_LIST_AVAILABLE_ENGINES_TOOLTIP),
+ 				NWidget(WWT_DROPDOWN, COLOUR_GREY, VLW_WIDGET_MANAGE_VEHICLES_DROPDOWN), SetMinimalSize(118, 12), SetFill(0, 1),
+ 								SetDataTip(STR_VEHICLE_LIST_MANAGE_LIST, STR_VEHICLE_LIST_MANAGE_LIST_TOOLTIP),
+ 				NWidget(WWT_PUSHIMGBTN, COLOUR_GREY, VLW_WIDGET_STOP_ALL), SetMinimalSize(12, 12), SetFill(0, 1),
+@@ -1193,7 +1193,7 @@
+ 								SetDataTip(SPR_FLAG_VEH_RUNNING, STR_VEHICLE_LIST_MASS_START_LIST_TOOLTIP),
+ 				NWidget(WWT_PANEL, COLOUR_GREY), SetMinimalSize(0, 12), SetResize(1, 0), SetFill(1, 1), EndContainer(),
+ 			EndContainer(),
+-			/* Widget to be shown for other companies hiding the previous 5 widgets. */
++			/* Widget to be shown for other companies hiding the previous 4 widgets. */
+ 			NWidget(WWT_PANEL, COLOUR_GREY), SetFill(1, 1), SetResize(1, 0), EndContainer(),
+ 		EndContainer(),
+ 		NWidget(WWT_RESIZEBOX, COLOUR_GREY),
+@@ -1543,7 +1543,7 @@
+ 			}
+ 
+ 			case VLW_WIDGET_AVAILABLE_VEHICLES:
+-				ShowBuildVehicleWindow(INVALID_TILE, this->vli.vtype);
++				ShowBuildVehicleWindow(INVALID_TILE, this->vli.vtype, this->owner);
+ 				break;
+ 
+ 			case VLW_WIDGET_MANAGE_VEHICLES_DROPDOWN: {
+Index: src/vehicle_gui.h
+===================================================================
+--- src/vehicle_gui.h	(revision 22729)
++++ src/vehicle_gui.h	(working copy)
+@@ -53,7 +53,7 @@
+ void DrawShipImage(const Vehicle *v, int left, int right, int y, VehicleID selection);
+ void DrawAircraftImage(const Vehicle *v, int left, int right, int y, VehicleID selection);
+ 
+-void ShowBuildVehicleWindow(TileIndex tile, VehicleType type);
++void ShowBuildVehicleWindow(TileIndex tile, VehicleType type, Owner owner);
+ 
+ uint ShowRefitOptionsList(int left, int right, int y, EngineID engine);
+ StringID GetCargoSubtypeText(const Vehicle *v);

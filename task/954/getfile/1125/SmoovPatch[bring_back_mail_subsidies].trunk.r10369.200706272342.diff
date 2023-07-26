@@ -1,0 +1,88 @@
+Index: src/economy.cpp
+===================================================================
+--- src/economy.cpp	(revision 10369)
++++ src/economy.cpp	(working copy)
+@@ -947,22 +947,29 @@
+ 	void *to;
+ };
+ 
+-static void FindSubsidyPassengerRoute(FoundRoute *fr)
++/* Pick 2 random towns, a random cargo, and check if the result is eligible for a subsidy */
++static void FindSubsidyInterCityRoute(FoundRoute *fr)
+ {
+ 	Town *from,*to;
+ 
+ 	fr->distance = (uint)-1;
+ 
+ 	fr->from = from = GetRandomTown();
+-	if (from == NULL || from->population < 400) return;
+-
+ 	fr->to = to = GetRandomTown();
+-	if (from == to || to == NULL || to->population < 400 || to->pct_pass_transported > 42)
+-		return;
++	
++	if (from == NULL || from == to || to == NULL) return; ///< reject invalid or identical picks.
+ 
+-	fr->distance = DistanceManhattan(from->xy, to->xy);
++	fr->cargo = (
++		(HASBIT(Random(), 0)) ///< are we picking pass or mail?
++		? (((to->pct_pass_transported > 42) && (to->population < 400)) ? CT_INVALID : CT_PASSENGERS) ///< too many pass transported to be eligible?
++		: (((to->pct_mail_transported > 42) && (to->population < 600)) ? CT_INVALID : CT_MAIL)       ///< too much mail transported to be eligible?
++	);                        ///< returns CT_INVALID if the route doesn't pass.
++	
++	if (fr->cargo == CT_INVALID) return; ///< failed to find an acceptable route.
++	fr->distance = DistanceManhattan(from->xy, to->xy); ///< found an acceptable route.
+ }
+ 
++/* Pick a random industry, destination, and cargo, and check if the result is eligible for a subsidy */
+ static void FindSubsidyCargoRoute(FoundRoute *fr)
+ {
+ 	Industry *i;
+@@ -988,17 +995,18 @@
+ 	}
+ 
+ 	/* Quit if no production in this industry
+-	 * or if the cargo type is passengers
+-	 * or if the pct transported is already large enough */
++	 * or if the cargo type is passengers or mail
++	 * or if the pct transported is already large enough
++	 */
+ 	if (total == 0 || trans > 42 || cargo == CT_INVALID) return;
+ 
+ 	const CargoSpec *cs = GetCargo(cargo);
+-	if (cs->town_effect == TE_PASSENGERS) return;
++	if (cs->town_effect == TE_PASSENGERS || cs->town_effect == TE_MAIL) return;
+ 
+ 	fr->cargo = cargo;
+ 
+ 	if (cs->town_effect == TE_GOODS || cs->town_effect == TE_FOOD) {
+-		/*  The destination is a town */
++		/* The destination is a town */
+ 		Town *t = GetRandomTown();
+ 
+ 		/* Only want big towns */
+@@ -1076,18 +1084,18 @@
+ 
+ 	/* 25% chance to go on */
+ 	if (CHANCE16(1,4)) {
+-		/*  Find a free slot*/
++		/* Find a free slot */
+ 		s = _subsidies;
+ 		while (s->cargo_type != CT_INVALID) {
+ 			if (++s == endof(_subsidies))
+ 				goto no_add;
+ 		}
+-
+-		n = 1000;
++		/* loop n times trying to find an eligible subsidy */
++		n = 1024;
+ 		do {
+-			FindSubsidyPassengerRoute(&fr);
+-			if (fr.distance <= 70) {
+-				s->cargo_type = CT_PASSENGERS;
++			FindSubsidyInterCityRoute(&fr);
++			if (fr.distance <= 70 && fr.cargo != CT_INVALID) {
++				s->cargo_type = fr.cargo;
+ 				s->from = ((Town*)fr.from)->index;
+ 				s->to = ((Town*)fr.to)->index;
+ 				goto add_subsidy;

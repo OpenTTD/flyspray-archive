@@ -1,0 +1,287 @@
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 9891)
++++ src/train_cmd.cpp	(working copy)
+@@ -244,35 +244,6 @@
+ 	TrainCargoChanged(v);
+ }
+ 
+-/* These two arrays are used for realistic acceleration. XXX: How should they
+- * be interpreted? */
+-static const byte _curve_neighbours45[8][2] = {
+-	{7, 1},
+-	{0, 2},
+-	{1, 3},
+-	{2, 4},
+-	{3, 5},
+-	{4, 6},
+-	{5, 7},
+-	{6, 0},
+-};
+-
+-static const byte _curve_neighbours90[8][2] = {
+-	{6, 2},
+-	{7, 3},
+-	{0, 4},
+-	{1, 5},
+-	{2, 6},
+-	{3, 7},
+-	{4, 0},
+-	{5, 1},
+-};
+-
+-enum AccelType {
+-	AM_ACCEL,
+-	AM_BRAKE
+-};
+-
+ static bool TrainShouldStop(const Vehicle* v, TileIndex tile)
+ {
+ 	const Order* o = &v->current_order;
+@@ -294,143 +265,130 @@
+ 	return true;
+ }
+ 
+-/** new acceleration*/
+-static int GetTrainAcceleration(Vehicle *v, bool mode)
++static const uint _curve_speed_limits[4][8] = {
++/*     0    1    2    3    4    5    6    7	  train cars between double 45 deg turns */
++	{ 61,  88, 111, 132, 151, 168, 183, 196}, ///< speed limit for normal rail 0
++	{ 91, 132, 166, 198, 226, 252, 274, 294}, ///< elec 1
++	{121, 176, 221, 264, 301, 336, 365, 392}, ///< mono 2
++	{151, 220, 276, 330, 376, 420, 456, 490}, ///< mglv 3
++};
++
++/**
++ * Gets maximum train speed based on stations, curves, and depots. 
++ * @param *v Train engine
++ * @return Returns max speed.
++ */
++int GetTrainMaxSpeed(Vehicle *v)
+ {
+ 	int max_speed = 2000;
+-	int speed = v->cur_speed * 10 / 16; //[mph]
+-	int curvecount[2] = {0, 0};
+ 
+-	/*first find the curve speed limit */
+-	int numcurve = 0;
+-	int sum = 0;
+-	int pos = 0;
+-	int lastpos = -1;
+-	for (const Vehicle *u = v; u->next != NULL; u = u->next, pos++) {
+-		Direction dir = u->direction;
+-		Direction ndir = u->next->direction;
+-		int i;
++	/** Force train to slow down if it is entering a station */
++	if (IsTileType(v->tile, MP_STATION) && IsFrontEngine(v)) {
++		max_speed = _curve_speed_limits[v->u.rail.railtype][1];
++		if (TrainShouldStop(v, v->tile)) {
++			int tiles_until_stop = GetStationByTile(v->tile)->GetPlatformLength(v->tile, DirToDiagDir(v->direction));
+ 
+-		for (i = 0; i < 2; i++) {
+-			if ( _curve_neighbours45[dir][i] == ndir) {
+-				curvecount[i]++;
+-				if (lastpos != -1) {
+-					numcurve++;
+-					sum += pos - lastpos;
+-					if (pos - lastpos == 1) {
+-						max_speed = 88;
+-					}
+-				}
+-				lastpos = pos;
+-			}
++			max_speed = min(max_speed, (25 + 16 * v->u.rail.railtype) * tiles_until_stop);
+ 		}
+-
+-		/*if we have a 90 degree turn, fix the speed limit to 60 */
+-		if (_curve_neighbours90[dir][0] == ndir ||
+-				_curve_neighbours90[dir][1] == ndir) {
+-			max_speed = 61;
+-		}
+ 	}
+ 
+-	if (numcurve > 0) sum /= numcurve;
++	/** Limit train speed by the smallest turn radius in the train */
++	int pos       = 0;  ///< current car
++	int pos_left  = -8; ///< car position of last found left turn
++	int pos_right = -8; ///< car position of last found right turn
++	int radius    = 8;  ///< 'radius' of double train bend.  we care if < 8
+ 
+-	if ((curvecount[0] != 0 || curvecount[1] != 0) && max_speed > 88) {
+-		int total = curvecount[0] + curvecount[1];
++	for (const Vehicle *u = v; u->next != NULL && radius > 0; u = u->next, pos++) {
++		
++		if (u->u.rail.track == TRACK_BIT_DEPOT)	radius = 0; ///< force trains to exit depots slowly
+ 
+-		if (curvecount[0] == 1 && curvecount[1] == 1) {
+-			max_speed = 0xFFFF;
+-		} else if (total > 1) {
+-			max_speed = 232 - (13 - clamp(sum, 1, 12)) * (13 - clamp(sum, 1, 12));
+-		}
+-	}
++		switch(u->direction - u->next->direction){
+ 
+-	max_speed += (max_speed / 2) * v->u.rail.railtype;
++			case 0: break; ///< train car directions are the same
+ 
+-	if (IsTileType(v->tile, MP_STATION) && IsFrontEngine(v)) {
+-		if (TrainShouldStop(v, v->tile)) {
+-			int station_length = GetStationByTile(v->tile)->GetPlatformLength(v->tile, DirToDiagDir(v->direction));
+-			int delta_v;
++			case 1: ///< train took a left 45 turn
++			case -7:
++				radius   = min(radius, pos - pos_left);
++				pos_left = pos;
++				break;
+ 
+-			max_speed = 120;
++			case -1: ///< train took a right 45 turn
++			case 7:
++				radius    = min(radius, pos - pos_right);
++				pos_right = pos;
++				break;
+ 
+-			delta_v = v->cur_speed / (station_length + 1);
+-			if (v->max_speed > (v->cur_speed - delta_v))
+-				max_speed = v->cur_speed - (delta_v / 10);
+-
+-			max_speed = max(max_speed, 25 * station_length);
++			default: ///< train took a 90deg turn
++				radius = 0;
+ 		}
+ 	}
++	if (radius < 8) max_speed = _curve_speed_limits[v->u.rail.railtype][radius];
+ 
+-	int mass = v->u.rail.cached_weight;
+-	int power = v->u.rail.cached_power * 746;
+-	max_speed = min(max_speed, v->u.rail.cached_max_speed);
++	return min(max_speed, v->u.rail.cached_max_speed);
++}
+ 
+-	int num = 0; //number of vehicles, change this into the number of axles later
+-	int incl = 0;
+-	int drag_coeff = 20; //[1e-4]
+-	for (const Vehicle *u = v; u != NULL; u = u->next) {
+-		num++;
+-		drag_coeff += 3;
++enum AccelType {
++	AM_ACCEL,
++	AM_BRAKE
++};
+ 
+-		if (u->u.rail.track == TRACK_BIT_DEPOT) max_speed = min(max_speed, 61);
++/**
++ * Realistic acceleration v2 
++ * @param *v Train engine
++ * @param mode AM_ACCEL or AM_BRAKE
++ * @return Returns acceleration.
++ *
++ * resistance =  rolling friction + air drag + gravity
++ * engine force = power / speed * efficiency
++ */
++static int GetTrainAcceleration(Vehicle *v, AccelType mode)
++{
++	int speed  = v->cur_speed;            ///< in kph
++	int mass   = v->u.rail.cached_weight; ///< in 1000kgs
++	int power  = v->u.rail.cached_power;  ///< in HP
++	int max_te = v->u.rail.cached_max_te; ///< in N, valid for non mag-lev
++	
++	/** find difference in weight of cars ascending or descending */
++	int num           = 0; ///< number of vehicles in train
++	int mass_on_slope = 0; ///< force of gravity of cars on slope
+ 
++	for (const Vehicle *u = v; u != NULL; u = u->next) {
++		num++;
+ 		if (HASBIT(u->u.rail.flags, VRF_GOINGUP)) {
+-			incl += u->u.rail.cached_veh_weight * 60; //3% slope, quite a bit actually
++			mass_on_slope += u->u.rail.cached_veh_weight;
+ 		} else if (HASBIT(u->u.rail.flags, VRF_GOINGDOWN)) {
+-			incl -= u->u.rail.cached_veh_weight * 60;
++			mass_on_slope -= u->u.rail.cached_veh_weight;
+ 		}
+ 	}
+ 
+-	v->max_speed = max_speed;
++	int area = 11 + num; ///< frontal area = 11 + (num cars) m^2
+ 
+-	const int area = 120;
+-	const int friction = 35; //[1e-3]
+-	int resistance;
++	/** coeff gravity = 0.03 * (mass)*ton * 10N/kg = 300*(mass) N */
++	int resistance = mass_on_slope * 300;
++
+ 	if (v->u.rail.railtype != RAILTYPE_MAGLEV) {
+-		resistance = 13 * mass / 10;
+-		resistance += 60 * num;
+-		resistance += friction * mass * speed / 1000;
+-		resistance += (area * drag_coeff * speed * speed) / 10000;
++		/** modified coeff of rolling friction = 0.0015 * 1000kg/ton * 10N/kg = 15 N/ton */
++		resistance += mass * 15;
++		/** modified coeff of drag = 1/2 * 0.6 * 1.293 kg/m^3 * (1000m/km / 3600s/h)^2 = 0.03 N/m^2/kph^2 */
++		resistance += area * speed * speed / 33;
+ 	} else {
+-		resistance = (area * (drag_coeff / 2) * speed * speed) / 10000;
++		resistance += area * speed * speed / 130; ///< lower coeff drag for maglev
++		max_te      =  num * 10000;  ///< 10,000N per car, limits early acceleration
+ 	}
+-	resistance += incl;
+-	resistance *= 4; //[N]
+ 
+-	/* Due to the mph to m/s conversion below, at speeds below 3 mph the force is
+-	 * actually double the train's power */
+-	const int max_te = v->u.rail.cached_max_te; // [N]
+ 	int force;
+-	if (speed > 2) {
+-		switch (v->u.rail.railtype) {
+-			case RAILTYPE_RAIL:
+-			case RAILTYPE_ELECTRIC:
+-			case RAILTYPE_MONO:
+-				force = power / speed; //[N]
+-				force *= 22;
+-				force /= 10;
+-				if (mode == AM_ACCEL && force > max_te) force = max_te;
+-				break;
+ 
+-			default: NOT_REACHED();
+-			case RAILTYPE_MAGLEV:
+-				force = power / 25;
+-				break;
+-		}
++	if (speed < 5) {
++		force = max(max_te, resistance * 2); ///< so train does not get stuck going up a hill
+ 	} else {
+-		/* "kickoff" acceleration */
+-		force = (mode == AM_ACCEL && v->u.rail.railtype != RAILTYPE_MAGLEV) ? min(max_te, power) : power;
+-		force = max(force, (mass * 8) + resistance);
++		/** force coeff = 746W/HP * 75% efficient * 3.6 kph/(m/s) = 2014N/(HP/kph) */
++		force = min(max_te, power * 2014 / speed);
+ 	}
+ 
+-	if (force <= 0) force = 10000;
+-
+-	if (v->u.rail.railtype != RAILTYPE_MAGLEV) force = min(force, mass * 10 * 200);
+-
+ 	if (mode == AM_ACCEL) {
+-		return (force - resistance) / (mass * 4);
++		return (force - resistance) / mass;
+ 	} else {
+-		return min((-force - resistance) / (mass * 4), -10000 / (mass * 4));
++		return min((-force * 3 - resistance) / mass, -25); ///< always slow down a little
+ 	}
+ }
+ 
+@@ -2576,12 +2534,13 @@
+ 
+ 	if (v->vehstatus & VS_STOPPED || HASBIT(v->u.rail.flags, VRF_REVERSING)) {
+ 		if (_patches.realistic_acceleration) {
+-			accel = GetTrainAcceleration(v, AM_BRAKE) * 2;
++			accel = GetTrainAcceleration(v, AM_BRAKE);
+ 		} else {
+ 			accel = v->acceleration * -2;
+ 		}
+ 	} else {
+ 		if (_patches.realistic_acceleration) {
++			v->max_speed = GetTrainMaxSpeed(v);
+ 			accel = GetTrainAcceleration(v, AM_ACCEL);
+ 		} else {
+ 			accel = v->acceleration;

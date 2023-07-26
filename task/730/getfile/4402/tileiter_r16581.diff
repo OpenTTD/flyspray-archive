@@ -1,0 +1,591 @@
+diff --git a/src/landscape.cpp b/src/landscape.cpp
+index 91372f4..2d31a70 100644
+--- a/src/landscape.cpp
++++ b/src/landscape.cpp
+@@ -605,6 +605,30 @@ CommandCost CmdLandscapeClear(TileIndex tile, DoCommandFlag flags, uint32 p1, ui
+ 	return _tile_type_procs[GetTileType(tile)]->clear_tile_proc(tile, flags);
+ }
+ 
++/** Clear a single tile
++ * @param tile tile to clear
++ * @param flags flags of operation to conduct
++ * @param money pile of money to subtract the cost from
++ * @param cost cumulative cost of several clear operations; cost for this operation is added
++ * @return false if cash is missing for the clearing operation, else true
++ */
++bool ClearSingleTile(TileIndex tile, DoCommandFlag flags, Money &money, CommandCost &cost)
++{
++	CommandCost ret = DoCommand(tile, 0, 0, flags & ~DC_EXEC, CMD_LANDSCAPE_CLEAR);
++ 	if (CmdFailed(ret)) return true;
++
++ 	if (flags & DC_EXEC) {
++ 		money -= ret.GetCost();
++		if (ret.GetCost() > 0 && money < 0) {
++ 			_additional_cash_required = ret.GetCost();
++ 			return false;
++ 		}
++ 		DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++ 	}
++ 	cost.AddCost(ret);
++ 	return true;
++}
++
+ /** Clear a big piece of landscape
+  * @param tile end tile of area dragging
+  * @param p1 start tile of area dragging
+@@ -615,45 +639,30 @@ CommandCost CmdClearArea(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32
+ {
+ 	if (p1 >= MapSize()) return CMD_ERROR;
+ 
+-	/* make sure sx,sy are smaller than ex,ey */
+-	int ex = TileX(tile);
+-	int ey = TileY(tile);
+-	int sx = TileX(p1);
+-	int sy = TileY(p1);
+-	if (ex < sx) Swap(ex, sx);
+-	if (ey < sy) Swap(ey, sy);
+-
+ 	Money money = GetAvailableMoneyForCommand();
+ 	CommandCost cost(EXPENSES_CONSTRUCTION);
+-	bool success = false;
+-
+-	for (int x = sx; x <= ex; ++x) {
+-		for (int y = sy; y <= ey; ++y) {
+-			CommandCost ret = DoCommand(TileXY(x, y), 0, 0, flags & ~DC_EXEC, CMD_LANDSCAPE_CLEAR);
+-			if (CmdFailed(ret)) continue;
+-			success = true;
+-
+-			if (flags & DC_EXEC) {
+-				money -= ret.GetCost();
+-				if (ret.GetCost() > 0 && money < 0) {
+-					_additional_cash_required = ret.GetCost();
+-					return cost;
+-				}
+-				DoCommand(TileXY(x, y), 0, 0, flags, CMD_LANDSCAPE_CLEAR);
+-
+-				/* draw explosion animation... */
+-				if ((x == sx || x == ex) && (y == sy || y == ey)) {
+-					/* big explosion in each corner, or small explosion for single tiles */
+-					CreateEffectVehicleAbove(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, 2,
+-						sy == ey && sx == ex ? EV_EXPLOSION_SMALL : EV_EXPLOSION_LARGE
+-					);
+-				}
+-			}
+-			cost.AddCost(ret);
+-		}
+-	}
+ 
+-	return (success) ? cost : CMD_ERROR;
++	for (OrthogonalIterator iter(tile, p1); iter != TileIterator::end; ++iter) {
++ 		if (!ClearSingleTile(*iter, flags, money, cost)) return cost;
++ 	}
++
++ 	/* draw explosion animation... */
++	/* big explosion in 2 corners, or small explosion
++	 * for single tiles
++	 */
++	CreateEffectVehicleAbove(TileX(tile) * TILE_SIZE + TILE_SIZE / 2,
++		TileY(tile) * TILE_SIZE + TILE_SIZE / 2, 2,
++		tile == p1 ? EV_EXPLOSION_SMALL : EV_EXPLOSION_LARGE
++	 );
++
++ 	if (tile != p1) {
++ 		CreateEffectVehicleAbove(TileX(p1) * TILE_SIZE + TILE_SIZE / 2,
++ 			TileY(p1) * TILE_SIZE + TILE_SIZE / 2, 2,
++ 			EV_EXPLOSION_LARGE
++ 		);
++ 	}
++
++ 	return (cost.GetCost() == 0) ? CMD_ERROR : cost;
+ }
+ 
+ 
+diff --git a/src/map.cpp b/src/map.cpp
+index 3dfe478..cddac44 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -303,6 +303,84 @@ bool CircularTileSearch(TileIndex *tile, uint radius, uint w, uint h, TestTileOn
+ 	return false;
+ }
+ 
++const InvalidIterator TileIterator::end;
++
++/** Create an orthogonal tile iterator
++ * @param corner1 one corner of the rectange to be iterated over
++ * @param corner2 the opposite corner of the rectangle to be iterated over
++ */
++OrthogonalIterator::OrthogonalIterator(TileIndex corner1, TileIndex corner2)
++{
++	/* coordinates of end and start points */
++	this->x_max = TileX(corner2);
++	this->y_max = TileY(corner2);
++	Init(TileX(corner1), TileY(corner1));
++}
++
++/** Initialize the orthogonal tile iterator; only called from constructor
++ * @param x_min x dimension of a vertical edge of the rectangle
++ * @param y_min y dimension of a horizontal edge of the rectangle
++ */
++void OrthogonalIterator::Init(uint x_min, uint y_min)
++{
++	/* make sure x_min, y_min are smaller than x_max, y_max
++	 */
++	if (this->x_max < x_min) Swap(this->x_max, x_min);
++	if (this->y_max < y_min) Swap(this->y_max, y_min);
++
++	this->current = TileXY(x_min, y_min);
++	this->w = this->x_max - x_min + 1;
++}
++
++/** Create an orthogonal tile iterator
++ * @param corner a corner of the rectangle to be iterated over
++ * @param width x dimension of the rectangle to be iterated over
++ * @param height y dimension of the rectangle to be iterated over
++ */
++OrthogonalIterator::OrthogonalIterator(TileIndex corner, int width, int height)
++{
++	uint x_min = TileX(corner);
++	uint y_min = TileY(corner);
++	this->x_max = x_min + width;
++	this->y_max = y_min + height;
++	Init(x_min, y_min);
++}
++
++/** Create a diagonal tile iterator
++ * @param corner1 a corner of the rectangle to be iterated over
++ * @param corner2 the opposite corner of the rectangle to be iterated over
++ */
++DiagonalIterator::DiagonalIterator(TileIndex corner1, TileIndex corner2)
++{
++	int dist_x = TileX(corner1) - TileX(corner2);
++	int dist_y = TileY(corner1) - TileY(corner2);
++	this->a_max = dist_x + dist_y;
++	this->b_max = dist_y - dist_x;
++	this->base = corner2;
++	/* Unfortunately we can't find a new base and make all a and b positive because
++	 * the new base might be a "flattened" corner where there actually is no single
++	 * tile. If we try anyway the result is either inaccurate ("one off" half of the
++	 * time) or the code gets much more complex;
++	 *
++	 * We also need to increment here to have equality as marker for the end of a row or
++	 * column. Like that it's shorter than having another if/else in operator++
++	 */
++	if (this->a_max > 0) {
++		this->a_max++;
++	} else {
++		this->a_max--;
++	}
++
++	if (this->b_max > 0) {
++		this->b_max++;
++	} else {
++		this->b_max--;
++	}
++	this->b_cur = 0;
++	this->a_cur = 0;
++	if (OutsideMap()) operator++();
++}
++
+ /*!
+  * Finds the distance for the closest tile with water/land given a tile
+  * @param tile  the tile to find the distance too
+diff --git a/src/map_func.h b/src/map_func.h
+index 1deafc0..b99beb2 100644
+--- a/src/map_func.h
++++ b/src/map_func.h
+@@ -352,6 +352,230 @@ uint DistanceFromEdge(TileIndex); ///< shortest distance from any edge of the ma
+ 			} while (++var, --w_cur != 0);                       \
+ 		} while (var += TileDiffXY(0, 1) - (w), --h_cur != 0); \
+ 	}
++
++class InvalidIterator;
++
++/**
++ * A common base class for tile iterators.
++ */
++class TileIterator {
++public:
++	static const InvalidIterator end;
++	virtual TileIterator &operator++() = 0;
++	virtual TileIndex operator*() const = 0;
++};
++
++/**
++ * An invalid iterator mimicking the result of end() method in stl containers.
++ */
++class InvalidIterator : public TileIterator {
++	TileIterator &operator++() {return *this;}
++	TileIndex operator*() const {return INVALID_TILE;}
++};
++
++/**
++ * An iterator that lists all the tiles in an orthogonally arranged rectangle.
++ * Use operator++ to advance it and operator* to get the current tile.
++ */
++class OrthogonalIterator : public TileIterator {
++public:
++
++	OrthogonalIterator(TileIndex corner1, TileIndex corner2);
++
++	OrthogonalIterator(TileIndex corner, int width, int height);
++
++	/**
++	 * increments the iterator
++	 */
++	inline OrthogonalIterator &operator++()
++	{
++		++this->current;
++		/* If TileX(current) == 0 here, the left edge of the map has been reached.
++		 * In this case TileX(current) > x_max doesn't work
++		 */
++		if(TileX(this->current) > this->x_max || (TileX(this->current) == 0)) {
++			this->current += TileDiffXY(0, 1) - this->w;
++			/* there is no wrap-around for y components, so this one always works */
++			if (TileY(this->current) > this->y_max) {
++				this->current = INVALID_TILE;
++			}
++		}
++		return *this;
++	}
++
++	/**
++	 * returns the tile associated with the iterator
++	 */
++	inline TileIndex operator*() const {return this->current;}
++
++	/**
++	 * compare two iterators for equality.
++	 * They are equal if all their members are.
++	 */
++	inline bool operator==(const OrthogonalIterator &other) const
++	{
++		return this->current == other.current && this->x_max == other.x_max &&
++				this->y_max == other.y_max && this->w == other.w;
++	}
++
++	/**
++	 * compare two iterators for inequality.
++	 */
++	inline bool operator!=(const OrthogonalIterator &other) const
++	{
++		return !(*this == other);
++	}
++
++private:
++	void Init(uint x_min, uint y_min);
++	TileIndex current;
++	uint x_max, y_max;
++	uint w;
++
++	friend bool operator==(const OrthogonalIterator &it1, const InvalidIterator &it2);
++};
++
++/** check if an orthogonal iterator has finished iterating.
++ * @param it1 the iterator to be checked
++ * @param it2 an invalid iterator
++ * @return true if it1 has finished iterating, else false
++ */
++inline bool operator==(const OrthogonalIterator &it1, const InvalidIterator &it2)
++{
++	return it1.current == INVALID_TILE;
++}
++
++/** check if an orthogonal iterator has finished iterating. */
++inline bool operator==(const InvalidIterator &it1, const OrthogonalIterator &it2)
++{
++	return it2 == it1;
++}
++
++/** check if an orthogonal iterator is still iterating.
++ * @param it1 the iterator to be checked
++ * @param it2 an invalid iterator
++ * @returns false if it1 has finished iterating, else true
++ */
++inline bool operator!=(const OrthogonalIterator &it1, const InvalidIterator &it2)
++{
++	return !(it1 == it2);
++}
++
++/** check if an orthogonal iterator is still iterating. */
++inline bool operator!=(const InvalidIterator &it1, const OrthogonalIterator &it2)
++{
++	return !(it2 == it1);
++}
++
++
++/**
++ * an iterator that lists all the tiles in an diagonally arranged rectangle.
++ * Use operator++ to advance it and operator* to get the current tile.
++ */
++class DiagonalIterator : public TileIterator {
++public:
++	/* a and b are coordinates in a rotated coordinate system.
++	 * base, a_max and b_max form a rectangle in a diagonal coordinate system.
++	 * a_max counts the number of diagonals in one direction, b_max in the other.
++	 * However with this method you only count half the squares. Compare with a
++	 * check board with alternating black and white squares. You only count one
++	 * color. That is why we count double the amount of rows and columns and
++	 * divide by 2 when translating the coordinates back.
++	 */
++
++	DiagonalIterator(TileIndex corner1, TileIndex corner2);
++
++	/** advances the iterator by one tile */
++	inline DiagonalIterator &operator++()
++	{
++		do {
++			if (this->a_max > 0) {
++				++this->a_cur;
++			} else {
++				--this->a_cur;
++			}
++			if (this->a_cur == this->a_max) {
++				this->a_cur = 0;
++				if (this->b_max > 0) {
++					++this->b_cur;
++				} else {
++					--this->b_cur;
++				}
++			}
++		} while (OutsideMap() && this->b_max != this->b_cur);
++		return *this;
++	}
++
++	/** returns the tile associated with the iterator. */
++	inline TileIndex operator*() const
++	{
++		return this->base +
++			TileDiffXY((this->a_cur - this->b_cur) / 2, (this->b_cur + this->a_cur) / 2);
++	}
++
++	/**
++	 * compare two iterators.
++	 * They are equal if all their members are.
++	 */
++	inline bool operator==(const DiagonalIterator &other) const
++	{
++		return this->base == other.base && this->b_cur == other.b_cur &&
++				this->b_max == other.b_max && this->a_cur == other.a_cur &&
++				this->a_max == other.a_max;
++	}
++
++	/** compare two iterators for inequality */
++	inline bool operator!=(const DiagonalIterator &other) const
++	{
++		return !(*this == other);
++	}
++
++private:
++	/** check if the iterator refers to an invalid tile */
++	inline bool OutsideMap() const
++	{
++		return *(*this) >= MapSize();
++	}
++
++	TileIndex base;
++	int a_cur, b_cur;
++	int a_max, b_max;
++
++	friend bool operator==(const DiagonalIterator &it1, const InvalidIterator &it2);
++};
++
++/** check if a diagonal iterator has finished iterating.
++ * @param it1 the iterator to be checked
++ * @param it2 an invalid iterator
++ * @return true if it1 has finished iterating, else false
++ */
++inline bool operator==(const DiagonalIterator &it1, const InvalidIterator &it2)
++{
++	return it1.b_cur == it1.b_max;
++}
++
++/** check if a diagonal iterator has finished iterating.*/
++inline bool operator==(const InvalidIterator &it1, const DiagonalIterator &it2)
++{
++	return it2 == it1;
++}
++
++/** check if a diagonal iterator is still iterating.
++ * @param it1 the iterator to be checked
++ * @param it2 an invalid iterator
++ * @return false if it1 has finished iterating, else true
++ */
++inline bool operator!=(const DiagonalIterator &it1, const InvalidIterator &it2)
++{
++	return !(it1 == it2);
++}
++
++/** check if a diagonal iterator is still iterating.*/
++inline bool operator!=(const InvalidIterator &it1, const DiagonalIterator &it2)
++{
++	return !(it2 == it1);
++}
++
+ /**
+  * Convert a DiagDirection to a TileIndexDiff
+  *
+diff --git a/src/map_type.h b/src/map_type.h
+index 7098ad7..dcd0a15 100644
+--- a/src/map_type.h
++++ b/src/map_type.h
+@@ -62,4 +62,13 @@ struct TileIndexDiffC {
+  */
+ #define STRAIGHT_TRACK_LENGTH 7071/10000
+ 
++/**
++ * argument for CmdLevelLand describing what to do
++ */
++enum LevelMode {
++	LEVEL_LEVEL,
++	LEVEL_LOWER,
++	LEVEL_RAISE,
++};
++
+ #endif /* MAP_TYPE_H */
+diff --git a/src/terraform_cmd.cpp b/src/terraform_cmd.cpp
+index adbbded..a024172 100644
+--- a/src/terraform_cmd.cpp
++++ b/src/terraform_cmd.cpp
+@@ -346,13 +346,44 @@ CommandCost CmdTerraformLand(TileIndex tile, DoCommandFlag flags, uint32 p1, uin
+ 	return total_cost;
+ }
+ 
++/** raises or lowers a single tile to the given height
++ * @param tile2 the tile to be leveled
++ * @param h the height to be leveled to
++ * @param flags DC_EXEC for simulation or real action and other flags for DoCommand
++ * @param money pile of money the cost is subtracted from
++ * @param cost cumulative cost of possibly many level actions. The cost for this action is added to it.
++ * @return false if cash is missing for the level action, true otherwise
++ */
++bool LevelSingleTile(TileIndex tile2, uint h, DoCommandFlag flags, Money &money, CommandCost &cost)
++{
++	uint curh = TileHeight(tile2);
++	while (curh != h) {
++		CommandCost ret = DoCommand(tile2, SLOPE_N, (curh > h) ? 0 : 1,
++			flags & ~DC_EXEC, CMD_TERRAFORM_LAND);
++		if (CmdFailed(ret)) break;
++
++		if (flags & DC_EXEC) {
++			money -= ret.GetCost();
++			if (money < 0) {
++				_additional_cash_required = ret.GetCost();
++				return false;
++			}
++			DoCommand(tile2, SLOPE_N, (curh > h) ? 0 : 1, flags,
++				CMD_TERRAFORM_LAND);
++		}
++
++		cost.AddCost(ret);
++		curh += (curh > h) ? -1 : 1;
++	}
++	return true;
++}
+ 
+ /** Levels a selected (rectangle) area of land
+  * @param tile end tile of area-drag
+  * @param flags for this command type
+  * @param p1 start tile of area drag
+- * @param p2 height difference; eg raise (+1), lower (-1) or level (0)
+- * @return  error or cost of terraforming
++ * @param p2 see @LevelMode; flags for the mode of levelling (up, down, or same height)
++ * @return error or cost of terraforming
+  */
+ CommandCost CmdLevelLand(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
+ {
+@@ -364,46 +395,31 @@ CommandCost CmdLevelLand(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32
+ 	uint oldh = TileHeight(p1);
+ 
+ 	/* compute new height */
+-	uint h = oldh + p2;
++	uint h = oldh;
++	LevelMode mode = (LevelMode)GB(p2, 0, 2);
++	switch (mode) {
++	case LEVEL_LEVEL:
++		break;
++	case LEVEL_RAISE:
++		h++;
++		break;
++	case LEVEL_LOWER:
++		h--;
++		break;
++	default:
++		return CMD_ERROR;
++	}
+ 
+ 	/* Check range of destination height */
+ 	if (h > MAX_TILE_HEIGHT) return_cmd_error((oldh == 0) ? STR_ERROR_ALREADY_AT_SEA_LEVEL : STR_ERROR_TOO_HIGH);
+ 	if (p2 == 0) _error_message = STR_ALREADY_LEVELLED;
+ 
+-	/* make sure sx,sy are smaller than ex,ey */
+-	int ex = TileX(tile);
+-	int ey = TileY(tile);
+-	int sx = TileX(p1);
+-	int sy = TileY(p1);
+-	if (ex < sx) Swap(ex, sx);
+-	if (ey < sy) Swap(ey, sy);
+-	tile = TileXY(sx, sy);
+-
+-	int size_x = ex - sx + 1;
+-	int size_y = ey - sy + 1;
+-
+ 	Money money = GetAvailableMoneyForCommand();
+ 	CommandCost cost(EXPENSES_CONSTRUCTION);
+ 
+-	BEGIN_TILE_LOOP(tile2, size_x, size_y, tile) {
+-		uint curh = TileHeight(tile2);
+-		while (curh != h) {
+-			CommandCost ret = DoCommand(tile2, SLOPE_N, (curh > h) ? 0 : 1, flags & ~DC_EXEC, CMD_TERRAFORM_LAND);
+-			if (CmdFailed(ret)) break;
+-
+-			if (flags & DC_EXEC) {
+-				money -= ret.GetCost();
+-				if (money < 0) {
+-					_additional_cash_required = ret.GetCost();
+-					return cost;
+-				}
+-				DoCommand(tile2, SLOPE_N, (curh > h) ? 0 : 1, flags, CMD_TERRAFORM_LAND);
+-			}
+-
+-			cost.AddCost(ret);
+-			curh += (curh > h) ? -1 : 1;
+-		}
+-	} END_TILE_LOOP(tile2, size_x, size_y, tile)
++	for (OrthogonalIterator iter(tile, p1); iter != TileIterator::end; ++iter) {
++		if (!LevelSingleTile(*iter, h, flags, money, cost)) return cost;
++	}
+ 
+ 	return (cost.GetCost() == 0) ? CMD_ERROR : cost;
+ }
+diff --git a/src/terraform_gui.cpp b/src/terraform_gui.cpp
+index e281b6b..f22c162 100644
+--- a/src/terraform_gui.cpp
++++ b/src/terraform_gui.cpp
+@@ -119,18 +119,23 @@ bool GUIPlaceProcDragXY(ViewportDragDropSelectionProcess proc, TileIndex start_t
+ 		if (TileY(end_tile) == MapMaxY()) end_tile += TileDiffXY(0, -1);
+ 	}
+ 
++	int32 lvl_demolish_flags = 0;
++
+ 	switch (proc) {
+ 		case DDSP_DEMOLISH_AREA:
+-			DoCommandP(end_tile, start_tile, 0, CMD_CLEAR_AREA | CMD_MSG(STR_ERROR_CAN_T_CLEAR_THIS_AREA), CcPlaySound10);
++			DoCommandP(end_tile, start_tile, lvl_demolish_flags, CMD_CLEAR_AREA | CMD_MSG(STR_ERROR_CAN_T_CLEAR_THIS_AREA), CcPlaySound10);
+ 			break;
+ 		case DDSP_RAISE_AND_LEVEL_AREA:
+-			DoCommandP(end_tile, start_tile, 1, CMD_LEVEL_LAND | CMD_MSG(STR_ERROR_CAN_T_RAISE_LAND_HERE), CcTerraform);
++			SB(lvl_demolish_flags, 0, 2, LEVEL_RAISE);
++			DoCommandP(end_tile, start_tile, lvl_demolish_flags, CMD_LEVEL_LAND | CMD_MSG(STR_ERROR_CAN_T_RAISE_LAND_HERE), CcTerraform);
+ 			break;
+ 		case DDSP_LOWER_AND_LEVEL_AREA:
+-			DoCommandP(end_tile, start_tile, (uint32)-1, CMD_LEVEL_LAND | CMD_MSG(STR_ERROR_CAN_T_LOWER_LAND_HERE), CcTerraform);
++			SB(lvl_demolish_flags, 0, 2, LEVEL_LOWER);
++			DoCommandP(end_tile, start_tile, lvl_demolish_flags, CMD_LEVEL_LAND | CMD_MSG(STR_ERROR_CAN_T_LOWER_LAND_HERE), CcTerraform);
+ 			break;
+ 		case DDSP_LEVEL_AREA:
+-			DoCommandP(end_tile, start_tile, 0, CMD_LEVEL_LAND | CMD_MSG(STR_ERROR_CAN_T_LEVEL_LAND_HERE), CcTerraform);
++			SB(lvl_demolish_flags, 0, 2, LEVEL_LEVEL);
++			DoCommandP(end_tile, start_tile, lvl_demolish_flags, CMD_LEVEL_LAND | CMD_MSG(STR_ERROR_CAN_T_LEVEL_LAND_HERE), CcTerraform);
+ 			break;
+ 		case DDSP_CREATE_ROCKS:
+ 			GenerateRockyArea(end_tile, start_tile);

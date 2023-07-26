@@ -1,0 +1,364 @@
+=== src/lang/english.txt
+==================================================================
+--- src/lang/english.txt	(/trunk)	(revision 514)
++++ src/lang/english.txt	(/branch/random_TL)	(revision 514)
+@@ -1174,6 +1174,7 @@
+ STR_CONFIG_PATCHES_TOWN_LAYOUT_BETTER_ROADS                     :better roads
+ STR_CONFIG_PATCHES_TOWN_LAYOUT_2X2_GRID                         :2x2 grid
+ STR_CONFIG_PATCHES_TOWN_LAYOUT_3X3_GRID                         :3x3 grid
++STR_CONFIG_PATCHES_TOWN_LAYOUT_RANDOM                           :random
+ 
+ STR_CONFIG_PATCHES_TOOLBAR_POS                                  :{LTBLUE}Position of main toolbar: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_TOOLBAR_POS_LEFT                             :Left
+=== src/town.h
+==================================================================
+--- src/town.h	(/trunk)	(revision 514)
++++ src/town.h	(/branch/random_TL)	(revision 514)
+@@ -75,6 +75,7 @@
+ 	uint8 class_count[HOUSE_CLASS_MAX];
+ };
+ 
++
+ struct Town;
+ DECLARE_OLD_POOL(Town, Town, 3, 8000)
+ 
+@@ -145,6 +146,9 @@
+ 	/* If this is a larger town, and should grow more quickly. */
+ 	bool larger_town;
+ 
++	/* Town specific road layout */
++	TownLayoutByte road_layout;
++
+ 	/* NOSAVE: UpdateTownRadius updates this given the house count. */
+ 	uint16 radius[5];
+ 
+@@ -160,6 +164,8 @@
+ 	~Town();
+ 
+ 	inline bool IsValid() const { return this->xy != 0; }
++
++	void GenerateRandomLayout();
+ };
+ 
+ struct HouseSpec {
+=== src/saveload.cpp
+==================================================================
+--- src/saveload.cpp	(/trunk)	(revision 514)
++++ src/saveload.cpp	(/branch/random_TL)	(revision 514)
+@@ -29,7 +29,7 @@
+ #include "strings.h"
+ #include <list>
+ 
+-extern const uint16 SAVEGAME_VERSION = 81;
++extern const uint16 SAVEGAME_VERSION = 82;
+ uint16 _sl_version;       ///< the major savegame version identifier
+ byte   _sl_minor_version; ///< the minor savegame version, DO NOT USE!
+ 
+=== src/town_cmd.cpp
+==================================================================
+--- src/town_cmd.cpp	(/trunk)	(revision 514)
++++ src/town_cmd.cpp	(/branch/random_TL)	(revision 514)
+@@ -96,6 +96,59 @@
+ 	this->xy = 0;
+ }
+ 
++/**
++ * Pseudo random number generator.
++ * The generation algorithm is seeded by the
++ * X and Y position of a tile.
++ *
++ * @param x The X position
++ * @param y The Y position
++ * @param number The number of random bits we want to have
++ * retrun number random bits
++ */
++uint OriginalTileRandomiser(uint x, uint y, uint number)
++{
++	uint variant;
++	variant  = x >> 4;
++	variant ^= x >> 6;
++	variant ^= y >> 4;
++	variant -= y >> 6;
++	return GB(variant, 0, number);
++}
++
++/**
++ * Overloaded function
++ * By default are 2 random bits needed
++ */
++uint OriginalTileRandomiser(uint x, uint y)
++{
++	return OriginalTileRandomiser(x, y, 2);
++}
++
++/**
++ * Generate a random town road layout.
++ * The random is based on the original
++ * tile randomiser.
++ */
++void Town::GenerateRandomLayout()
++{
++	this->road_layout = (TownLayout)OriginalTileRandomiser(TileX(this->xy), TileY(this->xy), 3);
++
++	switch (this->road_layout) {
++		/* Valid layouts */
++		case TL_ORIGINAL:
++		case TL_BETTER_ROADS:
++		case TL_2X2_GRID:
++		case TL_3X3_GRID:
++			break;
++
++		/* All others are invalid */
++		default:
++			this->road_layout = TL_ORIGINAL;
++			break;
++	}
++}
++
+ // Local
+ static int _grow_town_result;
+ 
+@@ -119,17 +172,6 @@
+ 	TownDrawHouseLift
+ };
+ 
+-uint OriginalTileRandomiser(uint x, uint y)
+-{
+-	uint variant;
+-	variant  = x >> 4;
+-	variant ^= x >> 6;
+-	variant ^= y >> 4;
+-	variant -= y >> 6;
+-	variant &= 3;
+-	return variant;
+-}
+-
+ /**
+  * Return a random direction
+  *
+@@ -683,14 +725,17 @@
+ 	return false;
+ }
+ 
++#define TOWN_LAYOUT ((_patches.town_layout == TL_RANDOM) ? t->road_layout : _patches.town_layout)
++
+ /**
+  * Check if a Road is allowed on a given tile
+  *
++ * @param t current town
+  * @param tile The target tile
+  * @param dir The direction in which we want to extend the town
+  * @return true if it is allowed else false
+  */
+-static bool IsRoadAllowedHere(TileIndex tile, DiagDirection dir)
++static bool IsRoadAllowedHere(Town* t, TileIndex tile, DiagDirection dir)
+ {
+ 	if (TileX(tile) < 2 || TileY(tile) < 2 || MapMaxX() <= TileX(tile) || MapMaxY() <= TileY(tile)) return false;
+ 
+@@ -715,7 +760,7 @@
+ 		if (cur_slope == SLOPE_FLAT) {
+ no_slope:
+ 			/* Tile has no slope */
+-			switch (_patches.town_layout) {
++			switch (TOWN_LAYOUT) {
+ 				default: NOT_REACHED();
+ 
+ 				case TL_ORIGINAL: /* Disallow the road if any neighboring tile has a road (distance: 1) */
+@@ -796,7 +841,7 @@
+ 	TileIndexDiffC grid_pos = TileIndexToTileIndexDiffC(t->xy, tile); // Vector from downtown to the tile
+ 	RoadBits rcmd = ROAD_NONE;
+ 
+-	switch (_patches.town_layout) {
++	switch (TOWN_LAYOUT) {
+ 		default: NOT_REACHED();
+ 
+ 		case TL_2X2_GRID:
+@@ -968,9 +1013,9 @@
+  * @param tile_ptr The current tile
+  * @param cur_rb The current tiles RoadBits
+  * @param target_dir The target road dir
+- * @param t1 The current town
++ * @param t The current town
+  */
+-static void GrowTownInTile(TileIndex *tile_ptr, RoadBits cur_rb, DiagDirection target_dir, Town *t1)
++static void GrowTownInTile(TileIndex *tile_ptr, RoadBits cur_rb, DiagDirection target_dir, Town *t)
+ {
+ 	RoadBits rcmd = ROAD_NONE;  // RoadBits for the road construction command
+ 	TileIndex tile = *tile_ptr; // The main tile on which we base our growth
+@@ -986,7 +1031,7 @@
+ 		LevelTownLand(tile);
+ 
+ 		/* Is a road allowed here? */
+-		switch (_patches.town_layout) {
++		switch (TOWN_LAYOUT) {
+ 			default: NOT_REACHED();
+ 
+ 			case TL_NO_ROADS: /* Disallow Roads */
+@@ -994,13 +1039,13 @@
+ 
+ 			case TL_3X3_GRID:
+ 			case TL_2X2_GRID:
+-				rcmd = GetTownRoadGridElement(t1, tile, target_dir);
++				rcmd = GetTownRoadGridElement(t, tile, target_dir);
+ 				if (rcmd == ROAD_NONE) return;
+ 				break;
+ 
+ 			case TL_BETTER_ROADS:
+ 			case TL_ORIGINAL:
+-				if (!IsRoadAllowedHere(tile, target_dir)) return;
++				if (!IsRoadAllowedHere(t, tile, target_dir)) return;
+ 
+ 				DiagDirection source_dir = ReverseDiagDir(target_dir);
+ 
+@@ -1009,7 +1054,7 @@
+ 					do target_dir = RandomDiagDir(); while (target_dir == source_dir);
+ 				}
+ 
+-				if (!IsRoadAllowedHere(TileAddByDiagDir(tile, target_dir), target_dir)) {
++				if (!IsRoadAllowedHere(t, TileAddByDiagDir(tile, target_dir), target_dir)) {
+ 					/* A road is not allowed to continue the randomized road,
+ 					 *  return if the road we're trying to build is curved. */
+ 					if (target_dir != ReverseDiagDir(source_dir)) return;
+@@ -1034,7 +1079,7 @@
+ 		 * the fitting RoadBits */
+ 		_grow_town_result = GROWTH_SEARCH_STOPPED;
+ 
+-		switch (_patches.town_layout) {
++		switch (TOWN_LAYOUT) {
+ 			default: NOT_REACHED();
+ 
+ 			case TL_NO_ROADS: /* Disallow Roads */
+@@ -1042,7 +1087,7 @@
+ 
+ 			case TL_3X3_GRID:
+ 			case TL_2X2_GRID:
+-			 	rcmd = GetTownRoadGridElement(t1, tile, target_dir);
++			 	rcmd = GetTownRoadGridElement(t, tile, target_dir);
+ 				break;
+ 
+ 			case TL_BETTER_ROADS:
+@@ -1074,7 +1119,7 @@
+ 		/* Don't walk into water. */
+ 		if (IsClearWaterTile(house_tile)) return;
+ 
+-		switch (_patches.town_layout) {
++		switch (TOWN_LAYOUT) {
+ 			default: NOT_REACHED();
+ 
+ 			case TL_NO_ROADS:
+@@ -1082,23 +1127,23 @@
+ 				break;
+ 
+ 			case TL_3X3_GRID: /* Use 2x2 grid afterwards! */
+-				GrowTownWithExtraHouse(t1, TileAddByDiagDir(house_tile, target_dir));
++				GrowTownWithExtraHouse(t, TileAddByDiagDir(house_tile, target_dir));
+ 				/* FALL THROUGH */
+ 
+ 			case TL_2X2_GRID:
+-				rcmd = GetTownRoadGridElement(t1, house_tile, target_dir);
++				rcmd = GetTownRoadGridElement(t, house_tile, target_dir);
+ 				allow_house = (rcmd == ROAD_NONE);
+ 				break;
+ 
+ 			case TL_BETTER_ROADS: /* Use original afterwards! */
+-				GrowTownWithExtraHouse(t1, TileAddByDiagDir(house_tile, target_dir));
++				GrowTownWithExtraHouse(t, TileAddByDiagDir(house_tile, target_dir));
+ 				/* FALL THROUGH */
+ 
+ 			case TL_ORIGINAL:
+ 				 /* Allow a house at the edge. 60% chance or
+ 				  * always ok if no road allowed. */
+ 				rcmd = DiagDirToRoadBits(target_dir);
+-				allow_house = (!IsRoadAllowedHere(house_tile, target_dir) || CHANCE16(6, 10));
++				allow_house = (!IsRoadAllowedHere(t, house_tile, target_dir) || CHANCE16(6, 10));
+ 				break;
+ 		}
+ 
+@@ -1110,7 +1155,7 @@
+ 
+ 				/* And build a house.
+ 				 * Set result to -1 if we managed to build it. */
+-				if (BuildTownHouse(t1, house_tile)) {
++				if (BuildTownHouse(t, house_tile)) {
+ 					_grow_town_result = GROWTH_SUCCEED;
+ 				}
+ 			}
+@@ -1127,9 +1172,9 @@
+ 	rcmd = CleanUpRoadBits(tile, rcmd);
+ 	if (rcmd == ROAD_NONE) return;
+ 
+-	if (GrowTownWithBridge(t1, tile, rcmd)) return;
++	if (GrowTownWithBridge(t, tile, rcmd)) return;
+ 
+-	GrowTownWithRoad(t1, tile, rcmd);
++	GrowTownWithRoad(t, tile, rcmd);
+ }
+ 
+ /** Returns "growth" if a house was built, or no if the build failed.
+@@ -1149,7 +1194,7 @@
+ 	/* Number of times to search.
+ 	 * Better roads, 2X2 and 3X3 grid grow quite fast so we give
+ 	 * them a little handicap. */
+-	switch (_patches.town_layout) {
++	switch (TOWN_LAYOUT) {
+ 		case TL_BETTER_ROADS:
+ 			_grow_town_result = 10 + t->num_houses * 2 / 9;
+ 			break;
+@@ -1439,6 +1484,8 @@
+ 	UpdateTownVirtCoord(t);
+ 	_town_sort_dirty = true;
+ 
++	t->GenerateRandomLayout();
++
+ 	/* Random town size. */
+ 	x = (Random() & 0xF) + 8;
+ 
+@@ -2445,6 +2492,8 @@
+ 
+ 	SLE_CONDVAR(Town, larger_town,           SLE_BOOL,                  56, SL_MAX_VERSION),
+ 
++	SLE_CONDVAR(Town, road_layout,           SLE_UINT8,                 82, SL_MAX_VERSION),
++
+ 	/* reserve extra space in savegame here. (currently 30 bytes) */
+ 	SLE_CONDNULL(30, 2, SL_MAX_VERSION),
+ 
+=== src/openttd.h
+==================================================================
+--- src/openttd.h	(/trunk)	(revision 514)
++++ src/openttd.h	(/branch/random_TL)	(revision 514)
+@@ -216,6 +216,8 @@
+ 	TL_2X2_GRID,         ///< Geometric 2x2 grid algorithm
+ 	TL_3X3_GRID,         ///< Geometric 3x3 grid algorithm
+ 
++	TL_RANDOM,           ///< Random town layout
++
+ 	NUM_TLS,             ///< Number of town layouts
+ };
+ 
+=== src/openttd.cpp
+==================================================================
+--- src/openttd.cpp	(/trunk)	(revision 514)
++++ src/openttd.cpp	(/branch/random_TL)	(revision 514)
+@@ -2210,6 +2210,16 @@
+ 		}
+ 	}
+ 
++	if (CheckSavegameVersion(82)) {
++		/* Towns now have the possibility to have their own distinct road layout. */
++		Town *t;
++		FOR_ALL_TOWNS(t) {
++			/* If the savegame is earlier than introduction of random
++			 * town layouts generate town specific ones. */
++			t->GenerateRandomLayout();
++		}
++	}
++
+ 	return true;
+ }
+ 
+
+Property changes on: 
+___________________________________________________________________
+Name: svk:merge
+ +6aa0318a-3be1-0310-93fa-89fd2396df07:/trunk:11272
+

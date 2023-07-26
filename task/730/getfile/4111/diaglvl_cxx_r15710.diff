@@ -1,0 +1,697 @@
+diff --git src/landscape.cpp src/landscape.cpp
+index f3b8ccd..86da511 100644
+--- src/landscape.cpp
++++ src/landscape.cpp
+@@ -605,6 +605,23 @@ CommandCost CmdLandscapeClear(TileIndex tile, DoCommandFlag flags, uint32 p1, ui
+ 	return _tile_type_procs[GetTileType(tile)]->clear_tile_proc(tile, flags);
+ }
+ 
++bool ClearSingleTile(TileIndex tile, DoCommandFlag flags, Money & money, CommandCost & cost)
++{
++	CommandCost ret = DoCommand(tile, 0, 0, flags & ~DC_EXEC, CMD_LANDSCAPE_CLEAR);
++ 	if (CmdFailed(ret)) return true;
++
++ 	if (flags & DC_EXEC) {
++ 		money -= ret.GetCost();
++		if (ret.GetCost() > 0 && money < 0) {
++ 			_additional_cash_required = ret.GetCost();
++ 			return false;
++ 		}
++ 		DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++ 	}
++ 	cost.AddCost(ret);
++ 	return true;
++}
++
+ /** Clear a big piece of landscape
+  * @param tile end tile of area dragging
+  * @param p1 start tile of area dragging
+@@ -615,45 +632,39 @@ CommandCost CmdClearArea(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32
+ {
+ 	if (p1 >= MapSize()) return CMD_ERROR;
+ 
+-	/* make sure sx,sy are smaller than ex,ey */
+-	int ex = TileX(tile);
+-	int ey = TileY(tile);
+-	int sx = TileX(p1);
+-	int sy = TileY(p1);
+-	if (ex < sx) Swap(ex, sx);
+-	if (ey < sy) Swap(ey, sy);
+-
+ 	Money money = GetAvailableMoneyForCommand();
+ 	CommandCost cost(EXPENSES_CONSTRUCTION);
+-	bool success = false;
+-
+-	for (int x = sx; x <= ex; ++x) {
+-		for (int y = sy; y <= ey; ++y) {
+-			CommandCost ret = DoCommand(TileXY(x, y), 0, 0, flags & ~DC_EXEC, CMD_LANDSCAPE_CLEAR);
+-			if (CmdFailed(ret)) continue;
+-			success = true;
+-
+-			if (flags & DC_EXEC) {
+-				money -= ret.GetCost();
+-				if (ret.GetCost() > 0 && money < 0) {
+-					_additional_cash_required = ret.GetCost();
+-					return cost;
+-				}
+-				DoCommand(TileXY(x, y), 0, 0, flags, CMD_LANDSCAPE_CLEAR);
+-
+-				/* draw explosion animation... */
+-				if ((x == sx || x == ex) && (y == sy || y == ey)) {
+-					/* big explosion in each corner, or small explosion for single tiles */
+-					CreateEffectVehicleAbove(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, 2,
+-						sy == ey && sx == ex ? EV_EXPLOSION_SMALL : EV_EXPLOSION_LARGE
+-					);
+-				}
+-			}
+-			cost.AddCost(ret);
+-		}
+-	}
+ 
+-	return (success) ? cost : CMD_ERROR;
++	if (p2 & ORIENTATION_DIAG) {
++ 		for (DiagIterator iter(tile, p1); iter != TileIterator::end; ++iter) {
++ 			if (!ClearSingleTile(*iter, flags, money, cost)) return cost;
++ 		}
++ 	}
++ 	if (p2 & ORIENTATION_ORTH){
++ 		for (OrthIterator iter(tile, p1); iter != TileIterator::end; ++iter) {
++ 			if (!ClearSingleTile(*iter, flags, money, cost)) return cost;
++ 		}
++ 	}
++
++ 	/* draw explosion animation... */
++	/* big explosion in 2 corners, or small explosion
++	 * for single tiles
++	 */
++	CreateEffectVehicleAbove(TileX(tile) * TILE_SIZE + TILE_SIZE
++		/ 2, TileY(tile) * TILE_SIZE + TILE_SIZE / 2,
++		2, tile == p1 ?
++		EV_EXPLOSION_SMALL :
++		EV_EXPLOSION_LARGE
++	 );
++
++ 	if (tile != p1) {
++ 		CreateEffectVehicleAbove(TileX(p1) * TILE_SIZE + TILE_SIZE
++			/ 2, TileY(p1) * TILE_SIZE + TILE_SIZE / 2, 2,
++			EV_EXPLOSION_LARGE
++ 		);
++ 	}
++
++ 	return (cost.GetCost() == 0) ? CMD_ERROR : cost;
+ }
+ 
+ 
+diff --git src/map.cpp src/map.cpp
+index ba6c82d..f23a24b 100644
+--- src/map.cpp
++++ src/map.cpp
+@@ -327,3 +327,65 @@ bool CircularTileSearch(TileIndex *tile, uint radius, uint w, uint h, TestTileOn
+ 	*tile = INVALID_TILE;
+ 	return false;
+ }
++
++const InvalidIterator TileIterator::end = InvalidIterator();
++
++OrthIterator::OrthIterator(TileIndex corner1, TileIndex corner2)
++{
++	/* coordinates of end and start points */
++	x_max = TileX(corner2);
++	y_max = TileY(corner2);
++	uint x_min = TileX(corner1);
++	uint y_min = TileY(corner1);
++	Init(x_min, y_min);
++}
++
++void OrthIterator::Init(uint x_min, uint y_min)
++{
++	/* make sure x_min, y_min are smaller than x_max, y_max
++	 */
++	if (x_max < x_min) Swap(x_max, x_min);
++	if (y_max < y_min) Swap(y_max, y_min);
++
++	current = TileXY(x_min, y_min);
++	w = x_max - x_min + 1;
++}
++
++OrthIterator::OrthIterator(TileIndex corner, int width, int height)
++{
++	uint x_min = TileX(corner);
++	uint y_min = TileY(corner);
++	x_max = x_min + width;
++	y_max = y_min + height;
++	Init(x_min, y_min);
++}
++
++DiagIterator::DiagIterator(TileIndex corner1, TileIndex corner2)
++{
++	int dist_x = TileX(corner1) - TileX(corner2);
++	int dist_y = TileY(corner1) - TileY(corner2);
++	a_max = dist_x + dist_y;
++	b_max = dist_y - dist_x;
++	base = corner2;
++	/* Unfortunately we can't find a new base and make all a and b positive because
++	 * the new base might be a "flattened" corner where there actually is no single
++	 * tile. If we try anyway the result is either inaccurate ("one off" half of the
++	 * time) or the code gets much more complex;
++	 *
++	 * We also need to increment here to have equality as marker for the end of a row or
++	 * column. Like that it's shorter than having another if/else in operator++
++	 */
++	if (a_max > 0) {
++		a_max++;
++	} else {
++		a_max--;
++	}
++	if (b_max > 0) {
++		b_max++;
++	} else {
++		b_max--;
++	}
++	b_cur = 0;
++	a_cur = 0;
++	if (OutsideMap()) operator++();
++}
+diff --git src/map_func.h src/map_func.h
+index 1d2eec8..d8c8944 100644
+--- src/map_func.h
++++ src/map_func.h
+@@ -333,6 +333,186 @@ uint DistanceFromEdge(TileIndex); ///< shortest distance from any edge of the ma
+ 			} while (++var, --w_cur != 0);                       \
+ 		} while (var += TileDiffXY(0, 1) - (w), --h_cur != 0); \
+ 	}
++
++/* a common base class for tile iterators could be done as follows. On the downside
++ * we'd need virtual methods which degrades performance.
++ */
++class InvalidIterator;
++class TileIterator {
++public:
++	static const InvalidIterator end;
++	virtual TileIterator & operator++() = 0;
++	virtual TileIndex operator*() const = 0;
++};
++
++
++class InvalidIterator : public TileIterator {
++	TileIterator & operator++() {return *this;}
++	TileIndex operator*() const {return INVALID_TILE;}
++};
++
++/**
++ * an iterator that lists all the tiles in an orthogonally arranged rectangle.
++ * Use operator++ to advance it and operator* to get the current tile.
++ */
++class OrthIterator : public TileIterator {
++public:
++
++	OrthIterator(TileIndex corner1, TileIndex corner2);
++
++	OrthIterator(TileIndex corner, int width, int height);
++
++	inline OrthIterator & operator++()
++	{
++		++current;
++		if(TileX(current) > x_max) {
++			current += TileDiffXY(0, 1) - (w);
++			if (TileY(current) > y_max) {
++				current = INVALID_TILE;
++			}
++		}
++		return *this;
++	}
++
++	inline TileIndex operator*() const {return current;}
++
++	/**
++	 * compare two iterators.
++	 * They are equal iff all their members are.
++	 */
++	inline bool operator==(const OrthIterator & other) const
++	{
++		return current == other.current && x_max == other.x_max &&
++			y_max == other.y_max && w == other.w;
++	}
++
++	inline bool operator!=(const OrthIterator & other) const
++	{
++		return !operator==(other);
++	}
++
++private:
++	void Init(uint x_min, uint y_min);
++	TileIndex current;
++	uint x_max, y_max;
++	uint w;
++
++	friend bool operator==(const OrthIterator & it1, const InvalidIterator & it2);
++};
++
++inline bool operator==(const OrthIterator & it1, const InvalidIterator & it2)
++{
++	return it1.current == INVALID_TILE;
++}
++
++inline bool operator==(const InvalidIterator & it1, const OrthIterator & it2)
++{
++	return it2 == it1;
++}
++
++inline bool operator!=(const OrthIterator & it1, const InvalidIterator & it2)
++{
++	return !(it1 == it2);
++}
++
++inline bool operator!=(const InvalidIterator & it1, const OrthIterator & it2)
++{
++	return !(it2 == it1);
++}
++
++
++/**
++ * an iterator that lists all the tiles in an diagonally arranged rectangle.
++ * Use operator++ to advance it and operator* to get the current tile.
++ */
++class DiagIterator : public TileIterator {
++public:
++	/* a and b are coordinates in a rotated coordinate system.
++	 * base, a_max and b_max form a rectangle in a diagonal coordinate system.
++	 * a_max counts the number of diagonals in one direction, b_max in the other.
++	 * However with this method you only count half the squares. Compare with a
++	 * check board with alternating black and white squares. You only count one
++	 * color. That is why we count double the amount of rows and columns and
++	 * divide by 2 when translating the coordinates back.
++	 */
++
++	DiagIterator(TileIndex corner1, TileIndex corner2);
++
++	inline TileIterator & operator++()
++	{
++		do {
++			if (a_max > 0) {
++				++a_cur;
++			} else {
++				--a_cur;
++			}
++			if(a_cur == a_max) {
++				a_cur = 0;
++				if (b_max > 0) {
++					++b_cur;
++				} else {
++					--b_cur;
++				}
++			}
++		} while (OutsideMap() && b_max != b_cur);
++		return *this;
++	}
++
++	inline TileIndex operator*() const
++	{
++		return base + TileDiffXY((a_cur - b_cur) / 2, (b_cur + a_cur) / 2);
++	}
++
++	/**
++	 * compare two iterators.
++	 * They are equal iff all their members are.
++	 */
++	inline bool operator==(const DiagIterator & other) const
++	{
++		return base == other.base && b_cur == other.b_cur &&
++			b_max == other.b_max && a_cur == other.a_cur && a_max == other.a_max;
++	}
++
++	inline bool operator!=(const DiagIterator & other) const
++	{
++		return !operator==(other);
++	}
++
++private:
++	inline bool OutsideMap() const
++	{
++		TileIndex tile = base + TileDiffXY((a_cur - b_cur) / 2, (b_cur + a_cur) / 2);
++		return TileX(tile) >= MapSizeX() || TileY(tile) >= MapSizeY();
++	}
++
++	TileIndex base;
++	int a_cur, b_cur;
++	int a_max, b_max;
++
++	friend bool operator==(const DiagIterator & it1, const InvalidIterator & it2);
++};
++
++inline bool operator==(const DiagIterator & it1, const InvalidIterator & it2)
++{
++	return it1.b_cur == it1.b_max;
++}
++
++inline bool operator==(const InvalidIterator & it1, const DiagIterator & it2)
++{
++	return it2 == it1;
++}
++
++inline bool operator!=(const DiagIterator & it1, const InvalidIterator & it2)
++{
++	return !(it1 == it2);
++}
++
++inline bool operator!=(const InvalidIterator & it1, const DiagIterator & it2)
++{
++	return !(it2 == it1);
++}
++
++
+ /**
+  * Convert a DiagDirection to a TileIndexDiff
+  *
+diff --git src/map_type.h src/map_type.h
+index 7098ad7..b4b6ea1 100644
+--- src/map_type.h
++++ src/map_type.h
+@@ -62,4 +62,17 @@ struct TileIndexDiffC {
+  */
+ #define STRAIGHT_TRACK_LENGTH 7071/10000
+ 
++/**
++ * argument for CmdLevelLand describing what to do
++ */
++typedef enum {
++	LEVEL_LOWER	= 0x1,
++	LEVEL_RAISE	= 0x2,
++} LevelMode;
++
++typedef enum {
++	ORIENTATION_DIAG = 0x4,
++	ORIENTATION_ORTH = 0x8,
++} Orientation;
++
+ #endif /* MAP_TYPE_H */
+diff --git src/terraform_cmd.cpp src/terraform_cmd.cpp
+index 22e4f90..6e5b80f 100644
+--- src/terraform_cmd.cpp
++++ src/terraform_cmd.cpp
+@@ -346,12 +346,35 @@ CommandCost CmdTerraformLand(TileIndex tile, DoCommandFlag flags, uint32 p1, uin
+ 	return total_cost;
+ }
+ 
++bool LevelSingleTile(TileIndex tile2, uint h, DoCommandFlag flags, Money & money, CommandCost & cost)
++{
++	uint curh = TileHeight(tile2);
++	while (curh != h) {
++		CommandCost ret = DoCommand(tile2, SLOPE_N, (curh > h) ? 0 : 1,
++			flags & ~DC_EXEC, CMD_TERRAFORM_LAND);
++		if (CmdFailed(ret)) break;
++
++		if (flags & DC_EXEC) {
++			money -= ret.GetCost();
++			if (money < 0) {
++				_additional_cash_required = ret.GetCost();
++				return false;
++			}
++			DoCommand(tile2, SLOPE_N, (curh > h) ? 0 : 1, flags,
++				CMD_TERRAFORM_LAND);
++		}
++
++		cost.AddCost(ret);
++		curh += (curh > h) ? -1 : 1;
++	}
++	return true;
++}
+ 
+ /** Levels a selected (rectangle) area of land
+  * @param tile end tile of area-drag
+  * @param flags for this command type
+  * @param p1 start tile of area drag
+- * @param p2 height difference; eg raise (+1), lower (-1) or level (0)
++ * @param p2 see @LevelMode and @Orientation; flags for the mode of levelling (up, down, diagonal ...)
+  * @return  error or cost of terraforming
+  */
+ CommandCost CmdLevelLand(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
+@@ -364,46 +387,27 @@ CommandCost CmdLevelLand(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32
+ 	uint oldh = TileHeight(p1);
+ 
+ 	/* compute new height */
+-	uint h = oldh + p2;
++	uint h = oldh;
++	if (p2 & LEVEL_RAISE) h++;
++	if (p2 & LEVEL_LOWER) h--;
+ 
+ 	/* Check range of destination height */
+ 	if (h > MAX_TILE_HEIGHT) return_cmd_error((oldh == 0) ? STR_1003_ALREADY_AT_SEA_LEVEL : STR_1004_TOO_HIGH);
+ 	if (p2 == 0) _error_message = STR_ALREADY_LEVELLED;
+ 
+-	/* make sure sx,sy are smaller than ex,ey */
+-	int ex = TileX(tile);
+-	int ey = TileY(tile);
+-	int sx = TileX(p1);
+-	int sy = TileY(p1);
+-	if (ex < sx) Swap(ex, sx);
+-	if (ey < sy) Swap(ey, sy);
+-	tile = TileXY(sx, sy);
+-
+-	int size_x = ex - sx + 1;
+-	int size_y = ey - sy + 1;
+-
+ 	Money money = GetAvailableMoneyForCommand();
+ 	CommandCost cost(EXPENSES_CONSTRUCTION);
+ 
+-	BEGIN_TILE_LOOP(tile2, size_x, size_y, tile) {
+-		uint curh = TileHeight(tile2);
+-		while (curh != h) {
+-			CommandCost ret = DoCommand(tile2, SLOPE_N, (curh > h) ? 0 : 1, flags & ~DC_EXEC, CMD_TERRAFORM_LAND);
+-			if (CmdFailed(ret)) break;
+-
+-			if (flags & DC_EXEC) {
+-				money -= ret.GetCost();
+-				if (money < 0) {
+-					_additional_cash_required = ret.GetCost();
+-					return cost;
+-				}
+-				DoCommand(tile2, SLOPE_N, (curh > h) ? 0 : 1, flags, CMD_TERRAFORM_LAND);
+-			}
+-
+-			cost.AddCost(ret);
+-			curh += (curh > h) ? -1 : 1;
++	if (p2 & ORIENTATION_DIAG) {
++		for (DiagIterator iter(tile, p1); iter != TileIterator::end; ++iter) {
++			if (!LevelSingleTile(*iter, h, flags, money, cost)) return cost;
+ 		}
+-	} END_TILE_LOOP(tile2, size_x, size_y, tile)
++	}
++	if (p2 & ORIENTATION_ORTH){
++		for (OrthIterator iter(tile, p1); iter != TileIterator::end; ++iter) {
++			if (!LevelSingleTile(*iter, h, flags, money, cost)) return cost;
++		}
++	}
+ 
+ 	return (cost.GetCost() == 0) ? CMD_ERROR : cost;
+ }
+diff --git src/terraform_gui.cpp src/terraform_gui.cpp
+index d05e35c..a228324 100644
+--- src/terraform_gui.cpp
++++ src/terraform_gui.cpp
+@@ -121,16 +121,16 @@ bool GUIPlaceProcDragXY(ViewportDragDropSelectionProcess proc, TileIndex start_t
+ 
+ 	switch (proc) {
+ 		case DDSP_DEMOLISH_AREA:
+-			DoCommandP(end_tile, start_tile, 0, CMD_CLEAR_AREA | CMD_MSG(STR_00B5_CAN_T_CLEAR_THIS_AREA), CcPlaySound10);
++			DoCommandP(end_tile, start_tile, _ctrl_pressed ? ORIENTATION_DIAG : ORIENTATION_ORTH, CMD_CLEAR_AREA | CMD_MSG(STR_00B5_CAN_T_CLEAR_THIS_AREA), CcPlaySound10);
+ 			break;
+ 		case DDSP_RAISE_AND_LEVEL_AREA:
+-			DoCommandP(end_tile, start_tile, 1, CMD_LEVEL_LAND | CMD_MSG(STR_0808_CAN_T_RAISE_LAND_HERE), CcTerraform);
++			DoCommandP(end_tile, start_tile, LEVEL_RAISE | ORIENTATION_ORTH, CMD_LEVEL_LAND | CMD_MSG(STR_0808_CAN_T_RAISE_LAND_HERE), CcTerraform);
+ 			break;
+ 		case DDSP_LOWER_AND_LEVEL_AREA:
+-			DoCommandP(end_tile, start_tile, (uint32)-1, CMD_LEVEL_LAND | CMD_MSG(STR_0809_CAN_T_LOWER_LAND_HERE), CcTerraform);
++			DoCommandP(end_tile, start_tile, LEVEL_LOWER | ORIENTATION_ORTH, CMD_LEVEL_LAND | CMD_MSG(STR_0809_CAN_T_LOWER_LAND_HERE), CcTerraform);
+ 			break;
+ 		case DDSP_LEVEL_AREA:
+-			DoCommandP(end_tile, start_tile, 0, CMD_LEVEL_LAND | CMD_MSG(STR_CAN_T_LEVEL_LAND_HERE), CcTerraform);
++			DoCommandP(end_tile, start_tile, _ctrl_pressed ? ORIENTATION_DIAG : ORIENTATION_ORTH, CMD_LEVEL_LAND, CcPlaySound10);
+ 			break;
+ 		case DDSP_CREATE_ROCKS:
+ 			GenerateRockyArea(end_tile, start_tile);
+diff --git src/tilehighlight_type.h src/tilehighlight_type.h
+index 1ad04d9..d3c940f 100644
+--- src/tilehighlight_type.h
++++ src/tilehighlight_type.h
+@@ -72,6 +72,8 @@ struct TileHighlightData {
+ 	ViewportDragDropSelectionProcess select_proc;
+ 
+ 	TileIndex redsq;
++	bool diagonal;     ///< true if dragging a 45 degrees rotated rectangle
++	bool new_diagonal;
+ };
+ 
+ #endif /* TILEHIGHLIGHT_TYPE_H */
+diff --git src/viewport.cpp src/viewport.cpp
+index c218df8..576a74a 100644
+--- src/viewport.cpp
++++ src/viewport.cpp
+@@ -691,6 +691,17 @@ void EndSpriteCombine()
+ 	_vd.combine_sprites = 0;
+ }
+ 
++bool IsInsideRotatedRectangle(int x, int y)
++{
++	int dist_a = (_thd.size.x + _thd.size.y); // Rotated coordinate system for selected rectangle
++	int dist_b = (_thd.size.x - _thd.size.y); // We don't have to divide by 2. It's all relative!
++	int a = ((x - _thd.pos.x) + (y - _thd.pos.y)); // Rotated coordinate system for the point under scrutiny
++	int b = ((x - _thd.pos.x) - (y - _thd.pos.y));
++
++	return ((dist_a >= 0 && a <= dist_a && a >= 0) || (dist_a < 0 && a >= dist_a && a <= 0)) &&
++			((dist_b >= 0 && b <= dist_b && b >= 0) || (dist_b < 0 && b >= dist_b && b <= 0));
++}
++
+ /**
+  * Add a child sprite to a parent sprite.
+  *
+@@ -878,6 +889,26 @@ static void DrawTileSelection(const TileInfo *ti)
+ 	/* no selection active? */
+ 	if (_thd.drawstyle == 0) return;
+ 
++	if (_thd.diagonal) { // We're drawing a 45 degrees rotated (diagonal) rectangle
++		if (IsInsideRotatedRectangle((int)ti->x, (int)ti->y)) {
++			if (_thd.drawstyle & HT_RECT) { // highlighting a square (clear land)
++				SpriteID image = SPR_SELECT_TILE + _tileh_to_sprite[ti->tileh];
++				DrawSelectionSprite(image, _thd.make_square_red ? PALETTE_SEL_TILE_RED : PAL_NONE, ti, 7, FOUNDATION_PART_NORMAL);
++			} else { // highlighting a dot (level land)
++				/* Figure out the Z coordinate for the single dot. */
++				byte z = ti->z;
++				if (ti->tileh & 8) {
++					z += 8;
++					if (!(ti->tileh & 2) && (ti->tileh & 0x10)) {
++						z += 8;
++					}
++				}
++				DrawGroundSpriteAt(_cur_dpi->zoom != 2 ? SPR_DOT : SPR_DOT_SMALL, PAL_NONE, ti->x, ti->y, z);
++			}
++		}
++		return;
++	}
++
+ 	/* Inside the inner area? */
+ 	if (IsInsideBS(ti->x, _thd.pos.x, _thd.size.x) &&
+ 			IsInsideBS(ti->y, _thd.pos.y, _thd.size.y)) {
+@@ -1735,26 +1766,41 @@ static void SetSelectionTilesDirty()
+ 	x_size = _thd.size.x;
+ 	y_size = _thd.size.y;
+ 
+-	if (_thd.outersize.x) {
+-		x_size += _thd.outersize.x;
+-		x += _thd.offs.x;
+-		y_size += _thd.outersize.y;
+-		y += _thd.offs.y;
+-	}
+-
+-	assert(x_size > 0);
+-	assert(y_size > 0);
++	if (!_thd.diagonal) { // Selecting in a straigth rectangle (or a single square)
++		if (_thd.outersize.x) {
++			x_size += _thd.outersize.x;
++			x += _thd.offs.x;
++			y_size += _thd.outersize.y;
++			y += _thd.offs.y;
++		}
++		assert(x_size > 0);
++		assert(y_size > 0);
+ 
+-	x_size += x;
+-	y_size += y;
++		x_size += x;
++		y_size += y;
+ 
+-	do {
+-		int y_bk = y;
+ 		do {
+-			MarkTileDirty(x, y);
+-		} while ( (y += TILE_SIZE) != y_size);
+-		y = y_bk;
+-	} while ( (x += TILE_SIZE) != x_size);
++			int y_bk = y;
++			do {
++				MarkTileDirty(x, y);
++			} while ((y += TILE_SIZE) != y_size);
++			y = y_bk;
++		} while ((x += TILE_SIZE) != x_size);
++	} else { // Selecting in a 45 degrees rotated (diagonal) rectangle.
++		/* a_size, b_size describe a rectangle with rotated coordinates */
++		int a_size = x_size + y_size, b_size = x_size - y_size;
++
++		int interval_a = a_size < 0 ? -TILE_SIZE : TILE_SIZE;
++		int interval_b = b_size < 0 ? -TILE_SIZE : TILE_SIZE;
++
++		for (int a = -interval_a; a != a_size + interval_a; a += interval_a) {
++			for (int b = -interval_b; b != b_size + interval_b; b += interval_b) {
++				x = _thd.pos.x + (a + b) / 2;
++				y = _thd.pos.y + (a - b) / 2;
++				MarkTileDirty(x, y);
++			}
++		}
++	}
+ }
+ 
+ 
+@@ -2124,6 +2170,12 @@ static HighLightStyle GetAutorailHT(int x, int y)
+ 	return HT_RAIL | _autorail_piece[x & 0xF][y & 0xF];
+ }
+ 
++static inline bool DraggingDiagonal()
++{
++	return _ctrl_pressed && _thd.select_method == VPM_X_AND_Y &&
++		(_thd.select_proc == DDSP_DEMOLISH_AREA || _thd.select_proc == DDSP_LEVEL_AREA);
++}
++
+ /**
+  * Updates tile highlighting for all cases.
+  * Uses _thd.selstart and _thd.selend and _thd.place_mode (set elsewhere) to determine _thd.pos and _thd.size
+@@ -2137,6 +2189,7 @@ void UpdateTileSelection()
+ 	int y1;
+ 
+ 	_thd.new_drawstyle = 0;
++	_thd.new_diagonal = false;
+ 
+ 	if (_thd.place_mode == VHM_SPECIAL) {
+ 		x1 = _thd.selend.x;
+@@ -2147,12 +2200,20 @@ void UpdateTileSelection()
+ 			x1 &= ~0xF;
+ 			y1 &= ~0xF;
+ 
+-			if (x1 >= x2) Swap(x1, x2);
+-			if (y1 >= y2) Swap(y1, y2);
++			if ( DraggingDiagonal() )
++				_thd.new_diagonal = true;
++			else {
++				if (x1 >= x2) Swap(x1,x2);
++				if (y1 >= y2) Swap(y1,y2);
++			}
+ 			_thd.new_pos.x = x1;
+ 			_thd.new_pos.y = y1;
+-			_thd.new_size.x = x2 - x1 + TILE_SIZE;
+-			_thd.new_size.y = y2 - y1 + TILE_SIZE;
++			_thd.new_size.x = x2 - x1;
++			_thd.new_size.y = y2 - y1;
++			if (!_thd.new_diagonal) {
++				_thd.new_size.x += TILE_SIZE;
++				_thd.new_size.y += TILE_SIZE;
++			}
+ 			_thd.new_drawstyle = _thd.next_drawstyle;
+ 		}
+ 	} else if (_thd.place_mode != VHM_NONE) {
+@@ -2186,7 +2247,8 @@ void UpdateTileSelection()
+ 			_thd.pos.x != _thd.new_pos.x || _thd.pos.y != _thd.new_pos.y ||
+ 			_thd.size.x != _thd.new_size.x || _thd.size.y != _thd.new_size.y ||
+ 			_thd.outersize.x != _thd.new_outersize.x ||
+-			_thd.outersize.y != _thd.new_outersize.y) {
++			_thd.outersize.y != _thd.new_outersize.y ||
++			_thd.diagonal    != _thd.new_diagonal) {
+ 		/* clear the old selection? */
+ 		if (_thd.drawstyle) SetSelectionTilesDirty();
+ 
+@@ -2194,6 +2256,7 @@ void UpdateTileSelection()
+ 		_thd.pos = _thd.new_pos;
+ 		_thd.size = _thd.new_size;
+ 		_thd.outersize = _thd.new_outersize;
++		_thd.diagonal = _thd.new_diagonal;
+ 		_thd.dirty = 0xff;
+ 
+ 		/* draw the new selection? */

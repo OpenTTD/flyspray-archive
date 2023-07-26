@@ -1,0 +1,143 @@
+Index: src/order_gui.cpp
+===================================================================
+--- src/order_gui.cpp	(Revision 9768)
++++ src/order_gui.cpp	(Arbeitskopie)
+@@ -93,7 +93,7 @@
+ 
+ 	if (v->owner == _local_player) {
+ 		/* skip */
+-		SetWindowWidgetDisabledState(w, ORDER_WIDGET_SKIP, v->num_orders == 0);
++		SetWindowWidgetDisabledState(w, ORDER_WIDGET_SKIP, v->num_orders <= 1);
+ 
+ 		/* delete */
+ 		SetWindowWidgetDisabledState(w, ORDER_WIDGET_DELETE,
+@@ -390,7 +390,16 @@
+ 
+ static void OrderClick_Skip(Window *w, const Vehicle *v)
+ {
+-	DoCommandP(v->tile, v->index, 0, NULL, CMD_SKIP_ORDER);
++	if (_ctrl_pressed) {
++		/* Skip to selected order */
++		DoCommandP(v->tile, v->index, OrderGetSel(w), NULL, CMD_SKIP_TO_ORDER | CMD_MSG(STR_CAN_T_SKIP_TO_ORDER));
++	} else {
++		/* Skip to next order */
++		VehicleOrderID b = v->cur_order_index + 1;
++		if (b >= v->num_orders) b = 0;
++
++		DoCommandP(v->tile, v->index, b, NULL, CMD_SKIP_TO_ORDER | CMD_MSG(STR_CAN_T_SKIP_ORDER));
++	}
+ }
+ 
+ static void OrderClick_Delete(Window *w, const Vehicle *v)
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(Revision 9768)
++++ src/lang/english.txt	(Arbeitskopie)
+@@ -2588,6 +2588,8 @@
+ STR_8833_CAN_T_INSERT_NEW_ORDER                                 :{WHITE}Can't insert new order...
+ STR_8834_CAN_T_DELETE_THIS_ORDER                                :{WHITE}Can't delete this order...
+ STR_8835_CAN_T_MODIFY_THIS_ORDER                                :{WHITE}Can't modify this order...
++STR_CAN_T_SKIP_ORDER                                            :{WHITE}Can't skip current order...
++STR_CAN_T_SKIP_TO_ORDER                                         :{WHITE}Can't skip to selected order...
+ STR_8837_CAN_T_MOVE_VEHICLE                                     :{WHITE}Can't move vehicle...
+ STR_REAR_ENGINE_FOLLOW_FRONT_ERROR                              :{WHITE}The rear engine will always follow its front counterpart
+ STR_8838_N_A                                                    :N/A{SKIP}
+@@ -2619,7 +2621,7 @@
+ STR_8851_SHOW_CAPACITIES_OF_EACH                                :{BLACK}Show capacities of each vehicle
+ STR_8852_SHOW_TOTAL_CARGO                                       :{BLACK}Show total capacity of train, split by cargo type
+ STR_8852_ORDERS_LIST_CLICK_ON_ORDER                             :{BLACK}Orders list - click on an order to highlight it. CTRL + click scrolls to the station
+-STR_8853_SKIP_THE_CURRENT_ORDER                                 :{BLACK}Skip the current order, and start the next
++STR_8853_SKIP_THE_CURRENT_ORDER                                 :{BLACK}Skip the current order, and start the next. CTRL + click skips to the selected order
+ STR_8854_DELETE_THE_HIGHLIGHTED                                 :{BLACK}Delete the highlighted order
+ STR_8855_MAKE_THE_HIGHLIGHTED_ORDER                             :{BLACK}Make the highlighted order non-stop
+ STR_8856_INSERT_A_NEW_ORDER_BEFORE                              :{BLACK}Insert a new order before the highlighted order, or add to end of list
+Index: src/order_cmd.cpp
+===================================================================
+--- src/order_cmd.cpp	(Revision 9768)
++++ src/order_cmd.cpp	(Arbeitskopie)
+@@ -557,16 +557,17 @@
+ 	return 0;
+ }
+ 
+-/** Goto next order of order-list.
++/** Goto order of order-list.
+  * @param tile unused
+  * @param flags operation to perform
+  * @param p1 The ID of the vehicle which order is skipped
+- * @param p2 unused
++ * @param p2 the selected order to which we want to skip
+  */
+-int32 CmdSkipOrder(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++int32 CmdSkipToOrder(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 	VehicleID veh_id = p1;
++	VehicleOrderID sel_ord = p2;
+ 
+ 	if (!IsValidVehicleID(veh_id)) return CMD_ERROR;
+ 
+@@ -574,13 +575,11 @@
+ 
+ 	if (!CheckOwnership(v->owner)) return CMD_ERROR;
+ 
++	if (sel_ord >= v->num_orders || v->num_orders < 2) return CMD_ERROR;
++
+ 	if (flags & DC_EXEC) {
+-		/* Goto next order */
+-		VehicleOrderID b = v->cur_order_index + 1;
+-		if (b >= v->num_orders) b = 0;
++		v->cur_order_index = sel_ord;
+ 
+-		v->cur_order_index = b;
+-
+ 		if (v->type == VEH_TRAIN) v->u.rail.days_since_order_progr = 0;
+ 
+ 		if (v->type == VEH_ROAD) ClearSlot(v);
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(Revision 9768)
++++ src/command.cpp	(Arbeitskopie)
+@@ -79,7 +79,7 @@
+ DEF_COMMAND(CmdReverseTrainDirection);
+ 
+ DEF_COMMAND(CmdModifyOrder);
+-DEF_COMMAND(CmdSkipOrder);
++DEF_COMMAND(CmdSkipToOrder);
+ DEF_COMMAND(CmdDeleteOrder);
+ DEF_COMMAND(CmdInsertOrder);
+ DEF_COMMAND(CmdChangeServiceInt);
+@@ -214,7 +214,7 @@
+ 	{CmdReverseTrainDirection,               0}, /*  41 */
+ 
+ 	{CmdModifyOrder,                         0}, /*  42 */
+-	{CmdSkipOrder,                           0}, /*  43 */
++	{CmdSkipToOrder,                         0}, /*  43 */
+ 	{CmdDeleteOrder,                         0}, /*  44 */
+ 	{CmdInsertOrder,                         0}, /*  45 */
+ 
+Index: src/ai/trolly/trolly.cpp
+===================================================================
+--- src/ai/trolly/trolly.cpp	(Revision 9768)
++++ src/ai/trolly/trolly.cpp	(Arbeitskopie)
+@@ -1221,7 +1221,7 @@
+ 	// Skip the first order if it is a second vehicle
+ 	//  This to make vehicles go different ways..
+ 	if (p->ainew.cur_veh & 1)
+-		AI_DoCommand(0, p->ainew.veh_id, 0, DC_EXEC, CMD_SKIP_ORDER);
++		AI_DoCommand(0, p->ainew.veh_id, 1, DC_EXEC, CMD_SKIP_TO_ORDER);
+ 
+ 	// 3, 2, 1... go! (give START_STOP command ;))
+ 	AI_DoCommand(0, p->ainew.veh_id, 0, DC_EXEC, CMD_START_STOP_ROADVEH);
+Index: src/command.h
+===================================================================
+--- src/command.h	(Revision 9768)
++++ src/command.h	(Arbeitskopie)
+@@ -57,7 +57,7 @@
+ 	CMD_REVERSE_TRAIN_DIRECTION      =  41,
+ 
+ 	CMD_MODIFY_ORDER                 =  42,
+-	CMD_SKIP_ORDER                   =  43,
++	CMD_SKIP_TO_ORDER                =  43,
+ 	CMD_DELETE_ORDER                 =  44,
+ 	CMD_INSERT_ORDER                 =  45,
+ 

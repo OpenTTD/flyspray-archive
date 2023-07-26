@@ -1,0 +1,446 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 10387)
++++ src/lang/english.txt	(working copy)
+@@ -3323,6 +3323,10 @@
+ STR_GROUP_ALL_ROADS                                             :All road vehicles
+ STR_GROUP_ALL_SHIPS                                             :All ships
+ STR_GROUP_ALL_AIRCRAFTS                                         :All aircraft
++STR_GROUP_DEFAULT_TRAINS                                        :Ungrouped trains
++STR_GROUP_DEFAULT_ROADS                                         :Ungrouped road vehicles
++STR_GROUP_DEFAULT_SHIPS                                         :Ungrouped ships
++STR_GROUP_DEFAULT_AIRCRAFTS                                     :Ungrouped aircraft
+ STR_GROUP_TINY_NUM                                              :{TINYFONT}{COMMA}
+ STR_GROUP_ADD_SHARED_VEHICLE                                    :Add shared vehicles
+ STR_GROUP_REMOVE_ALL_VEHICLES                                   :Remove all vehicles
+Index: src/group.h
+===================================================================
+--- src/group.h	(revision 10387)
++++ src/group.h	(working copy)
+@@ -8,6 +8,7 @@
+ #include "oldpool.h"
+ 
+ enum {
++	ALL_GROUP = 0xFFFD,
+ 	DEFAULT_GROUP = 0xFFFE,
+ 	INVALID_GROUP = 0xFFFF,
+ };
+@@ -52,6 +53,18 @@
+ {
+ 	return (index == DEFAULT_GROUP);
+ }
++ 
++/**
++ * Checks if a GroupID stands for all vehicles of a player
++ *
++ * @param id_g The GroupID to check
++ *
++ * @return true is id_g is identical to ALL_GROUP
++ */
++static inline bool IsAllGroupID(GroupID id_g)
++{
++	return (id_g == ALL_GROUP);
++}
+ 
+ #define FOR_ALL_GROUPS_FROM(g, start) for (g = GetGroup(start); g != NULL; g = (g->index + 1U < GetGroupPoolSize()) ? GetGroup(g->index + 1) : NULL) if (IsValidGroup(g))
+ #define FOR_ALL_GROUPS(g) FOR_ALL_GROUPS_FROM(g, 0)
+@@ -69,6 +82,32 @@
+ 	return num;
+ }
+ 
++/**
++ * Get the number of engines with EngineID id_e in the group with GroupID
++ * id_g
++ *
++ * @param id_g The GroupID of the group used
++ * @param id_e The EngineID of the engine to count
++ *
++ * @return The number of engines with EngineID id_e in the group
++ */
++static inline uint GetGroupNumEngines(GroupID id_g, EngineID id_e)
++{
++	if (IsValidGroupID(id_g)) {
++		return GetGroup(id_g)->num_engines[id_e];
++	} else {
++		const Group *g;
++		uint num = GetPlayer(_local_player)->num_engines[id_e];
++
++		if (IsDefaultGroupID(id_g)) {
++			FOR_ALL_GROUPS(g)
++				num -= g->num_engines[id_e];
++		}
++
++		return num;
++	}
++}
++
+ static inline void IncreaseGroupNumVehicle(GroupID id_g)
+ {
+ 	if (IsValidGroupID(id_g)) GetGroup(id_g)->num_vehicle++;
+Index: src/build_vehicle_gui.cpp
+===================================================================
+--- src/build_vehicle_gui.cpp	(revision 10387)
++++ src/build_vehicle_gui.cpp	(working copy)
+@@ -822,7 +822,6 @@
+ 	byte step_size = GetVehicleListHeight(type);
+ 	byte x_offset = 0;
+ 	byte y_offset = 0;
+-	Player *p = GetPlayer(_local_player);
+ 
+ 	assert(max <= EngList_Count(&eng_list));
+ 
+@@ -853,7 +852,7 @@
+ 
+ 	for (; min < max; min++, y += step_size) {
+ 		const EngineID engine = eng_list[min];
+-		const uint num_engines = IsDefaultGroupID(selected_group) ? p->num_engines[engine] : GetGroup(selected_group)->num_engines[engine];
++		const uint num_engines = GetGroupNumEngines(selected_group, engine);
+ 
+ 		SetDParam(0, engine);
+ 		DrawString(x + x_offset, y, STR_ENGINE_NAME, engine == selected_id ? 0xC : 0x10);
+Index: src/autoreplace_gui.cpp
+===================================================================
+--- src/autoreplace_gui.cpp	(revision 10387)
++++ src/autoreplace_gui.cpp	(working copy)
+@@ -48,7 +48,7 @@
+ {
+ 	Player *p = GetPlayer(_local_player);
+ 	byte type = GetEngine(e)->type;
+-	uint num_engines = IsDefaultGroupID(id_g) ? p->num_engines[e] : GetGroup(id_g)->num_engines[e];
++	uint num_engines = GetGroupNumEngines(id_g, e);
+ 
+ 	if (num_engines == 0 || p->num_engines[e] == 0) {
+ 		/* We don't have any of this engine type.
+@@ -140,7 +140,6 @@
+  */
+ static void GenerateReplaceVehList(Window *w, bool draw_left)
+ {
+-	Player *p = GetPlayer(_local_player);
+ 	EngineID e;
+ 	EngineID selected_engine = INVALID_ENGINE;
+ 	byte type = w->window_number;
+@@ -154,7 +153,7 @@
+ 
+ 		if (draw_left) {
+ 			const GroupID selected_group = WP(w, replaceveh_d).sel_group;
+-			const uint num_engines = IsDefaultGroupID(selected_group) ? p->num_engines[e] : GetGroup(selected_group)->num_engines[e];
++			const uint num_engines = GetGroupNumEngines(selected_group, e);
+ 
+ 			/* Skip drawing the engines we don't have any of and haven't set for replacement */
+ 			if (num_engines == 0 && EngineReplacementForPlayer(GetPlayer(_local_player), e, selected_group) == INVALID_ENGINE) continue;
+Index: src/group_gui.cpp
+===================================================================
+--- src/group_gui.cpp	(revision 10387)
++++ src/group_gui.cpp	(working copy)
+@@ -112,6 +112,7 @@
+ 	GRP_WIDGET_STICKY,
+ 	GRP_WIDGET_EMPTY_TOP_LEFT,
+ 	GRP_WIDGET_ALL_VEHICLES,
++	GRP_WIDGET_DEFAULT_VEHICLES,
+ 	GRP_WIDGET_LIST_GROUP,
+ 	GRP_WIDGET_LIST_GROUP_SCROLLBAR,
+ 	GRP_WIDGET_SORT_BY_ORDER,
+@@ -141,8 +142,9 @@
+ {    WWT_CAPTION,  RESIZE_RIGHT,    14,    11,   513,     0,    13, 0x0,                  STR_018C_WINDOW_TITLE_DRAG_THIS},
+ {  WWT_STICKYBOX,     RESIZE_LR,    14,   514,   525,     0,    13, 0x0,                  STR_STICKY_BUTTON},
+ {      WWT_PANEL,   RESIZE_NONE,    14,     0,   200,    14,    25, 0x0,                  STR_NULL},
+-{      WWT_PANEL,   RESIZE_NONE,    14,     0,   200,    26,    39, 0x0,                  STR_NULL},
+-{     WWT_MATRIX, RESIZE_BOTTOM,    14,     0,   188,    39,   220, 0x701,                STR_GROUPS_CLICK_ON_GROUP_FOR_TIP},
++{      WWT_PANEL,   RESIZE_NONE,    14,     0,   200,    26,    38, 0x0,                  STR_NULL},
++{      WWT_PANEL,   RESIZE_NONE,    14,     0,   200,    39,    52, 0x0,                  STR_NULL},
++{     WWT_MATRIX, RESIZE_BOTTOM,    14,     0,   188,    52,   220, 0x701,                STR_GROUPS_CLICK_ON_GROUP_FOR_TIP},
+ {  WWT_SCROLLBAR, RESIZE_BOTTOM,    14,   189,   200,    26,   220, 0x0,                  STR_0190_SCROLL_BAR_SCROLLS_LIST},
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   201,   281,    14,    25, STR_SORT_BY,          STR_SORT_ORDER_TIP},
+ {      WWT_PANEL,   RESIZE_NONE,    14,   282,   435,    14,    25, 0x0,                  STR_SORT_CRITERIA_TIP},
+@@ -181,13 +183,13 @@
+ 		default: NOT_REACHED();
+ 		case VEH_TRAIN:
+ 		case VEH_ROAD:
+-			w->vscroll.cap = 14;
++			w->vscroll.cap = 13;
+ 			w->vscroll2.cap = 8;
+ 			w->resize.step_height = PLY_WND_PRC__SIZE_OF_ROW_SMALL;
+ 			break;
+ 		case VEH_SHIP:
+ 		case VEH_AIRCRAFT:
+-			w->vscroll.cap = 10;
++			w->vscroll.cap = 9;
+ 			w->vscroll2.cap = 4;
+ 			w->resize.step_height = PLY_WND_PRC__SIZE_OF_ROW_BIG2;
+ 			break;
+@@ -214,7 +216,7 @@
+ 	gl->l.flags = VL_REBUILD | VL_NONE;
+ 	gl->l.resort_timer = DAY_TICKS * PERIODIC_RESORT_DAYS;	// Set up resort timer
+ 
+-	gv->group_sel = DEFAULT_GROUP;
++	gv->group_sel = ALL_GROUP;
+ 
+ 	switch (gv->vehicle_type) {
+ 		case VEH_TRAIN:
+@@ -275,8 +277,8 @@
+ 		INVALID_STRING_ID
+ 	};
+ 
+-	action_str[3] = IsDefaultGroupID(gid) ? INVALID_STRING_ID : STR_GROUP_ADD_SHARED_VEHICLE;
+-	action_str[4] = IsDefaultGroupID(gid) ? INVALID_STRING_ID : STR_GROUP_REMOVE_ALL_VEHICLES;
++	action_str[3] = IsValidGroupID(gid) ? STR_GROUP_ADD_SHARED_VEHICLE : INVALID_STRING_ID;
++	action_str[4] = IsValidGroupID(gid) ? STR_GROUP_REMOVE_ALL_VEHICLES : INVALID_STRING_ID;
+ 
+ 	ShowDropDownMenu(w, action_str, 0, GRP_WIDGET_MANAGE_VEHICLES_DROPDOWN, 0, 0);
+ }
+@@ -314,9 +316,9 @@
+ 			int max;
+ 			int i;
+ 
+-			/* If we select the default group, gv->list will contain all vehicles of the player
++			/* If we select the all vehicles, gv->list will contain all vehicles of the player
+ 			 * else gv->list will contain all vehicles which belong to the selected group */
+-			BuildVehicleList(gv, owner, gv->group_sel, IsDefaultGroupID(gv->group_sel) ? VLW_STANDARD : VLW_GROUP_LIST);
++			BuildVehicleList(gv, owner, gv->group_sel, IsAllGroupID(gv->group_sel) ? VLW_STANDARD : VLW_GROUP_LIST);
+ 			SortVehicleList(gv);
+ 
+ 
+@@ -334,16 +336,16 @@
+ 					GRP_WIDGET_MANAGE_VEHICLES_DROPDOWN,
+ 					WIDGET_LIST_END);
+ 
+-			/* Disable the group specific function when we select the default group */
+-			SetWindowWidgetsDisabledState(w, IsDefaultGroupID(gv->group_sel),
++			/* Disable the group specific function when we select the default group or all vehicles */
++			SetWindowWidgetsDisabledState(w, IsDefaultGroupID(gv->group_sel) || IsAllGroupID(gv->group_sel),
+ 					GRP_WIDGET_DELETE_GROUP,
+ 					GRP_WIDGET_RENAME_GROUP,
+ 					GRP_WIDGET_REPLACE_PROTECTION,
+ 					WIDGET_LIST_END);
+ 
+-			/* If selected_group == DEFAULT_GROUP, draw the standard caption
+-			   We list all vehicles */
+-			if (IsDefaultGroupID(gv->group_sel)) {
++			/* If selected_group == DEFAULT_GROUP || ALL_GROUP, draw the standard caption
++			   We list all vehicles or ungrouped vehicles */
++			if (IsDefaultGroupID(gv->group_sel) || IsAllGroupID(gv->group_sel)) {
+ 				SetDParam(0, p->index);
+ 				SetDParam(1, gv->l.list_length);
+ 
+@@ -398,17 +400,33 @@
+ 
+ 			/* Draw Matrix Group
+ 			 * The selected group is drawn in white */
+-			StringID str;
++			StringID str_all_veh, str_no_group_veh;
+ 
+ 			switch (gv->vehicle_type) {
+-				case VEH_TRAIN:    str = STR_GROUP_ALL_TRAINS;    break;
+-				case VEH_ROAD:     str = STR_GROUP_ALL_ROADS;     break;
+-				case VEH_SHIP:     str = STR_GROUP_ALL_SHIPS;     break;
+-				case VEH_AIRCRAFT: str = STR_GROUP_ALL_AIRCRAFTS; break;
++				case VEH_TRAIN:
++					str_all_veh = STR_GROUP_ALL_TRAINS;
++					str_no_group_veh = STR_GROUP_DEFAULT_TRAINS;
++					break;
++				case VEH_ROAD:
++					str_all_veh = STR_GROUP_ALL_ROADS;
++					str_no_group_veh = STR_GROUP_DEFAULT_ROADS;
++					break;
++				case VEH_SHIP:
++					str_all_veh = STR_GROUP_ALL_SHIPS;
++					str_no_group_veh = STR_GROUP_DEFAULT_SHIPS;
++					break;
++				case VEH_AIRCRAFT:
++					str_all_veh = STR_GROUP_ALL_AIRCRAFTS;
++					str_no_group_veh = STR_GROUP_DEFAULT_AIRCRAFTS;
++					break;
+ 				default: NOT_REACHED(); break;
+ 			}
+-			DrawString(10, y1, str, IsDefaultGroupID(gv->group_sel) ? 12 : 16);
++			DrawString(10, y1, str_all_veh, IsAllGroupID(gv->group_sel) ? 12 : 16);
+ 
++			y1 += 13;
++
++			DrawString(10, y1, str_no_group_veh, IsDefaultGroupID(gv->group_sel) ? 12 : 16);
++
+ 			max = min(w->vscroll.pos + w->vscroll.cap, gl->l.list_length);
+ 			for (i = w->vscroll.pos ; i < max ; ++i) {
+ 				const Group *g = gl->sort_list[i];
+@@ -491,6 +509,15 @@
+ 					return;
+ 
+ 				case GRP_WIDGET_ALL_VEHICLES: // All vehicles button
++					if (!IsAllGroupID(gv->group_sel)) {
++						gv->group_sel = ALL_GROUP;
++						gv->l.flags |= VL_REBUILD;
++						UpdateGroupActionDropdown(w, gv->group_sel);
++						SetWindowDirty(w);
++					}
++					break;
++
++				case GRP_WIDGET_DEFAULT_VEHICLES: // Ungrouped vehicles button
+ 					if (!IsDefaultGroupID(gv->group_sel)) {
+ 						gv->group_sel = DEFAULT_GROUP;
+ 						gv->l.flags |= VL_REBUILD;
+@@ -500,7 +527,7 @@
+ 					break;
+ 
+ 				case GRP_WIDGET_LIST_GROUP: { // Matrix Group
+-					uint16 id_g = (e->we.click.pt.y - PLY_WND_PRC__OFFSET_TOP_WIDGET - 13) / PLY_WND_PRC__SIZE_OF_ROW_TINY;
++					uint16 id_g = (e->we.click.pt.y - PLY_WND_PRC__OFFSET_TOP_WIDGET - 26) / PLY_WND_PRC__SIZE_OF_ROW_TINY;
+ 
+ 					if (id_g >= w->vscroll.cap) return;
+ 
+@@ -554,14 +581,14 @@
+ 
+ 				case GRP_WIDGET_DELETE_GROUP: { // Delete the selected group
+ 					GroupID group = gv->group_sel;
+-					gv->group_sel = DEFAULT_GROUP;
++					gv->group_sel = ALL_GROUP;
+ 
+ 					DoCommandP(0, group, 0, NULL, CMD_DELETE_GROUP | CMD_MSG(STR_GROUP_CAN_T_DELETE));
+ 					break;
+ 				}
+ 
+ 				case GRP_WIDGET_RENAME_GROUP: { // Rename the selected roup
+-					assert(!IsDefaultGroupID(gv->group_sel));
++					assert(IsValidGroupID(gv->group_sel));
+ 
+ 					const Group *g = GetGroup(gv->group_sel);
+ 
+@@ -583,7 +610,7 @@
+ 
+ 				case GRP_WIDGET_START_ALL:
+ 				case GRP_WIDGET_STOP_ALL: { // Start/stop all vehicles of the list
+-					DoCommandP(0, gv->group_sel, ((IsDefaultGroupID(gv->group_sel) ? VLW_STANDARD : VLW_GROUP_LIST) & VLW_MASK)
++					DoCommandP(0, gv->group_sel, ((IsAllGroupID(gv->group_sel) ? VLW_STANDARD : VLW_GROUP_LIST) & VLW_MASK)
+ 														| (1 << 6)
+ 														| (e->we.click.widget == GRP_WIDGET_START_ALL ? (1 << 5) : 0)
+ 														| gv->vehicle_type, NULL, CMD_MASS_START_STOP);
+@@ -592,7 +619,7 @@
+ 				}
+ 
+ 				case GRP_WIDGET_REPLACE_PROTECTION:
+-					if (!IsDefaultGroupID(gv->group_sel)) {
++					if (IsValidGroupID(gv->group_sel)) {
+ 						const Group *g = GetGroup(gv->group_sel);
+ 
+ 						DoCommandP(0, gv->group_sel, !g->replace_protection, NULL, CMD_SET_GROUP_REPLACE_PROTECTION);
+@@ -604,7 +631,8 @@
+ 
+ 		case WE_DRAGDROP: {
+ 			switch (e->we.click.widget) {
+-				case GRP_WIDGET_ALL_VEHICLES: // All trains
++				case GRP_WIDGET_ALL_VEHICLES: // All vehicles
++				case GRP_WIDGET_DEFAULT_VEHICLES: // Ungrouped vehicles
+ 					DoCommandP(0, DEFAULT_GROUP, gv->vehicle_sel, NULL, CMD_ADD_VEHICLE_GROUP | CMD_MSG(STR_GROUP_CAN_T_ADD_VEHICLE));
+ 
+ 					gv->vehicle_sel = INVALID_VEHICLE;
+@@ -614,7 +642,7 @@
+ 					break;
+ 
+ 				case GRP_WIDGET_LIST_GROUP: { // Maxtrix group
+-					uint16 id_g = (e->we.click.pt.y - PLY_WND_PRC__OFFSET_TOP_WIDGET - 13) / PLY_WND_PRC__SIZE_OF_ROW_TINY;
++					uint16 id_g = (e->we.click.pt.y - PLY_WND_PRC__OFFSET_TOP_WIDGET - 26) / PLY_WND_PRC__SIZE_OF_ROW_TINY;
+ 					const VehicleID vindex = gv->vehicle_sel;
+ 
+ 					gv->vehicle_sel = INVALID_VEHICLE;
+@@ -701,21 +729,21 @@
+ 							ShowReplaceGroupVehicleWindow(gv->group_sel, gv->vehicle_type);
+ 							break;
+ 						case 1: // Send for servicing
+-							DoCommandP(0, gv->group_sel, ((IsDefaultGroupID(gv->group_sel) ? VLW_STANDARD : VLW_GROUP_LIST) & VLW_MASK)
++							DoCommandP(0, gv->group_sel, ((IsAllGroupID(gv->group_sel) ? VLW_STANDARD : VLW_GROUP_LIST) & VLW_MASK)
+ 										| DEPOT_MASS_SEND
+ 										| DEPOT_SERVICE, NULL, GetCmdSendToDepot(gv->vehicle_type));
+ 							break;
+ 						case 2: // Send to Depots
+-							DoCommandP(0, gv->group_sel, ((IsDefaultGroupID(gv->group_sel) ? VLW_STANDARD : VLW_GROUP_LIST) & VLW_MASK)
++							DoCommandP(0, gv->group_sel, ((IsAllGroupID(gv->group_sel) ? VLW_STANDARD : VLW_GROUP_LIST) & VLW_MASK)
+ 										| DEPOT_MASS_SEND, NULL, GetCmdSendToDepot(gv->vehicle_type));
+ 							break;
+ 						case 3: // Add shared Vehicles
+-							assert(!IsDefaultGroupID(gv->group_sel));
++							assert(IsValidGroupID(gv->group_sel));
+ 
+ 							DoCommandP(0, gv->group_sel, gv->vehicle_type, NULL, CMD_ADD_SHARED_VEHICLE_GROUP | CMD_MSG(STR_GROUP_CAN_T_ADD_SHARED_VEHICLE));
+ 							break;
+ 						case 4: // Remove all Vehicles from the selected group
+-							assert(!IsDefaultGroupID(gv->group_sel));
++							assert(IsValidGroupID(gv->group_sel));
+ 
+ 							DoCommandP(0, gv->group_sel, gv->vehicle_type, NULL, CMD_REMOVE_ALL_VEHICLES_GROUP | CMD_MSG(STR_GROUP_CAN_T_REMOVE_ALL_VEHICLES));
+ 							break;
+Index: src/players.cpp
+===================================================================
+--- src/players.cpp	(revision 10387)
++++ src/players.cpp	(working copy)
+@@ -711,7 +711,7 @@
+ 			GroupID id_g = GB(p1, 16, 16);
+ 			CommandCost cost;
+ 
+-			if (!IsValidGroupID(id_g) && !IsDefaultGroupID(id_g)) return CMD_ERROR;
++			if (!IsValidGroupID(id_g) && !IsAllGroupID(id_g) && !IsDefaultGroupID(id_g)) return CMD_ERROR;
+ 			if (new_engine_type != INVALID_ENGINE) {
+ 				/* First we make sure that it's a valid type the user requested
+ 				 * check that it's an engine that is in the engine array */
+Index: src/engine.cpp
+===================================================================
+--- src/engine.cpp	(revision 10387)
++++ src/engine.cpp	(working copy)
+@@ -507,7 +507,7 @@
+ 
+ 		er->to = INVALID_ENGINE;
+ 		er->next = NULL;
+-		er->group_id = DEFAULT_GROUP;
++		er->group_id = ALL_GROUP;
+ 		return er;
+ 	}
+ 
+@@ -636,8 +636,12 @@
+ 		er = GetEngineRenew(index);
+ 		SlObject(er, _engine_renew_desc);
+ 
+-		/* Advanced vehicle lists got added */
+-		if (CheckSavegameVersion(60)) er->group_id = DEFAULT_GROUP;
++		/* Advanced vehicle lists, ungrouped vehicles got added */
++		if (CheckSavegameVersion(60)) {
++			er->group_id = ALL_GROUP;
++		} else if (CheckSavegameVersion(68)) {
++			if (er->group_id == DEFAULT_GROUP) er->group_id = ALL_GROUP;
++		}
+ 	}
+ }
+ 
+Index: src/autoreplace_cmd.cpp
+===================================================================
+--- src/autoreplace_cmd.cpp	(revision 10387)
++++ src/autoreplace_cmd.cpp	(working copy)
+@@ -138,11 +138,11 @@
+ 	 *  If not, chek if an global auto replacement is defined */
+ 	new_engine_type = (IsValidGroupID(old_v->group_id) && GetGroup(old_v->group_id)->replace_protection) ?
+ 			INVALID_ENGINE :
+-			EngineReplacementForPlayer(p, old_v->engine_type, DEFAULT_GROUP);
++			EngineReplacementForPlayer(p, old_v->engine_type, ALL_GROUP);
+ 
+ 	/* If we don't set new_egnine_type previously, we try to check if an autoreplacement was defined
+ 	 *  for the group and the engine_type of the vehicle */
+-	if (new_engine_type == INVALID_ENGINE && !IsDefaultGroupID(old_v->group_id)) {
++	if (new_engine_type == INVALID_ENGINE && !IsAllGroupID(old_v->group_id)) {
+ 		new_engine_type = EngineReplacementForPlayer(p, old_v->engine_type, old_v->group_id);
+ 	}
+ 
+@@ -346,10 +346,15 @@
+ 				if (IsValidGroupID(w->group_id)) {
+ 					if (!EngineHasReplacementForPlayer(p, w->engine_type, w->group_id) && (
+ 							GetGroup(w->group_id)->replace_protection ||
+-							!EngineHasReplacementForPlayer(p, w->engine_type, DEFAULT_GROUP))) {
++							!EngineHasReplacementForPlayer(p, w->engine_type, ALL_GROUP))) {
+ 						continue;
+ 					}
+-				} else if (!EngineHasReplacementForPlayer(p, w->engine_type, DEFAULT_GROUP)) {
++				} else if (IsDefaultGroupID(w->group_id)) {
++					if (!EngineHasReplacementForPlayer(p, w->engine_type, DEFAULT_GROUP) &&
++							!EngineHasReplacementForPlayer(p, w->engine_type, ALL_GROUP)) {
++						continue;
++					}
++				} else if (!EngineHasReplacementForPlayer(p, w->engine_type, ALL_GROUP)) {
+ 					continue;
+ 				}
+ 			}

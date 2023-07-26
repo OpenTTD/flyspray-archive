@@ -1,0 +1,1226 @@
+Index: src/ai/default/default.cpp
+===================================================================
+--- src/ai/default/default.cpp	(revision 9601)
++++ src/ai/default/default.cpp	(working copy)
+@@ -135,7 +135,7 @@
+ {
+ 	EngineID best_veh_index = INVALID_ENGINE;
+ 	byte best_veh_score = 0;
+-	int32 ret;
++	CommandResult ret;
+ 	EngineID i;
+ 
+ 	for (i = 0; i < NUM_TRAIN_ENGINES; i++) {
+@@ -151,7 +151,7 @@
+ 		}
+ 
+ 		ret = DoCommand(tile, i, 0, 0, CMD_BUILD_RAIL_VEHICLE);
+-		if (!CmdFailed(ret) && ret <= money && rvi->ai_rank >= best_veh_score) {
++		if (!CmdFailed(ret) && ret.cost <= money && rvi->ai_rank >= best_veh_score) {
+ 			best_veh_score = rvi->ai_rank;
+ 			best_veh_index = i;
+ 		}
+@@ -171,7 +171,7 @@
+ 		const RoadVehicleInfo *rvi = RoadVehInfo(i);
+ 		const Engine* e = GetEngine(i);
+ 		int32 rating;
+-		int32 ret;
++		CommandResult ret;
+ 
+ 		if (!HASBIT(e->player_avail, _current_player) || e->reliability < 0x8A3D) {
+ 			continue;
+@@ -188,8 +188,8 @@
+ 		if (CmdFailed(ret)) continue;
+ 
+ 		/* Add the cost of refitting */
+-		if (rvi->cargo_type != cargo) ret += GetRefitCost(i);
+-		if (ret > money) continue;
++		if (rvi->cargo_type != cargo) ret.cost += GetRefitCost(i);
++		if (ret.cost > money) continue;
+ 
+ 		best_veh_rating = rating;
+ 		best_veh_index = i;
+@@ -206,7 +206,7 @@
+ 
+ 	for (i = AIRCRAFT_ENGINES_INDEX; i != AIRCRAFT_ENGINES_INDEX + NUM_AIRCRAFT_ENGINES; i++) {
+ 		const Engine* e = GetEngine(i);
+-		int32 ret;
++		CommandResult ret;
+ 
+ 		if (!HASBIT(e->player_avail, _current_player) || e->reliability < 0x8A3D) {
+ 			continue;
+@@ -215,8 +215,8 @@
+ 		if ((AircraftVehInfo(i)->subtype & AIR_CTOL) != flag) continue;
+ 
+ 		ret = DoCommand(0, i, 0, DC_QUERY_COST, CMD_BUILD_AIRCRAFT);
+-		if (!CmdFailed(ret) && ret <= money && ret >= best_veh_cost) {
+-			best_veh_cost = ret;
++		if (!CmdFailed(ret) && ret.cost <= money && ret.cost >= best_veh_cost) {
++			best_veh_cost = ret.cost;
+ 			best_veh_index = i;
+ 		}
+ 	}
+@@ -1567,9 +1567,9 @@
+ 	return true;
+ }
+ 
+-static int32 AiDoBuildDefaultRailTrack(TileIndex tile, const AiDefaultBlockData* p, RailType railtype, byte flag)
++static CommandResult AiDoBuildDefaultRailTrack(TileIndex tile, const AiDefaultBlockData* p, RailType railtype, byte flag)
+ {
+-	int32 ret;
++	CommandResult ret;
+ 	int32 total_cost = 0;
+ 	Town *t = NULL;
+ 	int rating = 0;
+@@ -1591,7 +1591,7 @@
+ 			}
+ 
+ 			if (CmdFailed(ret)) return CMD_ERROR;
+-			total_cost += ret;
++			total_cost += ret.cost;
+ 
+ clear_town_stuff:;
+ 			if (_cleared_town != NULL) {
+@@ -1613,7 +1613,7 @@
+ 					k = i;
+ 					ret = DoCommand(c, railtype, i, flag | DC_AUTO | DC_NO_WATER, CMD_BUILD_SINGLE_RAIL);
+ 					if (CmdFailed(ret)) return CMD_ERROR;
+-					total_cost += ret;
++					total_cost += ret.cost;
+ 				}
+ 			}
+ 
+@@ -1628,17 +1628,17 @@
+ 						ret = DoCommand(c, k, 0, flag, CMD_BUILD_SIGNALS);
+ 					} while (--j);
+ 				} else {
+-					ret = _price.build_signals;
++					ret.cost = _price.build_signals;
+ 				}
+ 				if (CmdFailed(ret)) return CMD_ERROR;
+-				total_cost += ret;
++				total_cost += ret.cost;
+ 			}
+ 		} else if (p->mode == 3) {
+ 			//Clear stuff and then build single rail.
+ 			if (GetTileSlope(c, NULL) != SLOPE_FLAT) return CMD_ERROR;
+ 			ret = DoCommand(c, 0, 0, flag | DC_AUTO | DC_NO_WATER | DC_AI_BUILDING, CMD_LANDSCAPE_CLEAR);
+ 			if (CmdFailed(ret)) return CMD_ERROR;
+-			total_cost += ret + _price.build_rail;
++			total_cost += ret.cost + _price.build_rail;
+ 
+ 			if (flag & DC_EXEC) {
+ 				DoCommand(c, railtype, p->attr&1, flag | DC_AUTO | DC_NO_WATER | DC_AI_BUILDING, CMD_BUILD_SINGLE_RAIL);
+@@ -1667,12 +1667,14 @@
+ {
+ 	int i;
+ 	const AiDefaultRailBlock *p;
++	CommandResult ret;
+ 
+ 	for (i = 0; (p = _default_rail_track_data[i]) != NULL; i++) {
+ 		if (p->p0 == p0 && p->p1 == p1 && p->p2 == p2 && p->p3 == p3 &&
+ 				(p->dir == 0xFF || p->dir == dir || ((p->dir - 1) & 3) == dir)) {
+-			*cost = AiDoBuildDefaultRailTrack(tile, p->data, railtype, DC_NO_TOWN_RATING);
+-			if (!CmdFailed(*cost) && AiCheckTrackResources(tile, p->data, cargo))
++			ret = AiDoBuildDefaultRailTrack(tile, p->data, railtype, DC_NO_TOWN_RATING);
++			*cost = ret.cost;
++			if (!CmdFailed(CommandResult) && AiCheckTrackResources(tile, p->data, cargo))
+ 				return i;
+ 		}
+ 	}
+@@ -1751,6 +1753,7 @@
+ 	AiBuildRec *aib;
+ 	int rule;
+ 	int32 cost;
++	CommandResult ret;
+ 
+ 	// time out?
+ 	if (++p->ai.timeout_counter == 1388) {
+@@ -1791,7 +1794,7 @@
+ 					p->ai.state_mode = -p->ai.state_mode;
+ 				}
+ 			} else if (CheckPlayerHasMoney(cost)) {
+-				int32 r;
++				CommandResult r;
+ 				// player has money, build it.
+ 				aib->cur_building_rule = rule;
+ 
+Index: src/aircraft_cmd.cpp
+===================================================================
+--- src/aircraft_cmd.cpp	(revision 9601)
++++ src/aircraft_cmd.cpp	(working copy)
+@@ -235,7 +235,7 @@
+  * @param p2 bit 0 when set, the unitnumber will be 0, otherwise it will be a free number
+  * return result of operation.  Could be cost, error
+  */
+-int32 CmdBuildAircraft(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildAircraft(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (!IsEngineBuildable(p1, VEH_AIRCRAFT, _current_player)) return_cmd_error(STR_AIRCRAFT_NOT_AVAILABLE);
+ 
+@@ -450,7 +450,7 @@
+  * @param p2 unused
+  * @return result of operation.  Error or sold value
+  */
+-int32 CmdSellAircraft(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSellAircraft(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+@@ -477,7 +477,7 @@
+  * @param p2 unused
+  * @return result of operation.  Nothing if everything went well
+  */
+-int32 CmdStartStopAircraft(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdStartStopAircraft(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+@@ -520,7 +520,7 @@
+  * - p2 bit 8-10 - VLW flag (for mass goto depot)
+  * @return o if everything went well
+  */
+-int32 CmdSendAircraftToHangar(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSendAircraftToHangar(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (p2 & DEPOT_MASS_SEND) {
+ 		/* Mass goto depot requested */
+@@ -594,7 +594,7 @@
+  * - p2 = (bit 8-15) - the new cargo subtype to refit to
+  * @return cost of refit or error
+  */
+-int32 CmdRefitAircraft(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRefitAircraft(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	byte new_subtype = GB(p2, 8, 8);
+ 
+Index: src/clear_cmd.cpp
+===================================================================
+--- src/clear_cmd.cpp	(revision 9601)
++++ src/clear_cmd.cpp	(working copy)
+@@ -232,7 +232,7 @@
+  * @param p2 direction; eg up or down
+  * @return error or cost of terraforming
+  */
+-int32 CmdTerraformLand(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdTerraformLand(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	TerraformerState ts;
+ 	TileIndex t;
+@@ -357,7 +357,7 @@
+  * @param p2 unused
+  * @return  error or cost of terraforming
+  */
+-int32 CmdLevelLand(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdLevelLand(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int size_x, size_y;
+ 	int ex;
+@@ -418,7 +418,7 @@
+  * @param p2 unused
+  * @return error of cost of operation
+  */
+-int32 CmdPurchaseLandArea(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdPurchaseLandArea(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int32 cost;
+ 
+@@ -474,7 +474,7 @@
+  * @param p2 unused
+  * @return error or cost of operation
+  */
+-int32 CmdSellLandArea(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSellLandArea(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revision 9601)
++++ src/command.cpp	(working copy)
+@@ -16,7 +16,7 @@
+ 
+ const char* _cmd_text = NULL;
+ 
+-#define DEF_COMMAND(yyyy) int32 yyyy(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++#define DEF_COMMAND(yyyy) CommandResult yyyy(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ 
+ DEF_COMMAND(CmdBuildRailroadTrack);
+ DEF_COMMAND(CmdRemoveRailroadTrack);
+@@ -332,7 +332,7 @@
+ 
+ static int _docommand_recursive;
+ 
+-int32 DoCommand(TileIndex tile, uint32 p1, uint32 p2, uint32 flags, uint procc)
++CommandResult DoCommand(TileIndex tile, uint32 p1, uint32 p2, uint32 flags, uint procc)
+ {
+ 	int32 res;
+ 	CommandProc *proc;
+Index: src/command.h
+===================================================================
+--- src/command.h	(revision 9601)
++++ src/command.h	(working copy)
+@@ -174,8 +174,14 @@
+ 	CMD_OFFLINE = 0x2, ///< the command cannot be executed in a multiplayer game; single-player only
+ };
+ 
+-typedef int32 CommandProc(TileIndex tile, uint32 flags, uint32 p1, uint32 p2);
++struct CommandResult {
++	bool success;
++	StringID error;
++	uint64 cost;
++};
+ 
++typedef CommandResult CommandProc(TileIndex tile, uint32 flags, uint32 p1, uint32 p2);
++
+ struct Command {
+ 	CommandProc *proc;
+ 	byte flags;
+@@ -189,15 +195,14 @@
+  * @param res the resulting value from the command to be checked
+  * @return Return true if the command failed, false otherwise
+  */
+-static inline bool CmdFailed(int32 res)
++static inline bool CmdFailed(CommandResult res)
+ {
+-	/* lower 16bits are the StringID of the possible error */
+-	return res <= (CMD_ERROR | INVALID_STRING_ID);
++	return !res.success;
+ }
+ 
+ /* command.cpp */
+ typedef void CommandCallback(bool success, TileIndex tile, uint32 p1, uint32 p2);
+-int32 DoCommand(TileIndex tile, uint32 p1, uint32 p2, uint32 flags, uint procc);
++CommandResult DoCommand(TileIndex tile, uint32 p1, uint32 p2, uint32 flags, uint procc);
+ bool DoCommandP(TileIndex tile, uint32 p1, uint32 p2, CommandCallback *callback, uint32 cmd);
+ 
+ #ifdef ENABLE_NETWORK
+Index: src/economy.cpp
+===================================================================
+--- src/economy.cpp	(revision 9601)
++++ src/economy.cpp	(working copy)
+@@ -1694,7 +1694,7 @@
+  * @param p1 player to buy the shares from
+  * @param p2 unused
+  */
+-int32 CmdBuyShareInCompany(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuyShareInCompany(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Player *p;
+ 	int64 cost;
+@@ -1740,7 +1740,7 @@
+  * @param p1 player to sell the shares from
+  * @param p2 unused
+  */
+-int32 CmdSellShareInCompany(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSellShareInCompany(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Player *p;
+ 	int64 cost;
+@@ -1776,7 +1776,7 @@
+  * @param p1 player/company to buy up
+  * @param p2 unused
+  */
+-int32 CmdBuyCompany(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuyCompany(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Player *p;
+ 	PlayerID pid = (PlayerID)p1;
+Index: src/engine.cpp
+===================================================================
+--- src/engine.cpp	(revision 9601)
++++ src/engine.cpp	(working copy)
+@@ -252,7 +252,7 @@
+  * @param p1 engine-prototype offered
+  * @param p2 unused
+  */
+-int32 CmdWantEnginePreview(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdWantEnginePreview(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Engine *e;
+ 
+@@ -353,7 +353,7 @@
+  * @param p1 engine ID to rename
+  * @param p2 unused
+  */
+-int32 CmdRenameEngine(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRenameEngine(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	StringID str;
+ 
+Index: src/industry_cmd.cpp
+===================================================================
+--- src/industry_cmd.cpp	(revision 9601)
++++ src/industry_cmd.cpp	(working copy)
+@@ -1497,7 +1497,7 @@
+  * @param p2 unused
+  * @return index of the newly create industry, or CMD_ERROR if it failed
+  */
+-int32 CmdBuildIndustry(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildIndustry(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int num;
+ 	const IndustryTileTable * const *itt;
+Index: src/landscape.cpp
+===================================================================
+--- src/landscape.cpp	(revision 9601)
++++ src/landscape.cpp	(working copy)
+@@ -367,7 +367,7 @@
+  * @param p1 unused
+  * @param p2 unused
+  */
+-int32 CmdLandscapeClear(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdLandscapeClear(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+@@ -380,7 +380,7 @@
+  * @param flags of operation to conduct
+  * @param p2 unused
+  */
+-int32 CmdClearArea(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdClearArea(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int32 cost, ret, money;
+ 	int ex;
+Index: src/misc_cmd.cpp
+===================================================================
+--- src/misc_cmd.cpp	(revision 9601)
++++ src/misc_cmd.cpp	(working copy)
+@@ -23,7 +23,7 @@
+  * @param p1 unused
+  * @param p2 face bitmasked
+  */
+-int32 CmdSetPlayerFace(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSetPlayerFace(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	PlayerFace pf = (PlayerFace)p2;
+ 
+@@ -43,7 +43,7 @@
+  * p1 bits 8-9 set in use state or first/second colour
+  * @param p2 new colour for vehicles, property, etc.
+  */
+-int32 CmdSetPlayerColor(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSetPlayerColor(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Player *p, *pp;
+ 	byte colour;
+@@ -120,7 +120,7 @@
+  * @param p1 unused
+  * @param p2 when set, loans the maximum amount in one go (press CTRL)
+  */
+-int32 CmdIncreaseLoan(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdIncreaseLoan(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Player *p;
+ 
+@@ -149,7 +149,7 @@
+  * @param p1 unused
+  * @param p2 when set, pays back the maximum loan permitting money (press CTRL)
+  */
+-int32 CmdDecreaseLoan(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdDecreaseLoan(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Player *p;
+ 	int32 loan;
+@@ -189,7 +189,7 @@
+  * @param p1 unused
+  * @param p2 unused
+  */
+-int32 CmdChangeCompanyName(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdChangeCompanyName(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	StringID str;
+ 	Player *p;
+@@ -216,7 +216,7 @@
+  * @param p1 unused
+  * @param p2 unused
+  */
+-int32 CmdChangePresidentName(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdChangePresidentName(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	StringID str;
+ 	Player *p;
+@@ -254,7 +254,7 @@
+  * @param p1 0 = decrease pause counter; 1 = increase pause counter
+  * @param p2 unused
+  */
+-int32 CmdPause(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdPause(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (flags & DC_EXEC) {
+ 		_pause_game += (p1 == 1) ? 1 : -1;
+@@ -272,7 +272,7 @@
+  * @param p1 the amount of money to receive (if negative), or spend (if positive)
+  * @param p2 unused
+  */
+-int32 CmdMoneyCheat(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdMoneyCheat(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ #ifndef _DEBUG
+ 	if (_networking) return CMD_ERROR;
+@@ -289,7 +289,7 @@
+  * @param p1 the amount of money to transfer; max 20.000.000
+  * @param p2 the player to transfer the money to
+  */
+-int32 CmdGiveMoney(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdGiveMoney(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	const Player *p = GetPlayer(_current_player);
+ 	int32 amount = min((int32)p1, 20000000);
+@@ -321,7 +321,7 @@
+  *           itself is changed. The new value is inside p2
+  * @param p2 new value for a difficulty setting or difficulty level
+  */
+-int32 CmdChangeDifficultyLevel(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdChangeDifficultyLevel(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (p1 != (uint32)-1L && ((int32)p1 >= GAME_DIFFICULTY_NUM || (int32)p1 < 0)) return CMD_ERROR;
+ 
+Index: src/order_cmd.cpp
+===================================================================
+--- src/order_cmd.cpp	(revision 9601)
++++ src/order_cmd.cpp	(working copy)
+@@ -189,7 +189,7 @@
+  *                        only the first 8 bits used currently (bit 16 - 23) (max 255)
+  * @param p2 packed order to insert
+  */
+-int32 CmdInsertOrder(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdInsertOrder(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 	VehicleID veh   = GB(p1,  0, 16);
+@@ -481,7 +481,7 @@
+  * @param p1 the ID of the vehicle
+  * @param p2 the order to delete (max 255)
+  */
+-int32 CmdDeleteOrder(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdDeleteOrder(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v, *u;
+ 	VehicleID veh_id = p1;
+@@ -560,7 +560,7 @@
+  * @param p1 The ID of the vehicle which order is skipped
+  * @param p2 unused
+  */
+-int32 CmdSkipOrder(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSkipOrder(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 	VehicleID veh_id = p1;
+@@ -607,7 +607,7 @@
+  *                        only the first 8 bits used currently (bit 16 - 23) (max 255)
+  * @param p2 mode to change the order to (always set)
+  */
+-int32 CmdModifyOrder(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdModifyOrder(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 	Order *order;
+@@ -685,7 +685,7 @@
+  * - p1 = (bit 16-31) - source vehicle to clone orders from, if any (none for CO_UNSHARE)
+  * @param p2 mode of cloning: CO_SHARE, CO_COPY, or CO_UNSHARE
+  */
+-int32 CmdCloneOrder(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdCloneOrder(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *dst;
+ 	VehicleID veh_src = GB(p1, 16, 16);
+@@ -818,7 +818,7 @@
+  *   - bit 8-15 Cargo subtype
+  *   - bit 16-23 number of order to modify
+  */
+-int32 CmdOrderRefit(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdOrderRefit(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	const Vehicle *v;
+ 	Order *order;
+@@ -948,7 +948,7 @@
+  * If we do want to backup/restore it, just add UnitID uid to BackuppedOrders, and
+  * restore it as parameter 'y' (ugly hack I know) for example. "v->unitnumber = y;"
+  */
+-int32 CmdRestoreOrderIndex(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRestoreOrderIndex(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 	VehicleOrderID cur_ord = GB(p2,  0, 16);
+Index: src/players.cpp
+===================================================================
+--- src/players.cpp	(revision 9601)
++++ src/players.cpp	(working copy)
+@@ -646,7 +646,7 @@
+  * if p1 = 5, then
+  * - p2 = enable renew_keep_length
+  */
+-int32 CmdSetAutoReplace(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSetAutoReplace(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Player *p;
+ 	if (!IsValidPlayer(_current_player)) return CMD_ERROR;
+@@ -772,7 +772,7 @@
+  * @arg - network_server.c:838 DEF_SERVER_RECEIVE_COMMAND(PACKET_CLIENT_COMMAND)@n
+  * @arg - network_client.c:536 DEF_CLIENT_RECEIVE_COMMAND(PACKET_SERVER_MAP) from where the map has been received
+  */
+-int32 CmdPlayerCtrl(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdPlayerCtrl(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (flags & DC_EXEC) _current_player = OWNER_NONE;
+ 
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(revision 9601)
++++ src/rail_cmd.cpp	(working copy)
+@@ -233,7 +233,7 @@
+  * @param p1 railtype of being built piece (normal, mono, maglev)
+  * @param p2 rail track to build
+  */
+-int32 CmdBuildSingleRail(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildSingleRail(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Slope tileh;
+ 	RailType railtype;
+@@ -335,7 +335,7 @@
+  * @param p1 unused
+  * @param p2 rail orientation
+  */
+-int32 CmdRemoveSingleRail(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRemoveSingleRail(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Track track = (Track)p2;
+ 	TrackBits trackbit;
+@@ -528,7 +528,7 @@
+  * Stub for the unified rail builder/remover
+  * @see CmdRailTrackHelper
+  */
+-int32 CmdBuildRailroadTrack(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildRailroadTrack(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	return CmdRailTrackHelper(tile, flags, p1, CLRBIT(p2, 7));
+ }
+@@ -537,7 +537,7 @@
+  * Stub for the unified rail builder/remover
+  * @see CmdRailTrackHelper
+  */
+-int32 CmdRemoveRailroadTrack(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRemoveRailroadTrack(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	return CmdRailTrackHelper(tile, flags, p1, SETBIT(p2, 7));
+ }
+@@ -550,7 +550,7 @@
+  * @todo When checking for the tile slope,
+  * distingush between "Flat land required" and "land sloped in wrong direction"
+  */
+-int32 CmdBuildTrainDepot(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildTrainDepot(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Depot *d;
+ 	int32 cost, ret;
+@@ -616,7 +616,7 @@
+  * @param p2 used for CmdBuildManySignals() to copy direction of first signal
+  * TODO: p2 should be replaced by two bits for "along" and "against" the track.
+  */
+-int32 CmdBuildSingleSignal(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildSingleSignal(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Track track = (Track)GB(p1, 0, 3);
+ 	bool pre_signal = HASBIT(p1, 3);
+@@ -792,7 +792,7 @@
+  * Stub for the unified signal builder/remover
+  * @see CmdSignalTrackHelper
+  */
+-int32 CmdBuildSignalTrack(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildSignalTrack(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	return CmdSignalTrackHelper(tile, flags, p1, p2);
+ }
+@@ -804,7 +804,7 @@
+  * - p1 = (bit  3)    - override signal/semaphore, or pre/exit/combo signal (CTRL-toggle)
+  * - p1 = (bit  4)    - 0 = signals, 1 = semaphores
+  */
+-int32 CmdRemoveSingleSignal(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRemoveSingleSignal(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Track track = (Track)GB(p1, 0, 3);
+ 
+@@ -844,7 +844,7 @@
+  * Stub for the unified signal builder/remover
+  * @see CmdSignalTrackHelper
+  */
+-int32 CmdRemoveSignalTrack(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRemoveSignalTrack(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	return CmdSignalTrackHelper(tile, flags, p1, SETBIT(p2, 5)); // bit 5 is remove bit
+ }
+@@ -911,7 +911,7 @@
+  * @param p1 start tile of drag
+  * @param p2 new railtype to convert to
+  */
+-int32 CmdConvertRail(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdConvertRail(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int32 ret, cost, money;
+ 	int ex;
+Index: src/road_cmd.cpp
+===================================================================
+--- src/road_cmd.cpp	(revision 9601)
++++ src/road_cmd.cpp	(working copy)
+@@ -93,7 +93,7 @@
+  * @param p1 bit 0..3 road pieces to remove (RoadBits)
+  * @param p2 unused
+  */
+-int32 CmdRemoveRoad(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRemoveRoad(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	/* cost for removing inner/edge -roads */
+ 	static const uint16 road_remove_cost[2] = {50, 18};
+@@ -254,7 +254,7 @@
+  * @param p1 bit 0..3 road pieces to build (RoadBits)
+  * @param p2 the town that is building the road (0 if not applicable)
+  */
+-int32 CmdBuildRoad(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildRoad(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int32 cost = 0;
+ 	int32 ret;
+@@ -408,7 +408,7 @@
+  * - p2 = (bit 1) - end tile starts in the 2nd half of tile (p2 & 2)
+  * - p2 = (bit 2) - direction: 0 = along x-axis, 1 = along y-axis (p2 & 4)
+  */
+-int32 CmdBuildLongRoad(TileIndex end_tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildLongRoad(TileIndex end_tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	TileIndex start_tile, tile;
+ 	int32 cost, ret;
+@@ -464,7 +464,7 @@
+  * - p2 = (bit 1) - end tile starts in the 2nd half of tile (p2 & 2)
+  * - p2 = (bit 2) - direction: 0 = along x-axis, 1 = along y-axis (p2 & 4)
+  */
+-int32 CmdRemoveLongRoad(TileIndex end_tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRemoveLongRoad(TileIndex end_tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	TileIndex start_tile, tile;
+ 	int32 cost, ret;
+@@ -518,7 +518,7 @@
+  * @todo When checking for the tile slope,
+  * distingush between "Flat land required" and "land sloped in wrong direction"
+  */
+-int32 CmdBuildRoadDepot(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildRoadDepot(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int32 cost;
+ 	Depot *dep;
+Index: src/roadveh_cmd.cpp
+===================================================================
+--- src/roadveh_cmd.cpp	(revision 9601)
++++ src/roadveh_cmd.cpp	(working copy)
+@@ -124,7 +124,7 @@
+  * @param p1 bus/truck type being built (engine)
+  * @param p2 bit 0 when set, the unitnumber will be 0, otherwise it will be a free number
+  */
+-int32 CmdBuildRoadVeh(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildRoadVeh(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int32 cost;
+ 	Vehicle *v;
+@@ -229,7 +229,7 @@
+  * @param p1 road vehicle ID to start/stop
+  * @param p2 unused
+  */
+-int32 CmdStartStopRoadVeh(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdStartStopRoadVeh(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 	uint16 callback;
+@@ -280,7 +280,7 @@
+  * @param p1 vehicle ID to be sold
+  * @param p2 unused
+  */
+-int32 CmdSellRoadVeh(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSellRoadVeh(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 
+@@ -379,7 +379,7 @@
+  * - p2 bit 0-3 - DEPOT_ flags (see vehicle.h)
+  * - p2 bit 8-10 - VLW flag (for mass goto depot)
+  */
+-int32 CmdSendRoadVehToDepot(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSendRoadVehToDepot(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 	const Depot *dep;
+@@ -449,7 +449,7 @@
+  * @param p1 vehicle ID to turn
+  * @param p2 unused
+  */
+-int32 CmdTurnRoadVeh(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdTurnRoadVeh(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 
+@@ -1845,7 +1845,7 @@
+  * - p2 = (bit 0-7) - the new cargo type to refit to
+  * - p2 = (bit 8-15) - the new cargo subtype to refit to
+  */
+-int32 CmdRefitRoadVeh(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRefitRoadVeh(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 	int32 cost;
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 9601)
++++ src/settings.cpp	(working copy)
+@@ -1731,7 +1731,7 @@
+  * The new value is properly clamped to its minimum/maximum when setting
+  * @see _patch_settings
+  */
+-int32 CmdChangePatchSetting(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdChangePatchSetting(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	const SettingDesc *sd = GetSettingDescription(p1);
+ 
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 9601)
++++ src/settings_gui.cpp	(working copy)
+@@ -228,7 +228,7 @@
+  * @param p1 the side of the road; 0 = left side and 1 = right side
+  * @param p2 unused
+  */
+-int32 CmdSetRoadDriveSide(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSetRoadDriveSide(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	/* Check boundaries and you can only change this if NO vehicles have been built yet,
+ 	 * except in the intro-menu where of course it's always possible to do so. */
+Index: src/ship_cmd.cpp
+===================================================================
+--- src/ship_cmd.cpp	(revision 9601)
++++ src/ship_cmd.cpp	(working copy)
+@@ -840,7 +840,7 @@
+  * @param p1 ship type being built (engine)
+  * @param p2 bit 0 when set, the unitnumber will be 0, otherwise it will be a free number
+  */
+-int32 CmdBuildShip(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildShip(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int32 value;
+ 	Vehicle *v;
+@@ -937,7 +937,7 @@
+  * @param p1 vehicle ID to be sold
+  * @param p2 unused
+  */
+-int32 CmdSellShip(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSellShip(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 
+@@ -971,7 +971,7 @@
+  * @param p1 ship ID to start/stop
+  * @param p2 unused
+  */
+-int32 CmdStartStopShip(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdStartStopShip(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 	uint16 callback;
+@@ -1012,7 +1012,7 @@
+  * - p2 bit 0-3 - DEPOT_ flags (see vehicle.h)
+  * - p2 bit 8-10 - VLW flag (for mass goto depot)
+  */
+-int32 CmdSendShipToDepot(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSendShipToDepot(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 	const Depot *dep;
+@@ -1085,7 +1085,7 @@
+  * - p2 = (bit 0-7) - the new cargo type to refit to (p2 & 0xFF)
+  * - p2 = (bit 8-15) - the new cargo subtype to refit to
+  */
+-int32 CmdRefitShip(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRefitShip(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 	int32 cost;
+Index: src/signs.cpp
+===================================================================
+--- src/signs.cpp	(revision 9601)
++++ src/signs.cpp	(working copy)
+@@ -118,7 +118,7 @@
+  * @param p1 unused
+  * @param p2 unused
+  */
+-int32 CmdPlaceSign(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdPlaceSign(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Sign *si;
+ 
+@@ -155,7 +155,7 @@
+  * @param p2 unused
+  * @return 0 if succesfull, otherwise CMD_ERROR
+  */
+-int32 CmdRenameSign(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRenameSign(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (!IsValidSignID(p1)) return CMD_ERROR;
+ 
+Index: src/station_cmd.cpp
+===================================================================
+--- src/station_cmd.cpp	(revision 9601)
++++ src/station_cmd.cpp	(working copy)
+@@ -797,7 +797,7 @@
+  * - p2 = (bit  8-15) - custom station class
+  * - p2 = (bit 16-23) - custom station id
+  */
+-int32 CmdBuildRailroadStation(TileIndex tile_org, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildRailroadStation(TileIndex tile_org, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int w_org, h_org;
+ 	int32 ret;
+@@ -1025,7 +1025,7 @@
+  * @param p1 unused
+  * @param p2 unused
+  */
+-int32 CmdRemoveFromRailroadStation(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRemoveFromRailroadStation(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+@@ -1177,7 +1177,7 @@
+  * @param p2 bit 0: 0 for Bus stops, 1 for truck stops
+  *           bit 1: 0 for normal, 1 for drive-through
+  */
+-int32 CmdBuildRoadStop(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildRoadStop(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	bool type = HASBIT(p2, 0);
+ 	bool is_drive_through = HASBIT(p2, 1);
+@@ -1343,7 +1343,7 @@
+  * @param p1 not used
+  * @param p2 bit 0: 0 for Bus stops, 1 for truck stops
+  */
+-int32 CmdRemoveRoadStop(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRemoveRoadStop(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	/* Make sure the specified tile is a road stop of the correct type */
+ 	if (!IsTileType(tile, MP_STATION) || !IsRoadStop(tile) || (uint32)GetRoadStopType(tile) != p2) return CMD_ERROR;
+@@ -1468,7 +1468,7 @@
+  * @param p1 airport type, @see airport.h
+  * @param p2 unused
+  */
+-int32 CmdBuildAirport(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildAirport(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	bool airport_upgrade = true;
+ 
+@@ -1643,7 +1643,7 @@
+  * @param p1 unused
+  * @param p2 unused
+  */
+-int32 CmdBuildBuoy(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildBuoy(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+@@ -1751,7 +1751,7 @@
+  * @param p1 unused
+  * @param p2 unused
+  */
+-int32 CmdBuildDock(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildDock(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int32 cost;
+ 
+@@ -2383,7 +2383,7 @@
+  * @param p1 station ID that is to be renamed
+  * @param p2 unused
+  */
+-int32 CmdRenameStation(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRenameStation(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (!IsValidStationID(p1) || _cmd_text[0] == '\0') return CMD_ERROR;
+ 	Station *st = GetStation(p1);
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revision 9601)
++++ src/town_cmd.cpp	(working copy)
+@@ -1054,7 +1054,7 @@
+  * @param p1 size of the town (0 = random, 1 = small, 2 = medium, 3 = large)
+  * @param p2 unused
+  */
+-int32 CmdBuildTown(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildTown(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Town *t;
+ 	uint32 townnameparts;
+@@ -1432,7 +1432,7 @@
+  * @param p1 town ID to rename
+  * @param p2 unused
+  */
+-int32 CmdRenameTown(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRenameTown(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	StringID str;
+ 	Town *t;
+@@ -1635,7 +1635,7 @@
+  * @param p1 town to do the action at
+  * @param p2 action to perform, @see _town_action_proc for the list of available actions
+  */
+-int32 CmdDoTownAction(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdDoTownAction(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int32 cost;
+ 	Town *t;
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 9601)
++++ src/train_cmd.cpp	(working copy)
+@@ -557,7 +557,7 @@
+ 	}
+ }
+ 
+-static int32 CmdBuildRailWagon(EngineID engine, TileIndex tile, uint32 flags)
++static CommandResult CmdBuildRailWagon(EngineID engine, TileIndex tile, uint32 flags)
+ {
+ 	SET_EXPENSES_TYPE(EXPENSES_NEW_VEHICLES);
+ 
+@@ -704,7 +704,7 @@
+  * @param p2 bit 0 when set, the train will get number 0, otherwise it will get a free number
+  *           bit 1 prevents any free cars from being added to the train
+  */
+-int32 CmdBuildRailVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildRailVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	/* Check if the engine-type is valid (for the player) */
+ 	if (!IsEngineBuildable(p1, VEH_TRAIN, _current_player)) return_cmd_error(STR_RAIL_VEHICLE_NOT_AVAILABLE);
+@@ -959,7 +959,7 @@
+  * - p1 (bit 16 - 31) what wagon to put the source wagon AFTER, XXX - INVALID_VEHICLE to make a new line
+  * @param p2 (bit 0) move all vehicles following the source vehicle
+  */
+-int32 CmdMoveRailVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdMoveRailVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	VehicleID s = GB(p1, 0, 16);
+ 	VehicleID d = GB(p1, 16, 16);
+@@ -1241,7 +1241,7 @@
+  * @param p1 train to start/stop
+  * @param p2 unused
+  */
+-int32 CmdStartStopTrain(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdStartStopTrain(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+@@ -1283,7 +1283,7 @@
+  * - p2 = 2: when selling attached locos, rearrange all vehicles after it to separate lines;
+  *           all wagons of the same type will go on the same line. Used by the AI currently
+  */
+-int32 CmdSellRailWagon(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSellRailWagon(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (!IsValidVehicleID(p1) || p2 > 2) return CMD_ERROR;
+ 
+@@ -1677,7 +1677,7 @@
+  * @param p1 train to reverse
+  * @param p2 if true, reverse a unit in a train (needs to be in a depot)
+  */
+-int32 CmdReverseTrainDirection(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdReverseTrainDirection(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+@@ -1726,7 +1726,7 @@
+  * @param p1 train to ignore the red signal
+  * @param p2 unused
+  */
+-int32 CmdForceTrainProceed(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdForceTrainProceed(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+@@ -1747,7 +1747,7 @@
+  * - p2 = (bit 0-7) - the new cargo type to refit to
+  * - p2 = (bit 8-15) - the new cargo subtype to refit to
+  */
+-int32 CmdRefitRailVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRefitRailVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	CargoID new_cid = GB(p2, 0, 8);
+ 	byte new_subtype = GB(p2, 8, 8);
+@@ -1930,7 +1930,7 @@
+  * - p2 bit 0-3 - DEPOT_ flags (see vehicle.h)
+  * - p2 bit 8-10 - VLW flag (for mass goto depot)
+  */
+-int32 CmdSendTrainToDepot(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdSendTrainToDepot(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	if (p2 & DEPOT_MASS_SEND) {
+ 		/* Mass goto depot requested */
+Index: src/tree_cmd.cpp
+===================================================================
+--- src/tree_cmd.cpp	(revision 9601)
++++ src/tree_cmd.cpp	(working copy)
+@@ -213,7 +213,7 @@
+  * @param p1 tree type, -1 means random.
+  * @param p2 end tile of area-drag
+  */
+-int32 CmdPlantTree(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdPlantTree(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	StringID msg = INVALID_STRING_ID;
+ 	int32 cost;
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 9601)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -174,7 +174,7 @@
+  * - p2 = (bit 0- 7) - bridge type (hi bh)
+  * - p2 = (bit 8-..) - rail type. bit15 ((x>>8)&0x80) means road bridge.
+  */
+-int32 CmdBuildBridge(TileIndex end_tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildBridge(TileIndex end_tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	uint bridge_type;
+ 	RailType railtype;
+@@ -445,7 +445,7 @@
+  * @param p1 railtype, 0x200 for road tunnel
+  * @param p2 unused
+  */
+-int32 CmdBuildTunnel(TileIndex start_tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildTunnel(TileIndex start_tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	TileIndexDiff delta;
+ 	TileIndex end_tile;
+Index: src/unmovable_cmd.cpp
+===================================================================
+--- src/unmovable_cmd.cpp	(revision 9601)
++++ src/unmovable_cmd.cpp	(working copy)
+@@ -79,7 +79,7 @@
+  * @param p1 unused
+  * @param p2 unused
+  */
+-int32 CmdBuildCompanyHQ(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildCompanyHQ(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Player *p = GetPlayer(_current_player);
+ 	int cost;
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 9601)
++++ src/vehicle.cpp	(working copy)
+@@ -1609,7 +1609,7 @@
+  *   - bit 6 if set, then it's a vehicle list window, not a depot and Tile is ignored in this case
+  *   - bit 8-11 Vehicle List Window type (ignored unless bit 1 is set)
+  */
+-int32 CmdMassStartStopVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdMassStartStopVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle **vl = NULL;
+ 	uint16 engine_list_length = 0;
+@@ -1673,7 +1673,7 @@
+  * @param p1 Vehicle type
+  * @param p2 unused
+  */
+-int32 CmdDepotSellAllVehicles(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdDepotSellAllVehicles(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle **engines = NULL;
+ 	Vehicle **wagons = NULL;
+@@ -1726,7 +1726,7 @@
+  * @param p1 Type of vehicle
+  * @param p2 Unused
+  */
+-int32 CmdDepotMassAutoReplace(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdDepotMassAutoReplace(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle **vl = NULL;
+ 	uint16 engine_list_length = 0;
+@@ -1793,7 +1793,7 @@
+  * @param p1 the original vehicle's index
+  * @param p2 1 = shared orders, else copied orders
+  */
+-int32 CmdCloneVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdCloneVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v_front, *v;
+ 	Vehicle *w_front, *w, *w_rear;
+@@ -2230,7 +2230,7 @@
+  * @param p1 vehicle ID to name
+  * @param p2 unused
+  */
+-int32 CmdNameVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdNameVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+ 	StringID str;
+@@ -2264,7 +2264,7 @@
+  * @param p1 vehicle ID that is being service-interval-changed
+  * @param p2 new service interval
+  */
+-int32 CmdChangeServiceInt(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdChangeServiceInt(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle* v;
+ 	uint16 serv_int = GetServiceIntervalClamped(p2); /* Double check the service interval from the user-input */
+Index: src/water_cmd.cpp
+===================================================================
+--- src/water_cmd.cpp	(revision 9601)
++++ src/water_cmd.cpp	(working copy)
+@@ -53,7 +53,7 @@
+  * @param p1 bit 0 depot orientation (Axis)
+  * @param p2 unused
+  */
+-int32 CmdBuildShipDepot(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildShipDepot(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	TileIndex tile2;
+ 
+@@ -197,7 +197,7 @@
+  * @param p1 unused
+  * @param p2 unused
+  */
+-int32 CmdBuildLock(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildLock(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	DiagDirection dir;
+ 
+@@ -219,7 +219,7 @@
+  * @param p1 start tile of stretch-dragging
+  * @param p2 ctrl pressed - toggles ocean / canals at sealevel (ocean only allowed in the scenario editor)
+  */
+-int32 CmdBuildCanal(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildCanal(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int32 cost;
+ 	int size_x, size_y;
+Index: src/waypoint.cpp
+===================================================================
+--- src/waypoint.cpp	(revision 9601)
++++ src/waypoint.cpp	(working copy)
+@@ -200,7 +200,7 @@
+  * @todo When checking for the tile slope,
+  * distingush between "Flat land required" and "land sloped in wrong direction"
+  */
+-int32 CmdBuildTrainWaypoint(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdBuildTrainWaypoint(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Waypoint *wp;
+ 	Slope tileh;
+@@ -334,7 +334,7 @@
+  * @param p2 unused
+  * @return cost of operation or error
+  */
+-int32 CmdRemoveTrainWaypoint(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRemoveTrainWaypoint(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 	return RemoveTrainWaypoint(tile, flags, true);
+@@ -348,7 +348,7 @@
+  * @param p2 unused
+  * @return cost of operation or error
+  */
+-int32 CmdRenameWaypoint(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++CommandResult CmdRenameWaypoint(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Waypoint *wp;
+ 

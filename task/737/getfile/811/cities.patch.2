@@ -1,0 +1,293 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 9664)
++++ src/settings.cpp	(working copy)
+@@ -1396,6 +1396,8 @@
+ 	SDT_BOOL(Patches, allow_shares,               0, 0, false,            STR_CONFIG_PATCHES_ALLOW_SHARES,     NULL),
+ 	SDT_CONDVAR(Patches, town_growth_rate, SLE_UINT8, 54, SL_MAX_VERSION, 0, MS, 2, 0,   4, 0, STR_CONFIG_PATCHES_TOWN_GROWTH,  NULL),
+ 	SDT_CONDVAR(Patches, larger_towns,     SLE_UINT8, 54, SL_MAX_VERSION, 0, D0, 4, 0, 255, 1, STR_CONFIG_PATCHES_LARGER_TOWNS, NULL),
++  SDT_VAR(Patches, number_of_cities, SLE_UINT8, S, NC, 1, 0, 10, 1, STR_CONFIG_PATCHES_NUMBER_OF_CITIES, NULL),
++  SDT_VAR(Patches, city_size_multiplier, SLE_UINT8, S, NC,    3,    2,       10,     1,       STR_CONFIG_PATCHES_CITY_SIZE_MULTIPLIER, NULL),
+ 
+ 	/***************************************************************************/
+ 	/* AI section of the GUI-configure patches window */
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 9664)
++++ src/lang/english.txt	(working copy)
+@@ -630,6 +630,7 @@
+ STR_RESET_LANDSCAPE_CONFIRMATION_TEXT                           :{WHITE}Are you sure you want to remove all player-owned property?
+ STR_022E_LANDSCAPE_GENERATION                                   :{BLACK}Landscape generation
+ STR_022F_TOWN_GENERATION                                        :{BLACK}Town generation
++STR_022F_CITY_GENERATION                                        :{BLACK}City generation
+ STR_0230_INDUSTRY_GENERATION                                    :{BLACK}Industry generation
+ STR_0231_ROAD_CONSTRUCTION                                      :{BLACK}Road construction
+ STR_0233_TOWN_GENERATION                                        :{WHITE}Town Generation
+@@ -1161,6 +1162,9 @@
+ STR_CONFIG_PATCHES_YAPF_ROAD                                    :{LTBLUE}Use YAPF for roadvehs: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_YAPF_RAIL                                    :{LTBLUE}Use YAPF for trains: {ORANGE}{STRING1}
+ 
++STR_CONFIG_PATCHES_NUMBER_OF_CITIES                             :{LTBLUE}Number of cities to create: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_CITY_SIZE_MULTIPLIER                         :{LTBLUE}City Size Multiplier: {ORANGE}{STRING1}
++
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :Sub-tropical landscape
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 9664)
++++ src/settings_gui.cpp	(working copy)
+@@ -627,6 +627,8 @@
+ 	"inflation",
+ 	"build_rawmaterial_ind",
+ 	"multiple_industry_per_town",
++  "number_of_cities",
++  "city_size_multiplier",
+ 	"same_industry_close",
+ 	"bribe",
+ 	"colored_news_year",
+Index: src/variables.h
+===================================================================
+--- src/variables.h	(revision 9664)
++++ src/variables.h	(working copy)
+@@ -99,6 +99,8 @@
+ 	bool build_rawmaterial_ind;         // allow building raw material industries
+ 	bool multiple_industry_per_town;    // allow many industries of the same type per town
+ 	bool same_industry_close;           // allow same type industries to be built close to each other
++  uint8 number_of_cities;             // the number of cities to create
++  uint8 city_size_multiplier;         // how much bigger a city is then your joe-average town
+ 	bool lost_train_warn;               // if a train can't find its destination, show a warning
+ 	uint8 order_review_system;
+ 	bool train_income_warn;             // if train is generating little income, show a warning
+Index: src/genworld_gui.cpp
+===================================================================
+--- src/genworld_gui.cpp	(revision 9664)
++++ src/genworld_gui.cpp	(working copy)
+@@ -834,6 +834,7 @@
+ 		STR_022E_LANDSCAPE_GENERATION,
+ 		STR_CLEARING_TILES,
+ 		STR_022F_TOWN_GENERATION,
++    STR_022F_CITY_GENERATION,
+ 		STR_0230_INDUSTRY_GENERATION,
+ 		STR_UNMOVABLE_GENERATION,
+ 		STR_TREE_GENERATION,
+Index: src/town.h
+===================================================================
+--- src/town.h	(revision 9664)
++++ src/town.h	(working copy)
+@@ -10,7 +10,15 @@
+ #include "functions.h"
+ #include "helpers.hpp"
+ 
++
++// Town creation modes
+ enum {
++  TOWN_MODE_RANDOM = 1,
++  TOWN_MODE_FIXED = 2,
++  TOWN_MODE_CITY = 3,
++};
++
++enum {
+ 	HOUSE_NO_CLASS   = 0,
+ 	NEW_HOUSE_OFFSET = 110,
+ 	HOUSE_MAX        = 512,
+@@ -189,7 +197,7 @@
+ void InitializeTown();
+ void ShowTownViewWindow(TownID town);
+ void ExpandTown(Town *t);
+-Town *CreateRandomTown(uint attempts, uint size_mode);
++Town *CreateRandomTown(uint attempts, uint size_mode, uint size_val);
+ 
+ enum {
+ 	ROAD_REMOVE = 0,
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revision 9664)
++++ src/town_cmd.cpp	(working copy)
+@@ -96,6 +96,8 @@
+ // Local
+ static int _grow_town_result;
+ 
++static int _largest_town = 0;
++
+ static bool BuildTownHouse(Town *t, TileIndex tile);
+ static void DoBuildTownHouse(Town *t, TileIndex tile);
+ 
+@@ -954,7 +956,16 @@
+ 	t->max_mail = t->population >> 4;
+ }
+ 
+-static void DoCreateTown(Town *t, TileIndex tile, uint32 townnameparts, uint size_mode)
++/**
++ * Does the actual town creation.
++ *
++ * @param t The town
++ * @param tile Where to put it
++ * @param townnameparts Its name
++ * @param size_mode How the size should be determined
++ * @param size_val parameter for size determination
++ */
++static void DoCreateTown(Town *t, TileIndex tile, uint32 townnameparts, uint size_mode, uint size_val)
+ {
+ 	int x, i;
+ 
+@@ -1003,12 +1014,36 @@
+ 	UpdateTownVirtCoord(t);
+ 	_town_sort_dirty = true;
+ 
+-	if (size_mode == 0) {
+-		x = (Random() & 0xF) + 8;
+-	} else {
+-		x = (size_mode - 1) * 16 + 3;
+-	}
++  // new code for town creation modes
++  switch (size_mode) {
++    case TOWN_MODE_RANDOM:
++      // size_val: unused
++   		x = (Random() & 0xF) + 8;
++      break;
++ 
++    case TOWN_MODE_CITY:
++      // size_val: multiplier
++      x = (_largest_town * size_val) - 16;
++      break;
+ 
++    case TOWN_MODE_FIXED:
++      // size_val: actual size to use
++  		x = (size_val - 1) * 16 + 3;
++      break;
++
++    default:
++      // assume random
++  		x = (Random() & 0xF) + 8;
++      break;
++
++  }
++
++  if (size_mode != TOWN_MODE_CITY) {
++    if (x > _largest_town) {
++      _largest_town = x;
++    }
++  }
++
+ 	t->num_houses += x;
+ 	UpdateTownRadius(t);
+ 
+@@ -1088,13 +1123,13 @@
+ 	/* Create the town */
+ 	if (flags & DC_EXEC) {
+ 		_generating_world = true;
+-		DoCreateTown(t, tile, townnameparts, p1);
++		DoCreateTown(t, tile, townnameparts, TOWN_MODE_FIXED, p1);
+ 		_generating_world = false;
+ 	}
+ 	return 0;
+ }
+ 
+-Town *CreateRandomTown(uint attempts, uint size_mode)
++Town *CreateRandomTown(uint attempts, uint size_mode, uint size_val)
+ {
+ 	TileIndex tile;
+ 	Town *t;
+@@ -1118,7 +1153,7 @@
+ 		t = AllocateTown();
+ 		if (t == NULL) break;
+ 
+-		DoCreateTown(t, tile, townnameparts, size_mode);
++		DoCreateTown(t, tile, townnameparts, size_mode, size_val);
+ 		return t;
+ 	} while (--attempts);
+ 	return NULL;
+@@ -1126,21 +1161,37 @@
+ 
+ static const byte _num_initial_towns[3] = {11, 23, 46};
+ 
++/**
++ * Create some towns
++*/
+ bool GenerateTowns()
+ {
+ 	uint num = 0;
+ 	uint n = ScaleByMapSize(_num_initial_towns[_opt.diff.number_towns] + (Random() & 7));
++  uint num_cities = _patches.number_of_cities;
+ 
++  /* prevent users trying to create 10 cities on a 64x64 map */
++  if (n <= 2) {
++    num_cities = 0;
++  } else if (n <= 4) {
++    if (num_cities != 0) {
++      num_cities = 1;
++    }
++  }
++
++  /* reset the 'largest town' counter */
++  _largest_town = 0;
++
++  /* Create towns */
+ 	SetGeneratingWorldProgress(GWP_TOWN, n);
+-
+ 	do {
+ 		IncreaseGeneratingWorldProgress(GWP_TOWN);
+ 		/* try 20 times to create a random-sized town for the first loop. */
+-		if (CreateRandomTown(20, 0) != NULL) num++;
++		if (CreateRandomTown(20, TOWN_MODE_RANDOM, 0) != NULL) num++;
+ 	} while (--n);
+ 
+ 	/* give it a last try, but now more aggressive */
+-	if (num == 0 && CreateRandomTown(10000, 0) == NULL) {
++	if (num == 0 && CreateRandomTown(10000, TOWN_MODE_RANDOM, 0) == NULL) {
+ 		if (GetNumTowns() == 0) {
+ 			/* XXX - can we handle that more gracefully? */
+ 			if (_game_mode != GM_EDITOR) error("Could not generate any town");
+@@ -1149,6 +1200,26 @@
+ 		}
+ 	}
+ 
++
++  if (num_cities == 0) {
++  /* user doesnt want cities, or there on 64x64 */
++    SetGeneratingWorldProgress(GWP_CITY, 1);
++    IncreaseGeneratingWorldProgress(GWP_CITY);
++
++  } else {
++  /* Create our cities */
++    SetGeneratingWorldProgress(GWP_CITY, num_cities);
++    num = 0;
++    n = 0;
++    do {
++  		IncreaseGeneratingWorldProgress(GWP_CITY);
++      if (CreateRandomTown(20, TOWN_MODE_CITY, _patches.city_size_multiplier) != NULL) num++;
++      n++;
++      if (n > 100) break;   // prevent infanate loop if there is a problem
++    } while (num < num_cities);
++  }
++
++
+ 	return true;
+ }
+ 
+Index: src/genworld.h
+===================================================================
+--- src/genworld.h	(revision 9664)
++++ src/genworld.h	(working copy)
+@@ -54,6 +54,7 @@
+ 	GWP_LANDSCAPE,   ///< Create the landscape
+ 	GWP_ROUGH_ROCKY, ///< Make rough and rocky areas
+ 	GWP_TOWN,        ///< Generate towns
++	GWP_CITY,        ///< Generate cities
+ 	GWP_INDUSTRY,    ///< Generate industries
+ 	GWP_UNMOVABLE,   ///< Generate unmovables (radio tower, light houses)
+ 	GWP_TREE,        ///< Generate trees
+Index: src/main_gui.cpp
+===================================================================
+--- src/main_gui.cpp	(revision 9664)
++++ src/main_gui.cpp	(working copy)
+@@ -1446,7 +1446,7 @@
+ 
+ 			HandleButtonClick(w, 5);
+ 			_generating_world = true;
+-			t = CreateRandomTown(20, _scengen_town_size);
++			t = CreateRandomTown(20, TOWN_MODE_FIXED, _scengen_town_size);
+ 			_generating_world = false;
+ 
+ 			if (t == NULL) {

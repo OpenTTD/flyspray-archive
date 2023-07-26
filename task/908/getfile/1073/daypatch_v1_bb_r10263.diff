@@ -1,0 +1,493 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 10263)
++++ src/settings.cpp	(working copy)
+@@ -1429,7 +1429,8 @@
+ 	SDT_CONDVAR(Patches, town_growth_rate,  SLE_UINT8, 54, SL_MAX_VERSION, 0, MS, 2, 0,   4, 0, STR_CONFIG_PATCHES_TOWN_GROWTH,          NULL),
+ 	SDT_CONDVAR(Patches, larger_towns,      SLE_UINT8, 54, SL_MAX_VERSION, 0, D0, 4, 0, 255, 1, STR_CONFIG_PATCHES_LARGER_TOWNS,         NULL),
+ 	SDT_CONDVAR(Patches, initial_city_size, SLE_UINT8, 56, SL_MAX_VERSION, 0, 0,  2, 1,  10, 1, STR_CONFIG_PATCHES_CITY_SIZE_MULTIPLIER, NULL),
+-
++	 SDT_VAR(Patches, daylength_multiplier, SLE_UINT8, 0,NC,  1,1,30,1,  STR_CONFIG_PATCHES_DAY_LENGTH_MULTIPLIER, NULL),
++	SDT_BOOL(Patches, daylength_correction,       0, 0, false,            STR_CONFIG_PATCHES_DAY_LENGTH_CORRECTION,   NULL),
+ 	/***************************************************************************/
+ 	/* AI section of the GUI-configure patches window */
+ 	SDT_BOOL(Patches, ainew_active,           0, 0, false, STR_CONFIG_PATCHES_AINEW_ACTIVE,      AiNew_PatchActive_Warning),
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 10263)
++++ src/lang/english.txt	(working copy)
+@@ -1163,6 +1163,8 @@
+ STR_CONFIG_PATCHES_LARGER_TOWNS                                 :{LTBLUE}Proportion of towns that will become cities: {ORANGE}1 in {STRING1}
+ STR_CONFIG_PATCHES_LARGER_TOWNS_DISABLED                        :{LTBLUE}Proportion of towns that will become cities: {ORANGE}None
+ STR_CONFIG_PATCHES_CITY_SIZE_MULTIPLIER                         :{LTBLUE}Initial city size multiplier: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_DAY_LENGTH_MULTIPLIER                        :{LTBLUE}Length of days (2,22 Sec * Setting): {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_DAY_LENGTH_CORRECTION                        :{LTBLUE}Length of days affects economy
+ 
+ STR_CONFIG_PATCHES_GUI                                          :{BLACK}Interface
+ STR_CONFIG_PATCHES_CONSTRUCTION                                 :{BLACK}Construction
+@@ -1964,6 +1966,7 @@
+ ############ range for requires ends
+ 
+ STR_482A_PRODUCTION_LAST_MONTH                                  :{BLACK}Production last month:
++STR_PRODUCTION_LAST_TEN_DAYS                                    :{BLACK}Production last 10 days:
+ STR_482B_TRANSPORTED                                            :{YELLOW}{CARGO}{BLACK} ({COMMA}% transported)
+ STR_482C_CENTER_THE_MAIN_VIEW_ON                                :{BLACK}Centre the main view on industry location
+ STR_482D_NEW_UNDER_CONSTRUCTION                                 :{BLACK}{BIGFONT}New {STRING} under construction near {TOWN}!
+@@ -2253,6 +2256,7 @@
+ STR_7060_CAN_T_BUY_COMPANY                                      :{WHITE}Can't buy company...
+ STR_7061_CARGO_PAYMENT_RATES                                    :{WHITE}Cargo Payment Rates
+ STR_7062_DAYS_IN_TRANSIT                                        :{BLACK}{TINYFONT}Days in transit
++STR_7062X_SECONDS_IN_TRANSIT                                    :{BLACK}{TINYFONT}Seconds in transit
+ STR_7063_PAYMENT_FOR_DELIVERING                                 :{BLACK}{TINYFONT}Payment for delivering 10 units (or 10,000 litres) of cargo a distance of 20 squares
+ STR_7064_TOGGLE_GRAPH_FOR_CARGO                                 :{BLACK}Toggle graph for cargo type on/off
+ STR_7065                                                        :{BLACK}{TINYFONT}{STRING}
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 10263)
++++ src/settings_gui.cpp	(working copy)
+@@ -696,6 +696,8 @@
+ 	"town_growth_rate",
+ 	"larger_towns",
+ 	"initial_city_size",
++	"daylength_multiplier",
++	"daylength_correction",
+ };
+ 
+ static const char *_patches_ai[] = {
+Index: src/engine_gui.cpp
+===================================================================
+--- src/engine_gui.cpp	(revision 10263)
++++ src/engine_gui.cpp	(working copy)
+@@ -125,7 +125,7 @@
+ 	SetDParam(3, rvi->power << multihead);
+ 	SetDParam(1, rvi->weight << multihead);
+ 
+-	SetDParam(4, rvi->running_cost_base * _price.running_rail[rvi->running_cost_class] >> 8 << multihead);
++	SetDParam(4, rvi->running_cost_base * _price.running_rail[rvi->running_cost_class] * EconomyMultiplier() >> 8 << multihead);
+ 
+ 	if (rvi->capacity != 0) {
+ 		SetDParam(5, rvi->cargo_type);
+@@ -143,7 +143,7 @@
+ 	SetDParam(1, avi->max_speed * 10 / 16);
+ 	SetDParam(2, avi->passenger_capacity);
+ 	SetDParam(3, avi->mail_capacity);
+-	SetDParam(4, avi->running_cost * _price.aircraft_running >> 8);
++	SetDParam(4, avi->running_cost * _price.aircraft_running * EconomyMultiplier() >> 8);
+ 
+ 	DrawStringMultiCenter(x, y, STR_A02E_COST_MAX_SPEED_CAPACITY, maxw);
+ }
+@@ -154,7 +154,7 @@
+ 
+ 	SetDParam(0, (_price.roadveh_base >> 3) * rvi->base_cost >> 5);
+ 	SetDParam(1, rvi->max_speed * 10 / 32);
+-	SetDParam(2, rvi->running_cost * _price.roadveh_running >> 8);
++	SetDParam(2, rvi->running_cost * _price.roadveh_running * EconomyMultiplier() >> 8);
+ 	SetDParam(3, rvi->cargo_type);
+ 	SetDParam(4, rvi->capacity);
+ 
+@@ -168,7 +168,7 @@
+ 	SetDParam(1, svi->max_speed * 10 / 32);
+ 	SetDParam(2, svi->cargo_type);
+ 	SetDParam(3, svi->capacity);
+-	SetDParam(4, svi->running_cost * _price.ship_running >> 8);
++	SetDParam(4, svi->running_cost * _price.ship_running * EconomyMultiplier() >> 8);
+ 	DrawStringMultiCenter(x, y, STR_982E_COST_MAX_SPEED_CAPACITY, maxw);
+ }
+ 
+Index: src/date.cpp
+===================================================================
+--- src/date.cpp	(revision 10263)
++++ src/date.cpp	(working copy)
+@@ -214,7 +214,7 @@
+ 	uint total = GetMaxVehicleIndex() + 1;
+ 	uint i;
+ 
+-	for (i = daytick; i < total; i += DAY_TICKS) {
++	for (i = daytick; i < total; i += TicksPerDay()) { // added daylength multiplier
+ 		Vehicle *v = GetVehicle(i);
+ 
+ 		if (IsValidVehicle(v)) _on_new_vehicle_day_proc[v->type](v);
+@@ -236,7 +236,7 @@
+ 	_tick_counter++;
+ 
+ 	_date_fract++;
+-	if (_date_fract < DAY_TICKS) return;
++	if (_date_fract < TicksPerDay()) return; // added daylength multiplier
+ 	_date_fract = 0;
+ 
+ 	/* yeah, increase day counter and call various daily loops */
+Index: src/industry_gui.cpp
+===================================================================
+--- src/industry_gui.cpp	(revision 10263)
++++ src/industry_gui.cpp	(working copy)
+@@ -323,7 +323,8 @@
+ 		}
+ 
+ 		if (ind->produced_cargo[0] != CT_INVALID) {
+-			DrawString(2, 117, STR_482A_PRODUCTION_LAST_MONTH, 0);
++			if (_patches.daylength_multiplier < 10) DrawString(2, 117, STR_482A_PRODUCTION_LAST_MONTH, 0);
++			if (_patches.daylength_multiplier >= 10) DrawString(2, 117, STR_PRODUCTION_LAST_TEN_DAYS, 0); // Not yet working!
+ 
+ 			SetDParam(0, ind->produced_cargo[0]);
+ 			SetDParam(1, i->last_month_production[0]);
+Index: src/build_vehicle_gui.cpp
+===================================================================
+--- src/build_vehicle_gui.cpp	(revision 10263)
++++ src/build_vehicle_gui.cpp	(working copy)
+@@ -483,7 +483,7 @@
+ 	}
+ 
+ 	/* Running cost */
+-	SetDParam(0, (GetEngineProperty(engine_number, 0x0D, rvi->running_cost_base) * _price.running_rail[rvi->running_cost_class] >> 8) << multihead);
++	SetDParam(0, (GetEngineProperty(engine_number, 0x0D, rvi->running_cost_base) * _price.running_rail[rvi->running_cost_class]  * EconomyMultiplier() >> 8) << multihead);
+ 	DrawString(x, y, STR_PURCHASE_INFO_RUNNINGCOST, 0);
+ 	y += 10;
+ 
+@@ -510,7 +510,7 @@
+ 	y += 10;
+ 
+ 	/* Running cost */
+-	SetDParam(0, rvi->running_cost * _price.roadveh_running >> 8);
++	SetDParam(0, rvi->running_cost * EconomyMultiplier() * _price.roadveh_running >> 8);
+ 	DrawString(x, y, STR_PURCHASE_INFO_RUNNINGCOST, 0);
+ 	y += 10;
+ 
+@@ -541,7 +541,7 @@
+ 	y += 10;
+ 
+ 	/* Running cost */
+-	SetDParam(0, GetEngineProperty(engine_number, 0x0F, svi->running_cost) * _price.ship_running >> 8);
++	SetDParam(0, GetEngineProperty(engine_number, 0x0F, svi->running_cost) * _price.ship_running * EconomyMultiplier() >> 8);
+ 	DrawString(x, y, STR_PURCHASE_INFO_RUNNINGCOST, 0);
+ 	y += 10;
+ 
+@@ -576,7 +576,7 @@
+ 	y += 10;
+ 
+ 	/* Running cost */
+-	SetDParam(0, GetEngineProperty(engine_number, 0x0E, avi->running_cost) * _price.aircraft_running >> 8);
++	SetDParam(0, GetEngineProperty(engine_number, 0x0E, avi->running_cost) * EconomyMultiplier() * _price.aircraft_running >> 8);
+ 	DrawString(x, y, STR_PURCHASE_INFO_RUNNINGCOST, 0);
+ 	y += 10;
+ 
+Index: src/ship_cmd.cpp
+===================================================================
+--- src/ship_cmd.cpp	(revision 10263)
++++ src/ship_cmd.cpp	(working copy)
+@@ -189,7 +189,7 @@
+ 
+ 	if (v->vehstatus & VS_STOPPED) return;
+ 
+-	cost.AddCost(GetVehicleProperty(v, 0x0F, ShipVehInfo(v->engine_type)->running_cost) * _price.ship_running / 364);
++	cost.AddCost(GetVehicleProperty(v, 0x0F, ShipVehInfo(v->engine_type)->running_cost) * _price.ship_running * EconomyMultiplier() / 364);
+ 	v->profit_this_year -= cost.GetCost() >> 8;
+ 
+ 	SET_EXPENSES_TYPE(EXPENSES_SHIP_RUN);
+Index: src/aircraft_gui.cpp
+===================================================================
+--- src/aircraft_gui.cpp	(revision 10263)
++++ src/aircraft_gui.cpp	(working copy)
+@@ -92,7 +92,7 @@
+ 
+ 			SetDParam(0, (v->age + 365 < v->max_age) ? STR_AGE : STR_AGE_RED);
+ 			SetDParam(2, v->max_age / 366);
+-			SetDParam(3, _price.aircraft_running * AircraftVehInfo(v->engine_type)->running_cost >> 8);
++			SetDParam(3, _price.aircraft_running * EconomyMultiplier() * AircraftVehInfo(v->engine_type)->running_cost >> 8);
+ 			DrawString(2, 15, STR_A00D_AGE_RUNNING_COST_YR, 0);
+ 		}
+ 
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 10263)
++++ src/train_cmd.cpp	(working copy)
+@@ -2864,12 +2864,12 @@
+ 							v->cur_speed = 0;
+ 							v->subspeed = 0;
+ 							v->progress = 255 - 100;
+-							if (++v->load_unload_time_rem < _patches.wait_oneway_signal * 20) return;
++							if (++v->load_unload_time_rem < _patches.wait_oneway_signal * 20 * _patches.daylength_multiplier) return;
+ 						} else if (HasSignalOnTrackdir(gp.new_tile, i)) {
+ 							v->cur_speed = 0;
+ 							v->subspeed = 0;
+ 							v->progress = 255 - 10;
+-							if (++v->load_unload_time_rem < _patches.wait_twoway_signal * 73) {
++							if (++v->load_unload_time_rem < _patches.wait_twoway_signal * 73 * _patches.daylength_multiplier) {
+ 								TileIndex o_tile = gp.new_tile + TileOffsByDiagDir(enterdir);
+ 								VehicleAtSignalData vasd;
+ 								vasd.tile = o_tile;
+Index: src/ai/trolly/trolly.cpp
+===================================================================
+--- src/ai/trolly/trolly.cpp	(revision 10263)
++++ src/ai/trolly/trolly.cpp	(working copy)
+@@ -81,7 +81,7 @@
+ {
+ 	assert(p->ainew.state == AI_STATE_NOTHING);
+ 	// If we are done idling, start over again
+-	if (p->ainew.idle == 0) p->ainew.idle = AI_RandomRange(DAY_TICKS * 2) + DAY_TICKS;
++	if (p->ainew.idle == 0) p->ainew.idle = AI_RandomRange(CorrectedDayTicks() * 2) + CorrectedDayTicks();
+ 	if (--p->ainew.idle == 0) {
+ 		// We are done idling.. what you say? Let's do something!
+ 		// I mean.. the next tick ;)
+@@ -880,7 +880,7 @@
+ 		// Passenger run.. how long is the route?
+ 		length = p->ainew.path_info.route_length;
+ 		// Calculating tiles a day a vehicle moves is not easy.. this is how it must be done!
+-		tiles_a_day = RoadVehInfo(i)->max_speed * DAY_TICKS / 256 / 16;
++		tiles_a_day = RoadVehInfo(i)->max_speed * CorrectedDayTicks() / 256 / 16;
+ 		// We want a vehicle in a station once a month at least, so, calculate it!
+ 		// (the * 2 is because we have 2 stations ;))
+ 		amount = length * 2 * 2 / tiles_a_day / 30;
+@@ -896,7 +896,7 @@
+ 		// Passenger run.. how long is the route?
+ 		length = p->ainew.path_info.route_length;
+ 		// Calculating tiles a day a vehicle moves is not easy.. this is how it must be done!
+-		tiles_a_day = RoadVehInfo(i)->max_speed * DAY_TICKS / 256 / 16;
++		tiles_a_day = RoadVehInfo(i)->max_speed * CorrectedDayTicks() / 256 / 16;
+ 		if (p->ainew.from_deliver) {
+ 			max_cargo = GetIndustry(p->ainew.from_ic)->last_month_production[0];
+ 		} else {
+Index: src/ai/trolly/trolly.h
+===================================================================
+--- src/ai/trolly/trolly.h	(revision 10263)
++++ src/ai/trolly/trolly.h	(working copy)
+@@ -139,7 +139,7 @@
+ #define AI_CHECK_MAX_VEHICLE_PER_STATION 10
+ 
+ // How many thick between building 2 vehicles
+-#define AI_BUILD_VEHICLE_TIME_BETWEEN DAY_TICKS
++#define AI_BUILD_VEHICLE_TIME_BETWEEN CorrectedDayTicks()
+ 
+ // How many days must there between vehicle checks
+ //  The more often, the less non-money-making lines there will be
+Index: src/station_gui.cpp
+===================================================================
+--- src/station_gui.cpp	(revision 10263)
++++ src/station_gui.cpp	(working copy)
+@@ -268,7 +268,7 @@
+ 	_last_station = NULL; // used for "cache" in namesorting
+ 	qsort((void*)sl->sort_list, sl->list_length, sizeof(sl->sort_list[0]), _station_sorter[sl->sort_type]);
+ 
+-	sl->resort_timer = DAY_TICKS * PERIODIC_RESORT_DAYS;
++	sl->resort_timer = TicksPerDay() * PERIODIC_RESORT_DAYS;
+ 	sl->flags &= ~SL_RESORT;
+ }
+ 
+@@ -299,7 +299,7 @@
+ 			sl->flags = SL_REBUILD;
+ 			sl->sort_type = station_sort.criteria;
+ 			if (station_sort.order) sl->flags |= SL_ORDER;
+-			sl->resort_timer = DAY_TICKS * PERIODIC_RESORT_DAYS;
++			sl->resort_timer = TicksPerDay() * PERIODIC_RESORT_DAYS;
+ 			break;
+ 
+ 		case WE_PAINT: {
+@@ -524,7 +524,7 @@
+ 		case WE_TICK:
+ 			if (--sl->resort_timer == 0) {
+ 				DEBUG(misc, 3, "Periodic rebuild station list player %d", owner);
+-				sl->resort_timer = DAY_TICKS * PERIODIC_RESORT_DAYS;
++				sl->resort_timer = TicksPerDay() * PERIODIC_RESORT_DAYS;
+ 				sl->flags |= SL_REBUILD;
+ 				SetWindowDirty(w);
+ 			}
+Index: src/ship_gui.cpp
+===================================================================
+--- src/ship_gui.cpp	(revision 10263)
++++ src/ship_gui.cpp	(working copy)
+@@ -50,7 +50,7 @@
+ 
+ 			SetDParam(0, (v->age + 365 < v->max_age) ? STR_AGE : STR_AGE_RED);
+ 			SetDParam(2, v->max_age / 366);
+-			SetDParam(3, ShipVehInfo(v->engine_type)->running_cost * _price.ship_running >> 8);
++			SetDParam(3, ShipVehInfo(v->engine_type)->running_cost * _price.ship_running * EconomyMultiplier() >> 8);
+ 			DrawString(2, 15, STR_9812_AGE_RUNNING_COST_YR, 0);
+ 		}
+ 
+Index: src/variables.h
+===================================================================
+--- src/variables.h	(revision 10263)
++++ src/variables.h	(working copy)
+@@ -239,6 +239,8 @@
+ 
+ 	bool timetabling;        ///< Whether to allow timetabling.
+ 	bool timetable_in_ticks; ///< Whether to show the timetable in ticks rather than days.
++	byte daylength_multiplier; // Allows to set the daylength
++	bool daylength_correction; // Economy changes according to the daylength set
+ };
+ 
+ VARDEF Patches _patches;
+@@ -397,4 +399,7 @@
+ /* Forking stuff */
+ VARDEF bool _dedicated_forks;
+ 
++/* Used to correct economy calculations for daylength changes */
++inline uint8 EconomyMultiplier() { return _patches.daylength_correction ? _patches.daylength_multiplier : 1; }
++
+ #endif /* VARIABLES_H */
+Index: src/vehicle_gui.cpp
+===================================================================
+--- src/vehicle_gui.cpp	(revision 10263)
++++ src/vehicle_gui.cpp	(working copy)
+@@ -146,7 +146,7 @@
+ 	qsort((void*)vl->sort_list, vl->l.list_length, sizeof(vl->sort_list[0]),
+ 		_vehicle_sorter[vl->l.sort_type]);
+ 
+-	vl->l.resort_timer = DAY_TICKS * PERIODIC_RESORT_DAYS;
++	vl->l.resort_timer = CorrectedDayTicks() * PERIODIC_RESORT_DAYS;
+ 	vl->l.flags &= ~VL_RESORT;
+ }
+ 
+@@ -904,7 +904,7 @@
+ 	vl->l.flags = VL_REBUILD | (vl->_sorting->order ? VL_DESC : VL_NONE);
+ 	vl->l.sort_type = vl->_sorting->criteria;
+ 	vl->sort_list = NULL;
+-	vl->l.resort_timer = DAY_TICKS * PERIODIC_RESORT_DAYS; // Set up resort timer
++	vl->l.resort_timer = CorrectedDayTicks() * PERIODIC_RESORT_DAYS; // Set up resort timer
+ }
+ 
+ void DrawSmallOrderList(const Vehicle *v, int x, int y)
+@@ -1172,7 +1172,7 @@
+ 				PlayerID owner = (PlayerID)w->caption_color;
+ 
+ 				DEBUG(misc, 3, "Periodic resort %d list player %d at station %d", vl->vehicle_type, owner, station);
+-				vl->l.resort_timer = DAY_TICKS * PERIODIC_RESORT_DAYS;
++				vl->l.resort_timer = CorrectedDayTicks() * PERIODIC_RESORT_DAYS;
+ 				vl->l.flags |= VL_RESORT;
+ 				SetWindowDirty(w);
+ 			}
+Index: src/network/network_server.cpp
+===================================================================
+--- src/network/network_server.cpp	(revision 10263)
++++ src/network/network_server.cpp	(working copy)
+@@ -997,7 +997,7 @@
+ 	/* The client is trying to catch up with the server */
+ 	if (cs->status == STATUS_PRE_ACTIVE) {
+ 		/* The client is not yet catched up? */
+-		if (frame + DAY_TICKS < _frame_counter) return;
++		if (frame + CorrectedDayTicks() < _frame_counter) return;
+ 
+ 		/* Now he is! Unpause the game */
+ 		cs->status = STATUS_ACTIVE;
+@@ -1518,7 +1518,7 @@
+ 		// Check if the speed of the client is what we can expect from a client
+ 		if (cs->status == STATUS_ACTIVE) {
+ 			// 1 lag-point per day
+-			int lag = NetworkCalculateLag(cs) / DAY_TICKS;
++			int lag = NetworkCalculateLag(cs) / CorrectedDayTicks();
+ 			if (lag > 0) {
+ 				if (lag > 3) {
+ 					// Client did still not report in after 4 game-day, drop him
+@@ -1544,8 +1544,8 @@
+ 			}
+ 		} else if (cs->status == STATUS_INACTIVE) {
+ 			int lag = NetworkCalculateLag(cs);
+-			if (lag > 4 * DAY_TICKS) {
+-				IConsolePrintF(_icolour_err,"Client #%d is dropped because it took longer than %d ticks to start the joining process", cs->index, 4 * DAY_TICKS);
++			if (lag > 4 * CorrectedDayTicks()) {
++				IConsolePrintF(_icolour_err,"Client #%d is dropped because it took longer than %d ticks to start the joining process", cs->index, 4 * CorrectedDayTicks());
+ 				NetworkCloseClient(cs);
+ 			}
+ 		}
+Index: src/network/network_client.cpp
+===================================================================
+--- src/network/network_client.cpp	(revision 10263)
++++ src/network/network_client.cpp	(working copy)
+@@ -598,7 +598,7 @@
+ 	// Let the server know that we received this frame correctly
+ 	//  We do this only once per day, to save some bandwidth ;)
+ 	if (!_network_first_time && last_ack_frame < _frame_counter) {
+-		last_ack_frame = _frame_counter + DAY_TICKS;
++		last_ack_frame = _frame_counter + CorrectedDayTicks();
+ 		DEBUG(net, 4, "Sent ACK at %d", _frame_counter);
+ 		SEND_COMMAND(PACKET_CLIENT_ACK)();
+ 	}
+Index: src/network/network.cpp
+===================================================================
+--- src/network/network.cpp	(revision 10263)
++++ src/network/network.cpp	(working copy)
+@@ -136,7 +136,7 @@
+ {
+ 	char buf[1024];
+ 	va_list va;
+-	const int duration = 10; // Game days the messages stay visible
++	const int duration = (10/_patches.daylength_multiplier); // Game days the messages stay visible
+ 	char message[1024];
+ 	char temp[1024];
+ 
+@@ -206,8 +206,8 @@
+ 	// This client has missed his ACK packet after 1 DAY_TICKS..
+ 	//  so we increase his lag for every frame that passes!
+ 	// The packet can be out by a max of _net_frame_freq
+-	if (cs->last_frame_server + DAY_TICKS + _network_frame_freq < _frame_counter)
+-		lag += _frame_counter - (cs->last_frame_server + DAY_TICKS + _network_frame_freq);
++	if (cs->last_frame_server + CorrectedDayTicks() + _network_frame_freq < _frame_counter)
++		lag += _frame_counter - (cs->last_frame_server + CorrectedDayTicks() + _network_frame_freq);
+ 
+ 	return lag;
+ }
+Index: src/train_gui.cpp
+===================================================================
+--- src/train_gui.cpp	(revision 10263)
++++ src/train_gui.cpp	(working copy)
+@@ -423,7 +423,7 @@
+ 
+ 	SetDParam(0, (v->age + 365 < v->max_age) ? STR_AGE : STR_AGE_RED);
+ 	SetDParam(2, v->max_age / 366);
+-	SetDParam(3, GetTrainRunningCost(v) >> 8);
++	SetDParam(3, GetTrainRunningCost(v) * EconomyMultiplier() >> 8);
+ 	DrawString(x, 15, STR_885D_AGE_RUNNING_COST_YR, 0);
+ 
+ 	SetDParam(2, v->u.rail.cached_max_speed * 10 / 16);
+Index: src/roadveh_cmd.cpp
+===================================================================
+--- src/roadveh_cmd.cpp	(revision 10263)
++++ src/roadveh_cmd.cpp	(working copy)
+@@ -1969,7 +1969,7 @@
+ 		}
+ 	}
+ 
+-	cost = RoadVehInfo(v->engine_type)->running_cost * _price.roadveh_running / 364;
++	cost = RoadVehInfo(v->engine_type)->running_cost * _price.roadveh_running * EconomyMultiplier() / 364;
+ 
+ 	v->profit_this_year -= cost.GetCost() >> 8;
+ 
+Index: src/date.h
+===================================================================
+--- src/date.h	(revision 10263)
++++ src/date.h	(working copy)
+@@ -60,4 +60,9 @@
+ void ConvertDateToYMD(Date date, YearMonthDay *ymd);
+ Date ConvertYMDToDate(Year year, Month month, Day day);
+ 
++/* Ouch... */
++#include "variables.h"
++inline uint8 CorrectedDayTicks() { return DAY_TICKS / _patches.daylength_multiplier; }
++inline uint16 TicksPerDay() { return DAY_TICKS * _patches.daylength_multiplier; }
++
+ #endif /* DATE_H */
+Index: src/aircraft_cmd.cpp
+===================================================================
+--- src/aircraft_cmd.cpp	(revision 10263)
++++ src/aircraft_cmd.cpp	(working copy)
+@@ -745,7 +745,7 @@
+ 
+ 	if (v->vehstatus & VS_STOPPED) return;
+ 
+-	CommandCost cost = CommandCost(GetVehicleProperty(v, 0x0E, AircraftVehInfo(v->engine_type)->running_cost) * _price.aircraft_running / 364);
++	CommandCost cost = CommandCost(GetVehicleProperty(v, 0x0E, AircraftVehInfo(v->engine_type)->running_cost) * EconomyMultiplier() * _price.aircraft_running / 364);
+ 
+ 	v->profit_this_year -= cost.GetCost() >> 8;
+ 
+Index: src/roadveh_gui.cpp
+===================================================================
+--- src/roadveh_gui.cpp	(revision 10263)
++++ src/roadveh_gui.cpp	(working copy)
+@@ -92,7 +92,7 @@
+ 
+ 			SetDParam(0, (v->age + 365 < v->max_age) ? STR_AGE : STR_AGE_RED);
+ 			SetDParam(2, v->max_age / 366);
+-			SetDParam(3, RoadVehInfo(v->engine_type)->running_cost * _price.roadveh_running >> 8);
++			SetDParam(3, RoadVehInfo(v->engine_type)->running_cost * _price.roadveh_running * EconomyMultiplier() >> 8);
+ 			DrawString(2, 15, STR_900D_AGE_RUNNING_COST_YR, 0);
+ 		}
+ 

@@ -1,0 +1,630 @@
+Index: src/bridge_gui.cpp
+===================================================================
+--- src/bridge_gui.cpp	(revision 10239)
++++ src/bridge_gui.cpp	(working copy)
+@@ -22,7 +22,7 @@
+ 	TileIndex end_tile;
+ 	byte type;
+ 	byte indexes[MAX_BRIDGES];
+-	int32 costs[MAX_BRIDGES];
++	Money costs[MAX_BRIDGES];
+ } _bridgedata;
+ 
+ void CcBuildBridge(bool success, TileIndex tile, uint32 p1, uint32 p2)
+Index: src/functions.h
+===================================================================
+--- src/functions.h	(revision 10239)
++++ src/functions.h	(working copy)
+@@ -139,8 +139,8 @@
+ bool EnsureNoVehicle(TileIndex tile);
+ bool EnsureNoVehicleOnGround(TileIndex tile);
+ void MarkAllViewportsDirty(int left, int top, int right, int bottom);
+-void ShowCostOrIncomeAnimation(int x, int y, int z, int32 cost);
+-void ShowFeederIncomeAnimation(int x, int y, int z, int32 cost);
++void ShowCostOrIncomeAnimation(int x, int y, int z, Money cost);
++void ShowFeederIncomeAnimation(int x, int y, int z, Money cost);
+ 
+ bool CheckIfAuthorityAllows(TileIndex tile);
+ Town *ClosestTownFromTile(TileIndex tile, uint threshold);
+Index: src/macros.h
+===================================================================
+--- src/macros.h	(revision 10239)
++++ src/macros.h	(working copy)
+@@ -51,6 +51,14 @@
+ 	return a;
+ }
+ 
++/* Gracefully reduce a signed 64-bit int to signed 32-bit -- no bogusly truncating the sign bit */
++static inline int32 s64_to_s32(int64 a)
++{
++	if (a <= (int32)0x80000000) return 0x80000000;
++	if (a >= (int32)0x7FFFFFFF) return 0x7FFFFFFF;
++	return (int32)a;
++}
++
+ static inline int32 BIGMULSS(int32 a, int32 b, int shift)
+ {
+ 	return (int32)((int64)a * (int64)b >> shift);
+Index: src/misc_gui.cpp
+===================================================================
+--- src/misc_gui.cpp	(revision 10239)
++++ src/misc_gui.cpp	(working copy)
+@@ -104,7 +104,7 @@
+ 	t = ClosestTownFromTile(tile, _patches.dist_local_authority);
+ 
+ 	old_money = p->player_money;
+-	p->player_money = 0x7fffffff;
++	p->player_money = INT64_MAX;
+ 	costclear = DoCommand(tile, 0, 0, 0, CMD_LANDSCAPE_CLEAR);
+ 	p->player_money = old_money;
+ 
+@@ -610,7 +610,7 @@
+ }
+ 
+ 
+-void ShowEstimatedCostOrIncome(int32 cost, int x, int y)
++void ShowEstimatedCostOrIncome(Money cost, int x, int y)
+ {
+ 	StringID msg = STR_0805_ESTIMATED_COST;
+ 
+@@ -622,7 +622,7 @@
+ 	ShowErrorMessage(INVALID_STRING_ID, msg, x, y);
+ }
+ 
+-void ShowCostOrIncomeAnimation(int x, int y, int z, int32 cost)
++void ShowCostOrIncomeAnimation(int x, int y, int z, Money cost)
+ {
+ 	StringID msg;
+ 	Point pt = RemapCoords(x,y,z);
+@@ -636,7 +636,7 @@
+ 	AddTextEffect(msg, pt.x, pt.y, 0x250);
+ }
+ 
+-void ShowFeederIncomeAnimation(int x, int y, int z, int32 cost)
++void ShowFeederIncomeAnimation(int x, int y, int z, Money cost)
+ {
+ 	Point pt = RemapCoords(x,y,z);
+ 
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(revision 10239)
++++ src/rail_cmd.cpp	(working copy)
+@@ -974,7 +974,7 @@
+ CommandCost CmdConvertRail(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	CommandCost ret, cost;
+-	int32 money;
++	Money money;
+ 	int ex;
+ 	int ey;
+ 	int sx, sy, x, y;
+Index: src/build_vehicle_gui.cpp
+===================================================================
+--- src/build_vehicle_gui.cpp	(revision 10239)
++++ src/build_vehicle_gui.cpp	(working copy)
+@@ -206,9 +206,9 @@
+ 	const RailVehicleInfo *rvi_a = RailVehInfo(*(const EngineID*)a);
+ 	const RailVehicleInfo *rvi_b = RailVehInfo(*(const EngineID*)b);
+ 
+-	int va = rvi_a->running_cost_base * _price.running_rail[rvi_a->running_cost_class] * (rvi_a->railveh_type == RAILVEH_MULTIHEAD ? 2 : 1);
+-	int vb = rvi_b->running_cost_base * _price.running_rail[rvi_b->running_cost_class] * (rvi_b->railveh_type == RAILVEH_MULTIHEAD ? 2 : 1);
+-	int r = va - vb;
++	Money va = rvi_a->running_cost_base * _price.running_rail[rvi_a->running_cost_class] * (rvi_a->railveh_type == RAILVEH_MULTIHEAD ? 2 : 1);
++	Money vb = rvi_b->running_cost_base * _price.running_rail[rvi_b->running_cost_class] * (rvi_b->railveh_type == RAILVEH_MULTIHEAD ? 2 : 1);
++	int r = MONEY_INT(va - vb);
+ 
+ 	return _internal_sort_order ? -r : r;
+ }
+@@ -224,9 +224,9 @@
+ 		* Because of this, the return value have to be reversed as well and we return b - a instead of a - b.
+ 		* Another thing is that both power and running costs should be doubled for multiheaded engines.
+ 		* Since it would be multipling with 2 in both numerator and denumerator, it will even themselves out and we skip checking for multiheaded. */
+-	int va = (rvi_a->running_cost_base * _price.running_rail[rvi_a->running_cost_class]) / max((uint16)1, rvi_a->power);
+-	int vb = (rvi_b->running_cost_base * _price.running_rail[rvi_b->running_cost_class]) / max((uint16)1, rvi_b->power);
+-	int r = vb - va;
++	Money va = (rvi_a->running_cost_base * _price.running_rail[rvi_a->running_cost_class]) / max((uint16)1, rvi_a->power);
++	Money vb = (rvi_b->running_cost_base * _price.running_rail[rvi_b->running_cost_class]) / max((uint16)1, rvi_b->power);
++	int r = MONEY_INT(vb - va);
+ 
+ 	return _internal_sort_order ? -r : r;
+ }
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 10239)
++++ src/train_cmd.cpp	(working copy)
+@@ -1248,7 +1248,7 @@
+ 				IsTrainEngine(v)) ? v->u.rail.other_multiheaded_part : NULL;
+ 
+ 			if (rear != NULL) {
+-				cost.AddCost(-(int64)rear->value);
++				cost.AddCost(-rear->value);
+ 				if (flags & DC_EXEC) {
+ 					UnlinkWagon(rear, first);
+ 					DeleteDepotHighlightOfVehicle(rear);
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revision 10239)
++++ src/command.cpp	(working copy)
+@@ -418,10 +418,10 @@
+ 	return res;
+ }
+ 
+-int32 GetAvailableMoneyForCommand()
++Money GetAvailableMoneyForCommand()
+ {
+ 	PlayerID pid = _current_player;
+-	if (!IsValidPlayer(pid)) return 0x7FFFFFFF; // max int
++	if (!IsValidPlayer(pid)) return INT64_MAX;
+ 	return GetPlayer(pid)->player_money;
+ }
+ 
+@@ -568,7 +568,7 @@
+ 
+ 	if (IsLocalPlayer() && _game_mode != GM_EDITOR) {
+ 		if (res2.GetCost() != 0) ShowCostOrIncomeAnimation(x, y, GetSlopeZ(x, y), res2.GetCost());
+-		if (_additional_cash_required) {
++		if (_additional_cash_required != 0) {
+ 			SetDParam(0, _additional_cash_required);
+ 			ShowErrorMessage(STR_0003_NOT_ENOUGH_CASH_REQUIRES, error_part1, x, y);
+ 			if (res2.GetCost() == 0) goto callb_err;
+Index: src/ai/default/default.cpp
+===================================================================
+--- src/ai/default/default.cpp	(revision 10239)
++++ src/ai/default/default.cpp	(working copy)
+@@ -132,7 +132,7 @@
+ 	p->ai.state_counter = 0;
+ }
+ 
+-static EngineID AiChooseTrainToBuild(RailType railtype, int32 money, byte flag, TileIndex tile)
++static EngineID AiChooseTrainToBuild(RailType railtype, Money money, byte flag, TileIndex tile)
+ {
+ 	EngineID best_veh_index = INVALID_ENGINE;
+ 	byte best_veh_score = 0;
+@@ -161,7 +161,7 @@
+ 	return best_veh_index;
+ }
+ 
+-static EngineID AiChooseRoadVehToBuild(CargoID cargo, int32 money, TileIndex tile)
++static EngineID AiChooseRoadVehToBuild(CargoID cargo, Money money, TileIndex tile)
+ {
+ 	EngineID best_veh_index = INVALID_ENGINE;
+ 	int32 best_veh_rating = 0;
+@@ -199,10 +199,10 @@
+ 	return best_veh_index;
+ }
+ 
+-static EngineID AiChooseAircraftToBuild(int32 money, byte flag)
++static EngineID AiChooseAircraftToBuild(Money money, byte flag)
+ {
+ 	EngineID best_veh_index = INVALID_ENGINE;
+-	int32 best_veh_cost = 0;
++	Money best_veh_cost = 0;
+ 	EngineID i;
+ 
+ 	for (i = AIRCRAFT_ENGINES_INDEX; i != AIRCRAFT_ENGINES_INDEX + NUM_AIRCRAFT_ENGINES; i++) {
+@@ -225,9 +225,9 @@
+ 	return best_veh_index;
+ }
+ 
+-static int32 AiGetBasePrice(const Player* p)
++static Money AiGetBasePrice(const Player* p)
+ {
+-	int32 base = _price.station_value;
++	Money base = _price.station_value;
+ 
+ 	// adjust base price when more expensive vehicles are available
+ 	switch (p->ai.railtype_to_use) {
+@@ -242,7 +242,7 @@
+ }
+ 
+ #if 0
+-static EngineID AiChooseShipToBuild(byte cargo, int32 money)
++static EngineID AiChooseShipToBuild(byte cargo, Money money)
+ {
+ 	// XXX: not done
+ 	return INVALID_ENGINE;
+@@ -251,13 +251,13 @@
+ 
+ static EngineID AiChooseRoadVehToReplaceWith(const Player* p, const Vehicle* v)
+ {
+-	int32 avail_money = p->player_money + v->value;
++	Money avail_money = p->player_money + v->value;
+ 	return AiChooseRoadVehToBuild(v->cargo_type, avail_money, v->tile);
+ }
+ 
+ static EngineID AiChooseAircraftToReplaceWith(const Player* p, const Vehicle* v)
+ {
+-	int32 avail_money = p->player_money + v->value;
++	Money avail_money = p->player_money + v->value;
+ 	return AiChooseAircraftToBuild(
+ 		avail_money, AircraftVehInfo(v->engine_type)->subtype & AIR_CTOL
+ 	);
+@@ -265,7 +265,7 @@
+ 
+ static EngineID AiChooseTrainToReplaceWith(const Player* p, const Vehicle* v)
+ {
+-	int32 avail_money = p->player_money + v->value;
++	Money avail_money = p->player_money + v->value;
+ 	const Vehicle* u = v;
+ 	int num = 0;
+ 
+@@ -3901,7 +3901,7 @@
+ 
+ static void AiAdjustLoan(const Player* p)
+ {
+-	int32 base = AiGetBasePrice(p);
++	Money base = AiGetBasePrice(p);
+ 
+ 	if (p->player_money > base * 1400) {
+ 		// Decrease loan
+Index: src/ai/trolly/trolly.cpp
+===================================================================
+--- src/ai/trolly/trolly.cpp	(revision 10239)
++++ src/ai/trolly/trolly.cpp	(working copy)
+@@ -97,7 +97,6 @@
+ //    - Build HQ
+ static void AiNew_State_WakeUp(Player *p)
+ {
+-	int32 money;
+ 	int c;
+ 	assert(p->ainew.state == AI_STATE_WAKE_UP);
+ 	// First, check if we have a HQ
+@@ -111,7 +110,7 @@
+ 		return;
+ 	}
+ 
+-	money = p->player_money - AI_MINIMUM_MONEY;
++	Money money = p->player_money - AI_MINIMUM_MONEY;
+ 
+ 	// Let's pick an action!
+ 	if (p->ainew.action == AI_ACTION_NONE) {
+Index: src/station_gui.cpp
+===================================================================
+--- src/station_gui.cpp	(revision 10239)
++++ src/station_gui.cpp	(working copy)
+@@ -131,14 +131,14 @@
+ {
+ 	const Station* st1 = *(const Station**)a;
+ 	const Station* st2 = *(const Station**)b;
+-	int sum1 = 0, sum2 = 0;
++	Money sum1 = 0, sum2 = 0;
+ 
+ 	for (CargoID j = 0; j < NUM_CARGO; j++) {
+ 		if (st1->goods[j].waiting_acceptance & 0xfff) sum1 += GetTransportedGoodsIncome(st1->goods[j].waiting_acceptance & 0xfff, 20, 50, j);
+ 		if (st2->goods[j].waiting_acceptance & 0xfff) sum2 += GetTransportedGoodsIncome(st2->goods[j].waiting_acceptance & 0xfff, 20, 50, j);
+ 	}
+ 
+-	return (_internal_sort_order & 1) ? sum2 - sum1 : sum1 - sum2;
++	return (_internal_sort_order & 1) ? MONEY_INT(sum2 - sum1) : MONEY_INT(sum1 - sum2);
+ }
+ 
+ /**
+Index: src/town_gui.cpp
+===================================================================
+--- src/town_gui.cpp	(revision 10239)
++++ src/town_gui.cpp	(working copy)
+@@ -41,7 +41,7 @@
+  */
+ uint GetMaskOfTownActions(int *nump, PlayerID pid, const Town *t)
+ {
+-	int32 avail, ref;
++	Money avail, ref;
+ 	int num = 0;
+ 	uint avail_buttons = 0x7F; // by default all buttons except bribe are enabled.
+ 	uint buttons = 0;
+Index: src/economy.cpp
+===================================================================
+--- src/economy.cpp	(revision 10239)
++++ src/economy.cpp	(working copy)
+@@ -112,7 +112,7 @@
+ /* Count vehicles */
+ 	{
+ 		Vehicle *v;
+-		int32 min_profit = 0;
++		Money min_profit = 0;
+ 		bool min_profit_first = true;
+ 		uint num = 0;
+ 
+@@ -135,7 +135,7 @@
+ 		_score_part[owner][SCORE_VEHICLES] = num;
+ 		/* Don't allow negative min_profit to show */
+ 		if (min_profit > 0)
+-			_score_part[owner][SCORE_MIN_PROFIT] = min_profit;
++			_score_part[owner][SCORE_MIN_PROFIT] = s64_to_s32(min_profit);
+ 	}
+ 
+ /* Count stations */
+@@ -163,9 +163,9 @@
+ 			} while (++pee,--numec);
+ 
+ 			if (min_income > 0)
+-				_score_part[owner][SCORE_MIN_INCOME] = min_income;
++				_score_part[owner][SCORE_MIN_INCOME] = s64_to_s32(min_income);
+ 
+-			_score_part[owner][SCORE_MAX_INCOME] = max_income;
++			_score_part[owner][SCORE_MAX_INCOME] = s64_to_s32(max_income);
+ 		}
+ 	}
+ 
+@@ -196,15 +196,14 @@
+ 
+ /* Generate score for player money */
+ 	{
+-		int32 money = p->player_money;
+-		if (money > 0) {
+-			_score_part[owner][SCORE_MONEY] = money;
++		if (p->player_money > 0) {
++			_score_part[owner][SCORE_MONEY] = s64_to_s32(p->player_money);
+ 		}
+ 	}
+ 
+ /* Generate score for loan */
+ 	{
+-		_score_part[owner][SCORE_LOAN] = _score_info[SCORE_LOAN].needed - p->current_loan;
++		_score_part[owner][SCORE_LOAN] = s64_to_s32(_score_info[SCORE_LOAN].needed - p->current_loan);
+ 	}
+ 
+ 	/* Now we calculate the score for each item.. */
+@@ -438,7 +437,6 @@
+ static void PlayersCheckBankrupt(Player *p)
+ {
+ 	PlayerID owner;
+-	int64 val;
+ 
+ 	/*  If the player has money again, it does not go bankrupt */
+ 	if (p->player_money >= 0) {
+@@ -466,7 +464,7 @@
+ 
+ 			/* Check if the company has any value.. if not, declare it bankrupt
+ 			 *  right now */
+-			val = CalculateCompanyValue(p);
++			Money val = CalculateCompanyValue(p);
+ 			if (val > 0) {
+ 				p->bankrupt_value = val;
+ 				p->bankrupt_asked = 1 << owner; // Don't ask the owner
+@@ -1319,11 +1317,11 @@
+ 	return false;
+ }
+ 
+-static int32 DeliverGoods(int num_pieces, CargoID cargo_type, StationID source, StationID dest, TileIndex source_tile, byte days_in_transit)
++static Money DeliverGoods(int num_pieces, CargoID cargo_type, StationID source, StationID dest, TileIndex source_tile, byte days_in_transit)
+ {
+ 	bool subsidised;
+ 	Station *s_from, *s_to;
+-	int32 profit;
++	Money profit;
+ 
+ 	assert(num_pieces > 0);
+ 
+@@ -1511,7 +1509,7 @@
+ 	bool anything_loaded   = false;
+ 	uint32 cargo_not_full  = 0;
+ 	uint32 cargo_full      = 0;
+-	int total_cargo_feeder_share = 0; // the feeder cash amount for the goods being loaded/unloaded in this load step
++	Money total_cargo_feeder_share = 0; // the feeder cash amount for the goods being loaded/unloaded in this load step
+ 
+ 	v->cur_speed = 0;
+ 
+@@ -1643,7 +1641,7 @@
+ 			 * ge->unload_pending holds the amount that has been credited, but has not yet been unloaded.
+ 			 */
+ 			int cargoshare = cap * 10000 / (ge->waiting_acceptance + ge->unload_pending);
+-			int feeder_profit_share = ge->feeder_profit * cargoshare / 10000;
++			Money feeder_profit_share = ge->feeder_profit * cargoshare / 10000;
+ 			v->cargo_count += cap;
+ 			ge->waiting_acceptance -= cap;
+ 
+Index: src/variables.h
+===================================================================
+--- src/variables.h	(revision 10239)
++++ src/variables.h	(working copy)
+@@ -286,7 +286,7 @@
+ VARDEF bool _news_ticker_sound;
+ 
+ VARDEF StringID _error_message;
+-VARDEF int32 _additional_cash_required;
++VARDEF Money _additional_cash_required;
+ 
+ VARDEF uint32 _decode_parameters[20];
+ 
+Index: src/vehicle_gui.cpp
+===================================================================
+--- src/vehicle_gui.cpp	(revision 10239)
++++ src/vehicle_gui.cpp	(working copy)
+@@ -589,7 +589,7 @@
+ {
+ 	const Vehicle* va = *(const Vehicle**)a;
+ 	const Vehicle* vb = *(const Vehicle**)b;
+-	int r = va->profit_this_year - vb->profit_this_year;
++	int r = MONEY_INT(va->profit_this_year - vb->profit_this_year);
+ 
+ 	VEHICLEUNITNUMBERSORTER(r, va, vb);
+ 
+@@ -600,7 +600,7 @@
+ {
+ 	const Vehicle* va = *(const Vehicle**)a;
+ 	const Vehicle* vb = *(const Vehicle**)b;
+-	int r = va->profit_last_year - vb->profit_last_year;
++	int r = MONEY_INT(va->profit_last_year - vb->profit_last_year);
+ 
+ 	VEHICLEUNITNUMBERSORTER(r, va, vb);
+ 
+@@ -687,13 +687,12 @@
+ 	const Vehicle* va = *(const Vehicle**)a;
+ 	const Vehicle* vb = *(const Vehicle**)b;
+ 	const Vehicle *u;
+-	int valuea = 0, valueb = 0;
+-	int r;
++	Money valuea = 0, valueb = 0;
+ 
+ 	for (u = va; u != NULL; u = u->next) valuea += u->value;
+ 	for (u = vb; u != NULL; u = u->next) valueb += u->value;
+ 
+-	r = valuea - valueb;
++	int r = MONEY_INT(valuea - valueb);
+ 
+ 	VEHICLEUNITNUMBERSORTER(r, va, vb);
+ 
+Index: src/gui.h
+===================================================================
+--- src/gui.h	(revision 10239)
++++ src/gui.h	(working copy)
+@@ -105,7 +105,7 @@
+ void ShowPlayerFinances(PlayerID player);
+ void ShowPlayerCompany(PlayerID player);
+ 
+-void ShowEstimatedCostOrIncome(int32 cost, int x, int y);
++void ShowEstimatedCostOrIncome(Money cost, int x, int y);
+ void ShowErrorMessage(StringID msg_1, StringID msg_2, int x, int y);
+ 
+ void DrawStationCoverageAreaText(int sx, int sy, uint mask,int rad);
+Index: src/network/network.h
+===================================================================
+--- src/network/network.h	(revision 10239)
++++ src/network/network.h	(working copy)
+@@ -44,9 +44,9 @@
+ 	char company_name[NETWORK_NAME_LENGTH];         // Company name
+ 	char password[NETWORK_PASSWORD_LENGTH];         // The password for the player
+ 	Year inaugurated_year;                          // What year the company started in
+-	int64 company_value;                            // The company value
+-	int64 money;                                    // The amount of money the company has
+-	int64 income;                                   // How much did the company earned last year
++	Money company_value;                            // The company value
++	Money money;                                    // The amount of money the company has
++	Money income;                                   // How much did the company earned last year
+ 	uint16 performance;                             // What was his performance last month?
+ 	bool use_password;                              // Is there a password
+ 	uint16 num_vehicle[NETWORK_VEHICLE_TYPES];      // How many vehicles are there of this type?
+Index: src/openttd.h
+===================================================================
+--- src/openttd.h	(revision 10239)
++++ src/openttd.h	(working copy)
+@@ -71,6 +71,9 @@
+ typedef uint16 DestinationID;
+ typedef int64 Money;
+ 
++// XXX: not needed on 64-bit platforms
++#define MONEY_INT(n) (s64_to_s32((int64)(n)))
++
+ /* DestinationID must be at least as large as every these below, because it can
+  * be any of them
+  */
+Index: src/player.h
+===================================================================
+--- src/player.h	(revision 10239)
++++ src/player.h	(working copy)
+@@ -116,7 +116,7 @@
+ 
+ 	CargoID cargo;
+ 	byte tbt;    ///< train/bus/truck 0/1/2 AI_TRAIN/AI_BUS/AI_TRUCK
+-	int new_cost;
++	Money new_cost;
+ 
+ 	byte action;
+ 
+Index: src/newgrf_engine.cpp
+===================================================================
+--- src/newgrf_engine.cpp	(revision 10239)
++++ src/newgrf_engine.cpp	(working copy)
+@@ -727,19 +727,19 @@
+ 		case 0x4F: return GB(v->reliability, 8, 8);
+ 		case 0x50: return v->reliability_spd_dec;
+ 		case 0x51: return GB(v->reliability_spd_dec, 8, 8);
+-		case 0x52: return v->profit_this_year;
+-		case 0x53: return GB(v->profit_this_year,  8, 24);
+-		case 0x54: return GB(v->profit_this_year, 16, 16);
+-		case 0x55: return GB(v->profit_this_year, 24,  8);
+-		case 0x56: return v->profit_last_year;
+-		case 0x57: return GB(v->profit_last_year,  8, 24);
+-		case 0x58: return GB(v->profit_last_year, 16, 16);
+-		case 0x59: return GB(v->profit_last_year, 24,  8);
++		case 0x52: return s64_to_s32(v->profit_this_year);
++		case 0x53: return GB(s64_to_s32(v->profit_this_year),  8, 24);
++		case 0x54: return GB(s64_to_s32(v->profit_this_year), 16, 16);
++		case 0x55: return GB(s64_to_s32(v->profit_this_year), 24,  8);
++		case 0x56: return s64_to_s32(v->profit_last_year);
++		case 0x57: return GB(s64_to_s32(v->profit_last_year),  8, 24);
++		case 0x58: return GB(s64_to_s32(v->profit_last_year), 16, 16);
++		case 0x59: return GB(s64_to_s32(v->profit_last_year), 24,  8);
+ 		case 0x5A: return v->next == NULL ? INVALID_VEHICLE : v->next->index;
+-		case 0x5C: return v->value;
+-		case 0x5D: return GB(v->value,  8, 24);
+-		case 0x5E: return GB(v->value, 16, 16);
+-		case 0x5F: return GB(v->value, 24,  8);
++		case 0x5C: return s64_to_s32(v->value);
++		case 0x5D: return GB(s64_to_s32(v->value),  8, 24);
++		case 0x5E: return GB(s64_to_s32(v->value), 16, 16);
++		case 0x5F: return GB(s64_to_s32(v->value), 24,  8);
+ 		case 0x60: return v->string_id;
+ 		case 0x61: return GB(v->string_id, 8, 8);
+ 		case 0x72: return v->cargo_subtype;
+Index: src/autoreplace_cmd.cpp
+===================================================================
+--- src/autoreplace_cmd.cpp	(revision 10239)
++++ src/autoreplace_cmd.cpp	(working copy)
+@@ -124,7 +124,7 @@
+  * @param flags is the flags to use when calling DoCommand(). Mainly DC_EXEC counts
+  * @return value is cost of the replacement or CMD_ERROR
+  */
+-static CommandCost ReplaceVehicle(Vehicle **w, byte flags, int32 total_cost)
++static CommandCost ReplaceVehicle(Vehicle **w, byte flags, Money total_cost)
+ {
+ 	CommandCost cost;
+ 	CommandCost sell_value;
+Index: src/player_gui.cpp
+===================================================================
+--- src/player_gui.cpp	(revision 10239)
++++ src/player_gui.cpp	(working copy)
+@@ -31,8 +31,8 @@
+ static void DrawPlayerEconomyStats(const Player *p, byte mode)
+ {
+ 	int x, y, i, j, year;
+-	const int64 (*tbl)[13];
+-	int64 sum, cost;
++	const Money (*tbl)[13];
++	Money sum, cost;
+ 	StringID str;
+ 
+ 	if (!(mode & 1)) { // normal sized economics window (mode&1) is minimized status
+Index: src/aircraft_cmd.cpp
+===================================================================
+--- src/aircraft_cmd.cpp	(revision 10239)
++++ src/aircraft_cmd.cpp	(working copy)
+@@ -347,7 +347,7 @@
+ 
+ 		v->subtype = (avi->subtype & AIR_CTOL ? AIR_AIRCRAFT : AIR_HELICOPTER);
+ 		v->UpdateDeltaXY(INVALID_DIR);
+-		v->value = (uint32)value.GetCost();
++		v->value = value.GetCost();
+ 
+ 		u->subtype = AIR_SHADOW;
+ 		u->UpdateDeltaXY(INVALID_DIR);
+Index: src/command.h
+===================================================================
+--- src/command.h	(revision 10239)
++++ src/command.h	(working copy)
+@@ -212,6 +212,6 @@
+ 
+ bool IsValidCommand(uint cmd);
+ byte GetCommandFlags(uint cmd);
+-int32 GetAvailableMoneyForCommand();
++Money GetAvailableMoneyForCommand();
+ 
+ #endif /* COMMAND_H */
+Index: src/main_gui.cpp
+===================================================================
+--- src/main_gui.cpp	(revision 10239)
++++ src/main_gui.cpp	(working copy)
+@@ -94,10 +94,10 @@
+ 		const Player *p = GetPlayer(_current_player);
+ 		Money money = min(p->player_money - p->current_loan, atoi(str) / _currency->rate);
+ 
+-		money = clamp(money, 0, 20000000); // Clamp between 20 million and 0
++		uint32 money_c = clamp(s64_to_s32(money), 0, 20000000); // Clamp between 20 million and 0
+ 
+ 		/* Give 'id' the money, and substract it from ourself */
+-		DoCommandP(0, money, id, CcGiveMoney, CMD_GIVE_MONEY | CMD_MSG(STR_INSUFFICIENT_FUNDS));
++		DoCommandP(0, money_c, id, CcGiveMoney, CMD_GIVE_MONEY | CMD_MSG(STR_INSUFFICIENT_FUNDS));
+ 	} break;
+ #endif /* ENABLE_NETWORK */
+ 		default: NOT_REACHED();

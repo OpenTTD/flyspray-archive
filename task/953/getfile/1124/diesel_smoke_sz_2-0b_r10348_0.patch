@@ -1,0 +1,95 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 10348)
++++ lang/english.txt	(working copy)
+@@ -1024,6 +1024,7 @@
+ STR_CONFIG_PATCHES_CATCHMENT                                    :{LTBLUE}Allow more realistically sized catchment areas: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_EXTRADYNAMITE                                :{LTBLUE}Allow removal of more town-owned roads, bridges, etc: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_MAMMOTHTRAINS                                :{LTBLUE}Enable building very long trains: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_SMOKE_REDUCTION								:{LTBLUE}Choose amount of smoke locomotives produce (2=least): {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_REALISTICACCEL                               :{LTBLUE}Enable realistic acceleration for trains: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_FORBID_90_DEG                                :{LTBLUE}Forbid trains and ships to make 90 deg turns: {ORANGE}{STRING1} {LTBLUE} (requires NPF)
+ STR_CONFIG_PATCHES_JOINSTATIONS                                 :{LTBLUE}Join train stations built next to each other: {ORANGE}{STRING1}
+Index: settings.cpp
+===================================================================
+--- settings.cpp	(revision 10348)
++++ settings.cpp	(working copy)
+@@ -1369,6 +1369,7 @@
+ 	SDT_BOOL(Patches, realistic_acceleration,        0, 0, false,                    STR_CONFIG_PATCHES_REALISTICACCEL,       NULL),
+ 	SDT_BOOL(Patches, forbid_90_deg,                 0, 0, false,                    STR_CONFIG_PATCHES_FORBID_90_DEG,        NULL),
+ 	SDT_BOOL(Patches, mammoth_trains,                0, 0,  true,                    STR_CONFIG_PATCHES_MAMMOTHTRAINS,        NULL),
++	 SDT_VAR(Patches, smoke_reduction,    SLE_UINT8, 0, 0,     1,	  0,	   2, 0, STR_CONFIG_PATCHES_SMOKE_REDUCTION,	  NULL),
+ 	SDT_BOOL(Patches, gotodepot,                     0, 0,  true,                    STR_CONFIG_PATCHES_GOTODEPOT,            NULL),
+ 	SDT_BOOL(Patches, roadveh_queue,                 0, 0,  true,                    STR_CONFIG_PATCHES_ROADVEH_QUEUE,        NULL),
+ 	SDT_BOOL(Patches, new_pathfinding_all,           0, 0, false,                    STR_CONFIG_PATCHES_NEW_PATHFINDING_ALL,  NULL),
+Index: settings_gui.cpp
+===================================================================
+--- settings_gui.cpp	(revision 10348)
++++ settings_gui.cpp	(working copy)
+@@ -712,6 +712,7 @@
+ 	"realistic_acceleration",
+ 	"forbid_90_deg",
+ 	"mammoth_trains",
++	"smoke_reduction",
+ 	"gotodepot",
+ 	"roadveh_queue",
+ 	"new_pathfinding_all",
+Index: train_cmd.cpp
+===================================================================
+--- train_cmd.cpp	(revision 10348)
++++ train_cmd.cpp	(working copy)
+@@ -1952,7 +1952,10 @@
+ {
+ 	bool sound = false;
+ 
+-	if (v->vehstatus & VS_TRAIN_SLOWING || v->load_unload_time_rem != 0 || v->cur_speed < 2)
++	if (v->vehstatus & VS_TRAIN_SLOWING ||
++		v->vehstatus & VS_STOPPED ||
++		v->load_unload_time_rem != 0 ||
++		v->cur_speed < 2)
+ 		return;
+ 
+ 	const Vehicle* u = v;
+@@ -1994,7 +1997,7 @@
+ 		switch (effect_type) {
+ 		case 0:
+ 			/* steam smoke. */
+-			if (GB(v->tick_counter, 0, 4) == 0) {
++			if (GB(v->tick_counter, 0, (3 + (_patches.smoke_reduction >> 1))) == 0) {
+ 				CreateEffectVehicleRel(v, x, y, 10, EV_STEAM_SMOKE);
+ 				sound = true;
+ 			}
+@@ -2002,7 +2005,9 @@
+ 
+ 		case 1:
+ 			/* diesel smoke */
+-			if (u->cur_speed <= 40 && CHANCE16(15, 128)) {
++			if (CHANCE16((((48000 >> _patches.smoke_reduction) >> (u->cur_speed >> 4)) +
++				(u->u.rail.cached_weight << (4 - (_patches.smoke_reduction >> 1))) -
++				(u->u.rail.cached_power >> 2)), 64000)) {
+ 				CreateEffectVehicleRel(v, 0, 0, 10, EV_DIESEL_SMOKE);
+ 				sound = true;
+ 			}
+@@ -2010,7 +2015,9 @@
+ 
+ 		case 2:
+ 			/* blue spark */
+-			if (GB(v->tick_counter, 0, 2) == 0 && CHANCE16(1, 45)) {
++			if (GB(v->tick_counter, 0, 3) == 0 && CHANCE16((1600 +
++				((48000 >> _patches.smoke_reduction) >> (u->cur_speed >> 4)) +
++				(u->u.rail.cached_weight << 3)), 64000)) {
+ 				CreateEffectVehicleRel(v, 0, 0, 10, EV_ELECTRIC_SPARK);
+ 				sound = true;
+ 			}
+Index: variables.h
+===================================================================
+--- variables.h	(revision 10348)
++++ variables.h	(working copy)
+@@ -86,6 +86,7 @@
+ 	bool vehicle_speed;                 // show vehicle speed
+ 	bool build_on_slopes;               // allow building on slopes
+ 	bool mammoth_trains;                // allow very long trains
++	uint8 smoke_reduction;              // choose amount of smoke locomotives produce
+ 	bool join_stations;                 // allow joining of train stations
+ 	bool full_load_any;                 // new full load calculation, any cargo must be full
+ 	bool improved_load;                 // improved loading algorithm

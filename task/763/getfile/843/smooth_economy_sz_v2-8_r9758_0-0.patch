@@ -1,0 +1,135 @@
+Index: industry.h
+===================================================================
+--- industry.h	(revision 9758)
++++ industry.h	(working copy)
+@@ -266,4 +266,12 @@
+ 	IT_INVALID             = 255,
+ };
+ 
++enum {
++	CHANCE_A               =  10,
++	CHANCE_B               = 500,
++	OVER_70_PCT_BONUS      =  75,
++	OVER_90_PCT_BONUS      =  25,
++	PERCENT_INCREASE       = 153,
++};
++
+ #endif /* INDUSTRY_H */
+Index: industry_cmd.cpp
+===================================================================
+--- industry_cmd.cpp	(revision 9758)
++++ industry_cmd.cpp	(working copy)
+@@ -851,7 +851,7 @@
+ 	END_TILE_LOOP(cur_tile, size_x, size_y, tile)
+ 
+ 	type = 3;
+-	if (_opt.landscape != LT_ARCTIC && _opt.landscape != LT_TROPIC) {
++	if (_opt.landscape != LT_ARCTIC) {
+ 		type = _plantfarmfield_type[Random() & 0xF];
+ 	}
+ 
+@@ -868,7 +868,7 @@
+ 
+ 	TileIndex tile = TileAddWrap(i->xy, x, y);
+ 
+-	if (tile != INVALID_TILE) PlantFarmField(tile, i->index);
++	if (tile != INVALID_TILE && GetTropicZone(tile) != TROPICZONE_DESERT) PlantFarmField(tile, i->index);
+ }
+ 
+ static void MaybePlantFarmField(const Industry *i)
+@@ -1641,14 +1641,21 @@
+ 				uint32 r = Random();
+ 				int old_prod, new_prod, percent;
+ 				int mag;
++				int influence = (i->pct_transported[j] > PERCENT_INCREASE) ? _patches.prod_changes : -(_patches.prod_changes);
+ 
+ 				new_prod = old_prod = i->production_rate[j];
+-				if (CHANCE16I(20, 1024, r))
+-					new_prod -= ((RandomRange(50) + 10) * old_prod) >> 8;
+-				if (CHANCE16I(20 + (i->pct_transported[j] * 20 >> 8), 1024, r >> 16))
+-					new_prod += ((RandomRange(50) + 10) * old_prod) >> 8;
++				// if more than 60% of cargo is transported, there is an up to 4% chance we increase - bigger production = lesser increase
++				if (CHANCE16I((CHANCE_A + influence), CHANCE_B, r))
++					new_prod += (1 + (((old_prod >> 3) * (i->pct_transported[j] + OVER_70_PCT_BONUS)) >> 8) + (old_prod >> 4) - (old_prod >> (5 + ((i->pct_transported[j] + OVER_90_PCT_BONUS) >> 7))) - (old_prod >> 6) - (old_prod >> 7));
+ 
++				// if less than 60% of cargo is transported, there is an up to 4% chance we decrease - bigger production = bigger decrease
++				if (CHANCE16I((CHANCE_A - influence), CHANCE_B, r >> 16))
++					new_prod -= (RandomRange((old_prod >> 2) + 1) - (old_prod >> 3) + (old_prod >> 4) + (old_prod >> 5) + (old_prod >> 6) + (old_prod >> 7));
++
++				// make sure prod_rate doesn't exceed 255 or oil rig doesn't produce too many passengers...
+ 				new_prod = clamp(new_prod, 0, 255);
++				if (i->type == IT_OIL_RIG && j == 1) new_prod = clamp(new_prod, 0, 16);
++				if (i->type == IT_BANK_TEMP && _opt.landscape == LT_TEMPERATE) new_prod = clamp(new_prod, 0, 64);
+ 				if (new_prod == old_prod) {
+ 					closeit = false;
+ 					continue;
+@@ -1661,7 +1668,7 @@
+ 					closeit = false;
+ 
+ 				mag = abs(percent);
+-				if (mag >= 10) {
++				if (mag >= 10 /* production messages only displayed for player-towns' industries --> */ && (HASBIT(i->town->have_ratings, _local_player) || i->town->exclusivity == _local_player)) {
+ 					SetDParam(2, mag);
+ 					SetDParam(0, GetCargo(i->produced_cargo[j])->name);
+ 					SetDParam(1, i->index);
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 9758)
++++ lang/english.txt	(working copy)
+@@ -1128,6 +1128,7 @@
+ STR_CONFIG_PATCHES_STARTING_YEAR                                :{LTBLUE}Starting year: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_ENDING_YEAR                                  :{LTBLUE}End game in: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_SMOOTH_ECONOMY                               :{LTBLUE}Enable smooth economy (more, smaller changes)
++STR_CONFIG_PATCHES_PROD_CHANGES									:{LTBLUE}Fine-tune smooth economy (1=least | 10=most responsive): {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_ALLOW_SHARES                                 :{LTBLUE}Allow buying shares from other companies
+ STR_CONFIG_PATCHES_DRAG_SIGNALS_DENSITY                         :{LTBLUE}When dragging, place signals every: {ORANGE}{STRING1} tile(s)
+ STR_CONFIG_PATCHES_SEMAPHORE_BUILD_BEFORE_DATE                  :{LTBLUE}Automatically build semaphores before: {ORANGE}{STRING1}
+Index: settings.cpp
+===================================================================
+--- settings.cpp	(revision 9758)
++++ settings.cpp	(working copy)
+@@ -1395,6 +1395,7 @@
+ 	 SDT_VAR(Patches, starting_year,    SLE_INT32, 0,NC,  1950, MIN_YEAR, MAX_YEAR, 1, STR_CONFIG_PATCHES_STARTING_YEAR,NULL),
+ 	 SDT_VAR(Patches, ending_year,      SLE_INT32,0,NC|NO,2051, MIN_YEAR, MAX_YEAR, 1, STR_CONFIG_PATCHES_ENDING_YEAR,  NULL),
+ 	SDT_BOOL(Patches, smooth_economy,             0, 0,  true,            STR_CONFIG_PATCHES_SMOOTH_ECONOMY,   NULL),
++	 SDT_VAR(Patches, prod_changes,     SLE_UINT8,0, 0,		5, 1, 10, 0,  STR_CONFIG_PATCHES_PROD_CHANGES,	   NULL),
+ 	SDT_BOOL(Patches, allow_shares,               0, 0, false,            STR_CONFIG_PATCHES_ALLOW_SHARES,     NULL),
+ 	SDT_CONDVAR(Patches, town_growth_rate,  SLE_UINT8, 54, SL_MAX_VERSION, 0, MS, 2, 0,   4, 0, STR_CONFIG_PATCHES_TOWN_GROWTH,          NULL),
+ 	SDT_CONDVAR(Patches, larger_towns,      SLE_UINT8, 54, SL_MAX_VERSION, 0, D0, 4, 0, 255, 1, STR_CONFIG_PATCHES_LARGER_TOWNS,         NULL),
+Index: settings_gui.cpp
+===================================================================
+--- settings_gui.cpp	(revision 9758)
++++ settings_gui.cpp	(working copy)
+@@ -634,6 +634,7 @@
+ 	"colored_news_year",
+ 	"ending_year",
+ 	"smooth_economy",
++	"prod_changes",
+ 	"allow_shares",
+ 	"town_growth_rate",
+ 	"larger_towns",
+Index: table/build_industry.h
+===================================================================
+--- table/build_industry.h	(revision 9758)
++++ table/build_industry.h	(working copy)
+@@ -1241,7 +1241,7 @@
+ 	   IT_BANK_TEMP,      IT_INVALID,          IT_INVALID,       CHECK_NOTHING,
+ 	   CT_VALUABLES,   6, CT_INVALID,       0, 5,
+ 	   CT_VALUABLES,      CT_INVALID,          CT_INVALID,
+-	   INDUSTRYLIFE_NOT_CLOSABLE,              1 << LT_TEMPERATE,
++	   INDUSTRYLIFE_PRODUCTION,              1 << LT_TEMPERATE,
+ 	   INDUSTRYBEH_TOWN1200_MORE | INDUSTRYBEH_ONLY_INTOWN,
+ 	   STR_480E_BANK,                          STR_482D_NEW_UNDER_CONSTRUCTION,
+ 	   STR_4832_ANNOUNCES_IMMINENT_CLOSURE,    STR_4835_INCREASES_PRODUCTION,     STR_4839_PRODUCTION_DOWN_BY_50),
+Index: variables.h
+===================================================================
+--- variables.h	(revision 9758)
++++ variables.h	(working copy)
+@@ -176,6 +176,7 @@
+ 	bool auto_euro;                     // automatically switch to euro in 2002
+ 	bool serviceathelipad;              // service helicopters at helipads automatically (no need to send to depot)
+ 	bool smooth_economy;                // smooth economy
++	uint8 prod_changes;					// fine-tune smooth economy (industry) to be more/less responsive to service
+ 	bool allow_shares;                  // allow the buying/selling of shares
+ 	byte dist_local_authority;          // distance for town local authority, default 20
+ 

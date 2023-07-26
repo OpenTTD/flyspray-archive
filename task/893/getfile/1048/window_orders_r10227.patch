@@ -1,0 +1,316 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(Revision 10227)
++++ src/lang/english.txt	(Arbeitskopie)
+@@ -2649,7 +2649,6 @@
+ STR_REFIT_ORDER                                                 :(Refit to {STRING})
+ STR_8829_ORDERS                                                 :{WHITE}{VEHICLE} (Orders)
+ STR_882A_END_OF_ORDERS                                          :{SETX 10}- - End of Orders - -
+-STR_FULLLOAD_OR_SERVICE                                         :{SKIP}{SKIP}{STRING}
+ STR_SERVICE                                                     :{BLACK}Service
+ STR_882B_CAN_T_BUILD_RAILROAD_VEHICLE                           :{WHITE}Can't build railway vehicle...
+ STR_882C_BUILT_VALUE                                            :{LTBLUE}{STRING}{BLACK}   Built: {LTBLUE}{NUM}{BLACK} Value: {LTBLUE}{CURRENCY}
+Index: src/order_gui.cpp
+===================================================================
+--- src/order_gui.cpp	(Revision 10227)
++++ src/order_gui.cpp	(Arbeitskopie)
+@@ -35,9 +35,8 @@
+ 	ORDER_WIDGET_DELETE,
+ 	ORDER_WIDGET_NON_STOP,
+ 	ORDER_WIDGET_GOTO,
+-	ORDER_WIDGET_FULL_LOAD,
+-	ORDER_WIDGET_UNLOAD,
+-	ORDER_WIDGET_REFIT,
++	ORDER_WIDGET_MULTI_BTN_ONE,
++	ORDER_WIDGET_MULTI_BTN_TWO,
+ 	ORDER_WIDGET_TRANSFER,
+ 	ORDER_WIDGET_SHARED_ORDER_LIST,
+ 	ORDER_WIDGET_RESIZE_BAR,
+@@ -106,82 +105,107 @@
+ 
+ static void DrawOrdersWindow(Window *w)
+ {
+-	const Vehicle *v;
+-	const Order *order;
+-	StringID str;
+-	int sel;
+-	int y, i;
+-	bool shared_orders;
+-	byte color;
++	const Vehicle *v = GetVehicle(w->window_number); ///< current vehicle
++	bool shared_orders = IsOrderListShared(v);       ///< order list is a shared orders list
++	int sel = OrderGetSel(w);                        ///< current selected order index
++	const Order *order = GetVehicleOrder(v, sel);    ///< current selected order
+ 
+-	v = GetVehicle(w->window_number);
+-
+-	shared_orders = IsOrderListShared(v);
+-
+ 	SetVScrollCount(w, v->num_orders + 1);
+ 
+-	sel = OrderGetSel(w);
+-	SetDParam(2, STR_8827_FULL_LOAD);
+-
+-	order = GetVehicleOrder(v, sel);
+-
+ 	if (v->owner == _local_player) {
+-		/* skip */
++		/* Skip */
+ 		SetWindowWidgetDisabledState(w, ORDER_WIDGET_SKIP, v->num_orders <= 1);
+ 
+-		/* delete */
++		/* Delete */
+ 		SetWindowWidgetDisabledState(w, ORDER_WIDGET_DELETE,
+ 				(uint)v->num_orders + ((shared_orders || v->num_orders != 0) ? 1 : 0) <= (uint)WP(w, order_d).sel);
+ 
+-		/* non-stop only for trains */
+-		SetWindowWidgetDisabledState(w, ORDER_WIDGET_NON_STOP,  v->type != VEH_TRAIN || order == NULL);
+-		SetWindowWidgetDisabledState(w, ORDER_WIDGET_FULL_LOAD, order == NULL); // full load
+-		SetWindowWidgetDisabledState(w, ORDER_WIDGET_UNLOAD,    order == NULL); // unload
+-		SetWindowWidgetDisabledState(w, ORDER_WIDGET_TRANSFER,  order == NULL); // transfer
+ 		/* Disable list of vehicles with the same shared orders if there is no list */
+ 		SetWindowWidgetDisabledState(w, ORDER_WIDGET_SHARED_ORDER_LIST, !shared_orders || v->orders == NULL);
+-		SetWindowWidgetDisabledState(w, ORDER_WIDGET_REFIT,     order == NULL); // Refit
+-		HideWindowWidget(w, ORDER_WIDGET_REFIT); // Refit
+-	} else {
+-		DisableWindowWidget(w, ORDER_WIDGET_TRANSFER);
+-	}
+ 
+-	ShowWindowWidget(w, ORDER_WIDGET_UNLOAD); // Unload
++		/* Non-stop only for trains */
++		SetWindowWidgetDisabledState(w, ORDER_WIDGET_NON_STOP, v->type != VEH_TRAIN || order == NULL);
+ 
+-	if (order != NULL) {
+-		switch (order->type) {
+-			case OT_GOTO_STATION: break;
++		if (order == NULL) {
++			/* Disable load, unload, transfer and refit */
++			SetWindowWidgetsDisabledState(w, true,
++				ORDER_WIDGET_MULTI_BTN_ONE,
++				ORDER_WIDGET_MULTI_BTN_TWO,
++				ORDER_WIDGET_TRANSFER,
++				WIDGET_LIST_END);
++		} else {
++			switch (order->type) {
++				case OT_GOTO_STATION:
++					/* Enable load, unload and transfer */
++					SetWindowWidgetsDisabledState(w, false,
++						ORDER_WIDGET_MULTI_BTN_ONE,
++						ORDER_WIDGET_MULTI_BTN_TWO,
++						ORDER_WIDGET_TRANSFER,
++						WIDGET_LIST_END);
+ 
+-			case OT_GOTO_DEPOT:
+-				DisableWindowWidget(w, ORDER_WIDGET_TRANSFER);
++					if (w->widget[ORDER_WIDGET_MULTI_BTN_TWO].data != STR_8828_UNLOAD) {
++						/* Custumise the multi buttons */
++						w->widget[ORDER_WIDGET_MULTI_BTN_ONE].data = STR_8827_FULL_LOAD;
++						w->widget[ORDER_WIDGET_MULTI_BTN_ONE].tooltips = STR_8857_MAKE_THE_HIGHLIGHTED_ORDER;
++						w->widget[ORDER_WIDGET_MULTI_BTN_TWO].data = STR_8828_UNLOAD;
++						w->widget[ORDER_WIDGET_MULTI_BTN_TWO].tooltips = STR_8858_MAKE_THE_HIGHLIGHTED_ORDER;
++					}
++					break;
+ 
+-				/* Remove unload and replace it with refit */
+-				HideWindowWidget(w, ORDER_WIDGET_UNLOAD);
+-				ShowWindowWidget(w, ORDER_WIDGET_REFIT);
+-				SetDParam(2,STR_SERVICE);
+-				break;
++				case OT_GOTO_DEPOT:
++					/* Enable service and refit */
++					SetWindowWidgetsDisabledState(w, false,
++						ORDER_WIDGET_MULTI_BTN_ONE,
++						ORDER_WIDGET_MULTI_BTN_TWO,
++						WIDGET_LIST_END);
++					DisableWindowWidget(w, ORDER_WIDGET_TRANSFER);
+ 
+-			case OT_GOTO_WAYPOINT:
+-				DisableWindowWidget(w, ORDER_WIDGET_FULL_LOAD);
+-				DisableWindowWidget(w, ORDER_WIDGET_UNLOAD);
+-				DisableWindowWidget(w, ORDER_WIDGET_TRANSFER);
+-				break;
++					if (w->widget[ORDER_WIDGET_MULTI_BTN_TWO].data != STR_REFIT) {
++						/* Custumise the multi buttons */
++						w->widget[ORDER_WIDGET_MULTI_BTN_ONE].data = STR_SERVICE;
++						w->widget[ORDER_WIDGET_MULTI_BTN_ONE].tooltips = STR_SERVICE_HINT;
++						w->widget[ORDER_WIDGET_MULTI_BTN_TWO].data = STR_REFIT;
++						w->widget[ORDER_WIDGET_MULTI_BTN_TWO].tooltips = STR_REFIT_TIP;
++					}
++					break;
+ 
+-			default: // every other orders
+-				DisableWindowWidget(w, ORDER_WIDGET_NON_STOP);
+-				DisableWindowWidget(w, ORDER_WIDGET_FULL_LOAD);
+-				DisableWindowWidget(w, ORDER_WIDGET_UNLOAD);
++				case OT_GOTO_WAYPOINT:
++					/* Disable the unnessesary stuff */
++					SetWindowWidgetsDisabledState(w, true,
++						ORDER_WIDGET_MULTI_BTN_ONE,
++						ORDER_WIDGET_MULTI_BTN_TWO,
++						ORDER_WIDGET_TRANSFER,
++						WIDGET_LIST_END);
++					break;
++
++				default:
++					/* Disable all order specific buttons */
++					SetWindowWidgetsDisabledState(w, true,
++						ORDER_WIDGET_NON_STOP,
++						ORDER_WIDGET_MULTI_BTN_ONE,
++						ORDER_WIDGET_MULTI_BTN_TWO,
++						ORDER_WIDGET_TRANSFER,
++						WIDGET_LIST_END);
++					break;
++			}
+ 		}
++	} else {
++		/* Show a competitor that he isn't able manipulate here */
++		DisableWindowWidget(w, ORDER_WIDGET_RESIZE_BAR);
+ 	}
+ 
+ 	SetDParam(0, v->string_id);
+ 	SetDParam(1, v->unitnumber);
+ 	DrawWindowWidgets(w);
+ 
+-	y = 15;
++	StringID str;           ///< Order text
++	byte color;             ///< Order text color
++	int y = 15;             ///< Y-offset from the top of the window
++	int i = w->vscroll.pos; ///< Order-offset by the position of the scrollbar
+ 
+-	i = w->vscroll.pos;
++	/* Get the first visible order */
+ 	order = GetVehicleOrder(v, i);
++
+ 	while (order != NULL) {
+ 		str = (v->cur_order_index == i) ? STR_8805 : STR_8804;
+ 		SetDParam(3, STR_EMPTY);
+@@ -229,18 +253,17 @@
+ 					SetDParam(2, order->dest);
+ 					break;
+ 
++				case OT_DUMMY:
++					SetDParam(1, STR_INVALID_ORDER);
++					SetDParam(2, order->dest);
++					break;
++
+ 				default: break;
+ 			}
+ 
+ 			color = (i == WP(w,order_d).sel) ? 0xC : 0x10;
+ 			SetDParam(0, i + 1);
+-			if (order->type != OT_DUMMY) {
+-				DrawString(2, y, str, color);
+-			} else {
+-				SetDParam(1, STR_INVALID_ORDER);
+-				SetDParam(2, order->dest);
+-				DrawString(2, y, str, color);
+-			}
++			DrawString(2, y, str, color);
+ 			y += 10;
+ 		}
+ 
+@@ -528,19 +551,6 @@
+ static void OrdersWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch (e->event) {
+-		case WE_CREATE:
+-			/* Ensure that the refit and unload buttons always remain at the same location.
+-			 * Only one of them can be active at any one time and takes turns on being disabled.
+-			 * To ensure that they stay at the same location, we also verify that they behave the same
+-			 * when resizing. */
+-			if (GetVehicle(w->window_number)->owner == _local_player) { // only the vehicle owner got these buttons
+-				assert(w->widget[ORDER_WIDGET_REFIT].left          == w->widget[ORDER_WIDGET_UNLOAD].left);
+-				assert(w->widget[ORDER_WIDGET_REFIT].right         == w->widget[ORDER_WIDGET_UNLOAD].right);
+-				assert(w->widget[ORDER_WIDGET_REFIT].top           == w->widget[ORDER_WIDGET_UNLOAD].top);
+-				assert(w->widget[ORDER_WIDGET_REFIT].bottom        == w->widget[ORDER_WIDGET_UNLOAD].bottom);
+-				assert(w->widget[ORDER_WIDGET_REFIT].display_flags == w->widget[ORDER_WIDGET_UNLOAD].display_flags);
+-			}
+-			break;
+ 
+ 	case WE_PAINT:
+ 		DrawOrdersWindow(w);
+@@ -609,20 +619,22 @@
+ 			OrderClick_Goto(w, v);
+ 			break;
+ 
+-		case ORDER_WIDGET_FULL_LOAD:
++		case ORDER_WIDGET_MULTI_BTN_ONE:
+ 			OrderClick_FullLoad(w, v);
+ 			break;
+ 
+-		case ORDER_WIDGET_UNLOAD:
+-			OrderClick_Unload(w, v);
+-			break;
+-		case ORDER_WIDGET_REFIT:
+-			OrderClick_Refit(w, v);
+-			break;
++		case ORDER_WIDGET_MULTI_BTN_TWO: {
++			switch (w->widget[ORDER_WIDGET_MULTI_BTN_TWO].data) {
++				default:               NOT_REACHED(); break;
++				case STR_8828_UNLOAD:  OrderClick_Unload(w, v); break;
++				case STR_REFIT:        OrderClick_Refit(w, v); break;
++			}
++		} break;
+ 
+ 		case ORDER_WIDGET_TRANSFER:
+ 			OrderClick_Transfer(w, v);
+ 			break;
++
+ 		case ORDER_WIDGET_SHARED_ORDER_LIST:
+ 			ShowVehicleListWindow(v);
+ 			break;
+@@ -671,18 +683,6 @@
+ 		break;
+ 	}
+ 
+-	case WE_RCLICK: {
+-		const Vehicle *v = GetVehicle(w->window_number);
+-		int s = OrderGetSel(w);
+-
+-		if (e->we.click.widget != ORDER_WIDGET_FULL_LOAD) break;
+-		if (s == v->num_orders || GetVehicleOrder(v, s)->type != OT_GOTO_DEPOT) {
+-			GuiShowTooltips(STR_8857_MAKE_THE_HIGHLIGHTED_ORDER);
+-		} else {
+-			GuiShowTooltips(STR_SERVICE_HINT);
+-		}
+-	} break;
+-
+ 	case WE_PLACE_OBJ: {
+ 		OrdersPlaceObj(GetVehicle(w->window_number), e->we.place.tile, w);
+ 	} break;
+@@ -742,9 +742,8 @@
+ 	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,    53,   105,    76,    87, STR_8824_DELETE,         STR_8854_DELETE_THE_HIGHLIGHTED},     // ORDER_WIDGET_DELETE
+ 	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,   106,   158,    76,    87, STR_8825_NON_STOP,       STR_8855_MAKE_THE_HIGHLIGHTED_ORDER}, // ORDER_WIDGET_NON_STOP
+ 	{    WWT_TEXTBTN,   RESIZE_TB,      14,   159,   211,    76,    87, STR_8826_GO_TO,          STR_8856_INSERT_A_NEW_ORDER_BEFORE},  // ORDER_WIDGET_GOTO
+-	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,   212,   264,    76,    87, STR_FULLLOAD_OR_SERVICE, STR_NULL},                            // ORDER_WIDGET_FULL_LOAD
+-	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,   265,   319,    76,    87, STR_8828_UNLOAD,         STR_8858_MAKE_THE_HIGHLIGHTED_ORDER}, // ORDER_WIDGET_UNLOAD
+-	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,   265,   319,    76,    87, STR_REFIT,               STR_REFIT_TIP},                       // ORDER_WIDGET_REFIT
++	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,   212,   264,    76,    87, STR_8827_FULL_LOAD,      STR_8857_MAKE_THE_HIGHLIGHTED_ORDER}, // ORDER_WIDGET_MULTI_BTN_ONE
++	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,   265,   319,    76,    87, STR_8828_UNLOAD,         STR_8858_MAKE_THE_HIGHLIGHTED_ORDER}, // ORDER_WIDGET_MULTI_BTN_TWO
+ 	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,   320,   372,    76,    87, STR_886F_TRANSFER,       STR_886D_MAKE_THE_HIGHLIGHTED_ORDER}, // ORDER_WIDGET_TRANSFER
+ 
+ 	{ WWT_PUSHIMGBTN,   RESIZE_TB,      14,   373,   386,    76,    87, SPR_SHARED_ORDERS_ICON,  STR_VEH_WITH_SHARED_ORDERS_LIST_TIP}, // ORDER_WIDGET_SHARED_ORDER_LIST
+@@ -778,9 +777,8 @@
+ 	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,    64,   128,    76,    87, STR_8824_DELETE,         STR_8854_DELETE_THE_HIGHLIGHTED},     // ORDER_WIDGET_DELETE
+ 	{      WWT_EMPTY,   RESIZE_TB,      14,     0,     0,    76,    87, 0x0,                     0x0},                                 // ORDER_WIDGET_NON_STOP
+ 	{    WWT_TEXTBTN,   RESIZE_TB,      14,   129,   192,    76,    87, STR_8826_GO_TO,          STR_8856_INSERT_A_NEW_ORDER_BEFORE},  // ORDER_WIDGET_GOTO
+-	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,   193,   256,    76,    87, STR_FULLLOAD_OR_SERVICE, STR_NULL},                            // ORDER_WIDGET_FULL_LOAD
+-	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,   257,   319,    76,    87, STR_8828_UNLOAD,         STR_8858_MAKE_THE_HIGHLIGHTED_ORDER}, // ORDER_WIDGET_UNLOAD
+-	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,   257,   319,    76,    87, STR_REFIT,               STR_REFIT_TIP},                       // ORDER_WIDGET_REFIT
++	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,   193,   256,    76,    87, STR_8827_FULL_LOAD,      STR_8857_MAKE_THE_HIGHLIGHTED_ORDER}, // ORDER_WIDGET_MULTI_BTN_ONE
++	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,   257,   319,    76,    87, STR_8828_UNLOAD,         STR_8858_MAKE_THE_HIGHLIGHTED_ORDER}, // ORDER_WIDGET_MULTI_BTN_TWO
+ 	{ WWT_PUSHTXTBTN,   RESIZE_TB,      14,   320,   383,    76,    87, STR_886F_TRANSFER,       STR_886D_MAKE_THE_HIGHLIGHTED_ORDER}, // ORDER_WIDGET_TRANSFER
+ 
+ 	{ WWT_PUSHIMGBTN,   RESIZE_TB,      14,   384,   397,    76,    87, SPR_SHARED_ORDERS_ICON,  STR_VEH_WITH_SHARED_ORDERS_LIST_TIP}, // ORDER_WIDGET_SHARED_ORDER_LIST
+@@ -814,9 +812,8 @@
+ 	{      WWT_EMPTY,   RESIZE_NONE,    14,     0,   319,    76,    87, 0x0,             STR_NULL},                            // ORDER_WIDGET_DELETE
+ 	{      WWT_EMPTY,   RESIZE_NONE,    14,     0,   319,    76,    87, 0x0,             STR_NULL},                            // ORDER_WIDGET_NON_STOP
+ 	{      WWT_EMPTY,   RESIZE_NONE,    14,     0,   319,    76,    87, 0x0,             STR_NULL},                            // ORDER_WIDGET_GOTO
+-	{      WWT_EMPTY,   RESIZE_NONE,    14,     0,   319,    76,    87, 0x0,             STR_NULL},                            // ORDER_WIDGET_FULL_LOAD
+-	{      WWT_EMPTY,   RESIZE_NONE,    14,     0,   319,    76,    87, 0x0,             STR_NULL},                            // ORDER_WIDGET_UNLOAD
+-	{      WWT_EMPTY,   RESIZE_NONE,    14,     0,   319,    76,    87, 0x0,             STR_NULL},                            // ORDER_WIDGET_REFIT
++	{      WWT_EMPTY,   RESIZE_NONE,    14,     0,   319,    76,    87, 0x0,             STR_NULL},                            // ORDER_WIDGET_MULTI_BTN_ONE
++	{      WWT_EMPTY,   RESIZE_NONE,    14,     0,   319,    76,    87, 0x0,             STR_NULL},                            // ORDER_WIDGET_MULTI_BTN_TWO
+ 	{      WWT_EMPTY,   RESIZE_NONE,    14,     0,   319,    76,    87, 0x0,             STR_NULL},                            // ORDER_WIDGET_TRANSFER
+ 
+ 	{      WWT_EMPTY,   RESIZE_NONE,    14,     0,   319,    76,    87, 0x0,             STR_NULL},                            // ORDER_WIDGET_SHARED_ORDER_LIST

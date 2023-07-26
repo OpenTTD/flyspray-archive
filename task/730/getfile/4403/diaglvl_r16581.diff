@@ -1,0 +1,431 @@
+diff --git a/src/core/math_func.cpp b/src/core/math_func.cpp
+index 360ec0e..ec26456 100644
+--- a/src/core/math_func.cpp
++++ b/src/core/math_func.cpp
+@@ -39,3 +39,12 @@ int GreatestCommonDivisor(int a, int b)
+ 	return a;
+ 
+ }
++
++/**
++ * check if the parameter "check" is inside the interval between begin an end,
++ * including both begin and end.
++ */
++bool IsInRangeInclusive(int begin, int end, int check) {
++	if (begin > end) Swap(begin, end);
++	return begin <= check && check <= end;
++}
+diff --git a/src/core/math_func.hpp b/src/core/math_func.hpp
+index 35e660d..9de8248 100644
+--- a/src/core/math_func.hpp
++++ b/src/core/math_func.hpp
+@@ -266,5 +266,6 @@ static FORCEINLINE void Swap(T &a, T &b)
+ 
+ int LeastCommonMultiple(int a, int b);
+ int GreatestCommonDivisor(int a, int b);
++bool IsInRangeInclusive(int begin, int end, int check);
+ 
+ #endif /* MATH_FUNC_HPP */
+diff --git a/src/landscape.cpp b/src/landscape.cpp
+index 2d31a70..7e7bb5b 100644
+--- a/src/landscape.cpp
++++ b/src/landscape.cpp
+@@ -633,7 +633,7 @@ bool ClearSingleTile(TileIndex tile, DoCommandFlag flags, Money &money, CommandC
+  * @param tile end tile of area dragging
+  * @param p1 start tile of area dragging
+  * @param flags of operation to conduct
+- * @param p2 unused
++ * @param p2 orientation of clearing rectangle encoded in bit 2, see @Orientation
+  */
+ CommandCost CmdClearArea(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
+ {
+@@ -642,8 +642,14 @@ CommandCost CmdClearArea(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32
+ 	Money money = GetAvailableMoneyForCommand();
+ 	CommandCost cost(EXPENSES_CONSTRUCTION);
+ 
+-	for (OrthogonalIterator iter(tile, p1); iter != TileIterator::end; ++iter) {
+- 		if (!ClearSingleTile(*iter, flags, money, cost)) return cost;
++	if (p2 == ORIENTATION_DIAG) {
++ 		for (DiagonalIterator iter(tile, p1); iter != TileIterator::end; ++iter) {
++ 			if (!ClearSingleTile(*iter, flags, money, cost)) return cost;
++ 		}
++ 	} else {
++ 		for (OrthogonalIterator iter(tile, p1); iter != TileIterator::end; ++iter) {
++ 			if (!ClearSingleTile(*iter, flags, money, cost)) return cost;
++ 		}
+  	}
+ 
+  	/* draw explosion animation... */
+diff --git a/src/map_type.h b/src/map_type.h
+index dcd0a15..4bc5c44 100644
+--- a/src/map_type.h
++++ b/src/map_type.h
+@@ -71,4 +71,12 @@ enum LevelMode {
+ 	LEVEL_RAISE,
+ };
+ 
++/**
++ * argument for CmdLevelLand describing the orientation of the level action
++ */
++enum Orientation {
++	ORIENTATION_DIAG,
++	ORIENTATION_ORTH,
++};
++
+ #endif /* MAP_TYPE_H */
+diff --git a/src/terraform_cmd.cpp b/src/terraform_cmd.cpp
+index a024172..136b5dc 100644
+--- a/src/terraform_cmd.cpp
++++ b/src/terraform_cmd.cpp
+@@ -382,7 +382,7 @@ bool LevelSingleTile(TileIndex tile2, uint h, DoCommandFlag flags, Money &money,
+  * @param tile end tile of area-drag
+  * @param flags for this command type
+  * @param p1 start tile of area drag
+- * @param p2 see @LevelMode; flags for the mode of levelling (up, down, or same height)
++ * @param flags for the mode of levelling; @LevelMode at bit 0 and @Orientation at bit 2
+  * @return error or cost of terraforming
+  */
+ CommandCost CmdLevelLand(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
+@@ -417,8 +417,15 @@ CommandCost CmdLevelLand(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32
+ 	Money money = GetAvailableMoneyForCommand();
+ 	CommandCost cost(EXPENSES_CONSTRUCTION);
+ 
+-	for (OrthogonalIterator iter(tile, p1); iter != TileIterator::end; ++iter) {
+-		if (!LevelSingleTile(*iter, h, flags, money, cost)) return cost;
++	Orientation orient = (Orientation)GB(p2, 2, 1);
++	if (orient == ORIENTATION_DIAG) {
++		for (DiagonalIterator iter(tile, p1); iter != TileIterator::end; ++iter) {
++			if (!LevelSingleTile(*iter, h, flags, money, cost)) return cost;
++		}
++	} else {
++		for (OrthogonalIterator iter(tile, p1); iter != TileIterator::end; ++iter) {
++			if (!LevelSingleTile(*iter, h, flags, money, cost)) return cost;
++		}
+ 	}
+ 
+ 	return (cost.GetCost() == 0) ? CMD_ERROR : cost;
+diff --git a/src/terraform_gui.cpp b/src/terraform_gui.cpp
+index f22c162..dc4a534 100644
+--- a/src/terraform_gui.cpp
++++ b/src/terraform_gui.cpp
+@@ -120,6 +120,11 @@ bool GUIPlaceProcDragXY(ViewportDragDropSelectionProcess proc, TileIndex start_t
+ 	}
+ 
+ 	int32 lvl_demolish_flags = 0;
++	if (_ctrl_pressed) {
++		SB(lvl_demolish_flags, 2, 1, ORIENTATION_DIAG);
++	} else {
++		SB(lvl_demolish_flags, 2, 1, ORIENTATION_ORTH);
++	}
+ 
+ 	switch (proc) {
+ 		case DDSP_DEMOLISH_AREA:
+diff --git a/src/tilehighlight_type.h b/src/tilehighlight_type.h
+index a3ddad5..6b02ad2 100644
+--- a/src/tilehighlight_type.h
++++ b/src/tilehighlight_type.h
+@@ -63,6 +63,8 @@ struct TileHighlightData {
+ 	ViewportDragDropSelectionProcess select_proc;
+ 
+ 	TileIndex redsq;
++	bool diagonal;     ///< true if dragging a 45 degrees rotated rectangle
++	bool new_diagonal;
+ };
+ 
+ #endif /* TILEHIGHLIGHT_TYPE_H */
+diff --git a/src/viewport.cpp b/src/viewport.cpp
+index bf3014b..b08f7a8 100644
+--- a/src/viewport.cpp
++++ b/src/viewport.cpp
+@@ -695,6 +695,23 @@ void EndSpriteCombine()
+ }
+ 
+ /**
++ * checks if a point is inside the selected a diagonal rectangle given by _thd.size and _thd.pos
++ * @param x x coordinate of the point to be checked
++ * @param y y coordinate of the point to be checked
++ * @return true if the point is inside the rectangle, else false
++ */
++bool IsInsideRotatedRectangle(int x, int y)
++{
++	int dist_a = (_thd.size.x + _thd.size.y); // Rotated coordinate system for selected rectangle
++	int dist_b = (_thd.size.x - _thd.size.y); // We don't have to divide by 2. It's all relative!
++	int a = ((x - _thd.pos.x) + (y - _thd.pos.y)); // Rotated coordinate system for the point under scrutiny
++	int b = ((x - _thd.pos.x) - (y - _thd.pos.y));
++
++	/* check if a and b are between 0 and dist_a or dist_b respectively */
++	return IsInRangeInclusive(dist_a, 0, a) && IsInRangeInclusive(dist_b, 0, b);
++}
++
++/**
+  * Add a child sprite to a parent sprite.
+  *
+  * @param image the image to draw.
+@@ -881,6 +898,26 @@ static void DrawTileSelection(const TileInfo *ti)
+ 	/* no selection active? */
+ 	if (_thd.drawstyle == 0) return;
+ 
++	if (_thd.diagonal) { // We're drawing a 45 degrees rotated (diagonal) rectangle
++		if (IsInsideRotatedRectangle((int)ti->x, (int)ti->y)) {
++			if (_thd.drawstyle & HT_RECT) { // highlighting a square (clear land)
++				SpriteID image = SPR_SELECT_TILE + _tileh_to_sprite[ti->tileh];
++				DrawSelectionSprite(image, _thd.make_square_red ? PALETTE_SEL_TILE_RED : PAL_NONE, ti, 7, FOUNDATION_PART_NORMAL);
++			} else { // highlighting a dot (level land)
++				/* Figure out the Z coordinate for the single dot. */
++				byte z = ti->z;
++				if (ti->tileh & SLOPE_N) {
++					z += TILE_HEIGHT;
++					if (!(ti->tileh & SLOPE_S) && (ti->tileh & SLOPE_STEEP)) {
++						z += TILE_HEIGHT;
++					}
++				}
++				DrawGroundSpriteAt(_cur_dpi->zoom != 2 ? SPR_DOT : SPR_DOT_SMALL, PAL_NONE, ti->x, ti->y, z);
++			}
++		}
++		return;
++	}
++
+ 	/* Inside the inner area? */
+ 	if (IsInsideBS(ti->x, _thd.pos.x, _thd.size.x) &&
+ 			IsInsideBS(ti->y, _thd.pos.y, _thd.size.y)) {
+@@ -1720,88 +1757,104 @@ void MarkTileDirtyByTile(TileIndex tile)
+  */
+ static void SetSelectionTilesDirty()
+ {
+-	int x_start = _thd.pos.x;
+-	int y_start = _thd.pos.y;
+-
+ 	int x_size = _thd.size.x;
+ 	int y_size = _thd.size.y;
+ 
+-	if (_thd.outersize.x != 0) {
+-		x_size  += _thd.outersize.x;
+-		x_start += _thd.offs.x;
+-		y_size  += _thd.outersize.y;
+-		y_start += _thd.offs.y;
+-	}
+-
+-	x_size -= TILE_SIZE;
+-	y_size -= TILE_SIZE;
+-
+-	assert(x_size >= 0);
+-	assert(y_size >= 0);
+-
+-	int x_end = Clamp(x_start + x_size, 0, MapSizeX() * TILE_SIZE - TILE_SIZE);
+-	int y_end = Clamp(y_start + y_size, 0, MapSizeY() * TILE_SIZE - TILE_SIZE);
+-
+-	x_start = Clamp(x_start, 0, MapSizeX() * TILE_SIZE - TILE_SIZE);
+-	y_start = Clamp(y_start, 0, MapSizeY() * TILE_SIZE - TILE_SIZE);
+-
+-	/* make sure everything is multiple of TILE_SIZE */
+-	assert((x_end | y_end | x_start | y_start) % TILE_SIZE == 0);
+-
+-	/* How it works:
+-	 * Suppose we have to mark dirty rectangle of 3x4 tiles:
+-	 *   x
+-	 *  xxx
+-	 * xxxxx
+-	 *  xxxxx
+-	 *   xxx
+-	 *    x
+-	 * This algorithm marks dirty columns of tiles, so it is done in 3+4-1 steps:
+-	 * 1)  x     2)  x
+-	 *    xxx       Oxx
+-	 *   Oxxxx     xOxxx
+-	 *    xxxxx     Oxxxx
+-	 *     xxx       xxx
+-	 *      x         x
+-	 * And so forth...
+-	 */
++	if (!_thd.diagonal) { // Selecting in a straigth rectangle (or a single square)
++		int x_start = _thd.pos.x;
++		int y_start = _thd.pos.y;
+ 
+-	int top_x = x_end; // coordinates of top dirty tile
+-	int top_y = y_start;
+-	int bot_x = top_x; // coordinates of bottom dirty tile
+-	int bot_y = top_y;
++		if (_thd.outersize.x != 0) {
++			x_size  += _thd.outersize.x;
++			x_start += _thd.offs.x;
++			y_size  += _thd.outersize.y;
++			y_start += _thd.offs.y;
++		}
+ 
+-	do {
+-		Point top = RemapCoords2(top_x, top_y); // topmost dirty point
+-		Point bot = RemapCoords2(bot_x + TILE_SIZE - 1, bot_y + TILE_SIZE - 1); // bottommost point
++		x_size -= TILE_SIZE;
++		y_size -= TILE_SIZE;
++
++		assert(x_size >= 0);
++		assert(y_size >= 0);
++
++		int x_end = Clamp(x_start + x_size, 0, MapSizeX() * TILE_SIZE - TILE_SIZE);
++		int y_end = Clamp(y_start + y_size, 0, MapSizeY() * TILE_SIZE - TILE_SIZE);
++
++		x_start = Clamp(x_start, 0, MapSizeX() * TILE_SIZE - TILE_SIZE);
++		y_start = Clamp(y_start, 0, MapSizeY() * TILE_SIZE - TILE_SIZE);
++
++		/* make sure everything is multiple of TILE_SIZE */
++		assert((x_end | y_end | x_start | y_start) % TILE_SIZE == 0);
++
++		/* How it works:
++		 * Suppose we have to mark dirty rectangle of 3x4 tiles:
++		 *   x
++		 *  xxx
++		 * xxxxx
++		 *  xxxxx
++		 *   xxx
++		 *    x
++		 * This algorithm marks dirty columns of tiles, so it is done in 3+4-1 steps:
++		 * 1)  x     2)  x
++		 *    xxx       Oxx
++		 *   Oxxxx     xOxxx
++		 *    xxxxx     Oxxxx
++		 *     xxx       xxx
++		 *      x         x
++		 * And so forth...
++		 */
++
++		int top_x = x_end; // coordinates of top dirty tile
++		int top_y = y_start;
++		int bot_x = top_x; // coordinates of bottom dirty tile
++		int bot_y = top_y;
+ 
+-		/* the 'x' coordinate of 'top' and 'bot' is the same (and always in the same distance from tile middle),
+-		 * tile height/slope affects only the 'y' on-screen coordinate! */
++		do {
++			Point top = RemapCoords2(top_x, top_y); // topmost dirty point
++			Point bot = RemapCoords2(bot_x + TILE_SIZE - 1, bot_y + TILE_SIZE - 1); // bottommost point
+ 
+-		int l = top.x - (TILE_PIXELS - 2); // 'x' coordinate of left side of dirty rectangle
+-		int t = top.y;                     // 'y' coordinate of top side -//-
+-		int r = top.x + (TILE_PIXELS - 2); // right side of dirty rectangle
+-		int b = bot.y;                     // bottom -//-
++			/* the 'x' coordinate of 'top' and 'bot' is the same (and always in the same distance from tile middle),
++			 * tile height/slope affects only the 'y' on-screen coordinate! */
+ 
+-		static const int OVERLAY_WIDTH = 4; // part of selection sprites is drawn outside the selected area
++			int l = top.x - (TILE_PIXELS - 2); // 'x' coordinate of left side of dirty rectangle
++			int t = top.y;                     // 'y' coordinate of top side -//-
++			int r = top.x + (TILE_PIXELS - 2); // right side of dirty rectangle
++			int b = bot.y;                     // bottom -//-
+ 
+-		/* For halftile foundations on SLOPE_STEEP_S the sprite extents some more towards the top */
+-		MarkAllViewportsDirty(l - OVERLAY_WIDTH, t - OVERLAY_WIDTH - TILE_HEIGHT, r + OVERLAY_WIDTH, b + OVERLAY_WIDTH);
++			static const int OVERLAY_WIDTH = 4; // part of selection sprites is drawn outside the selected area
+ 
+-		/* haven't we reached the topmost tile yet? */
+-		if (top_x != x_start) {
+-			top_x -= TILE_SIZE;
+-		} else {
+-			top_y += TILE_SIZE;
+-		}
++			/* For halftile foundations on SLOPE_STEEP_S the sprite extents some more towards the top */
++			MarkAllViewportsDirty(l - OVERLAY_WIDTH, t - OVERLAY_WIDTH - TILE_HEIGHT, r + OVERLAY_WIDTH, b + OVERLAY_WIDTH);
+ 
+-		/* the way the bottom tile changes is different when we reach the bottommost tile */
+-		if (bot_y != y_end) {
+-			bot_y += TILE_SIZE;
+-		} else {
+-			bot_x -= TILE_SIZE;
++			/* haven't we reached the topmost tile yet? */
++			if (top_x != x_start) {
++				top_x -= TILE_SIZE;
++			} else {
++				top_y += TILE_SIZE;
++			}
++
++			/* the way the bottom tile changes is different when we reach the bottommost tile */
++			if (bot_y != y_end) {
++				bot_y += TILE_SIZE;
++			} else {
++				bot_x -= TILE_SIZE;
++			}
++		} while (bot_x >= top_x);
++	} else { // Selecting in a 45 degrees rotated (diagonal) rectangle.
++		/* a_size, b_size describe a rectangle with rotated coordinates */
++		int a_size = x_size + y_size, b_size = x_size - y_size;
++
++		int interval_a = a_size < 0 ? -TILE_SIZE : TILE_SIZE;
++		int interval_b = b_size < 0 ? -TILE_SIZE : TILE_SIZE;
++
++		for (int a = -interval_a; a != a_size + interval_a; a += interval_a) {
++			for (int b = -interval_b; b != b_size + interval_b; b += interval_b) {
++				int x = _thd.pos.x + (a + b) / 2;
++				int y = _thd.pos.y + (a - b) / 2;
++				MarkTileDirtyByTile(TileXY(x / TILE_SIZE, y / TILE_SIZE));
++			}
+ 		}
+-	} while (bot_x >= top_x);
++	}
+ }
+ 
+ 
+@@ -2173,6 +2226,14 @@ static HighLightStyle GetAutorailHT(int x, int y)
+ 	return HT_RAIL | _autorail_piece[x & TILE_UNIT_MASK][y & TILE_UNIT_MASK];
+ }
+ 
++/** returns true if we are selecting a diagonal rectangle, otherwise false */
++static inline bool DraggingDiagonal()
++{
++	return _ctrl_pressed && _thd.select_method == VPM_X_AND_Y &&
++			(_thd.select_proc == DDSP_DEMOLISH_AREA || _thd.select_proc == DDSP_LEVEL_AREA ||
++			_thd.select_proc == DDSP_RAISE_AND_LEVEL_AREA || _thd.select_proc == DDSP_LOWER_AND_LEVEL_AREA);
++}
++
+ /**
+  * Updates tile highlighting for all cases.
+  * Uses _thd.selstart and _thd.selend and _thd.place_mode (set elsewhere) to determine _thd.pos and _thd.size
+@@ -2186,6 +2247,7 @@ void UpdateTileSelection()
+ 	int y1;
+ 
+ 	_thd.new_drawstyle = HT_NONE;
++	_thd.new_diagonal = false;
+ 
+ 	if (_thd.place_mode == HT_SPECIAL) {
+ 		x1 = _thd.selend.x;
+@@ -2196,12 +2258,20 @@ void UpdateTileSelection()
+ 			x1 &= ~TILE_UNIT_MASK;
+ 			y1 &= ~TILE_UNIT_MASK;
+ 
+-			if (x1 >= x2) Swap(x1, x2);
+-			if (y1 >= y2) Swap(y1, y2);
++			if (DraggingDiagonal()) {
++				_thd.new_diagonal = true;
++			} else {
++				if (x1 >= x2) Swap(x1, x2);
++				if (y1 >= y2) Swap(y1, y2);
++			}
+ 			_thd.new_pos.x = x1;
+ 			_thd.new_pos.y = y1;
+-			_thd.new_size.x = x2 - x1 + TILE_SIZE;
+-			_thd.new_size.y = y2 - y1 + TILE_SIZE;
++			_thd.new_size.x = x2 - x1;
++			_thd.new_size.y = y2 - y1;
++			if (!_thd.new_diagonal) {
++				_thd.new_size.x += TILE_SIZE;
++				_thd.new_size.y += TILE_SIZE;
++			}
+ 			_thd.new_drawstyle = _thd.next_drawstyle;
+ 		}
+ 	} else if (_thd.place_mode != HT_NONE) {
+@@ -2256,7 +2326,8 @@ void UpdateTileSelection()
+ 			_thd.pos.x != _thd.new_pos.x || _thd.pos.y != _thd.new_pos.y ||
+ 			_thd.size.x != _thd.new_size.x || _thd.size.y != _thd.new_size.y ||
+ 			_thd.outersize.x != _thd.new_outersize.x ||
+-			_thd.outersize.y != _thd.new_outersize.y) {
++			_thd.outersize.y != _thd.new_outersize.y ||
++			_thd.diagonal    != _thd.new_diagonal) {
+ 		/* clear the old selection? */
+ 		if (_thd.drawstyle) SetSelectionTilesDirty();
+ 
+@@ -2264,6 +2335,7 @@ void UpdateTileSelection()
+ 		_thd.pos = _thd.new_pos;
+ 		_thd.size = _thd.new_size;
+ 		_thd.outersize = _thd.new_outersize;
++		_thd.diagonal = _thd.new_diagonal;
+ 		_thd.dirty = 0xff;
+ 
+ 		/* draw the new selection? */

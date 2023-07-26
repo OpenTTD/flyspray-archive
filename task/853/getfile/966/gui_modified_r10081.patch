@@ -1,0 +1,419 @@
+Index: src/vehicle.h
+===================================================================
+--- src/vehicle.h	(revision 10081)
++++ src/vehicle.h	(working copy)
+@@ -287,7 +287,10 @@
+ 	int32 top_coord;
+ 	int32 right_coord;
+ 	int32 bottom_coord;
+-	Vehicle *next_hash;
++	VehicleID next_hash;
++	VehicleID next_hash_gui;
++	VehicleID *old_hash;
++	VehicleID *old_hash_gui;
+ 
+ 	/* Related to age and service time */
+ 	Date age;     // Age in days
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 10081)
++++ src/train_cmd.cpp	(working copy)
+@@ -2772,6 +2772,8 @@
+ static void TrainController(Vehicle *v, bool update_image)
+ {
+ 	Vehicle *prev;
++	DiagDirection enterdir = DIAGDIR_BEGIN; /* get rid of 'Uninitialised' warning */
++	bool ssign = false;
+ 
+ 	/* For every vehicle after and including the given vehicle */
+ 	for (prev = GetPrevVehicleInChain(v); v != NULL; prev = v, v = v->next) {
+@@ -2810,7 +2812,7 @@
+ 
+ 				/* Determine what direction we're entering the new tile from */
+ 				Direction dir = GetNewVehicleDirectionByTile(gp.new_tile, gp.old_tile);
+-				DiagDirection enterdir = DirToDiagDir(dir);
++				enterdir = DirToDiagDir(dir);
+ 				assert(IsValidDiagDirection(enterdir));
+ 
+ 				/* Get the status of the tracks in the new tile and mask
+@@ -2917,12 +2919,8 @@
+ 					assert(v->u.rail.track);
+ 				}
+ 
+-				if (IsFrontEngine(v)) TrainMovedChangeSignals(gp.new_tile, enterdir);
++				ssign = true;
+ 
+-				/* Signals can only change when the first
+-				 * (above) or the last vehicle moves. */
+-				if (v->next == NULL) TrainMovedChangeSignals(gp.old_tile, ReverseDiagDir(enterdir));
+-
+ 				if (prev == NULL) AffectSpeedByDirChange(v, chosen_dir);
+ 
+ 				v->direction = chosen_dir;
+@@ -2958,6 +2956,18 @@
+ 			/* This is the first vehicle in the train */
+ 			AffectSpeedByZChange(v, old_z);
+ 		}
++
++		if (ssign) {
++			if (IsFrontEngine(v)) TrainMovedChangeSignals(gp.new_tile, enterdir);
++
++			/* Signals can only change when the first
++			 * (above) or the last vehicle moves. */
++			if (v->next == NULL)
++				TrainMovedChangeSignals(gp.old_tile, ReverseDiagDir(enterdir));
++
++			ssign = false;
++		}
++
+ 	}
+ 	return;
+ 
+Index: src/roadveh_cmd.cpp
+===================================================================
+--- src/roadveh_cmd.cpp	(revision 10081)
++++ src/roadveh_cmd.cpp	(working copy)
+@@ -822,6 +822,11 @@
+ 	rvf.dir = dir;
+ 	rvf.veh = v;
+ 	u = (Vehicle*)VehicleFromPos(TileVirtXY(x, y), &rvf, EnumCheckRoadVehClose);
++	/* The new hash map will only give results from the actual tile *
++	 * This checks the next tile, if no result is found */
++	if (u == NULL ) {
++		u = (Vehicle*)VehicleFromPos(TileVirtXY(x, y) + TileOffsByDir(dir), &rvf, EnumCheckRoadVehClose);
++	}
+ 
+ 	/* This code protects a roadvehicle from being blocked for ever
+ 	 * If more than 1480 / 74 days a road vehicle is blocked, it will
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 10081)
++++ src/vehicle.cpp	(working copy)
+@@ -43,10 +43,63 @@
+ #include "group.h"
+ #include "economy.h"
+ 
++/*
++ * memory consumed = (1<<(HASH_BITS*2)) + (1<<(HASH_BITS_GUI*2))
++ *	HB/HB_GUI
++ *	6/6 -> 4+4kB ( ~ original, whole 64*64 map)
++ *	8/8 -> 64+64kB (probably the best tradeoff)
++ *	10/10 -> 1+1MB (should be enough for most games, whole 512*512 map)
++ *	11/11 -> 4+4MB (whole 2048*2048 map)
++*/
++/*
++ * HASH_BITS_GUI affects the speed of redraw of large areas. It should depend on screen resolution and zoom level.
++ * HASH_BITS_GUI = 8 should be good to avoid most of hash collisions.
++ * 
++*/
++/*
++ * Note: the confusing HASH_BIT_GUI - 1 was removed, so these figures may not be correct anymore
++ *	original 19.6s
++ *	original no detail, no anim 12.3s
++ *	6/6	18.9s
++ *	6/6 no detail, no anim	11.7s
++ *	11/11	18.9s
++ *	11/11 no detail, no anim	11.3s
++*/
++/*
++ *	original 25.5s
++ *	original no detail, no anim 24.9s
++ *	5/11	16.9s
++ *	7/11	11.5s
++ *	9/11	11.0s
++ *
++ *	6/6	15.4s
++ *	8/8	14.4s
++ *	11/5	20.5s
++ *	11/7	11.8s
++ *	11/9	11.0s
++ *	11/11	11.0s
++ *	11/11 no detail, no anim	10.5s
++*/
++
++#define HASH_BITS 8
++#define HASH_BITS_GUI 8
++#define HASH_MASK_GUI ((1<<HASH_BITS_GUI)-1)
++/* first HASH_BITS_GUI bit mask (for example the first 8 bits) */
++#define HASH_MASK_GUI_X (HASH_MASK_GUI)
++/* second HASH_BITS_GUI bit mask (for example the second 8 bits) */
++#define HASH_MASK_GUI_Y (HASH_MASK_GUI << HASH_BITS_GUI)
++
++#define HASH_MASK ((1<<HASH_BITS)-1)
++/* first HASH_BITS bit mask */
++#define HASH_MASK_X HASH_MASK
++/* second HASH_BITS bit mask */
++#define HASH_MASK_Y (HASH_MASK << HASH_BITS)
++
+ #define INVALID_COORD (-0x8000)
+-#define GEN_HASH(x, y) ((GB((y), 6, 6) << 6) + GB((x), 7, 6))
++/* The scale in the game is defined in several ways, in tiles, in size units and in dpi units */
++#define GEN_HASH_GUI(x,y) (((x/TILE_PIXELS) & HASH_MASK_GUI_X) | (((y/TILE_PIXELS) << (HASH_BITS_GUI)) & HASH_MASK_GUI_Y))
++#define GEN_HASH(x,y) (((x/TILE_SIZE) & HASH_MASK_X) | (((y/TILE_SIZE) << HASH_BITS) & HASH_MASK_Y))
+ 
+-
+ /* Tables used in vehicle.h to find the right command for a certain vehicle type */
+ const uint32 _veh_build_proc_table[] = {
+ 	CMD_BUILD_RAIL_VEHICLE,
+@@ -284,7 +337,10 @@
+ 	v->left_coord = INVALID_COORD;
+ 	v->first = NULL;
+ 	v->next = NULL;
+-	v->next_hash = NULL;
++	v->next_hash = INVALID_VEHICLE;
++	v->next_hash_gui = INVALID_VEHICLE;
++	v->old_hash = NULL;
++	v->old_hash_gui = NULL;
+ 	v->string_id = 0;
+ 	v->next_shared = NULL;
+ 	v->prev_shared = NULL;
+@@ -391,79 +447,113 @@
+ }
+ 
+ 
+-static Vehicle *_vehicle_position_hash[0x1000];
++static VehicleID _vehicle_position_hash_gui[1<<(HASH_BITS_GUI*2)];
++static VehicleID _vehicle_position_hash[1<<(HASH_BITS*2)];
+ 
+ void *VehicleFromPos(TileIndex tile, void *data, VehicleFromPosProc *proc)
+ {
+-	Point pt = RemapCoords(TileX(tile) * TILE_SIZE, TileY(tile) * TILE_SIZE, 0);
++	int x = ( TileX(tile) ) & HASH_MASK_X;
++	int y = ( TileY(tile) << HASH_BITS ) & HASH_MASK_Y;
++	VehicleID veh = _vehicle_position_hash[x | y];
+ 
+-	/* The hash area to scan */
+-	const int xl = GB(pt.x - 174, 7, 6);
+-	const int xu = GB(pt.x + 104, 7, 6);
+-	const int yl = GB(pt.y - 294, 6, 6) << 6;
+-	const int yu = GB(pt.y +  56, 6, 6) << 6;
++	while ( veh != INVALID_VEHICLE ) {
++		Vehicle *v = GetVehicle(veh);
++		void *a = proc(v, data);
++		if (a != NULL) return a;
++		veh = v->next_hash;
++	}
+ 
+-	int x;
+-	int y;
++	return NULL;
++}
+ 
+-	for (y = yl;; y = (y + (1 << 6)) & (0x3F << 6)) {
+-		for (x = xl;; x = (x + 1) & 0x3F) {
+-			Vehicle *v = _vehicle_position_hash[(x + y) & 0xFFFF];
++static void UpdateVehiclePosHash(Vehicle* v, int x, int y) {
++	VehicleID *old_hash, *new_hash, *old_hash_gui, *new_hash_gui;
++	int old_x = v->left_coord;
++	/* int old_y = v->top_coord;	unused */
++	Vehicle *u;
+ 
+-			while (v != NULL) {
+-				void* a = proc(v, data);
++	new_hash_gui = (x == INVALID_COORD) ? NULL : &_vehicle_position_hash_gui[GEN_HASH_GUI(x,y)];
++	old_hash_gui = (old_x == INVALID_COORD) ? NULL : v->old_hash_gui;
+ 
+-				if (a != NULL) return a;
+-				v = v->next_hash;
++	old_hash = (old_x == INVALID_COORD) ? NULL : v->old_hash;
++	new_hash = (x == INVALID_COORD) ? NULL : &_vehicle_position_hash[GEN_HASH(v->x_pos, v->y_pos)];
++
++	/* update hash_gui ? */
++
++	if (old_hash_gui != new_hash_gui) {
++
++		/* remove from hash table? */
++
++		if (old_hash_gui != NULL) {
++			Vehicle *last = NULL;
++			VehicleID idx = *old_hash_gui;
++
++			while ((u = GetVehicle(idx)) != v) {
++				idx = u->next_hash_gui;
++				assert(idx != INVALID_VEHICLE);
++				last = u;
+ 			}
+ 
+-			if (x == xu) break;
++			if (last == NULL) {
++				*old_hash_gui = v->next_hash_gui;
++			} else {
++				last->next_hash_gui = v->next_hash_gui;
++			}
+ 		}
+ 
+-		if (y == yu) break;
++		/* insert into hash table? */
++
++		if (new_hash_gui != NULL) {
++			v->next_hash_gui = *new_hash_gui;
++			*new_hash_gui = v->index;
++			v->old_hash_gui = new_hash_gui;
++		}
+ 	}
+-	return NULL;
+-}
+ 
++	/* update hash ? */
+ 
+-static void UpdateVehiclePosHash(Vehicle* v, int x, int y)
+-{
+-	Vehicle **old_hash, **new_hash;
+-	int old_x = v->left_coord;
+-	int old_y = v->top_coord;
++	if (old_hash != new_hash) {
+ 
+-	new_hash = (x == INVALID_COORD) ? NULL : &_vehicle_position_hash[GEN_HASH(x, y)];
+-	old_hash = (old_x == INVALID_COORD) ? NULL : &_vehicle_position_hash[GEN_HASH(old_x, old_y)];
++		/* remove from hash table? */
+ 
+-	if (old_hash == new_hash) return;
++		if (old_hash != NULL) {
++			Vehicle *last = NULL;
++			VehicleID idx = *old_hash;
++			while ((u = GetVehicle(idx)) != v) {
++				idx = u->next_hash;
++				assert(idx != INVALID_VEHICLE);
++				last = u;
++			}
+ 
+-	/* remove from hash table? */
+-	if (old_hash != NULL) {
+-		Vehicle *last = NULL;
+-		Vehicle *u = *old_hash;
+-		while (u != v) {
+-			last = u;
+-			u = u->next_hash;
+-			assert(u != NULL);
++			if (last == NULL) {
++				*old_hash = v->next_hash;
++			} else {
++				last->next_hash = v->next_hash;
++			}
+ 		}
+ 
+-		if (last == NULL) {
+-			*old_hash = v->next_hash;
+-		} else {
+-			last->next_hash = v->next_hash;
++		/* insert into hash table? */
++
++		if (new_hash != NULL) {
++			v->next_hash = *new_hash;
++			*new_hash = v->index;
++			v->old_hash = new_hash;
+ 		}
+ 	}
+-
+-	/* insert into hash table? */
+-	if (new_hash != NULL) {
+-		v->next_hash = *new_hash;
+-		*new_hash = v;
+-	}
+ }
+ 
+-void ResetVehiclePosHash()
++/*
++ * Resets both _vehicle_position_hash arrays. It is called really seldom.
++ * memset() cannot be used as it sets array to one byte, while we need 2 byte in one item.
++ *
++*/
++void ResetVehiclePosHash(void)
+ {
+-	memset(_vehicle_position_hash, 0, sizeof(_vehicle_position_hash));
++	int i;
++	for ( i = 0 ; i < (1<<(HASH_BITS*2)) ; i++ )
++		_vehicle_position_hash[i] = INVALID_VEHICLE;
++	for ( i = 0 ; i < (1<<(HASH_BITS_GUI*2)) ; i++ )
++		_vehicle_position_hash_gui[i] = INVALID_VEHICLE;
+ }
+ 
+ void InitializeVehicles()
+@@ -603,7 +693,10 @@
+ 	}
+ 
+ 	UpdateVehiclePosHash(v, INVALID_COORD, 0);
+-	v->next_hash = NULL;
++	v->next_hash = INVALID_VEHICLE;
++	v->next_hash_gui = INVALID_VEHICLE;
++	v->old_hash = NULL;
++	v->old_hash_gui = NULL;
+ 	if (IsPlayerBuildableVehicleType(v)) DeleteVehicleOrders(v);
+ 
+ 	/* Now remove any artic part. This will trigger an other
+@@ -793,40 +886,51 @@
+ 
+ void ViewportAddVehicles(DrawPixelInfo *dpi)
+ {
+-	/* The bounding rectangle */
+-	const int l = dpi->left;
+-	const int r = dpi->left + dpi->width;
+-	const int t = dpi->top;
+-	const int b = dpi->top + dpi->height;
++	int x, y, x2, y2;
++	VehicleID veh;
++	Vehicle *v;
+ 
+-	/* The hash area to scan */
+-	const int xl = GB(l - 70, 7, 6);
+-	const int xu = GB(r,      7, 6);
+-	const int yl = GB(t - 70, 6, 6) << 6;
+-	const int yu = GB(b,      6, 6) << 6;
++	#define VIEWPORT_OVERLAP 70 
+ 
+-	int x;
+-	int y;
++	x = (dpi->left - VIEWPORT_OVERLAP)/TILE_PIXELS;
++	x2 = (dpi->left + dpi->width)/TILE_PIXELS;
++	y = ((dpi->top - VIEWPORT_OVERLAP)/TILE_PIXELS) << HASH_BITS_GUI;
++	y2 = ((dpi->top + dpi->height)/TILE_PIXELS) << HASH_BITS_GUI;
+ 
+-	for (y = yl;; y = (y + (1 << 6)) & (0x3F << 6)) {
+-		for (x = xl;; x = (x + 1) & 0x3F) {
+-			const Vehicle *v = _vehicle_position_hash[(x + y) & 0xFFFF];
++#if HASH_BITS_GUI <= 6
++	/* prevent multiple redraws of the same vehicle in one pass */
++	/* happens only with small hash block size */
++	/* most likely to happen while doing slow scolling or even redrawing whole screen */
++	/* does NOT depend on zoom level! this is resolved in ViewportDrawChk */
++	/* however, when sprite cache size is changed, limit above should be changed too */
+ 
+-			while (v != NULL) {
++	if ( y2 - y > (1<<(HASH_BITS_GUI*2)) ) {
++		y = 0;
++		y2 = 1<<(HASH_BITS_GUI*2);
++	}
++
++	if ( x2 - x > (1<<(HASH_BITS_GUI)) ) {
++		x = 0;
++		x2 = 1<<(HASH_BITS_GUI);
++	}
++#endif
++
++	for(int yc = y; yc <= y2; yc += 1<<HASH_BITS_GUI) {
++		for(int xc = x; xc <= x2; xc++) {
++			veh = _vehicle_position_hash_gui[(xc & HASH_MASK_GUI_X) | (yc & HASH_MASK_GUI_Y)];
++			while (veh != INVALID_VEHICLE) {
++				v = GetVehicle(veh);
+ 				if (!(v->vehstatus & VS_HIDDEN) &&
+-						l <= v->right_coord &&
+-						t <= v->bottom_coord &&
+-						r >= v->left_coord &&
+-						b >= v->top_coord) {
++						dpi->left <= v->right_coord &&
++						dpi->top <= v->bottom_coord &&
++						dpi->left + dpi->width >= v->left_coord &&
++						dpi->top + dpi->height >= v->top_coord) {
+ 					DoDrawVehicle(v);
+ 				}
+-				v = v->next_hash;
++				veh = v->next_hash_gui;
+ 			}
+ 
+-			if (x == xu) break;
+ 		}
+-
+-		if (y == yu) break;
+ 	}
+ }
+ 
