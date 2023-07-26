@@ -1,0 +1,333 @@
+diff -rau ../OTTD-source-nightly-r10995/src/industry.h src/industry.h
+--- ../OTTD-source-nightly-r10995/src/industry.h	2007-08-26 02:23:32.000000000 +0200
++++ src/industry.h	2007-08-29 16:14:21.000000000 +0200
+@@ -337,4 +337,31 @@
+ 
+ static const uint8 IT_INVALID = 255;
+ 
++/*
++ * Production patch
++ */
++#define MIN_INITIAL_PRODUCTION 1
++#define MINORIG_INITIAL_PRODUCTION 4
++#define MAXORIG_INITIAL_PRODUCTION 127
++#define MAX_INITIAL_PRODUCTION 255
++#define DEFAULT_INITIAL_PRODUCTION 0
++#define SMOOTH_INITIAL_PRODUCTION 1
++#define RANDOM_INITIAL_PRODUCTION 2
++#define LOWEST_INITIAL_PRODUCTION 3
++#define LOW_INITIAL_PRODUCTION 4
++#define GREAT_INITIAL_PRODUCTION 5
++#define GREATEST_INITIAL_PRODUCTION 6
++
++#define INCREASE_OPTION_ALL _patches.increase_options==0
++#define NO_INCREASE_OPTION_ALL _patches.increase_options!=0
++#define NO_INCREASE_OPTION_DEFAULT _patches.increase_options!=1
++#define NO_INCREASE_OPTION_SERVICE _patches.increase_options!=2
++#define NO_INCREASE_OPTION_NONE _patches.increase_options!=3
++
++#define NO_DECREASE_OPTION_DEFAULT _patches.decrease_options!=0
++#define NO_DECREASE_OPTION_NO_SERVICE _patches.decrease_options!=1
++#define NO_DECREASE_OPTION_NONE _patches.decrease_options!=2
++
++#define NO_CREATE_OPTION_ALL _patches.create_options!=0
++#define CREATE_OPTION_NONE _patches.create_options==2
+ #endif /* INDUSTRY_H */
+diff -rau ../OTTD-source-nightly-r10995/src/industry_cmd.cpp src/industry_cmd.cpp
+--- ../OTTD-source-nightly-r10995/src/industry_cmd.cpp	2007-08-27 23:18:04.000000000 +0200
++++ src/industry_cmd.cpp	2007-08-29 16:14:21.000000000 +0200
+@@ -1404,12 +1404,42 @@
+ 	i->type = type;
+ 	IncIndustryTypeCount(type);
+ 
+-	i->production_rate[0] = indspec->production_rate[0];
+-	i->production_rate[1] = indspec->production_rate[1];
+-
+-	if (_patches.smooth_economy) {
+-		i->production_rate[0] = min((RandomRange(256) + 128) * i->production_rate[0] >> 8 , 255);
+-		i->production_rate[1] = min((RandomRange(256) + 128) * i->production_rate[1] >> 8 , 255);
++	switch(_patches.initial_production) {
++		case DEFAULT_INITIAL_PRODUCTION: 
++			// This is the original initial production
++			i->production_rate[0] = indspec->production_rate[0];
++			i->production_rate[1] = indspec->production_rate[1];
++			break;
++		case SMOOTH_INITIAL_PRODUCTION:
++			// This algoritm is from smooth economy
++			i->production_rate[0] = min((RandomRange(256) + 128) * indspec->production_rate[0] >> 8 , 255);
++			i->production_rate[1] = min((RandomRange(256) + 128) * indspec->production_rate[1] >> 8 , 255);
++			break;
++		case RANDOM_INITIAL_PRODUCTION:
++			// Initial production can be from 8 units per month to 2048 units per month
++			i->production_rate[0] = min(RandomRange(256) * MAX_INITIAL_PRODUCTION >> 8 , 255);
++			i->production_rate[1] = min(RandomRange(256) * MAX_INITIAL_PRODUCTION >> 8 , 255);
++			break;
++		case LOWEST_INITIAL_PRODUCTION:
++			// All industries produces 8 units per month
++			i->production_rate[0] = MIN_INITIAL_PRODUCTION;
++			i->production_rate[1] = MIN_INITIAL_PRODUCTION;
++			break;
++		case LOW_INITIAL_PRODUCTION:
++			// All industries produces 32 units per month
++			i->production_rate[0] = MINORIG_INITIAL_PRODUCTION;
++			i->production_rate[1] = MINORIG_INITIAL_PRODUCTION;
++			break;
++		case GREAT_INITIAL_PRODUCTION:
++			// All industries produces 1024 units per month
++			i->production_rate[0] = MAXORIG_INITIAL_PRODUCTION;
++			i->production_rate[1] = MAXORIG_INITIAL_PRODUCTION;
++			break;
++		case GREATEST_INITIAL_PRODUCTION:
++			// All industries produces 2048 units per month
++			i->production_rate[0] = MAX_INITIAL_PRODUCTION;
++			i->production_rate[1] = MAX_INITIAL_PRODUCTION;
++			break;
+ 	}
+ 
+ 	i->town = t;
+@@ -1697,7 +1727,7 @@
+  */
+ static void ExtChangeIndustryProduction(Industry *i)
+ {
+-	bool closeit = true;
++	bool closeit = !_patches.no_close_industries;
+ 	int j;
+ 	const IndustrySpec *indspec = GetIndustrySpec(i->type);
+ 
+@@ -1711,10 +1741,14 @@
+ 
+ 			new_prod = old_prod = i->production_rate[j];
+ 
+-			if (CHANCE16I(20, 1024, r)) new_prod -= max(((RandomRange(50) + 10) * old_prod) >> 8, 1U);
++			if (NO_DECREASE_OPTION_NONE && (NO_DECREASE_OPTION_NO_SERVICE || i->last_month_pct_transported[j]==0) && CHANCE16I(20, 1024, r)) {
++				new_prod -= max(((RandomRange(50) + 10) * old_prod) >> 8, 1U);
++			}
+ 			/* Chance of increasing becomes better when more is transported */
+-			if (CHANCE16I(20 + (i->last_month_pct_transported[j] * 20 >> 8), 1024, r >> 16) &&
+-					((indspec->behaviour & INDUSTRYBEH_DONT_INCR_PROD) == 0 || _opt.landscape != LT_TEMPERATE)) {
++			if (NO_INCREASE_OPTION_NONE && (NO_INCREASE_OPTION_SERVICE || i->last_month_pct_transported[j] > 1) &&
++					CHANCE16I(20 + (i->last_month_pct_transported[j] * 20 >> 8), 1024, r >> 16) &&
++					(INCREASE_OPTION_ALL || (indspec->behaviour & INDUSTRYBEH_DONT_INCR_PROD) == 0 || 
++					_opt.landscape != LT_TEMPERATE)) {
+ 				new_prod += max(((RandomRange(50) + 10) * old_prod) >> 8, 1U);
+ 			}
+ 
+@@ -1837,8 +1871,9 @@
+ 
+ 	ind_spc = GetIndustrySpec(cumulative_probs[j].ind);
+ 	/*  Check if it is allowed */
+-	if ((ind_spc->behaviour & INDUSTRYBEH_BEFORE_1950) && _cur_year > 1950) return;
+-	if ((ind_spc->behaviour & INDUSTRYBEH_AFTER_1960) && _cur_year < 1960) return;
++	if (NO_CREATE_OPTION_ALL && (ind_spc->behaviour & INDUSTRYBEH_BEFORE_1950) && _cur_year > 1950) return;
++	if (NO_CREATE_OPTION_ALL && (ind_spc->behaviour & INDUSTRYBEH_AFTER_1960) && _cur_year < 1960) return;
++	if (CREATE_OPTION_NONE) return;
+ 
+ 	/* try to create 2000 times this industry */
+ 	num = 2000;
+@@ -1866,12 +1901,13 @@
+ 		bool only_decrease = false;
+ 
+ 		/* decrease or increase */
+-		if ((indspec->behaviour & INDUSTRYBEH_DONT_INCR_PROD) && _opt.landscape == LT_TEMPERATE)
++		if ((indspec->behaviour & INDUSTRYBEH_DONT_INCR_PROD) && _opt.landscape == LT_TEMPERATE && NO_INCREASE_OPTION_ALL)
+ 			only_decrease = true;
+ 
+ 		if (only_decrease || CHANCE16(1, 3)) {
+ 			/* If you transport > 60%, 66% chance we increase, else 33% chance we increase */
+-			if (!only_decrease && (i->last_month_pct_transported[0] > 153) != CHANCE16(1, 3)) {
++			if (NO_INCREASE_OPTION_NONE && (NO_INCREASE_OPTION_SERVICE || i->last_month_pct_transported[0] > 1) && 
++						!only_decrease && (i->last_month_pct_transported[0] > 153) != CHANCE16(1, 3)) {
+ 				/* Increase production */
+ 				if (i->prod_level != 0x80) {
+ 					byte b;
+@@ -1889,25 +1925,34 @@
+ 					i->production_rate[1] = b;
+ 
+ 					str = indspec->production_up_text;
++				} else {
++					// I don't like it, but...
++					i->prod_level <<= 1;
++					i->production_rate[0] = 0xFF;
++					i->production_rate[1] = 0xFF;
++					str = indspec->production_up_text;
+ 				}
+ 			} else {
+-				/* Decrease production */
+-				if (i->prod_level == 4) {
+-					i->prod_level = 0;
+-					str = indspec->closure_text;
+-				} else {
+-					i->prod_level >>= 1;
+-					i->production_rate[0] = (i->production_rate[0] + 1) >> 1;
+-					i->production_rate[1] = (i->production_rate[1] + 1) >> 1;
++				if (NO_DECREASE_OPTION_NONE && (NO_DECREASE_OPTION_NO_SERVICE || (i->last_month_pct_transported[0]==0 &&
++								i->last_month_pct_transported[1]==0))) {
++					/* Decrease production */
++					if (i->prod_level == 0) {
++						i->prod_level = 0;
++						str = indspec->closure_text;
++					} else {
++						i->prod_level >>= 1;
++						i->production_rate[0] = (i->production_rate[0] + 1) >> 1;
++						i->production_rate[1] = (i->production_rate[1] + 1) >> 1;
+ 
+-					str = indspec->production_down_text;
++						str = indspec->production_down_text;
++					}
+ 				}
+ 			}
+ 		}
+ 	}
+ 	if (indspec->life_type & INDUSTRYLIFE_PROCESSING) {
+ 		/* maybe close */
+-		if ( (byte)(_cur_year - i->last_prod_year) >= 5 && CHANCE16(1, 2)) {
++		if ( (byte)(_cur_year - i->last_prod_year) >= 5 && CHANCE16(1, 2) && !_patches.no_close_industries) {
+ 			i->prod_level = 0;
+ 			str = indspec->closure_text;
+ 		}
+diff -rau ../OTTD-source-nightly-r10995/src/lang/catalan.txt src/lang/catalan.txt
+--- ../OTTD-source-nightly-r10995/src/lang/catalan.txt	2007-08-14 22:10:42.000000000 +0200
++++ src/lang/catalan.txt	2007-08-29 20:47:55.000000000 +0200
+@@ -1151,6 +1151,29 @@
+ STR_CONFIG_PATCHES_DRAG_SIGNALS_DENSITY                         :{LTBLUE}Arrossegant, sitúa senyals cada: {ORANGE}{STRING} quadre(s)
+ STR_CONFIG_PATCHES_SEMAPHORE_BUILD_BEFORE_DATE                  :{LTBLUE}Construir semàfors automàticament abans de: {ORANGE}{STRING}
+ 
++STR_CONFIG_PATCHES_NO_CLOSE_INDUSTRIES                          :{LTBLUE}Les indústries no tanquen: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION                           :{LTBLUE}Producció inicial: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_DEFAULT                   :per defecte
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_SMOOTH                    :aleatori suau
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_RANDOM                    :aleatori pur
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_LOWEST                    :el nivell més baix possible
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_LOW	                      :el nivell més baix del joc original
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_GREAT                     :el nivell més gran del joc original
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_GREATEST                  :el nivell més gran possible
++STR_CONFIG_PATCHES_INCREASE_OPTIONS                             :{LTBLUE}Opcions d'increment de producció: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_INCREASE_OPTIONS_ALL                         :totes les indústries
++STR_CONFIG_PATCHES_INCREASE_OPTIONS_DEFAULT                     :només les indústries que poden créixer
++STR_CONFIG_PATCHES_INCREASE_OPTIONS_SERVICED                    :només les indústries que són servides
++STR_CONFIG_PATCHES_INCREASE_OPTIONS_NONE                        :mai
++STR_CONFIG_PATCHES_DECREASE_OPTIONS                             :{LTBLUE}Opcions de reducció de producció: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_DECREASE_OPTIONS_DEFAULT                     :totes les indústries
++STR_CONFIG_PATCHES_DECREASE_OPTIONS_NO_SERVICED                 :només les indústries que no són servides
++STR_CONFIG_PATCHES_DECREASE_OPTIONS_NONE                        :mai
++STR_CONFIG_PATCHES_CREATE_OPTIONS                               :{LTBLUE}Opcions per crear noves indústries: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_CREATE_OPTIONS_ALL                           :permet totes les indústries sempre
++STR_CONFIG_PATCHES_CREATE_OPTIONS_DEFAULT                       :per defecte
++STR_CONFIG_PATCHES_CREATE_OPTIONS_NONE                          :mai
++
+ STR_CONFIG_PATCHES_TOWN_LAYOUT_INVALID                          :{WHITE}El format de poble "no més carreteres" no és vàlid a l'editor d'escenaris
+ STR_CONFIG_PATCHES_TOWN_LAYOUT                                  :{LTBLUE}Selecciona el format poble-carretera: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_TOWN_LAYOUT_NO_ROADS                         :sense més carreteres
+Only in src/lang: catalan.txt~
+diff -rau ../OTTD-source-nightly-r10995/src/lang/english.txt src/lang/english.txt
+--- ../OTTD-source-nightly-r10995/src/lang/english.txt	2007-08-14 12:46:38.000000000 +0200
++++ src/lang/english.txt	2007-08-29 20:35:09.000000000 +0200
+@@ -1151,6 +1151,29 @@
+ STR_CONFIG_PATCHES_DRAG_SIGNALS_DENSITY                         :{LTBLUE}When dragging, place signals every: {ORANGE}{STRING1} tile(s)
+ STR_CONFIG_PATCHES_SEMAPHORE_BUILD_BEFORE_DATE                  :{LTBLUE}Automatically build semaphores before: {ORANGE}{STRING1}
+ 
++STR_CONFIG_PATCHES_NO_CLOSE_INDUSTRIES                          :{LTBLUE}Industries never close: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION				:{LTBLUE}Initial production: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_DEFAULT			:default
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_SMOOTH			:smooth random
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_RANDOM			:full random
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_LOWEST			:the lowest it can be
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_LOW			:the lowest level of the original game
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_GREAT			:the greatest level of the original game
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_GREATEST			:the greatest it can be
++STR_CONFIG_PATCHES_INCREASE_OPTIONS				:{LTBLUE}Options to increase production: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_INCREASE_OPTIONS_ALL				:all the industries
++STR_CONFIG_PATCHES_INCREASE_OPTIONS_DEFAULT			:only the industries that are allowed to grow
++STR_CONFIG_PATCHES_INCREASE_OPTIONS_SERVICED			:only industries that are serviced
++STR_CONFIG_PATCHES_INCREASE_OPTIONS_NONE			:never
++STR_CONFIG_PATCHES_DECREASE_OPTIONS				:{LTBLUE}Options to reduce production: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_DECREASE_OPTIONS_DEFAULT			:all the industries
++STR_CONFIG_PATCHES_DECREASE_OPTIONS_NO_SERVICED			:no serviced industries
++STR_CONFIG_PATCHES_DECREASE_OPTIONS_NONE			:never
++STR_CONFIG_PATCHES_CREATE_OPTIONS				:{LTBLUE}Options to create new industries: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_CREATE_OPTIONS_ALL				:it always allow all industries
++STR_CONFIG_PATCHES_CREATE_OPTIONS_DEFAULT			:default
++STR_CONFIG_PATCHES_CREATE_OPTIONS_NONE				:never
++
+ STR_CONFIG_PATCHES_TOWN_LAYOUT_INVALID                          :{WHITE}The town layout "no more roads" isn't valid in the scenario editor
+ STR_CONFIG_PATCHES_TOWN_LAYOUT                                  :{LTBLUE}Select town-road layout: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_TOWN_LAYOUT_NO_ROADS                         :no more roads
+diff -rau ../OTTD-source-nightly-r10995/src/lang/spanish.txt src/lang/spanish.txt
+--- ../OTTD-source-nightly-r10995/src/lang/spanish.txt	2007-08-22 22:57:28.000000000 +0200
++++ src/lang/spanish.txt	2007-08-29 20:49:17.000000000 +0200
+@@ -1152,6 +1152,29 @@
+ STR_CONFIG_PATCHES_DRAG_SIGNALS_DENSITY                         :{LTBLUE}Cuando arrastre colocar señales cada: {ORANGE}{STRING} casilla(s)
+ STR_CONFIG_PATCHES_SEMAPHORE_BUILD_BEFORE_DATE                  :{LTBLUE}Coloca automáticamente semáforos antes de: {ORANGE}{STRING}
+ 
++STR_CONFIG_PATCHES_NO_CLOSE_INDUSTRIES                          :{LTBLUE}Las industrias no cierran: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION                           :{LTBLUE}Producción inicial: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_DEFAULT                   :por defecto
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_SMOOTH                    :aleatoreo suave
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_RANDOM                    :aleatoreo puro
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_LOWEST                    :el nivel más bajo posible
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_LOW                       :el nivel más bajo del juego original
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_GREAT                     :el nivel más grande del juego original
++STR_CONFIG_PATCHES_INITIAL_PRODUCTION_GREATEST                  :el nivel más grande posible
++STR_CONFIG_PATCHES_INCREASE_OPTIONS                             :{LTBLUE}Opciones de incremento de producción: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_INCREASE_OPTIONS_ALL                         :todas las industrias
++STR_CONFIG_PATCHES_INCREASE_OPTIONS_DEFAULT                     :sólo las industrias que pueden crecer
++STR_CONFIG_PATCHES_INCREASE_OPTIONS_SERVICED                    :solamente las industrias servidas
++STR_CONFIG_PATCHES_INCREASE_OPTIONS_NONE                        :nunca
++STR_CONFIG_PATCHES_DECREASE_OPTIONS                             :{LTBLUE}Opciones de reducción de producción: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_DECREASE_OPTIONS_DEFAULT                     :todas las industrias
++STR_CONFIG_PATCHES_DECREASE_OPTIONS_NO_SERVICED                 :solamente las industrias no servidas
++STR_CONFIG_PATCHES_DECREASE_OPTIONS_NONE                        :nunca
++STR_CONFIG_PATCHES_CREATE_OPTIONS                               :{LTBLUE}Opciones para crear nuevas industrias: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_CREATE_OPTIONS_ALL                           :permite todas las industrias siempre
++STR_CONFIG_PATCHES_CREATE_OPTIONS_DEFAULT                       :por defecto
++STR_CONFIG_PATCHES_CREATE_OPTIONS_NONE                          :nunca
++
+ STR_CONFIG_PATCHES_TOWN_LAYOUT_INVALID                          :{WHITE}El trazado de ciudad "no más carreteras" no es válido en el editor de escenarios
+ STR_CONFIG_PATCHES_TOWN_LAYOUT                                  :{LTBLUE}Selecciona trazado de carretera en ciudad: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_TOWN_LAYOUT_NO_ROADS                         :no más carreteras
+Only in src/lang: spanish.txt~
+diff -rau ../OTTD-source-nightly-r10995/src/settings.cpp src/settings.cpp
+--- ../OTTD-source-nightly-r10995/src/settings.cpp	2007-08-14 12:46:38.000000000 +0200
++++ src/settings.cpp	2007-08-29 16:14:21.000000000 +0200
+@@ -1428,6 +1428,11 @@
+ 	 SDT_VAR(Patches, starting_year,    SLE_INT32, 0,NC,  1950, MIN_YEAR, MAX_YEAR, 1, STR_CONFIG_PATCHES_STARTING_YEAR,NULL),
+ 	 SDT_VAR(Patches, ending_year,      SLE_INT32,0,NC|NO,2051, MIN_YEAR, MAX_YEAR, 1, STR_CONFIG_PATCHES_ENDING_YEAR,  NULL),
+ 	SDT_BOOL(Patches, smooth_economy,             0, 0,  true,            STR_CONFIG_PATCHES_SMOOTH_ECONOMY,   NULL),
++	SDT_BOOL(Patches, no_close_industries,        0, 0, false,            STR_CONFIG_PATCHES_NO_CLOSE_INDUSTRIES,     NULL),
++	 SDT_VAR(Patches, create_options,   SLE_UINT8, 0, MS, 1, 0, 2, 0,  STR_CONFIG_PATCHES_CREATE_OPTIONS,  NULL),
++	 SDT_VAR(Patches, initial_production,   SLE_UINT8, 0, MS, 0, 0, 6, 0,  STR_CONFIG_PATCHES_INITIAL_PRODUCTION,  NULL),
++	 SDT_VAR(Patches, increase_options,   SLE_UINT8, 0, MS, 1, 0, 3, 0,  STR_CONFIG_PATCHES_INCREASE_OPTIONS,  NULL),
++	 SDT_VAR(Patches, decrease_options,   SLE_UINT8, 0, MS, 0, 0, 2, 0,  STR_CONFIG_PATCHES_DECREASE_OPTIONS,  NULL),
+ 	SDT_BOOL(Patches, allow_shares,               0, 0, false,            STR_CONFIG_PATCHES_ALLOW_SHARES,     NULL),
+ 	SDT_CONDVAR(Patches, town_growth_rate,  SLE_UINT8, 54, SL_MAX_VERSION, 0, MS, 2, 0,   4, 0, STR_CONFIG_PATCHES_TOWN_GROWTH,          NULL),
+ 	SDT_CONDVAR(Patches, larger_towns,      SLE_UINT8, 54, SL_MAX_VERSION, 0, D0, 4, 0, 255, 1, STR_CONFIG_PATCHES_LARGER_TOWNS,         NULL),
+diff -rau ../OTTD-source-nightly-r10995/src/settings_gui.cpp src/settings_gui.cpp
+--- ../OTTD-source-nightly-r10995/src/settings_gui.cpp	2007-07-27 14:49:04.000000000 +0200
++++ src/settings_gui.cpp	2007-08-29 16:14:21.000000000 +0200
+@@ -694,6 +694,11 @@
+ 	"colored_news_year",
+ 	"ending_year",
+ 	"smooth_economy",
++	"no_close_industries",
++	"create_options",
++	"initial_production",
++	"increase_options",
++	"decrease_options",
+ 	"allow_shares",
+ 	"town_growth_rate",
+ 	"larger_towns",
+diff -rau ../OTTD-source-nightly-r10995/src/variables.h src/variables.h
+--- ../OTTD-source-nightly-r10995/src/variables.h	2007-07-26 18:51:10.000000000 +0200
++++ src/variables.h	2007-08-29 16:14:21.000000000 +0200
+@@ -180,6 +180,11 @@
+ 	bool smooth_economy;                // smooth economy
+ 	bool allow_shares;                  // allow the buying/selling of shares
+ 	byte dist_local_authority;          // distance for town local authority, default 20
++	bool no_close_industries;           // don't close industries
++	uint8 create_options;		    // options for create new industries
++	uint8 initial_production;	    // initial production of new created industries
++	uint8 increase_options;		    // options for customize production
++	uint8 decrease_options;		    // options for customize production
+ 
+ 	byte wait_oneway_signal;            // waitingtime in days before a oneway signal
+ 	byte wait_twoway_signal;            // waitingtime in days before a twoway signal

@@ -1,0 +1,414 @@
+diff -r 264c8ca62c50 src/build_vehicle_gui.cpp
+--- a/src/build_vehicle_gui.cpp	Mon Mar 23 21:32:55 2009 +0100
++++ b/src/build_vehicle_gui.cpp	Mon Mar 23 21:41:37 2009 +0100
+@@ -430,6 +430,11 @@
+ 	cargo_name_listing[i+1] = INVALID_STRING_ID;
+ }
+ 
++static bool AutoRefitEngine(EngineID e_id, CargoID cargo_id_criteria)
++{
++	return CT_INVALID != cargo_id_criteria && CT_NO_REFIT != cargo_id_criteria && INVALID_ENGINE != e_id && cargo_id_criteria != GetEngine(e_id)->GetDefaultCargoType();
++}
++
+ static int DrawCargoCapacityInfo(int left, int right, int y, EngineID engine, VehicleType type, bool refittable)
+ {
+ 	uint16 *cap = GetCapacityOfArticulatedParts(engine, type);
+@@ -451,12 +456,12 @@
+ }
+ 
+ /* Draw rail wagon specific details */
+-static int DrawRailWagonPurchaseInfo(int left, int right, int y, EngineID engine_number, const RailVehicleInfo *rvi)
++static int DrawRailWagonPurchaseInfo(int left, int right, int y, EngineID engine_number, const RailVehicleInfo *rvi, bool auto_refit)
+ {
+ 	const Engine *e = GetEngine(engine_number);
+ 
+ 	/* Purchase cost */
+-	SetDParam(0, e->GetCost());
++	SetDParam(0, auto_refit ? e->GetCost() + GetRefitCost(engine_number).GetCost() : e->GetCost());
+ 	DrawString(left, right, y, STR_PURCHASE_INFO_COST, TC_FROMSTRING);
+ 	y += 10;
+ 
+@@ -489,12 +494,12 @@
+ }
+ 
+ /* Draw locomotive specific details */
+-static int DrawRailEnginePurchaseInfo(int left, int right, int y, EngineID engine_number, const RailVehicleInfo *rvi)
++static int DrawRailEnginePurchaseInfo(int left, int right, int y, EngineID engine_number, const RailVehicleInfo *rvi, bool auto_refit)
+ {
+ 	const Engine *e = GetEngine(engine_number);
+ 
+ 	/* Purchase Cost - Engine weight */
+-	SetDParam(0, e->GetCost());
++	SetDParam(0, auto_refit ? e->GetCost() + GetRefitCost(engine_number).GetCost() : e->GetCost());
+ 	SetDParam(1, e->GetDisplayWeight());
+ 	DrawString(left, right, y, STR_PURCHASE_INFO_COST_WEIGHT, TC_FROMSTRING);
+ 	y += 10;
+@@ -531,12 +536,12 @@
+ }
+ 
+ /* Draw road vehicle specific details */
+-static int DrawRoadVehPurchaseInfo(int left, int right, int y, EngineID engine_number)
++static int DrawRoadVehPurchaseInfo(int left, int right, int y, EngineID engine_number, bool auto_refit)
+ {
+ 	const Engine *e = GetEngine(engine_number);
+ 
+ 	/* Purchase cost - Max speed */
+-	SetDParam(0, e->GetCost());
++	SetDParam(0, auto_refit ? e->GetCost() + GetRefitCost(engine_number).GetCost() : e->GetCost());
+ 	SetDParam(1, e->GetDisplayMaxSpeed());
+ 	DrawString(left, right, y, STR_PURCHASE_INFO_COST_SPEED, TC_FROMSTRING);
+ 	y += 10;
+@@ -550,12 +555,12 @@
+ }
+ 
+ /* Draw ship specific details */
+-static int DrawShipPurchaseInfo(int left, int right, int y, EngineID engine_number, const ShipVehicleInfo *svi, bool refittable)
++static int DrawShipPurchaseInfo(int left, int right, int y, EngineID engine_number, const ShipVehicleInfo *svi, bool refittable, bool auto_refit)
+ {
+ 	const Engine *e = GetEngine(engine_number);
+ 
+ 	/* Purchase cost - Max speed */
+-	SetDParam(0, e->GetCost());
++	SetDParam(0, auto_refit ? e->GetCost() + GetRefitCost(engine_number).GetCost() : e->GetCost());
+ 	SetDParam(1, e->GetDisplayMaxSpeed());
+ 	DrawString(left, right, y, STR_PURCHASE_INFO_COST_SPEED, TC_FROMSTRING);
+ 	y += 10;
+@@ -576,13 +581,13 @@
+ }
+ 
+ /* Draw aircraft specific details */
+-static int DrawAircraftPurchaseInfo(int left, int right, int y, EngineID engine_number, const AircraftVehicleInfo *avi, bool refittable)
++static int DrawAircraftPurchaseInfo(int left, int right, int y, EngineID engine_number, const AircraftVehicleInfo *avi, bool refittable, bool auto_refit)
+ {
+ 	const Engine *e = GetEngine(engine_number);
+ 	CargoID cargo = e->GetDefaultCargoType();
+ 
+ 	/* Purchase cost - Max speed */
+-	SetDParam(0, e->GetCost());
++	SetDParam(0, auto_refit ? e->GetCost() + GetRefitCost(engine_number).GetCost() : e->GetCost());
+ 	SetDParam(1, e->GetDisplayMaxSpeed());
+ 	DrawString(left, right, y, STR_PURCHASE_INFO_COST_SPEED, TC_FROMSTRING);
+ 	y += 10;
+@@ -610,27 +615,22 @@
+ 	return y;
+ }
+ 
+-/**
+- * Draw the purchase info details of a vehicle at a given location.
+- * @param left,right,y location where to draw the info
+- * @param engine_number the engine of which to draw the info of
+- * @return y after drawing all the text
+- */
+-int DrawVehiclePurchaseInfo(int left, int right, int y, EngineID engine_number)
++int DrawVehiclePurchaseInfo(int left, int right, int y, EngineID engine_number, CargoID cargo_id_criteria)
+ {
+ 	const Engine *e = GetEngine(engine_number);
+ 	YearMonthDay ymd;
+ 	ConvertDateToYMD(e->intro_date, &ymd);
+ 	bool refittable = IsArticulatedVehicleRefittable(engine_number);
++	bool auto_refit = AutoRefitEngine(engine_number, cargo_id_criteria);
+ 
+ 	switch (e->type) {
+ 		default: NOT_REACHED();
+ 		case VEH_TRAIN: {
+ 			const RailVehicleInfo *rvi = RailVehInfo(engine_number);
+ 			if (rvi->railveh_type == RAILVEH_WAGON) {
+-				y = DrawRailWagonPurchaseInfo(left, right, y, engine_number, rvi);
++				y = DrawRailWagonPurchaseInfo(left, right, y, engine_number, rvi, auto_refit);
+ 			} else {
+-				y = DrawRailEnginePurchaseInfo(left, right, y, engine_number, rvi);
++				y = DrawRailEnginePurchaseInfo(left, right, y, engine_number, rvi, auto_refit);
+ 			}
+ 
+ 			/* Cargo type + capacity, or N/A */
+@@ -647,7 +647,7 @@
+ 			break;
+ 		}
+ 		case VEH_ROAD: {
+-			y = DrawRoadVehPurchaseInfo(left, right, y, engine_number);
++			y = DrawRoadVehPurchaseInfo(left, right, y, engine_number, auto_refit);
+ 
+ 			/* Cargo type + capacity, or N/A */
+ 			int new_y = DrawCargoCapacityInfo(left, right, y, engine_number, VEH_ROAD, refittable);
+@@ -663,10 +663,10 @@
+ 			break;
+ 		}
+ 		case VEH_SHIP:
+-			y = DrawShipPurchaseInfo(left, right, y, engine_number, ShipVehInfo(engine_number), refittable);
++			y = DrawShipPurchaseInfo(left, right, y, engine_number, ShipVehInfo(engine_number), refittable, auto_refit);
+ 			break;
+ 		case VEH_AIRCRAFT:
+-			y = DrawAircraftPurchaseInfo(left, right, y, engine_number, AircraftVehInfo(engine_number), refittable);
++			y = DrawAircraftPurchaseInfo(left, right, y, engine_number, AircraftVehInfo(engine_number), refittable, auto_refit);
+ 			break;
+ 	}
+ 
+@@ -691,6 +691,17 @@
+ 	return y;
+ }
+ 
++/**
++ * Draw the purchase info details of a vehicle at a given location.
++ * @param left,right,y location where to draw the info
++ * @param engine_number the engine of which to draw the info of
++ * @return y after drawing all the text
++ */
++int DrawVehiclePurchaseInfo(int left, int right, int y, EngineID engine_number)
++{
++	return DrawVehiclePurchaseInfo(left, right, y, engine_number, CT_INVALID);
++}
++
+ static void DrawVehicleEngine(VehicleType type, int x, int y, EngineID engine, SpriteID pal)
+ {
+ 	switch (type) {
+@@ -846,8 +857,6 @@
+ 			case VEH_TRAIN:
+ 				this->widget[BUILD_VEHICLE_WIDGET_CAPTION].data    = this->listview_mode ? STR_AVAILABLE_TRAINS : STR_JUST_STRING;
+ 				this->widget[BUILD_VEHICLE_WIDGET_LIST].tooltips   = STR_8843_TRAIN_VEHICLE_SELECTION;
+-				this->widget[BUILD_VEHICLE_WIDGET_BUILD].data      = STR_881F_BUILD_VEHICLE;
+-				this->widget[BUILD_VEHICLE_WIDGET_BUILD].tooltips  = STR_8844_BUILD_THE_HIGHLIGHTED_TRAIN;
+ 				this->widget[BUILD_VEHICLE_WIDGET_RENAME].data     = STR_8820_RENAME;
+ 				this->widget[BUILD_VEHICLE_WIDGET_RENAME].tooltips = STR_8845_RENAME_TRAIN_VEHICLE_TYPE;
+ 				break;
+@@ -855,8 +864,6 @@
+ 			case VEH_ROAD:
+ 				this->widget[BUILD_VEHICLE_WIDGET_CAPTION].data    = this->listview_mode ? STR_AVAILABLE_ROAD_VEHICLES : STR_9006_NEW_ROAD_VEHICLES;
+ 				this->widget[BUILD_VEHICLE_WIDGET_LIST].tooltips   = STR_9026_ROAD_VEHICLE_SELECTION;
+-				this->widget[BUILD_VEHICLE_WIDGET_BUILD].data      = STR_9007_BUILD_VEHICLE;
+-				this->widget[BUILD_VEHICLE_WIDGET_BUILD].tooltips  = STR_9027_BUILD_THE_HIGHLIGHTED_ROAD;
+ 				this->widget[BUILD_VEHICLE_WIDGET_RENAME].data     = STR_9034_RENAME;
+ 				this->widget[BUILD_VEHICLE_WIDGET_RENAME].tooltips = STR_9035_RENAME_ROAD_VEHICLE_TYPE;
+ 				break;
+@@ -864,8 +871,6 @@
+ 			case VEH_SHIP:
+ 				this->widget[BUILD_VEHICLE_WIDGET_CAPTION].data    = this->listview_mode ? STR_AVAILABLE_SHIPS : STR_9808_NEW_SHIPS;
+ 				this->widget[BUILD_VEHICLE_WIDGET_LIST].tooltips   = STR_9825_SHIP_SELECTION_LIST_CLICK;
+-				this->widget[BUILD_VEHICLE_WIDGET_BUILD].data      = STR_9809_BUILD_SHIP;
+-				this->widget[BUILD_VEHICLE_WIDGET_BUILD].tooltips  = STR_9826_BUILD_THE_HIGHLIGHTED_SHIP;
+ 				this->widget[BUILD_VEHICLE_WIDGET_RENAME].data     = STR_9836_RENAME;
+ 				this->widget[BUILD_VEHICLE_WIDGET_RENAME].tooltips = STR_9837_RENAME_SHIP_TYPE;
+ 				break;
+@@ -873,12 +878,64 @@
+ 			case VEH_AIRCRAFT:
+ 				this->widget[BUILD_VEHICLE_WIDGET_CAPTION].data    = this->listview_mode ? STR_AVAILABLE_AIRCRAFT : STR_A005_NEW_AIRCRAFT;
+ 				this->widget[BUILD_VEHICLE_WIDGET_LIST].tooltips   = STR_A025_AIRCRAFT_SELECTION_LIST;
+-				this->widget[BUILD_VEHICLE_WIDGET_BUILD].data      = STR_A006_BUILD_AIRCRAFT;
+-				this->widget[BUILD_VEHICLE_WIDGET_BUILD].tooltips  = STR_A026_BUILD_THE_HIGHLIGHTED_AIRCRAFT;
+ 				this->widget[BUILD_VEHICLE_WIDGET_RENAME].data     = STR_A037_RENAME;
+ 				this->widget[BUILD_VEHICLE_WIDGET_RENAME].tooltips = STR_A038_RENAME_AIRCRAFT_TYPE;
+ 				break;
+ 		}
++		this->SetBuildButtonStrings();
++	}
++
++	void SetBuildButtonStrings()
++	{
++		if (!this->listview_mode && AutoRefitEngine(this->sel_engine, this->GetCargoIdCriteria())) {
++			switch (this->vehicle_type) {
++				default: NOT_REACHED();
++
++				case VEH_TRAIN:
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].data      = STR_BUILD_AND_REFIT_RAIL_VEHICLE;
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].tooltips  = STR_BUILD_AND_REFIT_THE_HIGHLIGHTED_TRAIN;
++					break;
++
++				case VEH_ROAD:
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].data      = STR_BUILD_AND_REFIT_ROAD_VEHICLE;
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].tooltips  = STR_BUILD_AND_REFIT_THE_HIGHLIGHTED_ROAD;
++					break;
++
++				case VEH_SHIP:
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].data      = STR_BUILD_AND_REFIT_SHIP;
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].tooltips  = STR_BUILD_AND_REFIT_THE_HIGHLIGHTED_SHIP;
++					break;
++
++				case VEH_AIRCRAFT:
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].data      = STR_BUILD_AND_REFIT_AIRCRAFT;
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].tooltips  = STR_BUILD_AND_REFIT_THE_HIGHLIGHTED_AIRCRAFT;
++					break;
++			}
++		} else {
++			switch (this->vehicle_type) {
++				default: NOT_REACHED();
++
++				case VEH_TRAIN:
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].data      = STR_881F_BUILD_VEHICLE;
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].tooltips  = STR_8844_BUILD_THE_HIGHLIGHTED_TRAIN;
++					break;
++
++				case VEH_ROAD:
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].data      = STR_9007_BUILD_VEHICLE;
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].tooltips  = STR_9027_BUILD_THE_HIGHLIGHTED_ROAD;
++					break;
++
++				case VEH_SHIP:
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].data      = STR_9809_BUILD_SHIP;
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].tooltips  = STR_9826_BUILD_THE_HIGHLIGHTED_SHIP;
++					break;
++
++				case VEH_AIRCRAFT:
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].data      = STR_A006_BUILD_AIRCRAFT;
++					this->widget[BUILD_VEHICLE_WIDGET_BUILD].tooltips  = STR_A026_BUILD_THE_HIGHLIGHTED_AIRCRAFT;
++					break;
++			}
++		}
+ 	}
+ 
+ 	/* Figure out what train EngineIDs to put in the list */
+@@ -887,7 +944,7 @@
+ 		EngineID sel_id = INVALID_ENGINE;
+ 		int num_engines = 0;
+ 		int num_wagons  = 0;
+-		CargoID cargo_id_criteria = this->cargo_id_listing[this->cargo_filter_criteria];
++		CargoID cargo_id_criteria = GetCargoIdCriteria();
+ 
+ 		this->filter.railtype = (this->listview_mode) ? RAILTYPE_END : GetRailType(this->window_number);
+ 
+@@ -1021,7 +1078,7 @@
+ 	/* Filter the engine list against the currently selected cargo filter */
+ 	void FilterEngineList()
+ 	{
+-		(&this->eng_list)->Filter(this->cargo_id_listing[this->cargo_filter_criteria]);
++		(&this->eng_list)->Filter(GetCargoIdCriteria());
+ 		if (0 == (&this->eng_list)->Length()) { // no engine passed through the filter, invalidate the previously selected engine
+ 			this->sel_engine = INVALID_ENGINE;
+ 		} else if (!(&this->eng_list)->Contains(this->sel_engine)) { // previously selected engine didn't pass the filter, select the first engine of the list
+@@ -1029,6 +1086,11 @@
+ 		}
+ 	}
+ 
++	CargoID GetCargoIdCriteria()
++	{
++		return this->cargo_id_listing[this->cargo_filter_criteria];
++	}
++
+ 	void OnClick(Point pt, int widget)
+ 	{
+ 		switch (widget) {
+@@ -1058,21 +1120,37 @@
+ 			case BUILD_VEHICLE_WIDGET_BUILD: {
+ 				EngineID sel_eng = this->sel_engine;
+ 				if (sel_eng != INVALID_ENGINE) {
++					CargoID cargo_id_criteria = this->GetCargoIdCriteria();
++					/* Refit after build if selected cargo criteria isn't 'Show All', 'None' nor the default engine cargo type */
++					bool should_auto_refit = AutoRefitEngine(sel_eng, cargo_id_criteria);
++					bool build_succeed = false;
+ 					switch (this->vehicle_type) {
+ 						default: NOT_REACHED();
+ 						case VEH_TRAIN:
+-							DoCommandP(this->window_number, sel_eng, 0,
++							build_succeed = DoCommandP(this->window_number, sel_eng, 0,
+ 									CMD_BUILD_RAIL_VEHICLE | CMD_MSG(STR_882B_CAN_T_BUILD_RAILROAD_VEHICLE),
+ 									(RailVehInfo(sel_eng)->railveh_type == RAILVEH_WAGON) ? CcBuildWagon : CcBuildLoco);
++							if(should_auto_refit && build_succeed) { // Refit the newly builded rail vehicule to the selected cargo criteria
++								DoCommandP(this->window_number, _new_vehicle_id, cargo_id_criteria, CMD_REFIT_RAIL_VEHICLE | CMD_MSG(STR_RAIL_CAN_T_REFIT_VEHICLE));
++							}
+ 							break;
+ 						case VEH_ROAD:
+-							DoCommandP(this->window_number, sel_eng, 0, CMD_BUILD_ROAD_VEH | CMD_MSG(STR_9009_CAN_T_BUILD_ROAD_VEHICLE), CcBuildRoadVeh);
++							build_succeed = DoCommandP(this->window_number, sel_eng, 0, CMD_BUILD_ROAD_VEH | CMD_MSG(STR_9009_CAN_T_BUILD_ROAD_VEHICLE), CcBuildRoadVeh);
++							if(should_auto_refit && build_succeed) { // Refit the newly builded road vehicule to the selected cargo criteria
++								DoCommandP(this->window_number, _new_vehicle_id, cargo_id_criteria, CMD_REFIT_ROAD_VEH | CMD_MSG(STR_REFIT_ROAD_VEHICLE_CAN_T));
++							}
+ 							break;
+ 						case VEH_SHIP:
+-							DoCommandP(this->window_number, sel_eng, 0, CMD_BUILD_SHIP | CMD_MSG(STR_980D_CAN_T_BUILD_SHIP), CcBuildShip);
++							build_succeed = DoCommandP(this->window_number, sel_eng, 0, CMD_BUILD_SHIP | CMD_MSG(STR_980D_CAN_T_BUILD_SHIP), CcBuildShip);
++							if(should_auto_refit && build_succeed) { // Refit the newly builded ship to the selected cargo criteria
++								DoCommandP(this->window_number, _new_vehicle_id, cargo_id_criteria, CMD_REFIT_SHIP | CMD_MSG(STR_9841_CAN_T_REFIT_SHIP));
++							}
+ 							break;
+ 						case VEH_AIRCRAFT:
+-							DoCommandP(this->window_number, sel_eng, 0, CMD_BUILD_AIRCRAFT | CMD_MSG(STR_A008_CAN_T_BUILD_AIRCRAFT), CcBuildAircraft);
++							build_succeed = DoCommandP(this->window_number, sel_eng, 0, CMD_BUILD_AIRCRAFT | CMD_MSG(STR_A008_CAN_T_BUILD_AIRCRAFT), CcBuildAircraft);
++							if(should_auto_refit && build_succeed) { // Refit the newly builded aircraft to the selected cargo criteria
++								DoCommandP(this->window_number, _new_vehicle_id, cargo_id_criteria, CMD_REFIT_AIRCRAFT | CMD_MSG(STR_A042_CAN_T_REFIT_AIRCRAFT));
++							}
+ 							break;
+ 					}
+ 				}
+@@ -1130,13 +1208,16 @@
+ 		/* Set text of 'cargo filter by' dropdown */
+ 		this->widget[BUILD_VEHICLE_WIDGET_CARGO_FILTER_DROPDOWN].data = this->cargo_name_listing[this->cargo_filter_criteria];
+ 
++		/* Set text and tooltip of 'build' button */
++		if (!this->listview_mode) this->SetBuildButtonStrings();
++
+ 		this->DrawWidgets();
+ 
+ 		DrawEngineList(this->vehicle_type, this->widget[BUILD_VEHICLE_WIDGET_LIST].left + 2, this->widget[BUILD_VEHICLE_WIDGET_LIST].right, this->widget[BUILD_VEHICLE_WIDGET_LIST].top + 1, &this->eng_list, this->vscroll.pos, max, this->sel_engine, 0, DEFAULT_GROUP);
+ 
+ 		if (this->sel_engine != INVALID_ENGINE) {
+ 			const Widget *wi = &this->widget[BUILD_VEHICLE_WIDGET_PANEL];
+-			int text_end = DrawVehiclePurchaseInfo(wi->left + 2, wi->right - 2, wi->top + 1, this->sel_engine);
++			int text_end = DrawVehiclePurchaseInfo(wi->left + 2, wi->right - 2, wi->top + 1, this->sel_engine, GetCargoIdCriteria());
+ 
+ 			if (text_end > wi->bottom) {
+ 				this->SetDirty();
+diff -r 264c8ca62c50 src/lang/english.txt
+--- a/src/lang/english.txt	Mon Mar 23 21:32:55 2009 +0100
++++ b/src/lang/english.txt	Mon Mar 23 21:41:37 2009 +0100
+@@ -2720,6 +2720,7 @@
+ STR_ALL_AVAIL_RAIL_VEHICLES                                     :{WHITE}Rail Vehicles
+ 
+ STR_881F_BUILD_VEHICLE                                          :{BLACK}Build Vehicle
++STR_BUILD_AND_REFIT_RAIL_VEHICLE                                :{BLACK}Build and Refit Vehicle
+ STR_CLONE_ROAD_VEHICLE                                          :{BLACK}Clone Vehicle
+ STR_CLONE_ROAD_VEHICLE_INFO                                     :{BLACK}This will build a copy of the road vehicle. Ctrl+Click will share the orders
+ STR_CLONE_ROAD_VEHICLE_DEPOT_INFO                               :{BLACK}This will build a copy of a road vehicle. Click this button and then on a road vehicle inside or outside the depot. Ctrl+Click will share the orders
+@@ -2776,6 +2777,7 @@
+ STR_8842_CENTER_MAIN_VIEW_ON_TRAIN                              :{BLACK}Centre main view on train depot location
+ STR_8843_TRAIN_VEHICLE_SELECTION                                :{BLACK}Train vehicle selection list - click on vehicle for information
+ STR_8844_BUILD_THE_HIGHLIGHTED_TRAIN                            :{BLACK}Build the highlighted train vehicle
++STR_BUILD_AND_REFIT_THE_HIGHLIGHTED_TRAIN                       :{BLACK}Build and refit the highlighted train vehicle
+ STR_8845_RENAME_TRAIN_VEHICLE_TYPE                              :{BLACK}Rename train vehicle type
+ STR_8846_CURRENT_TRAIN_ACTION_CLICK                             :{BLACK}Current train action - click here to stop/start train
+ STR_8847_SHOW_TRAIN_S_ORDERS                                    :{BLACK}Show train's orders
+@@ -2855,6 +2857,7 @@
+ STR_9004_NEW_VEHICLES                                           :{BLACK}New Vehicles
+ STR_9006_NEW_ROAD_VEHICLES                                      :{WHITE}New Road Vehicles
+ STR_9007_BUILD_VEHICLE                                          :{BLACK}Build Vehicle
++STR_BUILD_AND_REFIT_ROAD_VEHICLE                                :{BLACK}Build and Refit Vehicle
+ STR_9009_CAN_T_BUILD_ROAD_VEHICLE                               :{WHITE}Can't build road vehicle...
+ STR_900C_DETAILS                                                :{WHITE}{VEHICLE} (Details)
+ STR_900D_AGE_RUNNING_COST_YR                                    :{BLACK}Age: {LTBLUE}{STRING2}{BLACK}   Running Cost: {LTBLUE}{CURRENCY}/yr
+@@ -2886,6 +2889,7 @@
+ STR_9025_CENTER_MAIN_VIEW_ON_ROAD                               :{BLACK}Centre main view on road vehicle depot location
+ STR_9026_ROAD_VEHICLE_SELECTION                                 :{BLACK}Road vehicle selection list - click on vehicle for information
+ STR_9027_BUILD_THE_HIGHLIGHTED_ROAD                             :{BLACK}Build the highlighted road vehicle
++STR_BUILD_AND_REFIT_THE_HIGHLIGHTED_ROAD                        :{BLACK}Build and refit the highlighted road vehicle
+ STR_902A_COST_SPEED_RUNNING_COST                                :{BLACK}Cost: {CURRENCY}{}Speed: {VELOCITY}{}Running Cost: {CURRENCY}/yr{}Capacity: {CARGO}
+ STR_ARTICULATED_RV_CAPACITY                                     :{BLACK}Capacity: {LTBLUE}
+ STR_BARE_CARGO                                                  :{CARGO}
+@@ -2925,6 +2929,7 @@
+ STR_9805_SHIPS                                                  :{WHITE}{COMPANY} - {COMMA} Ship{P "" s}
+ STR_9808_NEW_SHIPS                                              :{WHITE}New Ships
+ STR_9809_BUILD_SHIP                                             :{BLACK}Build Ship
++STR_BUILD_AND_REFIT_SHIP                                        :{BLACK}Build and Refit Ship
+ STR_CLONE_SHIP                                                  :{BLACK}Clone Ship
+ STR_CLONE_SHIP_INFO                                             :{BLACK}This will build a copy of the ship. Ctrl+Click will share the orders
+ STR_CLONE_SHIP_DEPOT_INFO                                       :{BLACK}This will build a copy of a ship. Click this button and then on a ship inside or outside the depot. Ctrl+Click will share the orders
+@@ -2957,6 +2962,7 @@
+ STR_9823_SHIPS_CLICK_ON_SHIP_FOR                                :{BLACK}Ships - click on ship for information
+ STR_9825_SHIP_SELECTION_LIST_CLICK                              :{BLACK}Ship selection list - click on ship for information
+ STR_9826_BUILD_THE_HIGHLIGHTED_SHIP                             :{BLACK}Build the highlighted ship
++STR_BUILD_AND_REFIT_THE_HIGHLIGHTED_SHIP                        :{BLACK}Build and refit the highlighted ship
+ STR_9827_CURRENT_SHIP_ACTION_CLICK                              :{BLACK}Current ship action - click here to stop/start ship
+ STR_9828_SHOW_SHIP_S_ORDERS                                     :{BLACK}Show ship's orders
+ STR_9829_CENTER_MAIN_VIEW_ON_SHIP                               :{BLACK}Centre main view on ship's location
+@@ -2996,6 +3002,7 @@
+ STR_CLONE_AIRCRAFT_INFO_HANGAR_WINDOW                           :{BLACK}This will build a copy of an aircraft. Click this button and then on an aircraft inside or outside the hangar. Ctrl+Click will share the orders
+ STR_A005_NEW_AIRCRAFT                                           :{WHITE}New Aircraft
+ STR_A006_BUILD_AIRCRAFT                                         :{BLACK}Build Aircraft
++STR_BUILD_AND_REFIT_AIRCRAFT                                    :{BLACK}Build and Refit Aircraft
+ STR_A008_CAN_T_BUILD_AIRCRAFT                                   :{WHITE}Can't build aircraft...
+ STR_A009_AIRCRAFT                                               :{WHITE}{COMPANY} - {COMMA} Aircraft
+ STR_A00A                                                        :{WHITE}{VEHICLE}
+@@ -3027,6 +3034,7 @@
+ STR_A024_CENTER_MAIN_VIEW_ON_HANGAR                             :{BLACK}Centre main view on hangar location
+ STR_A025_AIRCRAFT_SELECTION_LIST                                :{BLACK}Aircraft selection list - click on aircraft for information
+ STR_A026_BUILD_THE_HIGHLIGHTED_AIRCRAFT                         :{BLACK}Build the highlighted aircraft
++STR_BUILD_AND_REFIT_THE_HIGHLIGHTED_AIRCRAFT                    :{BLACK}Build and refit the highlighted aircraft
+ STR_A027_CURRENT_AIRCRAFT_ACTION                                :{BLACK}Current aircraft action - click here to stop/start aircraft
+ STR_A028_SHOW_AIRCRAFT_S_ORDERS                                 :{BLACK}Show aircraft's orders
+ STR_A029_CENTER_MAIN_VIEW_ON_AIRCRAFT                           :{BLACK}Centre main view on aircraft's location

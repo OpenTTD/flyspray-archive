@@ -1,0 +1,268 @@
+Index: src/industry_gui.cpp
+===================================================================
+--- src/industry_gui.cpp	(revision 12805)
++++ src/industry_gui.cpp	(working copy)
+@@ -24,6 +24,7 @@
+ #include "map_func.h"
+ #include "player_func.h"
+ #include "settings_type.h"
++#include "widgets/dropdown_func.h"
+ 
+ #include "table/strings.h"
+ #include "table/sprites.h"
+@@ -640,14 +641,13 @@
+ 	IDW_CLOSEBOX = 0,
+ 	IDW_CAPTION,
+ 	IDW_STICKY,
+-	IDW_SORTBYNAME,
+-	IDW_SORTBYTYPE,
+-	IDW_SORTBYPROD,
+-	IDW_SORTBYTRANSPORT,
+-	IDW_SPACER,
++	IDW_SORTBY,
++	IDW_SORT_DROPDOWN,
++	IDW_CARGO_DROPDOWN,
++	IDW_PAN_RIGHT,
+ 	IDW_INDUSRTY_LIST,
+ 	IDW_SCROLLBAR,
+-	IDW_RESIZE,
++	IDW_RESIZE
+ };
+ 
+ /** Widget definition of the industy directory gui */
+@@ -655,11 +655,10 @@
+ {   WWT_CLOSEBOX,   RESIZE_NONE,    13,     0,    10,     0,    13, STR_00C5,                STR_018B_CLOSE_WINDOW},             // IDW_CLOSEBOX
+ {    WWT_CAPTION,   RESIZE_NONE,    13,    11,   495,     0,    13, STR_INDUSTRYDIR_CAPTION, STR_018C_WINDOW_TITLE_DRAG_THIS},   // IDW_CAPTION
+ {  WWT_STICKYBOX,   RESIZE_NONE,    13,   496,   507,     0,    13, 0x0,                     STR_STICKY_BUTTON},                 // IDW_STICKY
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,    13,     0,   100,    14,    25, STR_SORT_BY_NAME,        STR_SORT_ORDER_TIP},                // IDW_SORTBYNAME
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,    13,   101,   200,    14,    25, STR_SORT_BY_TYPE,        STR_SORT_ORDER_TIP},                // IDW_SORTBYTYPE
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,    13,   201,   300,    14,    25, STR_SORT_BY_PRODUCTION,  STR_SORT_ORDER_TIP},                // IDW_SORTBYPROD
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,    13,   301,   400,    14,    25, STR_SORT_BY_TRANSPORTED, STR_SORT_ORDER_TIP},                // IDW_SORTBYTRANSPORT
+-{      WWT_PANEL,   RESIZE_NONE,    13,   401,   495,    14,    25, 0x0,                     STR_NULL},                          // IDW_SPACER
++{    WWT_TEXTBTN,   RESIZE_NONE,    13,     0,    80,    14,    25, STR_SORT_BY,             STR_SORT_ORDER_TIP},                // IDW_SORTBY
++{   WWT_DROPDOWN,   RESIZE_NONE,    13,    81,   170,    14,    25, 0x0,                     STR_SORT_CRITERIA_TIP},             // IDW_SORT_DROPDOWN
++{   WWT_DROPDOWN,   RESIZE_NONE,    13,   171,   322,    14,    25, 0x0,                     STR_SORT_CRITERIA_TIP},             // IDW_CARGO_DROPDOWN
++{      WWT_PANEL,   RESIZE_NONE,    13,   323,   507,    14,    25, 0x0,                     STR_NULL},                          // IDW_PAN_RIGHT
+ {      WWT_PANEL, RESIZE_BOTTOM,    13,     0,   495,    26,   189, 0x0,                     STR_200A_TOWN_NAMES_CLICK_ON_NAME}, // IDW_INDUSRTY_LIST
+ {  WWT_SCROLLBAR, RESIZE_BOTTOM,    13,   496,   507,    14,   177, 0x0,                     STR_0190_SCROLL_BAR_SCROLLS_LIST},  // IDW_SCROLLBAR
+ {  WWT_RESIZEBOX,     RESIZE_TB,    13,   496,   507,   178,   189, 0x0,                     STR_RESIZE_BUTTON},                 // IDW_RESIZE
+@@ -750,23 +749,44 @@
+ 	return r;
+ }
+ 
++enum cargo_filter {
++	CF_SHOW_ALL = -1,
++	CF_SHOW_EMPTY = 255
++};
++
+ /**
+  * Makes a sorted industry list.
+  * When there are no industries, the list has to be made. This so when one
+  * starts a new game without industries after playing a game with industries
+  * the list is not populated with invalid industries from the previous game.
+  */
+-static void MakeSortedIndustryList()
++static void MakeSortedIndustryList(int cargo_filter)
+ {
+ 	const Industry* i;
+ 	int n = 0;
+ 
+-	/* Create array for sorting */
+-	_industry_sort = ReallocT(_industry_sort, GetMaxIndustryIndex() + 1);
++	/* Create array for filtering */
++	const Industry** industry_sort = MallocT<const Industry*>(GetMaxIndustryIndex() +1);
+ 
++	FOR_ALL_INDUSTRIES(i) {
++		if ((i->produced_cargo[0] != CF_SHOW_EMPTY && cargo_filter == i->produced_cargo[0]) || (cargo_filter == CF_SHOW_ALL)) {
++			industry_sort[n++] = i; continue;
++		}
++		if ((i->produced_cargo[1] != CF_SHOW_EMPTY && cargo_filter == i->produced_cargo[1]) || (cargo_filter == CF_SHOW_ALL)) {
++			industry_sort[n++] = i; continue;
++		}
++		/* stations without waiting cargo */
++		if ((cargo_filter == CF_SHOW_EMPTY && i->produced_cargo[0] == CF_SHOW_EMPTY && i->produced_cargo[1] == CF_SHOW_EMPTY) || (cargo_filter == CF_SHOW_ALL)) {
++			industry_sort[n++] = i;
++		}
++	}
++
++	free((void*)_industry_sort);
++	_industry_sort = MallocT<const Industry*>(n);
++	for (int j = 0; j < n; ++j) _industry_sort[j] = industry_sort[j];
++
+ 	/* Don't attempt a sort if there are no industries */
+-	if (GetNumIndustries() != 0) {
+-		FOR_ALL_INDUSTRIES(i) _industry_sort[n++] = i;
++	if (n != 0) {
+ 		qsort((void*)_industry_sort, n, sizeof(_industry_sort[0]), GeneralIndustrySorter);
+ 	}
+ 
+@@ -776,20 +796,35 @@
+ 	DEBUG(misc, 3, "Resorting industries list");
+ }
+ 
++static int _cargo_filter = CF_SHOW_ALL;
++static StringID _cargos_name_list[NUM_CARGO + 1];
++static int _cargos_dropdown_pos[NUM_CARGO + 1];
+ 
++const StringID _industry_directory_sort_listing[] = {
++	STR_SORT_BY_DROPDOWN_NAME,
++	STR_SORT_BY_TYPE,
++	STR_SORT_BY_PRODUCTION,
++	STR_SORT_BY_TRANSPORTED,
++	INVALID_STRING_ID
++};
++
+ static void IndustryDirectoryWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch (e->event) {
+ 	case WE_PAINT: {
++
++		w->widget[IDW_SORT_DROPDOWN].data = _industry_directory_sort_listing[_industry_sort_order >> 1];
++		w->widget[IDW_CARGO_DROPDOWN].data = _cargos_name_list[_cargos_dropdown_pos[_cargo_filter]];
++
+ 		if (_industry_sort_dirty) {
+ 			_industry_sort_dirty = false;
+-			MakeSortedIndustryList();
++			MakeSortedIndustryList(_cargo_filter);
+ 		}
+ 
+ 		SetVScrollCount(w, _num_industry_sort);
+ 
+ 		DrawWindowWidgets(w);
+-		DrawSortButtonState(w, IDW_SORTBYNAME + (_industry_sort_order >> 1), _industry_sort_order & 1 ? SBS_DOWN : SBS_UP);
++		DrawSortButtonState(w, IDW_SORTBY, _industry_sort_order & 1 ? SBS_DOWN : SBS_UP);
+ 
+ 		uint p = w->vscroll.pos;
+ 		int n = 0;
+@@ -822,30 +857,19 @@
+ 
+ 	case WE_CLICK:
+ 		switch (e->we.click.widget) {
+-			case IDW_SORTBYNAME: {
+-				_industry_sort_order = _industry_sort_order == 0 ? 1 : 0;
++			case IDW_SORTBY: // flip sorting method asc/desc
++				_industry_sort_order ^= 1;
+ 				_industry_sort_dirty = true;
+ 				SetWindowDirty(w);
+-			} break;
+-
+-			case IDW_SORTBYTYPE: {
+-				_industry_sort_order = _industry_sort_order == 2 ? 3 : 2;
+-				_industry_sort_dirty = true;
+-				SetWindowDirty(w);
+-			} break;
+-
+-			case IDW_SORTBYPROD: {
+-				_industry_sort_order = _industry_sort_order == 4 ? 5 : 4;
+-				_industry_sort_dirty = true;
+-				SetWindowDirty(w);
+-			} break;
+-
+-			case IDW_SORTBYTRANSPORT: {
+-				_industry_sort_order = _industry_sort_order == 6 ? 7 : 6;
+-				_industry_sort_dirty = true;
+-				SetWindowDirty(w);
+-			} break;
+-
++				break;
++			case IDW_SORT_DROPDOWN: {
++				ShowDropDownMenu(w, _industry_directory_sort_listing, _industry_sort_order >> 1, IDW_SORT_DROPDOWN, 0, 0);
++				break;
++			}
++			case IDW_CARGO_DROPDOWN: {
++				ShowDropDownMenu(w, _cargos_name_list, _cargos_dropdown_pos[_cargo_filter], IDW_CARGO_DROPDOWN, 0, 0);
++				break;
++			}
+ 			case IDW_INDUSRTY_LIST: {
+ 				int y = (e->we.click.pt.y - 28) / 10;
+ 				uint16 p;
+@@ -863,6 +887,39 @@
+ 		SetWindowDirty(w);
+ 		break;
+ 
++	case WE_DROPDOWN_SELECT: // we have selected a dropdown item in the list
++		switch (e->we.dropdown.button) {
++		case IDW_SORT_DROPDOWN:
++			if ((_industry_sort_order << 1) != e->we.dropdown.index) {
++				/* value has changed -> resort */
++				CLRBITS(_industry_sort_order, 0x06); //b0110
++				SETBITS(_industry_sort_order, e->we.dropdown.index << 1);
++			}
++			break;
++		case IDW_CARGO_DROPDOWN:
++			CargoID c;
++
++			if (e->we.dropdown.index > 1) {
++				int i = 2;
++				for (c = 0; c < NUM_CARGO; c++) {
++					if (!GetCargo(c)->IsValid()) continue;
++					if (e->we.dropdown.index == i) break;
++					i++;
++				}
++				_cargo_filter = c;
++			}
++			else if (e->we.dropdown.index == 1) {
++				_cargo_filter = CF_SHOW_EMPTY;
++			}
++			else {
++				_cargo_filter = CF_SHOW_ALL;
++			}
++			break;
++		}
++		_industry_sort_dirty = true;
++		SetWindowDirty(w);
++		break;
++
+ 	case WE_RESIZE:
+ 		w->vscroll.cap += e->we.sizing.diff.y / 10;
+ 		break;
+@@ -883,6 +940,24 @@
+ 	Window *w = AllocateWindowDescFront(&_industry_directory_desc, 0);
+ 
+ 	if (w != NULL) {
++		/* Create cargo filter list  */
++		_cargos_name_list[0] = STR_PURCHASE_INFO_ALL_TYPES;
++		_cargos_dropdown_pos[CF_SHOW_ALL] = 0;
++
++		_cargos_name_list[1] = STR_NO_CARGO_PRODUCED;
++		_cargos_dropdown_pos[CF_SHOW_EMPTY] = 1;		
++
++		uint i = 2;
++		for (CargoID c = 0; c < NUM_CARGO; c++) {
++			if (!GetCargo(c)->IsValid()) continue;
++			
++			_cargos_name_list[i] = GetCargo(c)->name;
++			_cargos_dropdown_pos[c] = i;
++
++			i++;
++		}
++		_cargos_name_list[i] = INVALID_STRING_ID;
++
+ 		w->vscroll.cap = 16;
+ 		w->resize.height = w->height - 6 * 10; // minimum 10 items
+ 		w->resize.step_height = 10;
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 12805)
++++ src/lang/english.txt	(working copy)
+@@ -363,9 +363,9 @@
+ STR_SORT_BY                                                     :{BLACK}Sort by
+ 
+ STR_SORT_BY_POPULATION                                          :{BLACK}Population
+-STR_SORT_BY_PRODUCTION                                          :{BLACK}Production
+-STR_SORT_BY_TYPE                                                :{BLACK}Type
+-STR_SORT_BY_TRANSPORTED                                         :{BLACK}Transported
++STR_SORT_BY_PRODUCTION                                          :Production
++STR_SORT_BY_TYPE                                                :Type
++STR_SORT_BY_TRANSPORTED                                         :Transported
+ STR_SORT_BY_NAME                                                :{BLACK}Name
+ STR_SORT_BY_DROPDOWN_NAME                                       :Name
+ STR_SORT_BY_DATE                                                :{BLACK}Date
+@@ -857,6 +857,7 @@
+ STR_0313_FUND_NEW_INDUSTRY                                      :Fund new industry
+ ############ range ends here
+ 
++STR_NO_CARGO_PRODUCED                                           :No cargo produced
+ STR_0314_FUND_NEW_INDUSTRY                                      :{WHITE}Fund new industry
+ STR_JUST_STRING                                                 :{STRING}
+ STR_JUST_INT                                                    :{NUM}

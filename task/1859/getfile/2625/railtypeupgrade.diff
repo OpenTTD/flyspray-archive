@@ -1,0 +1,384 @@
+diff -rup orig/OTTD-source-nightly-r12366/src/rail_cmd.cpp work/OTTD-source-nightly-r12366/src/rail_cmd.cpp
+--- orig/OTTD-source-nightly-r12366/src/rail_cmd.cpp	2008-03-05 22:11:26.000000000 +1030
++++ work/OTTD-source-nightly-r12366/src/rail_cmd.cpp	2008-03-16 22:43:11.000000000 +1030
+@@ -1171,6 +1171,166 @@ void *UpdateTrainPowerProc(Vehicle *v, v
+ 	return NULL;
+ }
+ 
++/* Is there a suitable conversion depot at this tile? */
++/* Yes, it's a really simple func at the moment, but who knows what could */
++/* happen to it later. */
++bool IsSecondaryConversionDepotSuitable(TileIndex tile, RailType totype)
++{
++	return (GetTileType(tile) == MP_RAILWAY)
++	     && (GetRailTileType(tile) == RAIL_TILE_DEPOT)
++	     && (GetRailType(tile) == totype);
++}
++
++/* Search for a suitable secondary depot of the specified type. */
++/* Returns tile if found, or INVALID_TILE if not. */
++/* Does not check the orgin tile, deliberately. */
++TileIndex FindSecondaryDepot(TileIndex origin, uint32 flags, RailType totype)
++{
++	uint rx = TileX(origin);
++	uint ry = TileY(origin);
++
++	/* Scan outwards until we find a suitable secondary depot. */
++	/* Ideally this would work with some kind of rail distance (ie. */
++	/* closest distance by rail), but I don't know how to do that, */
++	/* so I'll just scan outwards in a square with an increasing range. */
++	uint x = 0;
++	uint y = 0;
++	for (int sr=1; sr<=128; sr++) {
++		for (int oy=-sr; oy<=sr; oy += sr*2) {
++			int ty = ((int)ry) + oy;
++			if ((ty < 0) || ((uint)ty >= MapSizeY()))
++				continue;
++			y = (uint)ty;
++			for (int ox=-sr; ox<=sr; ox++) {				
++				int tx = ((int)rx) + ox;
++				if ((tx < 0) || ((uint)tx >= MapSizeX()))
++					continue;
++				x = (uint)tx;
++				if (IsSecondaryConversionDepotSuitable(TileXY(x, y), totype))
++					return TileXY(x, y);
++			}
++		}
++		for (int ox=-sr; ox<=sr; ox += sr*2) {
++			int tx = ((int)rx) + ox;
++			x = (uint)tx;
++			if ((tx < 0) || ((uint)tx >= MapSizeX()))
++				continue;
++			for (int oy=-sr+1; oy<=sr-1; oy++) {				
++				int ty = ((int)ry) + oy;
++				if ((ty < 0) || ((uint)ty >= MapSizeY()))
++					continue;
++				y = (uint)ty;
++				if (IsSecondaryConversionDepotSuitable(TileXY(x, y), totype))
++					return TileXY(x, y);
++			}
++		}
++	}
++
++	return INVALID_TILE;
++}
++
++/* Converts all vehicles in a single depot at <primary_tile>. */
++/* Returns cost. */
++/* in_place: Perform upgrade in-place, ie. without a secondary depot. */
++CommandCost ConvertAllVehiclesInDepot(TileIndex primary_tile, uint32 flags, RailType totype, bool in_place = true)
++{
++	/* TODO */
++	/* Always fail if patch is not enabled. */
++	/* if (!patch-is-enabled) */
++	/* return CMD_ERROR; */
++
++	Vehicle **vl = NULL;
++	uint16 engine_list_length = 0;
++	uint16 engine_count = 0;
++	uint i, x = 0, y = 0, z = 0;
++	CommandCost cost;
++
++	if (!IsDepotTile(primary_tile) || !IsTileOwner(primary_tile, _current_player))
++		return CMD_ERROR;
++	
++	/* Get the list of vehicles in the depot */
++	BuildDepotVehicleList(VEH_TRAIN, primary_tile, &vl, &engine_list_length, &engine_count, NULL, NULL, NULL);
++
++	/* Fast fail. Don't search for secondary depot if there is nothing to do.*/
++	if (engine_count == 0)
++		return CommandCost(0); /* No cost to convert zero trains! */
++	
++	fprintf(stderr, "Searching for suitable secondary depot.\n");
++        fprintf(stderr, "Our primary depot is at (%d, %d).\n", TileX(primary_tile), TileY(primary_tile));
++        fprintf(stderr, "We have %d trains here.\n", engine_count);
++
++	RailType orig_rail_type = GetRailType(primary_tile);
++
++	TileIndex secondary_tile = primary_tile;
++	if (!in_place)
++		secondary_tile = FindSecondaryDepot(primary_tile, flags, totype);
++
++	if (secondary_tile == INVALID_TILE) {
++		fprintf(stderr, "Could not find suitable secondary depot.\n");
++		free(vl);
++		return CMD_ERROR;
++	}
++
++	uint sx = TileX(secondary_tile);
++	uint sy = TileY(secondary_tile);
++	
++        fprintf(stderr, "Suitable secondary depot at (%d, %d).\n", sx, sy);
++
++	for (i = 0; i < engine_count; i++) {
++		Vehicle *v = vl[i];
++		bool stopped = (v->vehstatus & VS_STOPPED);
++		CommandCost ret;
++
++		/* Fail if train not stopped, or not fully in depot. */
++		if ((!stopped) || (!v->IsInDepot())) {
++			fprintf(stderr, "Train not ready for cloning.\n");
++			free(vl);
++			return CMD_ERROR;
++		}
++
++		x = v->x_pos;
++		y = v->y_pos;
++		z = v->z_pos;
++
++		if (in_place) {
++			/* Temporarily change rail type to allow us to build. */
++			SetRailType(secondary_tile, totype);
++		}
++
++		/* Clone the vehicle. */
++		ret = DoCommand(secondary_tile, v->index, 0, flags, CMD_CLONE_VEHICLE);
++
++		if (in_place) {
++			/* Now restore it. */
++			SetRailType(secondary_tile, orig_rail_type);
++		}
++		
++		if (CmdSucceeded(ret)) {
++			fprintf(stderr, "Train successfully cloned.\n");
++			cost.AddCost(ret);
++		} else {
++			fprintf(stderr, "Train could not be cloned.\n");
++			free(vl);
++			return CMD_ERROR;
++		}
++		
++		/* Sell the old one. */
++		ret = DoCommand(primary_tile, v->index, 1, flags, CMD_SELL_RAIL_WAGON);
++
++		if (CmdSucceeded(ret)) {
++			fprintf(stderr, "Old train successfully sold.\n");
++			cost.AddCost(ret);
++		} else {
++			fprintf(stderr, "Old train could not be sold.\n");
++			free(vl);
++			return CMD_ERROR;
++		}
++	}
++
++	free(vl);
++	return cost;
++}
++
+ /** Convert one rail type to the other. You can convert normal rail to
+  * monorail/maglev easily or vice-versa.
+  * @param tile end tile of rail conversion drag
+@@ -1230,7 +1390,29 @@ CommandCost CmdConvertRail(TileIndex til
+ 			/* Vehicle on the tile when not converting Rail <-> ElRail
+ 			 * Tunnels and bridges have special check later */
+ 			if (tt != MP_TUNNELBRIDGE) {
+-				if (!IsCompatibleRail(type, totype) && !EnsureNoVehicleOnGround(tile)) continue;
++
++				bool depot_upgrade_success = false;
++				
++				if ((tmp_patch__upgrade_rail_types_for_trains)
++					&& (tt == MP_RAILWAY) && (GetRailTileType(tile) == RAIL_TILE_DEPOT)) {
++					fprintf(stderr, "It's a depot. We should try converting.\n");
++					CommandCost ret = ConvertAllVehiclesInDepot(tile, flags, totype);
++					/* If we failed, we can't convert the depot. */
++					if (CmdSucceeded(ret)) {
++						depot_upgrade_success = true;
++						cost.AddCost(ret);
++					} else {
++						fprintf(stderr, "We failed to convert the vehicles in the depot.\n");
++						continue;
++					}
++
++					/* If we reach here, it is now fine to convert the depot. */
++					fprintf(stderr, "All is good, continue with depot conversion.\n");						
++				}
++
++				if (!depot_upgrade_success && !IsCompatibleRail(type, totype) && !EnsureNoVehicleOnGround(tile))
++						continue;
++					
+ 				if (flags & DC_EXEC) { // we can safely convert, too
+ 					SetRailType(tile, totype);
+ 					MarkTileDirtyByTile(tile);
+Only in work/OTTD-source-nightly-r12366/src: rev.cpp
+diff -rup orig/OTTD-source-nightly-r12366/src/settings.cpp work/OTTD-source-nightly-r12366/src/settings.cpp
+--- orig/OTTD-source-nightly-r12366/src/settings.cpp	2008-02-28 07:37:12.000000000 +1030
++++ work/OTTD-source-nightly-r12366/src/settings.cpp	2008-03-16 17:47:42.000000000 +1030
+@@ -64,6 +64,8 @@ GameOptions _opt_newgame;
+ GameOptions *_opt_ptr;
+ Patches _patches;
+ Patches _patches_newgame;
++/* GD: Not sure I completely follow how patches work, so it's hardcoded for now. */
++bool tmp_patch__upgrade_rail_types_for_trains = true;
+ 
+ struct IniFile;
+ struct IniItem;
+diff -rup orig/OTTD-source-nightly-r12366/src/settings_type.h work/OTTD-source-nightly-r12366/src/settings_type.h
+--- orig/OTTD-source-nightly-r12366/src/settings_type.h	2008-02-28 07:37:12.000000000 +1030
++++ work/OTTD-source-nightly-r12366/src/settings_type.h	2008-03-16 17:59:25.000000000 +1030
+@@ -239,4 +239,7 @@ extern Patches _patches;
+ /** The patch values that are used for new games and/or modified in config file */
+ extern Patches _patches_newgame;
+ 
++/* GD: Not sure I completely follow how patches work, so it's hardcoded for now. */
++extern bool tmp_patch__upgrade_rail_types_for_trains;
++
+ #endif /* SETTINGS_TYPE_H */
+diff -rup orig/OTTD-source-nightly-r12366/src/vehicle.cpp work/OTTD-source-nightly-r12366/src/vehicle.cpp
+--- orig/OTTD-source-nightly-r12366/src/vehicle.cpp	2008-03-05 08:19:40.000000000 +1030
++++ work/OTTD-source-nightly-r12366/src/vehicle.cpp	2008-03-16 22:33:53.000000000 +1030
+@@ -1751,6 +1751,65 @@ CommandCost CmdDepotMassAutoReplace(Tile
+ 	return cost;
+ }
+ 
++/* Given the specified engine <oe>, suggest a suitable replacement if it must run */
++/* on rail type <totype>. Assumes player <player>. */
++static EngineID SuggestEngineReplacement(EngineID oe, PlayerID player, RailType totype)
++{
++	EngineID e;
++	EngineID best_e = INVALID_ENGINE;
++	int best_score = 0;
++	fprintf(stderr, "Searching for replacement for engine ID %d.\n", oe);
++	FOR_ALL_ENGINEIDS_OF_TYPE(e, VEH_TRAIN) {
++		const RailVehicleInfo *rvi = RailVehInfo(e);
++		const RailVehicleInfo *orvi = RailVehInfo(oe);
++		/* Wagons for wagons, locos for locos. */
++		if ((orvi->railveh_type & RAILVEH_WAGON) != (rvi->railveh_type & RAILVEH_WAGON))
++			continue;
++		/* The engine must be suitable for the new type. */
++		if (!IsCompatibleRail(rvi->railtype, totype))
++			continue;
++		/* And being able to move is definitely a plus. */
++		if (!HasPowerOnRail(rvi->railtype, totype))
++			continue;
++		/* Must be allowed to build it. */
++		if (!IsEngineBuildable(e, VEH_TRAIN, player))
++			continue;
++
++		/* Give preference to the fastest locos, and greatest capacity wagons. */
++		int score = (rvi->railveh_type & RAILVEH_WAGON) ? rvi->capacity : rvi->max_speed;
++
++		/* If old has a cargo type, the new one should as well. */
++		if ((orvi->cargo_type != CT_INVALID) && (orvi->cargo_type != rvi->cargo_type)) {
++			/* If it's a wagon, fail right now. */
++			if (orvi->railveh_type & RAILVEH_WAGON)
++				continue;
++			/* Otherwise we've got a loco with the wrong cargo type. */
++			/* Punish the score somewhat, because we'd rather have a */
++			/* matching one. */
++			fprintf(stderr, "Candidate: %d bad cargo.\n", e);
++			score = score / 4;
++		}
++
++		/* We have a candidate. */
++		fprintf(stderr, "Candidate: %d Score: %d.\n", e, score);
++		if (best_e == INVALID_ENGINE) {
++			best_e = e;
++			best_score = score;
++		} else if (score > best_score) {
++			best_score = score;
++			best_e = e;
++		}
++	}
++
++	if (best_e != INVALID_ENGINE) {
++		fprintf(stderr, "Success: %d -> %d.\n", oe, best_e);
++		return best_e;
++	}
++
++	fprintf(stderr, "Failure. Nothing available for EngineID %d.\n", oe);
++	return INVALID_RAILTYPE;
++}
++
+ /** Clone a vehicle. If it is a train, it will clone all the cars too
+  * @param tile tile of the depot where the cloned vehicle is build
+  * @param flags type of operation
+@@ -1771,7 +1830,11 @@ CommandCost CmdCloneVehicle(TileIndex ti
+ 	w_front = NULL;
+ 	w_rear = NULL;
+ 
+-
++	/* If not INVALID_RAILTYPE, specifies the new rail type that we intend to use. */
++	RailType new_rail_type = INVALID_RAILTYPE;
++	/* Set to true if we have or intend to change any engines whilst cloning. */
++	bool changed_engines = false;
++	
+ 	/*
+ 	 * v_front is the front engine in the original vehicle
+ 	 * v is the car/vehicle of the original vehicle, that is currently being copied
+@@ -1784,6 +1847,16 @@ CommandCost CmdCloneVehicle(TileIndex ti
+ 
+ 	if (v->type == VEH_TRAIN && (!IsFrontEngine(v) || v->u.rail.crash_anim_pos >= 4400)) return CMD_ERROR;
+ 
++	if ((tmp_patch__upgrade_rail_types_for_trains) && (v->type == VEH_TRAIN)) {
++		RailType v_rail_type = RailVehInfo(v->engine_type)->railtype;
++		RailType w_rail_type = GetRailType(tile);
++		if (v_rail_type != w_rail_type) {
++			fprintf(stderr, "Change in rail type: %d -> %d.\n", v_rail_type, w_rail_type);
++			new_rail_type = w_rail_type;
++			changed_engines = true;
++		}
++	}
++	
+ 	/* check that we can allocate enough vehicles */
+ 	if (!(flags & DC_EXEC)) {
+ 		int veh_counter = 0;
+@@ -1804,7 +1877,13 @@ CommandCost CmdCloneVehicle(TileIndex ti
+ 			continue;
+ 		}
+ 
+-		cost = DoCommand(tile, v->engine_type, build_argument, flags, GetCmdBuildVeh(v));
++		EngineID new_engine_type = v->engine_type;
++		
++		/* If we are building for a new rail type, suggest a replacement. */
++		if (new_rail_type != INVALID_RAILTYPE)
++			new_engine_type = SuggestEngineReplacement(new_engine_type, _current_player, new_rail_type);
++		
++		cost = DoCommand(tile, new_engine_type, build_argument, flags, GetCmdBuildVeh(v));
+ 		build_argument = 3; // ensure that we only assign a number to the first engine
+ 
+ 		if (CmdFailed(cost)) return cost;
+@@ -1819,7 +1898,7 @@ CommandCost CmdCloneVehicle(TileIndex ti
+ 			}
+ 
+ 			if (v->type == VEH_TRAIN && !IsFrontEngine(v)) {
+-				/* this s a train car
++				/* this is a train car
+ 				 * add this unit to the end of the train */
+ 				CommandCost result = DoCommand(0, (w_rear->index << 16) | w->index, 1, flags, CMD_MOVE_RAIL_VEHICLE);
+ 				if (CmdFailed(result)) {
+@@ -1862,6 +1941,13 @@ CommandCost CmdCloneVehicle(TileIndex ti
+ 	do {
+ 		do {
+ 			if (flags & DC_EXEC) {
++				
++				/* If we've changed engines at all, the new train may be shorter. */
++				/* eg. if we go from a dual- to single-head loco. */
++				/* if ((changed_engines) && (w == NULL)) */
++				if (w == NULL)
++					break;
++				
+ 				assert(w != NULL);
+ 
+ 				if (w->cargo_type != v->cargo_type || w->cargo_subtype != v->cargo_subtype) {
+@@ -1893,6 +1979,10 @@ CommandCost CmdCloneVehicle(TileIndex ti
+ 			}
+ 		} while (v != NULL);
+ 
++		/* If we've changed engines at all, the new train may be shorter. */
++		if (w == NULL)
++			break;
++		
+ 		if ((flags & DC_EXEC) && v->type == VEH_TRAIN) w = GetNextVehicle(w);
+ 	} while (v->type == VEH_TRAIN && (v = GetNextVehicle(v)) != NULL);
+ 
+diff -rup orig/OTTD-source-nightly-r12366/src/vehicle_func.h work/OTTD-source-nightly-r12366/src/vehicle_func.h
+--- orig/OTTD-source-nightly-r12366/src/vehicle_func.h	2008-01-18 23:32:47.000000000 +1030
++++ work/OTTD-source-nightly-r12366/src/vehicle_func.h	2008-03-16 16:33:16.000000000 +1030
+@@ -12,6 +12,7 @@
+ #include "cargo_type.h"
+ #include "command_type.h"
+ #include "vehicle_type.h"
++#include "rail_type.h"
+ 
+ #define is_custom_sprite(x) (x >= 0xFD)
+ #define IS_CUSTOM_FIRSTHEAD_SPRITE(x) (x == 0xFD)

@@ -1,0 +1,450 @@
+Index: src/console_cmds.cpp
+===================================================================
+--- src/console_cmds.cpp	(revision 12416)
++++ src/console_cmds.cpp	(working copy)
+@@ -1367,7 +1367,7 @@
+ 	/* Don't change the name if it is the same as the old name */
+ 	if (strcmp(ci->client_name, _network_player_name) != 0) {
+ 		if (!_network_server) {
+-			SEND_COMMAND(PACKET_CLIENT_SET_NAME)(_network_player_name);
++			SEND_COMMAND(PACKET_CLIENT_SET_INFO)(_network_player_name, ci->client_lang, NETWORK_CHANGETYPE_NICK);
+ 		} else {
+ 			if (NetworkFindName(_network_player_name)) {
+ 				NetworkTextMessage(NETWORK_ACTION_NAME_CHANGE, 1, false, ci->client_name, "%s", _network_player_name);
+Index: src/network/core/tcp.h
+===================================================================
+--- src/network/core/tcp.h	(revision 12416)
++++ src/network/core/tcp.h	(working copy)
+@@ -44,7 +44,7 @@
+ 	PACKET_CLIENT_CHAT,
+ 	PACKET_SERVER_CHAT,
+ 	PACKET_CLIENT_SET_PASSWORD,
+-	PACKET_CLIENT_SET_NAME,
++	PACKET_CLIENT_SET_INFO,
+ 	PACKET_CLIENT_QUIT,
+ 	PACKET_CLIENT_ERROR,
+ 	PACKET_SERVER_QUIT,
+Index: src/network/network_server.cpp
+===================================================================
+--- src/network/network_server.cpp	(revision 12416)
++++ src/network/network_server.cpp	(working copy)
+@@ -22,6 +22,7 @@
+ #include "../core/alloc_func.hpp"
+ #include "../fileio.h"
+ #include "../string_func.h"
++#include "../window_func.h"
+ #include "../player_base.h"
+ #include "../player_func.h"
+ #include "../player_gui.h"
+@@ -56,6 +57,7 @@
+ 		p->Send_uint8 (ci->client_playas);
+ 		p->Send_string(ci->client_name);
+ 		p->Send_string(ci->unique_id);
++		p->Send_uint8 (ci->client_lang);
+ 
+ 		cs->Send_Packet(p);
+ 	}
+@@ -690,6 +692,8 @@
+ 
+ 	/* Make sure companies to which people try to join are not autocleaned */
+ 	if (IsValidPlayer(playas)) _network_player_info[playas].months_empty = 0;
++	
++	if (!_network_dedicated) InvalidateWindow(WC_CLIENT_LIST, 0);
+ 
+ 	if (_grfconfig == NULL) {
+ 		RECEIVE_COMMAND(PACKET_CLIENT_NEWGRFS_CHECKED)(cs, NULL);
+@@ -1160,23 +1164,36 @@
+ 	}
+ }
+ 
+-DEF_SERVER_RECEIVE_COMMAND(PACKET_CLIENT_SET_NAME)
++DEF_SERVER_RECEIVE_COMMAND(PACKET_CLIENT_SET_INFO)
+ {
+ 	char client_name[NETWORK_CLIENT_NAME_LENGTH];
+ 	NetworkClientInfo *ci;
++	uint8 client_lang;
++	uint8 changetype;
+ 
+ 	p->Recv_string(client_name, sizeof(client_name));
++	client_lang = p->Recv_uint8();
++	changetype = p->Recv_uint8();
++	
+ 	ci = DEREF_CLIENT_INFO(cs);
+ 
+ 	if (cs->has_quit) return;
+ 
+ 	if (ci != NULL) {
+-		// Display change
+-		if (NetworkFindName(client_name)) {
+-			NetworkTextMessage(NETWORK_ACTION_NAME_CHANGE, 1, false, ci->client_name, "%s", client_name);
+-			ttd_strlcpy(ci->client_name, client_name, sizeof(ci->client_name));
+-			NetworkUpdateClientInfo(ci->client_index);
++		if (changetype == NETWORK_CHANGETYPE_ALL || changetype == NETWORK_CHANGETYPE_NICK) {
++			// Display change
++			if (NetworkFindName(client_name)) {
++				NetworkTextMessage(NETWORK_ACTION_NAME_CHANGE, 1, false, ci->client_name, "%s", client_name);
++				ttd_strlcpy(ci->client_name, client_name, sizeof(ci->client_name));
++			}
+ 		}
++		if (changetype == NETWORK_CHANGETYPE_ALL || changetype == NETWORK_CHANGETYPE_LANGUAGE) {
++			// Just set it and send it to the clients
++			ci->client_lang = client_lang;
++			
++		}
++		NetworkUpdateClientInfo(ci->client_index);
++		if (!_network_dedicated) InvalidateWindow(WC_CLIENT_LIST, 0);
+ 	}
+ }
+ 
+@@ -1235,7 +1252,7 @@
+ 	RECEIVE_COMMAND(PACKET_CLIENT_CHAT),
+ 	NULL, /*PACKET_SERVER_CHAT,*/
+ 	RECEIVE_COMMAND(PACKET_CLIENT_SET_PASSWORD),
+-	RECEIVE_COMMAND(PACKET_CLIENT_SET_NAME),
++	RECEIVE_COMMAND(PACKET_CLIENT_SET_INFO),
+ 	RECEIVE_COMMAND(PACKET_CLIENT_QUIT),
+ 	RECEIVE_COMMAND(PACKET_CLIENT_ERROR),
+ 	NULL, /*PACKET_SERVER_QUIT,*/
+Index: src/network/network_data.h
+===================================================================
+--- src/network/network_data.h	(revision 12416)
++++ src/network/network_data.h	(working copy)
+@@ -62,6 +62,13 @@
+ 	NETWORK_ACTION_NAME_CHANGE,
+ };
+ 
++/* The type that is sent with PACKET_CLIENT_SET_INFO */
++enum {
++	NETWORK_CHANGETYPE_ALL,
++	NETWORK_CHANGETYPE_NICK,
++	NETWORK_CHANGETYPE_LANGUAGE,
++};
++
+ enum NetworkPasswordType {
+ 	NETWORK_GAME_PASSWORD,
+ 	NETWORK_COMPANY_PASSWORD,
+Index: src/network/network_client.cpp
+===================================================================
+--- src/network/network_client.cpp	(revision 12416)
++++ src/network/network_client.cpp	(working copy)
+@@ -123,15 +123,16 @@
+ 	//
+ 
+ 	extern const char _openttd_revision[];
++	extern const char *GetCurrentIsoCode();
+ 	Packet *p;
+ 	_network_join_status = NETWORK_JOIN_STATUS_AUTHORIZING;
+ 	InvalidateWindow(WC_NETWORK_STATUS_WINDOW, 0);
+-
++	
+ 	p = NetworkSend_Init(PACKET_CLIENT_JOIN);
+ 	p->Send_string(_openttd_revision);
+ 	p->Send_string(_network_player_name); // Player name
+ 	p->Send_uint8 (_network_playas);      // PlayAs
+-	p->Send_uint8 (NETLANG_ANY);          // Language
++	p->Send_uint8 (_network_current_networklang);  // Language
+ 	p->Send_string(_network_unique_id);
+ 	MY_CLIENT->Send_Packet(p);
+ }
+@@ -284,17 +285,19 @@
+ 	MY_CLIENT->Send_Packet(p);
+ }
+ 
+-DEF_CLIENT_SEND_COMMAND_PARAM(PACKET_CLIENT_SET_NAME)(const char *name)
++DEF_CLIENT_SEND_COMMAND_PARAM(PACKET_CLIENT_SET_INFO)(const char *name, uint8 language, uint8 changetype)
+ {
+ 	//
+-	// Packet: PACKET_CLIENT_SET_NAME
++	// Packet: PACKET_CLIENT_SET_INFO
+ 	// Function: Gives the player a new name
+ 	// Data:
+ 	//    String: Name
+ 	//
+-	Packet *p = NetworkSend_Init(PACKET_CLIENT_SET_NAME);
++	Packet *p = NetworkSend_Init(PACKET_CLIENT_SET_INFO);
+ 
+ 	p->Send_string(name);
++	p->Send_uint8(language);
++	p->Send_uint8(changetype);
+ 	MY_CLIENT->Send_Packet(p);
+ }
+ 
+@@ -398,9 +401,12 @@
+ 	PlayerID playas = (Owner)p->Recv_uint8();
+ 	char name[NETWORK_NAME_LENGTH];
+ 	char unique_id[NETWORK_UNIQUE_ID_LENGTH];
++	uint8 client_lang;
+ 
+ 	p->Recv_string(name, sizeof(name));
+ 	p->Recv_string(unique_id, sizeof(unique_id));
++	client_lang = p->Recv_uint8();
++	
+ 
+ 	if (MY_CLIENT->has_quit) return NETWORK_RECV_STATUS_CONN_LOST;
+ 
+@@ -418,6 +424,7 @@
+ 		}
+ 
+ 		ci->client_playas = playas;
++		ci->client_lang = client_lang;
+ 		ttd_strlcpy(ci->client_name, name, sizeof(ci->client_name));
+ 
+ 		InvalidateWindow(WC_CLIENT_LIST, 0);
+@@ -430,6 +437,7 @@
+ 	if (ci != NULL) {
+ 		ci->client_index = index;
+ 		ci->client_playas = playas;
++		ci->client_lang = client_lang;
+ 
+ 		ttd_strlcpy(ci->client_name, name, sizeof(ci->client_name));
+ 		ttd_strlcpy(ci->unique_id, unique_id, sizeof(ci->unique_id));
+@@ -887,7 +895,7 @@
+ 	NULL, /*PACKET_CLIENT_CHAT,*/
+ 	RECEIVE_COMMAND(PACKET_SERVER_CHAT),
+ 	NULL, /*PACKET_CLIENT_SET_PASSWORD,*/
+-	NULL, /*PACKET_CLIENT_SET_NAME,*/
++	NULL, /*PACKET_CLIENT_SET_INFO,*/
+ 	NULL, /*PACKET_CLIENT_QUIT,*/
+ 	NULL, /*PACKET_CLIENT_ERROR,*/
+ 	RECEIVE_COMMAND(PACKET_SERVER_QUIT),
+Index: src/network/network.cpp
+===================================================================
+--- src/network/network.cpp	(revision 12416)
++++ src/network/network.cpp	(working copy)
+@@ -320,6 +320,22 @@
+ 	return count;
+ }
+ 
++/** Send the changed language over the network */
++void NetworkUpdateLanguage()
++{
++	NetworkClientInfo *ci = NetworkFindClientInfoFromIndex(_network_own_client_index);
++	ci->client_lang = _network_current_networklang;
++
++	if (_network_server) {
++		NetworkUpdateClientInfo(ci->client_index);
++	}
++	else {
++		SEND_COMMAND(PACKET_CLIENT_SET_INFO)(_network_player_name, ci->client_lang, NETWORK_CHANGETYPE_LANGUAGE);
++	
++	}
++	
++
++}
+ static bool _min_players_paused = false;
+ 
+ /* Check if the minimum number of players has been reached and pause or unpause the game as appropriate */
+@@ -1018,6 +1034,7 @@
+ 
+ 	ci->client_index = NETWORK_SERVER_INDEX;
+ 	ci->client_playas = _network_dedicated ? PLAYER_SPECTATOR : _local_player;
++	ci->client_lang =_network_current_networklang;
+ 
+ 	ttd_strlcpy(ci->client_name, _network_player_name, sizeof(ci->client_name));
+ 	ttd_strlcpy(ci->unique_id, _network_unique_id, sizeof(ci->unique_id));
+Index: src/network/network_internal.h
+===================================================================
+--- src/network/network_internal.h	(revision 12416)
++++ src/network/network_internal.h	(working copy)
+@@ -75,7 +75,9 @@
+ 	NETWORK_JOIN_STATUS_GETTING_COMPANY_INFO,
+ };
+ 
+-/* Language ids for server_lang and client_lang. Do NOT modify the order. */
++#endif /* ENABLE_NETWORK */
++ /* Language ids for server_lang and client_lang. Do NOT modify the order. */
++/* They're always defined, because of the usage in newgrf_text.cpp */
+ enum NetworkLanguage {
+ 	NETLANG_ANY = 0,
+ 	NETLANG_ENGLISH,
+@@ -115,6 +117,7 @@
+ 	NETLANG_LATVIAN,
+ 	NETLANG_COUNT
+ };
++#ifdef ENABLE_NETWORK
+ 
+ VARDEF NetworkGameInfo _network_game_info;
+ VARDEF NetworkPlayerInfo _network_player_info[MAX_PLAYERS];
+@@ -184,6 +187,8 @@
+ VARDEF Year _network_restart_game_year;      // If this year is reached, the server automaticly restarts
+ VARDEF uint8 _network_min_players;           // Minimum number of players for game to unpause
+ 
++VARDEF uint8 _network_current_networklang;  ///< The current language for the network to be shown in the client list
++
+ void NetworkTCPQueryServer(const char* host, unsigned short port);
+ 
+ byte NetworkSpectatorCount();
+@@ -199,6 +204,7 @@
+ void NetworkPopulateCompanyInfo();
+ void UpdateNetworkGameWindow(bool unselect);
+ void CheckMinPlayers();
++void NetworkUpdateLanguage();
+ void NetworkStartDebugLog(const char *hostname, uint16 port);
+ 
+ void NetworkUDPCloseAll();
+@@ -208,6 +214,7 @@
+ bool NetworkClientConnectGame(const char *host, uint16 port);
+ void NetworkReboot();
+ void NetworkDisconnect();
++uint8 ConvertCurrentLanguageToNetLang();
+ 
+ bool IsNetworkCompatibleVersion(const char *version);
+ 
+Index: src/network/network_client.h
+===================================================================
+--- src/network/network_client.h	(revision 12416)
++++ src/network/network_client.h	(working copy)
+@@ -13,7 +13,7 @@
+ DEF_CLIENT_SEND_COMMAND_PARAM(PACKET_CLIENT_CHAT)(NetworkAction action, DestType desttype, int dest, const char *msg);
+ DEF_CLIENT_SEND_COMMAND_PARAM(PACKET_CLIENT_PASSWORD)(NetworkPasswordType type, const char *password);
+ DEF_CLIENT_SEND_COMMAND_PARAM(PACKET_CLIENT_SET_PASSWORD)(const char *password);
+-DEF_CLIENT_SEND_COMMAND_PARAM(PACKET_CLIENT_SET_NAME)(const char *name);
++DEF_CLIENT_SEND_COMMAND_PARAM(PACKET_CLIENT_SET_INFO)(const char *name, uint8 language, uint8 changetype);
+ DEF_CLIENT_SEND_COMMAND(PACKET_CLIENT_ACK);
+ DEF_CLIENT_SEND_COMMAND_PARAM(PACKET_CLIENT_RCON)(const char *pass, const char *command);
+ 
+Index: src/network/network_gui.cpp
+===================================================================
+--- src/network/network_gui.cpp	(revision 12416)
++++ src/network/network_gui.cpp	(working copy)
+@@ -1503,6 +1503,9 @@
+ 
+ 			DoDrawString(ci->client_name, 81, y, colour);
+ 
++			// Draw flags
++			DrawSprite(SPR_FLAGS_BASE + ci->client_lang, PAL_NONE,  52, y + 1);
++
+ 			y += CLNWND_ROWSIZE;
+ 		}
+ 	} break;
+Index: src/newgrf_text.cpp
+===================================================================
+--- src/newgrf_text.cpp	(revision 12416)
++++ src/newgrf_text.cpp	(working copy)
+@@ -19,6 +19,7 @@
+ #include "core/alloc_func.hpp"
+ #include "newgrf_storage.h"
+ #include "string_func.h"
++#include "network/network_internal.h"
+ 
+ #include "table/strings.h"
+ #include "table/control_codes.h"
+@@ -84,6 +85,7 @@
+ struct iso_grf {
+ 	char code[6];
+ 	byte grfLangID;
++	uint8 netLangID;
+ };
+ 
+ /**
+@@ -93,45 +95,49 @@
+  *   with newgrf bit positionning language id
+  * 2-its shift part is used to know what is the shift to
+  *   watch for when inserting new strings, hence analysing newgrf langid
++ * 3-its conversion to NETLANG types
+  */
+ const iso_grf iso_codes[] = {
+-	{"en_US", GRFLX_AMERICAN},
+-	{"en_GB", GRFLX_ENGLISH},
+-	{"de_DE", GRFLX_GERMAN},
+-	{"fr_FR", GRFLX_FRENCH},
+-	{"es_ES", GRFLX_SPANISH},
+-	{"af_ZA", GRFLX_AFRIKAANS},
+-	{"hr_HR", GRFLX_CROATIAN},
+-	{"cs_CZ", GRFLX_CZECH},
+-	{"ca_ES", GRFLX_CATALAN},
+-	{"da_DA", GRFLX_DANISH},
+-	{"nl_NL", GRFLX_DUTCH},
+-	{"et_ET", GRFLX_ESTONIAN},
+-	{"fi_FI", GRFLX_FINNISH},
+-	{"fy_NL", GRFLX_FRISIAN},
+-	{"gl_ES", GRFLX_GALICIAN},
+-	{"el_GR", GRFLX_GREEK},
+-	{"hu_HU", GRFLX_HUNGARIAN},
+-	{"is_IS", GRFLX_ICELANDIC},
+-	{"it_IT", GRFLX_ITALIAN},
+-	{"lv_LV", GRFLX_LATVIAN},
+-	{"lt_LT", GRFLX_LITHUANIAN},
+-	{"nb_NO", GRFLX_NORWEGIAN},
+-	{"pl_PL", GRFLX_POLISH},
+-	{"pt_PT", GRFLX_PORTUGUESE},
+-	{"pt_BR", GRFLX_BRAZILIAN},
+-	{"ro_RO", GRFLX_ROMANIAN},
+-	{"ru_RU", GRFLX_RUSSIAN},
+-	{"sk_SK", GRFLX_SLOVAK},
+-	{"sl_SL", GRFLX_SLOVENIAN},
+-	{"sv_SE", GRFLX_SWEDISH},
+-	{"tr_TR", GRFLX_TURKISH},
+-	{"uk_UA", GRFLX_UKRAINIAN},
+-	{"eo_EO", GRFLX_ESPERANTO},
+-	{"bg_BG", GRFLX_BULGARIAN},
+-	{"ja_JP", GRFLX_JAPANESE},
+-	{"ko_KR", GRFLX_KOREAN},
+-	{"gen",   GRFLB_GENERIC}   ///< this is not iso code, but there has to be something...
++	{"en_US", GRFLX_AMERICAN,   NETLANG_ENGLISH},
++	{"en_GB", GRFLX_ENGLISH,     NETLANG_ENGLISH},
++	{"de_DE", GRFLX_GERMAN,     NETLANG_GERMAN},
++	{"fr_FR", GRFLX_FRENCH,        NETLANG_FRENCH},
++	{"es_ES", GRFLX_SPANISH,     NETLANG_SPANISH},
++	{"af_ZA", GRFLX_AFRIKAANS,   NETLANG_AFRIKAANS},
++	{"hr_HR", GRFLX_CROATIAN,    NETLANG_CROATIAN},
++	{"cs_CZ", GRFLX_CZECH,          NETLANG_CZECH},
++	{"ca_ES", GRFLX_CATALAN,      NETLANG_CATALAN},
++	{"da_DA", GRFLX_DANISH,        NETLANG_DANISH},
++	{"nl_NL", GRFLX_DUTCH,           NETLANG_DUTCH},
++	{"et_ET", GRFLX_ESTONIAN,     NETLANG_ESTONIAN},
++	{"fi_FI", GRFLX_FINNISH,            NETLANG_FINNISH},
++	{"fy_NL", GRFLX_FRISIAN,         NETLANG_DUTCH},
++	{"gl_ES", GRFLX_GALICIAN,       NETLANG_GALICIAN},
++	{"el_GR", GRFLX_GREEK,          NETLANG_GREEK},
++	{"hu_HU", GRFLX_HUNGARIAN,  NETLANG_HUNGARIAN},
++	{"is_IS", GRFLX_ICELANDIC,      NETLANG_ICELANDIC},
++	{"it_IT", GRFLX_ITALIAN,             NETLANG_ITALIAN},
++	{"lv_LV", GRFLX_LATVIAN,          NETLANG_LATVIAN},
++	{"lt_LT", GRFLX_LITHUANIAN,      NETLANG_LITHUANIAN},
++	{"nb_NO", GRFLX_NORWEGIAN, NETLANG_NORWEGIAN},
++	{"nn_NO", GRFLX_NORWEGIAN, NETLANG_NORWEGIAN},
++	{"pl_PL", GRFLX_POLISH,            NETLANG_POLISH},
++	{"pt_PT", GRFLX_PORTUGUESE, NETLANG_PORTUGUESE},
++	{"pt_BR", GRFLX_BRAZILIAN,       NETLANG_BRAZILIAN},
++	{"ro_RO", GRFLX_ROMANIAN,      NETLANG_ROMANIAN},
++	{"ru_RU", GRFLX_RUSSIAN,         NETLANG_RUSSIAN},
++	{"sk_SK", GRFLX_SLOVAK,         NETLANG_SLOVAK},
++	{"sl_SL", GRFLX_SLOVENIAN,     NETLANG_SLOVENIAN},
++	{"sv_SE", GRFLX_SWEDISH,       NETLANG_SWEDISH},
++	{"tr_TR", GRFLX_TURKISH,          NETLANG_TURKISH},
++	{"uk_UA", GRFLX_UKRAINIAN,     NETLANG_UKRAINIAN},
++	{"eo_EO", GRFLX_ESPERANTO,  NETLANG_ESPERANTO},
++	{"bg_BG", GRFLX_BULGARIAN,    NETLANG_BULGARIAN},
++	{"ja_JP", GRFLX_JAPANESE,       NETLANG_JAPANESE},
++	{"ko_KR", GRFLX_KOREAN,         NETLANG_KOREAN},
++	{"zh_CN", GRFLX_ENGLISH,         NETLANG_CHINESE},
++	{"zh_TW", GRFLX_ENGLISH,        NETLANG_CHINESE},
++	{"gen",   GRFLB_GENERIC,          NETLANG_ANY}   ///< this is not iso code, but there has to be something...
+ };
+ 
+ 
+@@ -449,16 +455,23 @@
+ {
+ 	/* Use English by default, if we can't match up the iso_code. */
+ 	byte ret = GRFLX_ENGLISH;
++	uint8 lang = NETLANG_ANY;
+ 	byte i;
+ 
+ 	for (i=0; i < lengthof(iso_codes); i++) {
+ 		if (strncmp(iso_codes[i].code, iso_name, strlen(iso_codes[i].code)) == 0) {
+ 			/* We found a match, so let's use it. */
+ 			ret = iso_codes[i].grfLangID;
++			lang = iso_codes[i].netLangID;
+ 			break;
+ 		}
+ 	}
++
+ 	_currentLangID = ret;
++	#ifdef ENABLE_NETWORK
++	_network_current_networklang = lang;
++	NetworkUpdateLanguage();
++	#endif
+ }
+ 
+ bool CheckGrfLangID(byte lang_id, byte grf_version)

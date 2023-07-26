@@ -1,0 +1,137 @@
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 12187)
++++ src/train_cmd.cpp	(working copy)
+@@ -2674,9 +2674,11 @@
+ 	UpdateTrainAcceleration(this);
+ }
+ 
+-static int UpdateTrainSpeed(Vehicle *v)
++static void UpdateTrainSpeed(Vehicle *v)
+ {
+ 	uint accel;
++	uint spd_needed_to_change_position;	
++	bool position_changed;				
+ 
+ 	if (v->vehstatus & VS_STOPPED || HasBit(v->u.rail.flags, VRF_REVERSING)) {
+ 		if (_patches.realistic_acceleration) {
+@@ -2692,20 +2694,70 @@
+ 		}
+ 	}
+ 
+-	uint spd = v->subspeed + accel * 2;
+-	v->subspeed = (byte)spd;
++	uint spd = v->subspeed + accel * 2;	// subspeed is basically accel left over from last tick.
++	v->subspeed = (byte)spd;			// Store any accel not 'used' for next time. This is like the remainder of (spd /256).
+ 	{
+ 		int tempmax = v->max_speed;
+ 		if (v->cur_speed > v->max_speed)
+-			tempmax = v->cur_speed - (v->cur_speed / 10) - 1;
+-		v->cur_speed = spd = Clamp(v->cur_speed + ((int)spd >> 8), 0, tempmax);
++			tempmax = v->cur_speed - (v->cur_speed / 10) - 1;					// Work out max speed
++		v->cur_speed = spd = Clamp(v->cur_speed + ((int)spd >> 8), 0, tempmax); // Calculate new speed (basically add accel / 256)
+ 	}
+ 
+-	if (!(v->direction & 1)) spd = spd * 3 >> 2;
++	// Now we have a 'speed' value. For straight track, 256 speed is needed to advance 1 position.
++	// Diagonal goes at 3/4 speed, and needs 341.333333 speed. The old code would reduce spd for diagonal track.
++	// Instead of scaling spd then looking at how far it can go, this code simply requires more spd to go diagonally.
++	// The drawback of this is progress which stores unused spd now needs to store up to 340, which won't fit in a byte anymore.
++	
++	spd += v->progress; // Add the speed left over from last tick.
+ 
++	do {											// Loop until the train has finished moving.
++		if (!(v->direction & 1)) {					// If going diagonally, set required spd to move higher so train moves slower.
++			spd_needed_to_change_position = 341;	// Diagonal goes at 3/4 speed, and needs 341.333333 'speed'. Same efect as spd * 3 >> 2.
++		}
++		else {
++			spd_needed_to_change_position = 256;
++		}
++
++		if (spd >= spd_needed_to_change_position) {	
++			position_changed = true;				// Flag to control loop
++			spd -= spd_needed_to_change_position;	// We've used some speed changing position
++			TrainCheckIfLineEnds(v);				// Perhaps this only needs doing if we changed tiles. Optimisation?
++			TrainController(v, true);				// The 2nd parameter is update_image. Another possible optimisation might be to only do this on the last move.
++			if (v->cur_speed <= 0x100)				// Not sure what the purpose of this is, but it was in the previous code.
++				break;
++		} 
++		else {
++			position_changed = false;				// Flag to control loop
++		}
++
++	} while (position_changed);	
++
++	v->progress = spd;								// Save unused spd for next time. It now needs to hold up to 340, so a byte is too small.
++	SetLastSpeed(v, v->cur_speed);
++	
++	/*	Previous code
++	if (!(v->direction & 1)) spd = spd * 3 >> 2;	// This needs to be done on a move by move basis, not just at the
++													//  start for however many moves are expected to be made.
+ 	spd += v->progress;
+ 	v->progress = (byte)spd;
+-	return (spd >> 8);
++	return (spd >> 8);		// replaced by spd_needed_to_change_position
++
++		if (j == 0) {
++		// if the vehicle has speed 0, update the last_speed field. 
++		if (v->cur_speed != 0) return;
++	} else {
++		TrainCheckIfLineEnds(v);
++
++		do {
++			TrainController(v, true);
++			CheckTrainCollision(v);
++			if (v->cur_speed <= 0x100)
++				break;
++		} while (--j != 0);
++	}
++
++	SetLastSpeed(v, v->cur_speed);
++	*/
+ }
+ 
+ static void TrainEnterStation(Vehicle *v, StationID station)
+@@ -3542,15 +3594,18 @@
+ 
+ 	if (!mode) HandleLocomotiveSmokeCloud(v);
+ 
+-	int j = UpdateTrainSpeed(v);
+-
+ 	/* we need to invalidate the widget if we are stopping from 'Stopping 0 km/h' to 'Stopped' */
+ 	if (v->cur_speed == 0 && v->u.rail.last_speed == 0 && v->vehstatus & VS_STOPPED) {
+ 		InvalidateWindowWidget(WC_VEHICLE_VIEW, v->index, VVW_WIDGET_START_STOP_VEH);
+ 	}
+ 
++	UpdateTrainSpeed(v);
++	
++/* Moved into UpdateTrainSpeed()
++	int j = UpdateTrainSpeed(v);
++
+ 	if (j == 0) {
+-		/* if the vehicle has speed 0, update the last_speed field. */
++		// if the vehicle has speed 0, update the last_speed field. 
+ 		if (v->cur_speed != 0) return;
+ 	} else {
+ 		TrainCheckIfLineEnds(v);
+@@ -3564,6 +3619,7 @@
+ 	}
+ 
+ 	SetLastSpeed(v, v->cur_speed);
++*/
+ }
+ 
+ 
+Index: src/vehicle_base.h
+===================================================================
+--- src/vehicle_base.h	(revision 12187)
++++ src/vehicle_base.h	(working copy)
+@@ -237,7 +237,7 @@
+ 	uint16 cur_speed;        // current speed
+ 	byte subspeed;           // fractional speed
+ 	byte acceleration;       // used by train & aircraft
+-	byte progress;
++	uint16 progress;
+ 	uint32 motion_counter;
+ 
+ 	byte vehstatus;          // Status

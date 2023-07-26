@@ -1,0 +1,301 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 11050)
++++ src/lang/english.txt	(working copy)
+@@ -3374,3 +3374,9 @@
+ STR_PROSPECT_NEW_INDUSTRY                                       :{BLACK}Prospect
+ STR_BUILD_NEW_INDUSTRY                                          :{BLACK}Build
+ STR_INDUSTRY_SELECTION_HINT                                     :{BLACK}Choose the appropriate industry from this list
++
++#### Vehicle speeds tab
++STR_WAGON_SPEEDS                                                :{BLACK}Speeds
++STR_WAGON_SPEEDS_TOOLTIP                                        :{BLACK}Show engine and wagons speeds
++STR_WAGON_SPEEDS_VELOCITY                                       :{LTBLUE}{VELOCITY}
++STR_WAGON_SPEEDS_VELOCITY_NO_LIMIT                              :{LTBLUE}No limit
+Index: src/train_gui.cpp
+===================================================================
+--- src/train_gui.cpp	(revision 11050)
++++ src/train_gui.cpp	(working copy)
+@@ -152,13 +152,40 @@
+ 	}
+ }
+ 
++/**
++ * Vehicle speeds detail.
++ * It displays the maximum speed of the vehicle according the GRF settings and patch options
++ * @param *v Vehicle to display
++ * @param x Coordinate (horizontal) of the string to display
++ * @param y Coordinate (vertical) of the string to display
++ * @author Magicbuzz
++ */
++static void TrainDetailsSpeedsTab(const Vehicle *v, int x, int y)
++{
++	/** Vehicle max speed is found from the general vehicle information, not the vehicle itself */
++	const RailVehicleInfo *rvi = RailVehInfo(v->engine_type);
++ 
++	/** Wagons can have max speed only when the wagon_speed_limits is set and not using wagon override */
++	if ((rvi->railveh_type != RAILVEH_WAGON || _patches.wagon_speed_limits) && !UsesWagonOverride(v)) {
++		uint16 speed = GetVehicleProperty(v, 0x09, rvi->max_speed) * 10 / 16; ///< GRF speeds are in MPH while OTTD uses KMPH
++		if (speed > 0) {
++			/** Max speed is set, so we display it */
++			SetDParam(0, speed);
++			DrawStringRightAligned(x, y, STR_WAGON_SPEEDS_VELOCITY, 0);
++		} else {
++			/** Max speed is not set, so we display "no limit" */
++			DrawStringRightAligned(x, y, STR_WAGON_SPEEDS_VELOCITY_NO_LIMIT, 0);
++		}
++	}
++}
++
+ int GetTrainDetailsWndVScroll(VehicleID veh_id, byte det_tab)
+ {
+ 	AcceptedCargo act_cargo;
+ 	AcceptedCargo max_cargo;
+ 	int num = 0;
+ 
+-	if (det_tab == 3) { // Total cargo tab
++	if (det_tab == VLD_WIDGET_DETAILS1_TOTAL_CARGO) {
+ 		memset(max_cargo, 0, sizeof(max_cargo));
+ 		memset(act_cargo, 0, sizeof(act_cargo));
+ 
+@@ -185,8 +212,8 @@
+ 
+ void DrawTrainDetails(const Vehicle *v, int x, int y, int vscroll_pos, uint16 vscroll_cap, byte det_tab)
+ {
+-	/* draw the first 3 details tabs */
+-	if (det_tab != 3) {
++	/* Draw all detail tab but the total cargo */
++	if (det_tab != VLD_WIDGET_DETAILS1_TOTAL_CARGO) {
+ 		const Vehicle *u = v;
+ 		x = 1;
+ 		for (;;) {
+@@ -207,14 +234,15 @@
+ 				py = y + 2;
+ 				switch (det_tab) {
+ 					default: NOT_REACHED();
+-					case 0: TrainDetailsCargoTab(   v, px, py); break;
+-					case 1:
++					case VLD_WIDGET_DETAILS1_CARGO_CARRIED: TrainDetailsCargoTab(   v, px, py); break;
++					case VLD_WIDGET_DETAILS1_TRAIN_VEHICLES:
+ 						/* Only show name and value for the 'real' part */
+ 						if (!IsArticulatedPart(v)) {
+ 							TrainDetailsInfoTab(v, px, py);
+ 						}
+ 						break;
+-					case 2: TrainDetailsCapacityTab(v, px, py); break;
++					case VLD_WIDGET_DETAILS1_CAPACITY_OF_EACH: TrainDetailsCapacityTab(v, px, py); break;
++					case VLD_WIDGET_DETAILS2_SPEEDS: TrainDetailsSpeedsTab(v, 100, py); break;
+ 				}
+ 				y += 14;
+ 
+@@ -242,7 +270,7 @@
+ 		/* draw total cargo tab */
+ 		DrawString(x, y + 2, STR_013F_TOTAL_CAPACITY_TEXT, 0);
+ 		for (CargoID i = 0; i < NUM_CARGO; i++) {
+-			if (max_cargo[i] > 0 && --vscroll_pos < 0 && vscroll_pos > -vscroll_cap) {
++			if (max_cargo[i] > 0 && --vscroll_pos < 0 && vscroll_pos-1 > -vscroll_cap) {
+ 				y += 14;
+ 				SetDParam(0, i);            // {CARGO} #1
+ 				SetDParam(1, act_cargo[i]); // {CARGO} #2
+Index: src/vehicle_gui.cpp
+===================================================================
+--- src/vehicle_gui.cpp	(revision 11050)
++++ src/vehicle_gui.cpp	(working copy)
+@@ -1275,24 +1275,6 @@
+ 
+ /* Unified vehicle GUI - Vehicle Details Window */
+ 
+-/** Constants of vehicle details widget indices */
+-enum VehicleDetailsWindowWidgets {
+-	VLD_WIDGET_CLOSEBOX = 0,
+-	VLD_WIDGET_CAPTION,
+-	VLD_WIDGET_RENAME_VEHICLE,
+-	VLD_WIDGET_TOP_DETAILS,
+-	VLD_WIDGET_INCREASE_SERVICING_INTERVAL,
+-	VLD_WIDGET_DECREASE_SERVICING_INTERVAL,
+-	VLD_WIDGET_BOTTOM_RIGHT,
+-	VLD_WIDGET_MIDDLE_DETAILS,
+-	VLD_WIDGET_SCROLLBAR,
+-	VLD_WIDGET_DETAILS_CARGO_CARRIED,
+-	VLD_WIDGET_DETAILS_TRAIN_VEHICLES,
+-	VLD_WIDGET_DETAILS_CAPACITY_OF_EACH,
+-	VLD_WIDGET_DETAILS_TOTAL_CARGO,
+-	VLD_WIDGET_RESIZE,
+-};
+-
+ /** Vehicle details widgets. */
+ static const Widget _vehicle_details_widgets[] = {
+ 	{   WWT_CLOSEBOX,   RESIZE_NONE, 14,   0,  10,   0,  13, STR_00C5,             STR_018B_CLOSE_WINDOW},                  // VLD_WIDGET_CLOSEBOX
+@@ -1304,11 +1286,16 @@
+ 	{      WWT_PANEL,    RESIZE_RTB, 14,  11, 404, 101, 112, 0x0,                  STR_NULL},                               // VLD_WIDGET_BOTTOM_RIGHT
+ 	{     WWT_MATRIX,     RESIZE_RB, 14,   0, 392,  56, 100, 0x701,                STR_NULL},                               // VLD_WIDGET_MIDDLE_DETAILS
+ 	{  WWT_SCROLLBAR,    RESIZE_LRB, 14, 393, 404,  56, 100, 0x0,                  STR_0190_SCROLL_BAR_SCROLLS_LIST},       // VLD_WIDGET_SCROLLBAR
+-	{ WWT_PUSHTXTBTN,     RESIZE_TB, 14,   0,  95, 113, 124, STR_013C_CARGO,       STR_884F_SHOW_DETAILS_OF_CARGO_CARRIED}, // VLD_WIDGET_DETAILS_CARGO_CARRIED
+-	{ WWT_PUSHTXTBTN,     RESIZE_TB, 14,  96, 194, 113, 124, STR_013D_INFORMATION, STR_8850_SHOW_DETAILS_OF_TRAIN_VEHICLES},// VLD_WIDGET_DETAILS_TRAIN_VEHICLES
+-	{ WWT_PUSHTXTBTN,     RESIZE_TB, 14, 195, 293, 113, 124, STR_013E_CAPACITIES,  STR_8851_SHOW_CAPACITIES_OF_EACH},       // VLD_WIDGET_DETAILS_CAPACITY_OF_EACH
+-	{ WWT_PUSHTXTBTN,    RESIZE_RTB, 14, 294, 392, 113, 124, STR_013E_TOTAL_CARGO, STR_8852_SHOW_TOTAL_CARGO},              // VLD_WIDGET_DETAILS_TOTAL_CARGO
+-	{  WWT_RESIZEBOX,   RESIZE_LRTB, 14, 393, 404, 113, 124, 0x0,                  STR_RESIZE_BUTTON},                      // VLD_RESIZE
++	{ WWT_PUSHTXTBTN,     RESIZE_TB, 14,   0,  95, 113, 124, STR_013C_CARGO,       STR_884F_SHOW_DETAILS_OF_CARGO_CARRIED}, // VLD_WIDGET_DETAILS1_CARGO_CARRIED
++	{ WWT_PUSHTXTBTN,     RESIZE_TB, 14,  96, 194, 113, 124, STR_013D_INFORMATION, STR_8850_SHOW_DETAILS_OF_TRAIN_VEHICLES},// VLD_WIDGET_DETAILS1_TRAIN_VEHICLES
++	{ WWT_PUSHTXTBTN,     RESIZE_TB, 14, 195, 293, 113, 124, STR_013E_CAPACITIES,  STR_8851_SHOW_CAPACITIES_OF_EACH},       // VLD_WIDGET_DETAILS1_CAPACITY_OF_EACH
++	{ WWT_PUSHTXTBTN,    RESIZE_RTB, 14, 294, 392, 113, 124, STR_013E_TOTAL_CARGO, STR_8852_SHOW_TOTAL_CARGO},              // VLD_WIDGET_DETAILS1_TOTAL_CARGO
++	{      WWT_PANEL,   RESIZE_LRTB, 14, 393, 404, 113, 124, 0x0,                  STR_NULL},                               // VLD_WIDGET_DETAILS1_ENDLINE
++	{ WWT_PUSHTXTBTN,     RESIZE_TB, 14,   0,  95, 125, 136, STR_WAGON_SPEEDS,     STR_WAGON_SPEEDS_TOOLTIP},               // VLD_WIDGET_DETAILS2_SPEEDS
++	{      WWT_PANEL,   RESIZE_LRTB, 14,  96, 194, 125, 136, 0x0,                  STR_NULL},                               // VLD_WIDGET_DETAILS2_FREE1
++	{      WWT_PANEL,   RESIZE_LRTB, 14, 195, 293, 125, 136, 0x0,                  STR_NULL},                               // VLD_WIDGET_DETAILS2_FREE2
++	{      WWT_PANEL,   RESIZE_LRTB, 14, 294, 392, 125, 136, 0x0,                  STR_NULL},                               // VLD_WIDGET_DETAILS2_FREE3
++	{  WWT_RESIZEBOX,   RESIZE_LRTB, 14, 393, 404, 125, 136, 0x0,                  STR_RESIZE_BUTTON},                      // VLD_RESIZE
+ 	{   WIDGETS_END},
+ };
+ 
+@@ -1359,12 +1346,14 @@
+ 			ResizeWindow(w, 0, 39);
+ 
+ 			w->vscroll.cap = 6;
+-			w->height += 12;
++			w->height += 24;
+ 			w->resize.step_height = 14;
+ 			w->resize.height = w->height - 14 * 2; // Minimum of 4 wagons in the display
+ 
+ 			w->widget[VLD_WIDGET_RENAME_VEHICLE].tooltips = STR_8867_NAME_TRAIN;
+ 			w->widget[VLD_WIDGET_CAPTION].data = STR_8802_DETAILS;
++
++			WP(w, vehicledetails_d).tab = VLD_WIDGET_DETAILS1_CARGO_CARRIED;
+ 			break;
+ 
+ 		case VEH_ROAD: {
+@@ -1401,12 +1390,11 @@
+ 	if (v->type != VEH_TRAIN) {
+ 		w->vscroll.cap = 1;
+ 		w->widget[VLD_WIDGET_MIDDLE_DETAILS].right += 12;
++		WP(w, vehicledetails_d).tab = 0;
+ 	}
+ 
+ 	w->widget[VLD_WIDGET_MIDDLE_DETAILS].data = (w->vscroll.cap << 8) + 1;
+ 	w->caption_color = v->owner;
+-
+-	WP(w, vehicledetails_d).tab = 0;
+ }
+ 
+ /** Checks whether service interval is enabled for the vehicle. */
+@@ -1457,16 +1445,21 @@
+ 	SetWindowWidgetDisabledState(w, VLD_WIDGET_RENAME_VEHICLE, v->owner != _local_player);
+ 
+ 	if (v->type == VEH_TRAIN) {
+-		DisableWindowWidget(w, det_tab + 9);
++		DisableWindowWidget(w, det_tab);
+ 		SetVScrollCount(w, GetTrainDetailsWndVScroll(v->index, det_tab));
+ 	}
+ 
+ 	SetWindowWidgetsHiddenState(w, v->type != VEH_TRAIN,
+ 		VLD_WIDGET_SCROLLBAR,
+-		VLD_WIDGET_DETAILS_CARGO_CARRIED,
+-		VLD_WIDGET_DETAILS_TRAIN_VEHICLES,
+-		VLD_WIDGET_DETAILS_CAPACITY_OF_EACH,
+-		VLD_WIDGET_DETAILS_TOTAL_CARGO,
++		VLD_WIDGET_DETAILS1_CARGO_CARRIED,
++		VLD_WIDGET_DETAILS1_TRAIN_VEHICLES,
++		VLD_WIDGET_DETAILS1_CAPACITY_OF_EACH,
++		VLD_WIDGET_DETAILS1_TOTAL_CARGO,
++		VLD_WIDGET_DETAILS1_ENDLINE,
++		VLD_WIDGET_DETAILS2_SPEEDS,
++		VLD_WIDGET_DETAILS2_FREE1,
++		VLD_WIDGET_DETAILS2_FREE2,
++		VLD_WIDGET_DETAILS2_FREE3,
+ 		VLD_WIDGET_RESIZE,
+ 		WIDGET_LIST_END);
+ 
+@@ -1476,7 +1469,6 @@
+ 		VLD_WIDGET_DECREASE_SERVICING_INTERVAL,
+ 		WIDGET_LIST_END);
+ 
+-
+ 	SetDParam(0, v->index);
+ 	DrawWindowWidgets(w);
+ 
+@@ -1522,7 +1514,7 @@
+ 	/* Draw service interval text */
+ 	SetDParam(0, v->service_interval);
+ 	SetDParam(1, v->date_of_last_service);
+-	DrawString(13, w->height - (v->type != VEH_TRAIN ? 11 : 23), _patches.servint_ispercent ? STR_SERVICING_INTERVAL_PERCENT : STR_883C_SERVICING_INTERVAL_DAYS, 0);
++	DrawString(13, w->height - (v->type != VEH_TRAIN ? 11 : 35), _patches.servint_ispercent ? STR_SERVICING_INTERVAL_PERCENT : STR_883C_SERVICING_INTERVAL_DAYS, 0);
+ 
+ 	switch (v->type) {
+ 		case VEH_TRAIN:
+@@ -1588,19 +1580,21 @@
+ 					DoCommandP(v->tile, v->index, mod, NULL, CMD_CHANGE_SERVICE_INT | CMD_MSG(STR_018A_CAN_T_CHANGE_SERVICING));
+ 				} break;
+ 
+-				case VLD_WIDGET_DETAILS_CARGO_CARRIED:
+-				case VLD_WIDGET_DETAILS_TRAIN_VEHICLES:
+-				case VLD_WIDGET_DETAILS_CAPACITY_OF_EACH:
+-				case VLD_WIDGET_DETAILS_TOTAL_CARGO:
++				case VLD_WIDGET_DETAILS1_CARGO_CARRIED:
++				case VLD_WIDGET_DETAILS1_TRAIN_VEHICLES:
++				case VLD_WIDGET_DETAILS1_CAPACITY_OF_EACH:
++				case VLD_WIDGET_DETAILS1_TOTAL_CARGO:
++				case VLD_WIDGET_DETAILS2_SPEEDS:
+ 					SetWindowWidgetsDisabledState(w, false,
+-						VLD_WIDGET_DETAILS_CARGO_CARRIED,
+-						VLD_WIDGET_DETAILS_TRAIN_VEHICLES,
+-						VLD_WIDGET_DETAILS_CAPACITY_OF_EACH,
+-						VLD_WIDGET_DETAILS_TOTAL_CARGO,
++						VLD_WIDGET_DETAILS1_CARGO_CARRIED,
++						VLD_WIDGET_DETAILS1_TRAIN_VEHICLES,
++						VLD_WIDGET_DETAILS1_CAPACITY_OF_EACH,
++						VLD_WIDGET_DETAILS1_TOTAL_CARGO,
++						VLD_WIDGET_DETAILS2_SPEEDS,
+ 						e->we.click.widget,
+ 						WIDGET_LIST_END);
+ 
+-					WP(w, vehicledetails_d).tab = e->we.click.widget - 9;
++					WP(w, vehicledetails_d).tab = e->we.click.widget;
+ 					SetWindowDirty(w);
+ 					break;
+ 			}
+@@ -1614,7 +1608,10 @@
+ 			break;
+ 
+ 		case WE_RESIZE:
+-			if (e->we.sizing.diff.x != 0) ResizeButtons(w, 9, 12);
++			if (e->we.sizing.diff.x != 0) {
++				ResizeButtons(w, VLD_WIDGET_DETAILS1_CARGO_CARRIED, VLD_WIDGET_DETAILS1_TOTAL_CARGO);
++				ResizeButtons(w, VLD_WIDGET_DETAILS2_SPEEDS, VLD_WIDGET_DETAILS2_FREE3);
++			}
+ 			if (e->we.sizing.diff.y == 0) break;
+ 
+ 			w->vscroll.cap += e->we.sizing.diff.y / 14;
+Index: src/vehicle_gui.h
+===================================================================
+--- src/vehicle_gui.h	(revision 11050)
++++ src/vehicle_gui.h	(working copy)
+@@ -41,6 +41,29 @@
+ 	VLW_MASK          = 0x700,
+ };
+ 
++/** Constants of vehicle details widget indices */
++enum VehicleDetailsWindowWidgets {
++	VLD_WIDGET_CLOSEBOX = 0,
++	VLD_WIDGET_CAPTION,
++	VLD_WIDGET_RENAME_VEHICLE,
++	VLD_WIDGET_TOP_DETAILS,
++	VLD_WIDGET_INCREASE_SERVICING_INTERVAL,
++	VLD_WIDGET_DECREASE_SERVICING_INTERVAL,
++	VLD_WIDGET_BOTTOM_RIGHT,
++	VLD_WIDGET_MIDDLE_DETAILS,
++	VLD_WIDGET_SCROLLBAR,
++	VLD_WIDGET_DETAILS1_CARGO_CARRIED,
++	VLD_WIDGET_DETAILS1_TRAIN_VEHICLES,
++	VLD_WIDGET_DETAILS1_CAPACITY_OF_EACH,
++	VLD_WIDGET_DETAILS1_TOTAL_CARGO,
++	VLD_WIDGET_DETAILS1_ENDLINE,
++	VLD_WIDGET_DETAILS2_SPEEDS,
++	VLD_WIDGET_DETAILS2_FREE1,
++	VLD_WIDGET_DETAILS2_FREE2,
++	VLD_WIDGET_DETAILS2_FREE3,
++	VLD_WIDGET_RESIZE,
++};
++
+ static inline bool ValidVLWFlags(uint16 flags)
+ {
+ 	return (flags == VLW_STANDARD || flags == VLW_SHARED_ORDERS || flags == VLW_STATION_LIST || flags == VLW_DEPOT_LIST || flags == VLW_GROUP_LIST);

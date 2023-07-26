@@ -1,0 +1,128 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 12913)
++++ src/settings.cpp	(working copy)
+@@ -1437,6 +1437,7 @@
+ 	SDT_CONDVAR(Patches, pathfinder_for_ships,    SLE_UINT8, 87, SL_MAX_VERSION, 0, MS, 0, 0, 2, 1, STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS,   NULL),
+ 
+ 	SDT_BOOL(Patches, train_income_warn,             S, 0,  true,                    STR_CONFIG_PATCHES_WARN_INCOME_LESS,     NULL),
++	SDT_BOOL(Patches, vehicle_late_warn,             S, 0,  true,                    STR_CONFIG_PATCHES_WARN_RUNNING_LATE,    NULL),
+ 	 SDT_VAR(Patches, order_review_system,SLE_UINT8, S,MS,     2,     0,       2, 0, STR_CONFIG_PATCHES_ORDER_REVIEW,         NULL),
+ 	SDT_BOOL(Patches, never_expire_vehicles,         0,NN, false,                    STR_CONFIG_PATCHES_NEVER_EXPIRE_VEHICLES,NULL),
+ 	SDT_BOOL(Patches, lost_train_warn,               S, 0,  true,                    STR_CONFIG_PATCHES_WARN_LOST_TRAIN,      NULL),
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 12913)
++++ src/lang/english.txt	(working copy)
+@@ -985,6 +985,7 @@
+ 
+ STR_TRAIN_IS_LOST                                               :{WHITE}Train {COMMA} is lost.
+ STR_TRAIN_IS_UNPROFITABLE                                       :{WHITE}Train {COMMA}'s profit last year was {CURRENCY}
++STR_VEHICLE_IS_VERY_LATE                                        :{WHITE}Vehicle {COMMA} is running running over a month late
+ STR_EURO_INTRODUCE                                              :{BLACK}{BIGFONT}European Monetary Union!{}{}The Euro is introduced as the sole currency for everyday transactions in your country!
+ 
+ # Start of order review system.
+@@ -1063,6 +1064,7 @@
+ STR_CONFIG_PATCHES_ORDER_REVIEW_EXDEPOT                         :yes, but exclude stopped vehicles
+ STR_CONFIG_PATCHES_ORDER_REVIEW_ON                              :of all vehicles
+ STR_CONFIG_PATCHES_WARN_INCOME_LESS                             :{LTBLUE}Warn if a train's income is negative: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_WARN_RUNNING_LATE                            :{LTBLUE}Warn if a vehicle runs more than a month late: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_NEVER_EXPIRE_VEHICLES                        :{LTBLUE}Vehicles never expire: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_AUTORENEW_VEHICLE                            :{LTBLUE}Autorenew vehicle when it gets old
+ STR_CONFIG_PATCHES_AUTORENEW_MONTHS                             :{LTBLUE}Autorenew when vehicle is {ORANGE}{STRING1}{LTBLUE} months before/after max age
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 12913)
++++ src/settings_gui.cpp	(working copy)
+@@ -798,6 +798,7 @@
+ 	"pathfinder_for_roadvehs",
+ 	"pathfinder_for_ships",
+ 	"train_income_warn",
++	"vehicle_late_warn",
+ 	"order_review_system",
+ 	"never_expire_vehicles",
+ 	"lost_train_warn",
+Index: src/timetable_cmd.cpp
+===================================================================
+--- src/timetable_cmd.cpp	(revision 12913)
++++ src/timetable_cmd.cpp	(working copy)
+@@ -11,6 +11,8 @@
+ #include "vehicle_func.h"
+ #include "vehicle_base.h"
+ #include "settings_type.h"
++#include "strings_func.h"
++#include "news_func.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -100,6 +102,7 @@
+ 
+ 	if (flags & DC_EXEC) {
+ 		v->lateness_counter = 0;
++		v->lateness_reported = 0;
+ 	}
+ 
+ 	return CommandCost();
+@@ -191,6 +194,26 @@
+ 
+ 	v->lateness_counter -= (timetabled - time_taken);
+ 
++	/* If the vehicle is now running badly late, issue a warning message.
++	 * Use some basic hysteresis to avoid doing this over and over. */
++	if (_patches.vehicle_late_warn) {
++		if (v->lateness_reported) {
++			if (v->lateness_counter < (DAY_TICKS * 20)) {
++				v->lateness_reported = 0;
++			}
++		} else {
++			if (v->lateness_counter > (DAY_TICKS * 30)) {
++				SetDParam(0, v->unitnumber);
++				AddNewsItem(
++					STR_VEHICLE_IS_VERY_LATE,
++					NM_SMALL, NF_VIEWPORT | NF_VEHICLE, NT_ADVICE, DNC_NONE,
++					v->index,
++					0);
++				v->lateness_reported = 1;
++			}
++		}
++	}
++
+ 	for (v = GetFirstVehicleFromSharedList(v); v != NULL; v = v->next_shared) {
+ 		InvalidateWindow(WC_VEHICLE_TIMETABLE, v->index);
+ 	}
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 12913)
++++ src/settings_type.h	(working copy)
+@@ -76,6 +76,7 @@
+ 	bool lost_train_warn;               ///< if a train can't find its destination, show a warning
+ 	uint8 order_review_system;
+ 	bool train_income_warn;             ///< if train is generating little income, show a warning
++	bool vehicle_late_warn;             ///< if a vehicle is running more than a month late, show a warning
+ 	bool status_long_date;              ///< always show long date in status bar
+ 	bool signal_side;                   ///< show signals on right side
+ 	bool show_finances;                 ///< show finances at end of year
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 12913)
++++ src/vehicle.cpp	(working copy)
+@@ -2276,6 +2276,7 @@
+ 
+ 	SLE_CONDVAR(Vehicle, current_order_time,   SLE_UINT32,                67, SL_MAX_VERSION),
+ 	SLE_CONDVAR(Vehicle, lateness_counter,     SLE_INT32,                 67, SL_MAX_VERSION),
++	SLE_CONDVAR(Vehicle, lateness_reported,    SLE_UINT8,                 94, SL_MAX_VERSION),
+ 
+ 	/* reserve extra space in savegame here. (currently 10 bytes) */
+ 	SLE_CONDNULL(10,                                                       2, SL_MAX_VERSION),
+Index: src/vehicle_base.h
+===================================================================
+--- src/vehicle_base.h	(revision 12913)
++++ src/vehicle_base.h	(working copy)
+@@ -220,6 +220,7 @@
+ 	/* Used for timetabling. */
+ 	uint32 current_order_time;     ///< How many ticks have passed since this order started.
+ 	int32 lateness_counter;        ///< How many ticks late (or early if negative) this vehicle is.
++	byte lateness_reported;        ///< Flag that severe vehicle lateness has already been reported.
+ 
+ 	/* Boundaries for the current position in the world and a next hash link.
+ 	 * NOSAVE: All of those can be updated with VehiclePositionChanged() */

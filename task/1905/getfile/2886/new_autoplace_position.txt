@@ -1,0 +1,284 @@
+In this file (below), a replacement for GetAutoPlacePosition() is provided.
+Unlike the original function, this version takes both the minimal size and the
+default size arguments. It returns a position and size of the new window.
+
+It tries to find a position for the default sized window. If needed, the
+window is reduced in size to make it fit. Finally, it falls back to a minimal
+sized window. This window may also be placed partly off-screen if no other
+space is found.
+
+The same kind of lmits as in IsGoodAutoplace1() and IsGoodAutoplace2() are
+applied, coded in IsAutoplacePositionAcceptable(),
+IsAutoplacePositionOnScreen(), and NewWindowOverlapsExisting() functions.
+
+
+The new function uses the shifted responsibility that LocalGetWindowPlacement() provides both position and size
+(wpossize1/2.diff, and the PointDimension functions (constructor,
+copy-constructor, assignment operator).
+
+------------------
+
+
+enum NewWindowPosition {
+	NWP_BEFORE = 0,  ///< Position value 2 pixels BEFORE the existing window
+	NWP_START,       ///< Position value at START, the \c base position of the existing window
+	NWP_END,         ///< Position value at END, the \c base+length position of the existing window
+	NWP_AFTER,       ///< Position value 2 pixels AFTER the existing window
+
+	NWP_GROW_SHIFT = 0,  ///< Amount of shift needed to get the grow direction
+	NWP_GROW_LENGTH = 4, ///< Length of the grow direction in bits
+	NWP_XSHIFT = 4,      ///< Amount of shift needed to get position value of X coordinate
+	NWP_YSHIFT = 6,      ///< Amount of shift needed to get position value of Y coordinate
+	NWP_XYLENGTH = 2     ///< Length of the position value for both the X and the Y coordinate
+};
+
+/**
+ * \verbatim
+ *
+ *          | TR          TL |
+ *          0--            --1          < BEFORE
+ *
+ *     --2  +----------------+  4--     < START
+ *    BL |  |    existing    |  | BR
+ *          |     window     |                  y positions
+ *    TL |  |                |  | TR
+ *     --3  +----------------+  5--     < END
+ *
+ *          6--            --7          < AFTER
+ *          | BR          BL |
+ *
+ *
+ *       ^  ^                ^  ^
+ *  BEFORE  START          END  AFTER
+ *            x positions
+ *\endverbatim
+ *
+ * The routine tries to find a position and size for a new window. It uses the
+ * position and size of the existing windows as starting point for its attempts.
+ * In the figure above, the central rectangle represents an existing window.
+ * From this window, it computes 8 starting points where one of the corners of
+ * the new window should be placed. These points are labeled 0..7, and
+ * correspond with the index in the \c _corner_positions[] array.
+ *
+ * Each of the 8 points uses one of four possible X positions and one of four
+ * possible Y positions. These positions are labeled BEFORE, START, END, and
+ * AFTER. The values are encoded in the array by a constant shifted
+ * respectively NWP_XSHIFT and NWP_YSHIFT bits.
+ * To form a window from a point, growth (resizing) has to take place towards a
+ * direction. The direction is shown in the figure with two uppercase letters.
+ * In the array, the direction is encoded as two bits of the RESIZE_*
+ * constants.
+ *
+ * @see NewWindowPosition, AutoplaceNewWindow()
+ */
+static const byte _corner_positions[8] = {
+	(NWP_START  << NWP_XSHIFT) | (NWP_BEFORE << NWP_YSHIFT) | RESIZE_TOP    | RESIZE_RIGHT, // top-left
+	(NWP_END    << NWP_XSHIFT) | (NWP_BEFORE << NWP_YSHIFT) | RESIZE_TOP    | RESIZE_LEFT,  // top-right
+	(NWP_BEFORE << NWP_XSHIFT) | (NWP_START  << NWP_YSHIFT) | RESIZE_BOTTOM | RESIZE_LEFT,  // left-top
+	(NWP_BEFORE << NWP_XSHIFT) | (NWP_END    << NWP_YSHIFT) | RESIZE_TOP    | RESIZE_LEFT,  // left-bottom
+	(NWP_AFTER  << NWP_XSHIFT) | (NWP_START  << NWP_YSHIFT) | RESIZE_BOTTOM | RESIZE_RIGHT, // right-top
+	(NWP_AFTER  << NWP_XSHIFT) | (NWP_END    << NWP_YSHIFT) | RESIZE_TOP    | RESIZE_RIGHT, // right-bottom
+	(NWP_START  << NWP_XSHIFT) | (NWP_AFTER  << NWP_YSHIFT) | RESIZE_BOTTOM | RESIZE_RIGHT, // bottom-left
+	(NWP_END    << NWP_XSHIFT) | (NWP_AFTER  << NWP_YSHIFT) | RESIZE_BOTTOM | RESIZE_LEFT   // bottom-right
+};
+
+/**
+ * Verify whether provided rectangle is acceptable as position and size of a new window.
+ * Acceptable here means that it is <b>at most</b> partly off-screen.
+ * @param r Rectangle of the new window
+ * @return Value \c true is returned if the new position and place is acceptable
+ */
+static bool IsAutoplacePositionAcceptable(const PointDimension& pd)
+{
+	if (pd.x < -(pd.width>>2) || pd.x > _screen.width - (pd.width>>1)) return false;
+	if (pd.y < 22 || pd.y > _screen.height - (pd.height>>2)) return false;
+	return true;
+}
+
+/**
+ * Verify whether provided rectangle of a new window is completely on-screen.
+ * @param r Rectangle of the new window
+ * @return Value \c true is returned if the new position and place is completely on-screen
+ */
+static bool IsAutoplacePositionOnScreen(const PointDimension& pd)
+{
+	return pd.x >= 0 &&
+		pd.y >= 22 &&
+		pd.x + pd.width < _screen.width &&
+		pd.y + pd.height < _screen.height;
+}
+
+/**
+ * Compute absolute x or y coordinate of one corner using a position value, a base and a length.
+ * @param pos_val Position value, one of NWP_BEFORE, NWP_START, NWP_END, or NWP_AFTER
+ * @param base    Absolute x or y coordinate of the existing window
+ * @param length  Length (width or height) of the existing window
+ * @return Absolute x or y position of the corner
+ * @see NewWindowPosition
+ */
+static int ComputeWindowCoordinate(const byte pos_val, int base, int length)
+{
+	switch (pos_val) {
+		case NWP_BEFORE:
+			return base - 2;
+		case NWP_START:
+			return base;
+		case NWP_END:
+			return base + length;
+		case NWP_AFTER:
+			return base + length + 2;
+		default:
+			NOT_REACHED();
+	}
+}
+
+/**
+ * Given one corner, a resize direction, and the desired width and height,
+ * compute the position of the new window.
+ * @param xpos X coordinate of the corner
+ * @param ypos Y coordinate of the corner
+ * @param width  Desired width of the new window
+ * @param height Desired height of the new window
+ * @param resize Resize direction
+ * @param allow_clamp Allow clamping of the window to keep it on-screen
+ * @return Position and size of the new window
+ */
+static PointDimension ComputeWindowRectangle(int xpos, int ypos, int width, int height, const byte resize, bool allow_clamp)
+{
+	int left = (resize & RESIZE_LEFT) ? xpos - width : xpos;
+	int top  = (resize & RESIZE_TOP) ? ypos - height : ypos;
+
+	if (allow_clamp) {
+		int right  = min(left + width, _screen.width);
+		int bottom = min(top + height, _screen.height);
+		left = max(left, 0);
+		top = max(top, 0);
+		return PointDimension(left, top, right - left, bottom - top);
+	} else {
+		return PointDimension(left, top, width, height);
+	}
+}
+
+/**
+ * Verify whether a new window at \a pd would obscure any existing window
+ * @param pd Position and size of the new window
+ * @return \c true if the new window overlaps with any existing window, \c false otherwise
+ */
+static bool NewWindowOverlapsExisting(const PointDimension &pd)
+{
+	Window* const *wz;
+
+	FOR_ALL_WINDOWS(wz) {
+		const Window *w = *wz;
+		if (w->window_class == WC_MAIN_WINDOW) continue;
+
+		if (pd.x + pd.width > w->left &&
+				w->left + w->width > pd.x &&
+				pd.y + pd.height > w->top &&
+				w->top + w->height > pd.y) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Decide about the position and size of a new window at the screen.
+ * See the \c _corner_positions for details of how existing windows are used.
+ *
+ * The routine keeps track of the best found minimally sized and default sized
+ * rectangles (in \c min_rect and \c def_rect). Attached to the solutions are
+ * penalties (the number of horizontal and vertical lines not displayed of the
+ * window).
+ * It aims to find the best possible default sized window. If none can be
+ * found, it falls back to the best minimally sized window (which is allowed to
+ * be partly off-screen). If that also fails, it falls back to a simple
+ * allocation algorithm at the main diagonal of the screen.
+ *
+ * @param min_width  Minimal width of the new window
+ * @param min_height Minimal height of the new window
+ * @param def_width  Default width of the new window (prefered width)
+ * @param def_height Default height of the new window (prefered height)
+ * @return Rectangle describing the position of edges of the new window
+ * @see _corner_positions
+ */
+static PointDimension GetAutoPlacePosition(int min_width, int min_height, int def_width, int def_height)
+{
+	PointDimension def_rect(0, 24, def_width, def_height); // Best found rectangle for the default sized window
+	if (!NewWindowOverlapsExisting(def_rect)) return def_rect; // Jackpot! (first try with default sized window is not obscured)
+
+	PointDimension min_rect(0, 24, min_width, min_height); // Best found rectangle for the minimal sized window
+	int min_penalty = min_width + min_height + 1;
+	int def_penalty = (min_width == def_width && min_height == def_height) ? -1 : def_width + def_height + 1;
+
+
+	Window* const *wz;
+	FOR_ALL_WINDOWS(wz) {
+		if (w->window_class == WC_MAIN_WINDOW) continue; // try next window
+		if (IsVitalWindow(w)) continue; // try next window
+
+		for (uint i = 0; i < lengthof(_corner_positions); i++) {
+			int xpos = ComputeWindowCoordinate(GB(_corner_positions[i], NWP_XSHIFT, NWP_XYLENGTH), w->left, w->width);
+			int ypos = ComputeWindowCoordinate(GB(_corner_positions[i], NWP_YSHIFT, NWP_XYLENGTH), w->top, w->height);
+
+			/* Try new minimized window from (xpos, ypos) corner, growing in _corner_positions[i] direction */
+			PointDimension pd = ComputeWindowRectangle(xpos, ypos, min_width, min_height,
+								GB(_corner_positions[i], NWP_GROW_SHIFT, NWP_GROW_LENGTH), false);
+			if (!IsAutoplacePositionAcceptable(pd)) continue; // try next corner
+
+			if (!IsAutoplacePositionOnScreen(pd)) {
+				/* new window partly off-screen, but still acceptible */
+				if (NewWindowOverlapsExisting(pd)) continue; // try next corner
+				int vis_x = min(pd.x + pd.width, _screen.width) - max(pd.x, 0);
+				int vis_y = min(pd.y + pd.height, _screen.height) - max(pd.y, 0);
+				int penalty = min_width - vis_x + min_height - vis_y;
+				if (penalty < min_penalty) {   // if no optimal solution for minimal window available, save it not
+					min_penalty = penalty;
+					min_rect = pd;
+				}
+				/* minimal window already partly off-screen, default window just gets worse */
+			} else {
+				/* new window completely on-screen */
+				if (NewWindowOverlapsExisting(pd)) continue; // try next corner
+
+				if (min_penalty > 0) {   // if no optimal solution for minimal window available, save it not
+					min_penalty = 0;
+					min_rect = pd;
+				}
+				if (def_penalty > 0) {  // Is improvement of the default window possible?
+					pd = ComputeWindowRectangle(xpos, ypos, def_width, def_height,
+								GB(_corner_positions[i], NWP_GROW_SHIFT, NWP_GROW_LENGTH), true);
+					assert(pd.width >= min_width && pd.height >= min_height);
+					int penalty = def_width - pd.width + def_height - pd.height;
+					if (penalty == 0) return pd;  // Unclipped, default sized window position found
+					if (penalty < def_penalty) {
+						def_penalty = penalty;
+						def_rect = pd;
+					}
+				}
+
+			}
+
+		}
+	}
+
+	if (def_penalty >= 0 && def_penalty < def_width + def_height + 1) return def_rect;
+	if (min_penalty < min_width + min_height + 1) return min_rect;
+	
+	/* autoplacement relative to existing windows failed. Fallback to more primitive placing algorithm */
+	int left = 0, top = 24;
+
+restart:
+	FOR_ALL_WINDOWS(wz) {
+		const Window *w = *wz;
+
+		if (w->left == left && w->top == top) {
+			left += 5;
+			top += 5;
+			goto restart;
+		}
+	}
+
+	return PointDimension(left, top, min_width, min_height);
+}
+

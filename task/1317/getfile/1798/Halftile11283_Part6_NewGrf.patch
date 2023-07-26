@@ -1,0 +1,135 @@
+Index: src/newgrf.cpp
+===================================================================
+--- src/newgrf.cpp	(revision 7)
++++ src/newgrf.cpp	(revision 8)
+@@ -45,6 +45,8 @@
+ #include "newgrf_commons.h"
+ #include "newgrf_townname.h"
+ #include "newgrf_industries.h"
++#include "table/landscape_sprite.h"
++#include "gfxinit.h"
+ 
+ /* TTDPatch extended GRF format codec
+  * (c) Petr Baudis 2004 (GPL'd)
+@@ -3232,6 +3234,7 @@
+ 	/* TODO */
+ 
+ 	SpriteID replace = 0;
++	const SpriteID *index_tbl = NULL;
+ 
+ 	if (!check_length(len, 2, "GraphicsNew")) return;
+ 	buf++;
+@@ -3256,11 +3259,13 @@
+ 			break;
+ 
+ 		case 0x06: // Foundations
+-			if (num != 74) {
+-				grfmsg(1, "GraphicsNew: Foundation graphics sprite count must be 74, skipping");
+-				return;
++			switch (num) {
++				case 74: replace = SPR_SLOPES_BASE; break;
++				case 90: index_tbl = _slopes_action05_90; break;
++				default:
++					grfmsg(1, "GraphicsNew: Foundation graphics sprite count must be 74 or 90, skipping");
++					return;
+ 			}
+-			replace = SPR_SLOPES_BASE;
+ 			break;
+ 
+ 		case 0x08: // Canal graphics
+@@ -3326,6 +3331,12 @@
+ 			return;
+ 	}
+ 
++	if (index_tbl != NULL) {
++		grfmsg(2, "GraphicsNew: Loading %u sprites of type 0x%02X at indexed SpriteIDs", num, type);
++		LoadSpritesIndexed(_file_index, &_nfo_line, index_tbl);
++		return;
++	}
++
+ 	if (replace == 0) {
+ 		grfmsg(2, "GraphicsNew: Loading %u sprites of type 0x%02X at SpriteID 0x%04X", num, type, _cur_spriteid);
+ 	} else {
+Index: src/table/landscape_sprite.h
+===================================================================
+--- src/table/landscape_sprite.h	(revision 7)
++++ src/table/landscape_sprite.h	(revision 8)
+@@ -197,3 +197,10 @@
+ 	SPR_HALFTILE_FOUNDATION_BASE, SPR_HALFTILE_FOUNDATION_BASE + 4 * SPR_HALFTILE_BLOCK_SIZE - 1,
+ 	END
+ };
++
++/* Slope graphics indexes for Action 05 type 06, 90 sprites */
++static const SpriteID _slopes_action05_90[] = {
++	SPR_SLOPES_VIRTUAL_BASE + 15, SPR_SLOPES_VIRTUAL_BASE + 4 * SPR_TRKFOUND_BLOCK_SIZE,
++	SPR_HALFTILE_FOUNDATION_BASE, SPR_HALFTILE_FOUNDATION_BASE + 4 * SPR_HALFTILE_BLOCK_SIZE - 1,
++	END
++};
+Index: src/gfxinit.h
+===================================================================
+--- src/gfxinit.h	(revision 7)
++++ src/gfxinit.h	(revision 8)
+@@ -7,5 +7,6 @@
+ 
+ void CheckExternalFiles();
+ void GfxLoadSprites();
++void LoadSpritesIndexed(int file_index, uint *sprite_id, const SpriteID *index_tbl);
+ 
+ #endif /* GFXINIT_H */
+Index: src/gfxinit.cpp
+===================================================================
+--- src/gfxinit.cpp	(revision 7)
++++ src/gfxinit.cpp	(revision 8)
+@@ -74,36 +74,41 @@
+ }
+ 
+ 
+-static void LoadGrfIndexed(const char* filename, const SpriteID* index_tbl, int file_index)
++void LoadSpritesIndexed(int file_index, uint *sprite_id, const SpriteID *index_tbl)
+ {
+ 	uint start;
+-	uint sprite_id = 0;
+-
+-	FioOpenFile(file_index, filename);
+-
+-	DEBUG(sprite, 2, "Reading indexed grf-file '%s'", filename);
+-
+ 	while ((start = *index_tbl++) != END) {
+ 		uint end = *index_tbl++;
+ 
+ 		if (start == SKIP) { // skip sprites (amount in second var)
+ 			SkipSprites(end);
+-			sprite_id += end;
++			(*sprite_id) += end;
+ 		} else { // load sprites and use indexes from start to end
+ 			do {
+ 			#ifdef NDEBUG
+-				LoadNextSprite(start, file_index, sprite_id);
++				LoadNextSprite(start, file_index, *sprite_id);
+ 			#else
+-				bool b = LoadNextSprite(start, file_index, sprite_id);
++				bool b = LoadNextSprite(start, file_index, *sprite_id);
+ 				assert(b);
+ 			#endif
+-				sprite_id++;
++				(*sprite_id)++;
+ 			} while (++start <= end);
+ 		}
+ 	}
+ }
+ 
++static void LoadGrfIndexed(const char* filename, const SpriteID* index_tbl, int file_index)
++{
++	uint sprite_id = 0;
+ 
++	FioOpenFile(file_index, filename);
++
++	DEBUG(sprite, 2, "Reading indexed grf-file '%s'", filename);
++
++	LoadSpritesIndexed(file_index, &sprite_id, index_tbl);
++}
++
++
+ /* Check that the supplied MD5 hash matches that stored for the supplied filename */
+ static bool CheckMD5Digest(const MD5File file, md5_byte_t *digest, bool warn)
+ {

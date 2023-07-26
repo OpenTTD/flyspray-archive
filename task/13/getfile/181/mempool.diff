@@ -1,0 +1,5857 @@
+=== ai/default/default.c
+==================================================================
+--- ai/default/default.c	(revision 313)
++++ ai/default/default.c	(local)
+@@ -439,14 +439,18 @@
+ 
+ static Town *AiFindRandomTown(void)
+ {
+-	Town *t = GetTown(RandomRange(_total_towns));
+-	return (t->xy != 0) ? t : NULL;
++	return GetRandomTown();
+ }
+ 
+ static Industry *AiFindRandomIndustry(void)
+ {
+-	Industry *i = GetIndustry(RandomRange(_total_industries));
+-	return (i->xy != 0) ? i : NULL;
++	/* XXX: There used to be code here that would do a RandomRange() and see if
++	 * the found index was in use, if not, return NULL. This means that
++	 * depending on the amount of "index fragmentation", this function would
++	 * regularly fail to find an industry.
++	 * This function will now always find an industry, except when the pool is
++	 * empty... This might mean a functional behaviour, is that bad? */
++	return GetRandomIndustry();
+ }
+ 
+ static void AiFindSubsidyIndustryRoute(FoundRoute *fr)
+@@ -1388,7 +1392,7 @@
+ 		t = AiFindRandomTown();
+ 		if (t != NULL) {
+ 			// Find a random oil rig industry
+-			in = GetIndustry(RandomRange(_total_industries));
++			in = GetRandomIndustry();
+ 			if (in != NULL && in->type == IT_OIL_RIG) {
+ 				if (DistanceManhattan(t->xy, in->xy) < 60)
+ 					break;
+@@ -3563,8 +3567,8 @@
+ 	p->ai.state = AIS_1;
+ 
+ 	// Get a list of all stations that are in use by a vehicle
+-	in_use = malloc(GetStationPoolSize());
+-	memset(in_use, 0, GetStationPoolSize());
++	in_use = malloc(GetNumStationsUsed());
++	memset(in_use, 0, GetNumStationsUsed());
+ 	FOR_ALL_ORDERS(ord) {
+ 		if (ord->type == OT_GOTO_STATION) in_use[ord->station] = 1;
+ 	}
+=== ai/trolly/trolly.c
+==================================================================
+--- ai/trolly/trolly.c	(revision 313)
++++ ai/trolly/trolly.c	(local)
+@@ -388,9 +388,9 @@
+ 		if (p->ainew.temp == -1) {
+ 			// First, we pick a random spot to search from
+ 			if (p->ainew.from_type == AI_CITY)
+-				p->ainew.temp = AI_RandomRange(_total_towns);
++				p->ainew.temp = AI_RandomRange(GetNumTownsUsed());
+ 			else
+-				p->ainew.temp = AI_RandomRange(_total_industries);
++				p->ainew.temp = AI_RandomRange(GetNumIndustriesUsed());
+ 		}
+ 
+ 		if (!AiNew_Check_City_or_Industry(p, p->ainew.temp, p->ainew.from_type)) {
+@@ -399,9 +399,9 @@
+ 			//  to try again
+ 			p->ainew.temp++;
+ 			if (p->ainew.from_type == AI_CITY) {
+-				if (p->ainew.temp >= (int)_total_towns) p->ainew.temp = 0;
++				if (p->ainew.temp >= (int)GetNumTownsUsed()) p->ainew.temp = 0;
+ 			} else {
+-				if (p->ainew.temp >= _total_industries) p->ainew.temp = 0;
++				if (p->ainew.temp >= (int)GetNumIndustriesUsed()) p->ainew.temp = 0;
+ 			}
+ 
+ 			// Don't do an attempt if we are trying the same id as the last time...
+@@ -423,9 +423,9 @@
+ 	if (p->ainew.temp == -1) {
+ 		// First, we pick a random spot to search to
+ 		if (p->ainew.to_type == AI_CITY)
+-			p->ainew.temp = AI_RandomRange(_total_towns);
++			p->ainew.temp = AI_RandomRange(GetNumTownsUsed());
+ 		else
+-			p->ainew.temp = AI_RandomRange(_total_industries);
++			p->ainew.temp = AI_RandomRange(GetNumIndustriesUsed());
+ 	}
+ 
+ 	// The same city is not allowed
+@@ -526,9 +526,9 @@
+ 	//  to try again
+ 	p->ainew.temp++;
+ 	if (p->ainew.to_type == AI_CITY) {
+-		if (p->ainew.temp >= (int)_total_towns) p->ainew.temp = 0;
++		if (p->ainew.temp >= (int)GetNumTownsUsed()) p->ainew.temp = 0;
+ 	} else {
+-		if (p->ainew.temp >= _total_industries) p->ainew.temp = 0;
++		if (p->ainew.temp >= (int)GetNumIndustriesUsed()) p->ainew.temp = 0;
+ 	}
+ 
+ 	// Don't do an attempt if we are trying the same id as the last time...
+=== aircraft_cmd.c
+==================================================================
+--- aircraft_cmd.c	(revision 313)
++++ aircraft_cmd.c	(local)
+@@ -137,10 +137,10 @@
+ int32 CmdBuildAircraft(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int32 value;
+-	Vehicle *vl[3], *v, *u, *w;
+ 	UnitID unit_num;
+ 	const AircraftVehicleInfo *avi;
+ 	Engine *e;
++	uint num_vehicles;
+ 
+ 	if (!IsEngineBuildable(p1, VEH_Aircraft)) return_cmd_error(STR_ENGINE_NOT_BUILDABLE);
+ 
+@@ -154,9 +154,10 @@
+ 	SET_EXPENSES_TYPE(EXPENSES_NEW_VEHICLES);
+ 
+ 	avi = AircraftVehInfo(p1);
++	num_vehicles = ( (avi->subtype & 1) == 0 ? 3 : 2 );
++
+ 	// allocate 2 or 3 vehicle structs, depending on type
+-	if (!AllocateVehicles(vl, (avi->subtype & 1) == 0 ? 3 : 2) ||
+-			IsOrderPoolFull()) {
++	if (GetNumVehiclesFree() < num_vehicles || IsOrderPoolFull()) {
+ 		return_cmd_error(STR_00E1_TOO_MANY_VEHICLES_IN_GAME);
+ 	}
+ 
+@@ -165,8 +166,9 @@
+ 		return_cmd_error(STR_00E1_TOO_MANY_VEHICLES_IN_GAME);
+ 
+ 	if (flags & DC_EXEC) {
+-		uint x;
+-		uint y;
++		Vehicle *vl[3], *v, *u, *w;
++		uint x, y;
++		AllocateVehicles(vl, num_vehicles);
+ 
+ 		v = vl[0];
+ 		u = vl[1];
+@@ -332,7 +334,7 @@
+ {
+ 	Vehicle *v;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -361,7 +363,7 @@
+ {
+ 	Vehicle *v;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -397,7 +399,7 @@
+ {
+ 	Vehicle *v;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -417,7 +419,7 @@
+ 		const Station *st = GetStation(next_airport_index);
+ 		// If an airport doesn't have terminals (so no landing space for airports),
+ 		// it surely doesn't have any hangars
+-		if (!IsValidStation(st) || st->airport_tile == 0 || GetAirport(st->airport_type)->nof_depots == 0) {
++		if (st != NULL || st->airport_tile == 0 || GetAirport(st->airport_type)->nof_depots == 0) {
+ 			StationID station;
+ 
+ 			if (p2 != 0) return CMD_ERROR;
+@@ -447,7 +449,6 @@
+ 	return 0;
+ }
+ 
+-
+ /** Refits an aircraft to the specified cargo type.
+  * @param tile unused
+  * @param p1 vehicle ID of the aircraft to refit
+@@ -462,7 +463,7 @@
+ 	CargoID new_cid = GB(p2, 0, 8);
+ 	const AircraftVehicleInfo *avi;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+=== console_cmds.c
+==================================================================
+--- console_cmds.c	(revision 313)
++++ console_cmds.c	(local)
+@@ -132,15 +132,13 @@
+ 	}
+ 
+ 	FOR_ALL_VEHICLES(v) {
+-		if (IsValidVehicle(v)) {
+-			/* Code ripped from CmdStartStopTrain. Can't call it, because of
+-			 * ownership problems, so we'll duplicate some code, for now */
+-			if (v->type == VEH_Train)
+-				v->u.rail.days_since_order_progr = 0;
+-			v->vehstatus |= VS_STOPPED;
+-			InvalidateWindowWidget(WC_VEHICLE_VIEW, v->index, STATUS_BAR);
+-			InvalidateWindow(WC_VEHICLE_DEPOT, v->tile);
+-		}
++		/* Code ripped from CmdStartStopTrain. Can't call it, because of
++		 * ownership problems, so we'll duplicate some code, for now */
++		if (v->type == VEH_Train)
++			v->u.rail.days_since_order_progr = 0;
++		v->vehstatus |= VS_STOPPED;
++		InvalidateWindowWidget(WC_VEHICLE_VIEW, v->index, STATUS_BAR);
++		InvalidateWindow(WC_VEHICLE_DEPOT, v->tile);
+ 	}
+ 	return true;
+ }
+=== depot.c
+==================================================================
+--- depot.c	(revision 313)
++++ depot.c	(local)
+@@ -11,24 +11,16 @@
+ #include "order.h"
+ 
+ enum {
+-	/* Max depots: 64000 (8 * 8000) */
+-	DEPOT_POOL_BLOCK_SIZE_BITS = 3,       /* In bits, so (1 << 3) == 8 */
+-	DEPOT_POOL_MAX_BLOCKS      = 8000,
++	DEPOT_PUDDLE_SIZE      = 8,
+ };
+ 
+-/**
+- * Called if a new block is added to the depot-pool
+- */
+-static void DepotPoolNewBlock(uint start_item)
+-{
+-	Depot *depot;
++/* Forward declare init/destroy procs, referenced by INDEXED_POOL */
++static void InitializeDepot(const IndexedPool* pool, void* drop, DropIndex index);
++static void DestroyDepot(const IndexedPool* pool, void* drop, DropIndex index);
+ 
+-	FOR_ALL_DEPOTS_FROM(depot, start_item)
+-		depot->index = start_item++;
+-}
+-
+ /* Initialize the town-pool */
+-MemoryPool _depot_pool = { "Depots", DEPOT_POOL_MAX_BLOCKS, DEPOT_POOL_BLOCK_SIZE_BITS, sizeof(Depot), &DepotPoolNewBlock, NULL, 0, 0, NULL };
++static IndexedPoolSettings _depot_pool_settings = INDEXED_POOL(Depot, DEPOT_PUDDLE_SIZE);
++IndexedPool _depot_pool;
+ 
+ 
+ /**
+@@ -48,61 +40,34 @@
+ 	return NULL;
+ }
+ 
+-/**
+- * Allocate a new depot
+- */
+-Depot *AllocateDepot(void)
++static void InitializeDepot(const IndexedPool* pool, void* drop, DropIndex index)
+ {
+-	Depot *depot;
+-
+-	FOR_ALL_DEPOTS(depot) {
+-		if (!IsValidDepot(depot)) {
+-			uint index = depot->index;
+-
+-			memset(depot, 0, sizeof(Depot));
+-			depot->index = index;
+-
+-			return depot;
+-		}
+-	}
+-
+-	/* Check if we can add a block to the pool */
+-	if (AddBlockToPool(&_depot_pool))
+-		return AllocateDepot();
+-
+-	return NULL;
++	ZERO_AND_INDEX(Depot, drop);
+ }
+ 
+ /**
+- * Delete a depot
++ * Clean up a depot
+  */
+-void DoDeleteDepot(TileIndex tile)
++static void DestroyDepot(const IndexedPool* pool, void* drop, DropIndex index)
+ {
+ 	Order order;
+-	Depot *depot;
++	Depot *depot = (Depot*)drop;
+ 
+-	/* Get the depot */
+-	depot = GetDepotByTile(tile);
+-
+ 	/* Clear the tile */
+-	DoClearSquare(tile);
++	DoClearSquare(depot->xy);
+ 
+-	/* Clear the depot */
+-	depot->xy = 0;
+-
+ 	/* Clear the depot from all order-lists */
+ 	order.type    = OT_GOTO_DEPOT;
+ 	order.station = depot->index;
+-	DeleteDestinationFromVehicleOrder(order);
++	DeleteOrderFromAllVehicles(order);
+ 
+ 	/* Delete the depot-window */
+-	DeleteWindowById(WC_VEHICLE_DEPOT, tile);
++	DeleteWindowById(WC_VEHICLE_DEPOT, depot->xy);
+ }
+ 
+-void InitializeDepot(void)
++void InitializeDepots(void)
+ {
+-	CleanPool(&_depot_pool);
+-	AddBlockToPool(&_depot_pool);
++	IndexedPoolInitialize(&_depot_pool, &_depot_pool_settings);
+ }
+ 
+ 
+@@ -118,10 +83,8 @@
+ 	Depot *depot;
+ 
+ 	FOR_ALL_DEPOTS(depot) {
+-		if (IsValidDepot(depot)) {
+-			SlSetArrayIndex(depot->index);
+-			SlObject(depot, _depot_desc);
+-		}
++		SlSetArrayIndex(depot->index);
++		SlObject(depot, _depot_desc);
+ 	}
+ }
+ 
+@@ -130,13 +93,10 @@
+ 	int index;
+ 
+ 	while ((index = SlIterateArray()) != -1) {
+-		Depot *depot;
+-
+-		if (!AddBlockIfNeeded(&_depot_pool, index))
++		if (IndexedPoolAllocateIndex(&_depot_pool, index) == NULL)
+ 			error("Depots: failed loading savegame: too many depots");
+ 
+-		depot = GetDepot(index);
+-		SlObject(depot, _depot_desc);
++		SlObject(GetDepot(index), _depot_desc);
+ 	}
+ }
+ 
+=== depot.h
+==================================================================
+--- depot.h	(revision 313)
++++ depot.h	(local)
+@@ -16,41 +16,21 @@
+ struct Depot {
+ 	TileIndex xy;
+ 	TownID town_index;
+-	StationID index;
++	DepotID index; /* TODO: StationID? */
+ };
+ 
+-extern MemoryPool _depot_pool;
++extern IndexedPool _depot_pool;
+ 
+-/**
+- * Get the pointer to the depot with index 'index'
+- */
+-static inline Depot *GetDepot(uint index)
+-{
+-	return (Depot*)GetItemFromPool(&_depot_pool, index);
+-}
++#define FOR_ALL_DEPOTS(d) FOR_ALL_IN_POOL(_depot_pool, d)
++INDEXED_POOL_FUNCTIONS(Depot, Depots, _depot_pool)
+ 
+-/**
+- * Get the current size of the DepotPool
+- */
+-static inline uint16 GetDepotPoolSize(void)
+-{
+-	return _depot_pool.total_items;
+-}
+-
+-static inline bool IsDepotIndex(uint index)
+-{
+-	return index < GetDepotPoolSize();
+-}
+-
+-#define FOR_ALL_DEPOTS_FROM(d, start) for (d = GetDepot(start); d != NULL; d = (d->index + 1 < GetDepotPoolSize()) ? GetDepot(d->index + 1) : NULL)
+-#define FOR_ALL_DEPOTS(d) FOR_ALL_DEPOTS_FROM(d, 0)
+-
+ #define MIN_SERVINT_PERCENT  5
+ #define MAX_SERVINT_PERCENT 90
+ #define MIN_SERVINT_DAYS    30
+ #define MAX_SERVINT_DAYS   800
+ 
+-/** Get the service interval domain.
++/** 
++ * Get the service interval domain.
+  * Get the new proposed service interval for the vehicle is indeed, clamped
+  * within the given bounds. @see MIN_SERVINT_PERCENT ,etc.
+  * @param index proposed service interval
+@@ -66,14 +46,6 @@
+ VARDEF TileIndex _last_built_ship_depot_tile;
+ 
+ /**
+- * Check if a depot really exists.
+- */
+-static inline bool IsValidDepot(const Depot* depot)
+-{
+-	return depot->xy != 0; /* XXX: Replace by INVALID_TILE someday */
+-}
+-
+-/**
+  * Check if a tile is a depot of the given type.
+  */
+ static inline bool IsTileDepotType(TileIndex tile, TransportType type)
+@@ -135,15 +107,18 @@
+       03 (exit towards NW) we need either bit 0 or 4 set in tileh: 0x4C >> 3 = 1001<p>
+       So ((0x4C >> p2) & tileh) determines whether the depot can be built on the current tileh
+ */
++
++Depot *GetDepotByTile(TileIndex tile);
++void InitializeDepots(void);
++
+ static inline bool CanBuildDepotByTileh(uint32 direction, Slope tileh)
+ {
+ 	return (0x4C >> direction) & tileh;
+ }
+ 
++static inline void DoClearDepot(TileIndex tile)
++{
++	DeleteDepot(GetDepotByTile(tile));
++}
+ 
+-Depot *GetDepotByTile(TileIndex tile);
+-void InitializeDepot(void);
+-Depot *AllocateDepot(void);
+-void DoDeleteDepot(TileIndex tile);
+-
+ #endif /* DEPOT_H */
+=== economy.c
+==================================================================
+--- economy.c	(revision 313)
++++ economy.c	(local)
+@@ -260,7 +260,7 @@
+ 		if (new_player != OWNER_SPECTATOR) {
+ 			FOR_ALL_TOWNS(t) {
+ 				/* If a player takes over, give the ratings to that player. */
+-				if (IsValidTown(t) && HASBIT(t->have_ratings, old_player)) {
++				if (HASBIT(t->have_ratings, old_player)) {
+ 					if (HASBIT(t->have_ratings, new_player)) {
+ 						// use max of the two ratings.
+ 						t->ratings[new_player] = max(t->ratings[new_player], t->ratings[old_player]);
+@@ -271,10 +271,8 @@
+ 				}
+ 
+ 				/* Reset ratings for the town */
+-				if (IsValidTown(t)) {
+-					t->ratings[old_player] = 500;
+-					CLRBIT(t->have_ratings, old_player);
+-				}
++				t->ratings[old_player] = 500;
++				CLRBIT(t->have_ratings, old_player);
+ 			}
+ 		}
+ 	}
+@@ -891,12 +889,12 @@
+ 
+ 	fr->distance = (uint)-1;
+ 
+-	fr->from = from = GetTown(RandomRange(_total_towns));
+-	if (from->xy == 0 || from->population < 400)
++	fr->from = from = GetRandomTown();
++	if (from->population < 400)
+ 		return;
+ 
+-	fr->to = to = GetTown(RandomRange(_total_towns));
+-	if (from==to || to->xy == 0 || to->population < 400 || to->pct_pass_transported > 42)
++	fr->to = to = GetRandomTown();
++	if (from==to || to->population < 400 || to->pct_pass_transported > 42)
+ 		return;
+ 
+ 	fr->distance = DistanceManhattan(from->xy, to->xy);
+@@ -910,7 +908,7 @@
+ 
+ 	fr->distance = (uint)-1;
+ 
+-	fr->from = i = GetIndustry(RandomRange(_total_industries));
++	fr->from = i = GetIndustry(RandomRange(GetNumIndustries()));
+ 	if (i->xy == 0)
+ 		return;
+ 
+@@ -935,7 +933,7 @@
+ 
+ 	if (cargo == CT_GOODS || cargo == CT_FOOD) {
+ 		// The destination is a town
+-		Town *t = GetTown(RandomRange(_total_towns));
++		Town *t = GetRandomTown();
+ 
+ 		// Only want big towns
+ 		if (t->xy == 0 || t->population < 900)
+@@ -944,7 +942,7 @@
+ 		fr->to = t;
+ 	} else {
+ 		// The destination is an industry
+-		Industry *i2 = GetIndustry(RandomRange(_total_industries));
++		Industry *i2 = GetIndustry(RandomRange(GetNumIndustries()));
+ 
+ 		// The industry must accept the cargo
+ 		if (i == i2 || i2->xy == 0 ||
+=== engine.c
+==================================================================
+--- engine.c	(revision 313)
++++ engine.c	(local)
+@@ -501,49 +501,27 @@
+  * Engine Replacement stuff
+  ************************************************************************/
+ 
+-static void EngineRenewPoolNewBlock(uint start_item); /* Forward declare for initializer of _engine_renew_pool */
+ enum {
+-	ENGINE_RENEW_POOL_BLOCK_SIZE_BITS = 3,
+-	ENGINE_RENEW_POOL_MAX_BLOCKS      = 8000,
++	ENGINE_RENEW_PUDDLE_SIZE          = 128
+ };
+ 
+-MemoryPool _engine_renew_pool = { "EngineRe", ENGINE_RENEW_POOL_MAX_BLOCKS, ENGINE_RENEW_POOL_BLOCK_SIZE_BITS, sizeof(EngineRenew), &EngineRenewPoolNewBlock, NULL, 0, 0, NULL };
++/* Forward declare init/destroy proc, referenced by INDEXED_POOL */
++static void InitializeEngineRenew(const IndexedPool* pool, void* drop, DropIndex index);
++static void DestroyEngineRenew(const IndexedPool* pool, void* drop, DropIndex index);
+ 
+-static inline uint16 GetEngineRenewPoolSize(void)
+-{
+-	return _engine_renew_pool.total_items;
+-}
++/* Initialize the engine_renew-pool */
++static IndexedPoolSettings _engine_renew_pool_settings = INDEXED_POOL(EngineRenew, ENGINE_RENEW_PUDDLE_SIZE);
++IndexedPool _engine_renew_pool;
+ 
+-#define FOR_ALL_ENGINE_RENEWS_FROM(er, start) for (er = GetEngineRenew(start); er != NULL; er = (er->index + 1 < GetEngineRenewPoolSize()) ? GetEngineRenew(er->index + 1) : NULL)
+-#define FOR_ALL_ENGINE_RENEWS(er) FOR_ALL_ENGINE_RENEWS_FROM(er, 0)
+-
+-static void EngineRenewPoolNewBlock(uint start_item)
++static void InitializeEngineRenew(const IndexedPool* pool, void* drop, DropIndex index)
+ {
+-	EngineRenew *er;
+-
+-	FOR_ALL_ENGINE_RENEWS_FROM(er, start_item) {
+-		er->index = start_item++;
+-		er->from = INVALID_ENGINE;
+-	}
++	EngineRenew* er = (EngineRenew*)drop;
++	ZERO_AND_INDEX(EngineRenew, er)
+ }
+ 
+-
+-static EngineRenew *AllocateEngineRenew(void)
++static void DestroyEngineRenew(const IndexedPool* pool, void* drop, DropIndex index)
+ {
+-	EngineRenew *er;
+-
+-	FOR_ALL_ENGINE_RENEWS(er) {
+-		if (er->from == INVALID_ENGINE) {
+-			er->to = INVALID_ENGINE;
+-			er->next = NULL;
+-			return er;
+-		}
+-	}
+-
+-	/* Check if we can add a block to the pool */
+-	if (AddBlockToPool(&_engine_renew_pool)) return AllocateEngineRenew();
+-
+-	return NULL;
++	/* Nothing to do here */
+ }
+ 
+ /**
+@@ -562,9 +540,11 @@
+ void RemoveAllEngineReplacement(EngineRenewList* erl)
+ {
+ 	EngineRenew* er = (EngineRenew*)(*erl); /* Fetch first element */
++	EngineRenew* next;
+ 	while (er) {
+-		er->from = INVALID_ENGINE; /* "Deallocate" all elements */
+-		er = er->next;
++		next = er->next;
++		DeleteEngineRenew(er);
++		er = next;
+ 	}
+ 	*erl = NULL; /* Empty list */
+ }
+@@ -614,7 +594,7 @@
+ 				} else {
+ 					prev->next = er->next; /* Cut this element out */
+ 				}
+-				er->from = INVALID_ENGINE; /* Deallocate */
++				DeleteEngineRenew(er);
+ 			}
+ 			return 0;
+ 		}
+@@ -639,10 +619,8 @@
+ 	EngineRenew *er;
+ 
+ 	FOR_ALL_ENGINE_RENEWS(er) {
+-		if (er->from != INVALID_ENGINE) {
+-			SlSetArrayIndex(er->index);
+-			SlObject(er, _engine_renew_desc);
+-		}
++		SlSetArrayIndex(er->index);
++		SlObject(er, _engine_renew_desc);
+ 	}
+ }
+ 
+@@ -653,7 +631,7 @@
+ 	while ((index = SlIterateArray()) != -1) {
+ 		EngineRenew *er;
+ 
+-		if (!AddBlockIfNeeded(&_engine_renew_pool, index))
++		if (IndexedPoolAllocateIndex(&_engine_renew_pool, index) == NULL)
+ 			error("EngineRenews: failed loading savegame: too many EngineRenews");
+ 
+ 		er = GetEngineRenew(index);
+@@ -717,7 +695,5 @@
+ 
+ void InitializeEngines(void)
+ {
+-	/* Clean the engine renew pool and create 1 block in it */
+-	CleanPool(&_engine_renew_pool);
+-	AddBlockToPool(&_engine_renew_pool);
++	IndexedPoolInitialize(&_engine_renew_pool, &_engine_renew_pool_settings);
+ }
+=== engine.h
+==================================================================
+--- engine.h	(revision 313)
++++ engine.h	(local)
+@@ -259,7 +259,7 @@
+  * it.
+  */
+ struct EngineRenew {
+-	uint16 index;
++	EngineRenewID index;
+ 	EngineID from;
+ 	EngineID to;
+ 	struct EngineRenew *next;
+@@ -272,20 +272,13 @@
+  * placed here so the only exception to this rule, the saveload code, can use
+  * it.
+  */
+-extern MemoryPool _engine_renew_pool;
++extern IndexedPool _engine_renew_pool;
++#define FOR_ALL_ENGINE_RENEWS_FROM(v, start) FOR_ALL_IN_POOL_FROM(_engine_renew_pool, v, start)
++#define FOR_ALL_ENGINE_RENEWS(v) FOR_ALL_IN_POOL(_engine_renew_pool, v)
++#define FOR_ALL_ENGINE_RENEWS_EVERY_N_TICKS(v, n, ctr) FOR_ALL_EVERY_N_TICKS(_engine_renew_pool, v, n, ctr)
++INDEXED_POOL_FUNCTIONS(EngineRenew, EngineRenews, _engine_renew_pool)
+ 
+ /**
+- * DO NOT USE outside of engine.c. Is
+- * placed here so the only exception to this rule, the saveload code, can use
+- * it.
+- */
+-static inline EngineRenew *GetEngineRenew(uint16 index)
+-{
+-	return (EngineRenew*)GetItemFromPool(&_engine_renew_pool, index);
+-}
+-
+-
+-/**
+  * A list to group EngineRenew directives together (such as per-player).
+  */
+ typedef EngineRenew* EngineRenewList;
+=== graph_gui.c
+==================================================================
+--- graph_gui.c	(revision 313)
++++ graph_gui.c	(local)
+@@ -1109,12 +1109,12 @@
+ 	const uint16 cmp1 = *(const uint16 *)a;
+ 	const uint16 cmp2 = *(const uint16 *)b;
+ 
+-	ss = GetSign(cmp1);
++	ss = GetSignStruct(cmp1);
+ 	GetString(buf1, ss->str);
+ 
+ 	if (cmp2 != _last_sign_idx) {
+ 		_last_sign_idx = cmp2;
+-		ss = GetSign(cmp2);
++		ss = GetSignStruct(cmp2);
+ 		GetString(_bufcache, ss->str);
+ 	}
+ 
+@@ -1129,7 +1129,7 @@
+ 	_num_sign_sort = 0;
+ 
+ 	/* Create array for sorting */
+-	_sign_sort = realloc(_sign_sort, GetSignPoolSize() * sizeof(_sign_sort[0]));
++	_sign_sort = realloc(_sign_sort, GetNumSignStructs() * sizeof(_sign_sort[0]));
+ 	if (_sign_sort == NULL)
+ 		error("Could not allocate memory for the sign-sorting-list");
+ 
+@@ -1172,7 +1172,7 @@
+ 
+ 			/* Start drawing the signs */
+ 			for (i = w->vscroll.pos; i < w->vscroll.cap + w->vscroll.pos && i < w->vscroll.count; i++) {
+-				ss = GetSign(_sign_sort[i]);
++				ss = GetSignStruct(_sign_sort[i]);
+ 
+ 				if (ss->owner != OWNER_NONE)
+ 					DrawPlayerIcon(ss->owner, 4, y + 1);
+@@ -1197,7 +1197,7 @@
+ 			if (id_v >= w->vscroll.count)
+ 				return;
+ 
+-			ss = GetSign(_sign_sort[id_v]);
++			ss = GetSignStruct(_sign_sort[id_v]);
+ 			ScrollMainWindowToTile(TileVirtXY(ss->x, ss->y));
+ 		} break;
+ 		}
+=== industry.h
+==================================================================
+--- industry.h	(revision 313)
++++ industry.h	(local)
+@@ -31,9 +31,11 @@
+ 	byte last_prod_year;
+ 	byte was_cargo_delivered;
+ 
+-	uint16 index;
++	IndustryID index;
+ };
+ 
++extern IndexedPool _industry_pool;
++
+ typedef struct IndustryTileTable {
+ 	TileIndexDiffC ti;
+ 	IndustryGfx gfx;
+@@ -65,37 +67,9 @@
+ 
+ const IndustrySpec *GetIndustrySpec(IndustryType thistype);
+ 
+-extern MemoryPool _industry_pool;
++#define FOR_ALL_INDUSTRIES(i) FOR_ALL_IN_POOL(_industry_pool, i)
++INDEXED_POOL_FUNCTIONS(Industry, Industries, _industry_pool)
+ 
+-/**
+- * Check if an Industry really exists.
+- */
+-static inline bool IsValidIndustry(Industry* industry)
+-{
+-	return industry->xy != 0; /* XXX: Replace by INVALID_TILE someday */
+-}
+-
+-/**
+- * Get the pointer to the industry with index 'index'
+- */
+-static inline Industry *GetIndustry(uint index)
+-{
+-	return (Industry*)GetItemFromPool(&_industry_pool, index);
+-}
+-
+-/**
+- * Get the current size of the IndustryPool
+- */
+-static inline uint16 GetIndustryPoolSize(void)
+-{
+-	return _industry_pool.total_items;
+-}
+-
+-#define FOR_ALL_INDUSTRIES_FROM(i, start) for (i = GetIndustry(start); i != NULL; i = (i->index + 1 < GetIndustryPoolSize()) ? GetIndustry(i->index + 1) : NULL)
+-#define FOR_ALL_INDUSTRIES(i) FOR_ALL_INDUSTRIES_FROM(i, 0)
+-
+-VARDEF int _total_industries; // For the AI: the amount of industries active
+-
+ VARDEF uint16 *_industry_sort;
+ VARDEF bool _industry_sort_dirty;
+ 
+=== industry_cmd.c
+==================================================================
+--- industry_cmd.c	(revision 313)
++++ industry_cmd.c	(local)
+@@ -23,31 +23,52 @@
+ #include "table/industry_land.h"
+ #include "table/build_industry.h"
+ 
++
++static byte _industry_sound_ctr;
++static TileIndex _industry_sound_tile;
++
++void ShowIndustryViewWindow(int industry);
++void BuildOilRig(TileIndex tile);
++void DeleteOilRig(TileIndex tile);
++
+ enum {
+-	/* Max industries: 64000 (8 * 8000) */
+-	INDUSTRY_POOL_BLOCK_SIZE_BITS = 3,       /* In bits, so (1 << 3) == 8 */
+-	INDUSTRY_POOL_MAX_BLOCKS      = 8000,
++	INDUSTRY_PUDDLE_SIZE          = 8,
+ };
+ 
+-/**
+- * Called if a new block is added to the industry-pool
+- */
+-static void IndustryPoolNewBlock(uint start_item)
+-{
+-	Industry *i;
++/* Forward declare init/destroy proc, referenced by INDEXED_POOL */
++static void InitializeIndustry(const IndexedPool* pool, void* drop, DropIndex index);
++static void DestroyIndustry(const IndexedPool* pool, void* drop, DropIndex index);
+ 
+-	FOR_ALL_INDUSTRIES_FROM(i, start_item) i->index = start_item++;
++/* The industry pool */
++static IndexedPoolSettings _industry_pool_settings = INDEXED_POOL(Industry, INDUSTRY_PUDDLE_SIZE);
++IndexedPool _industry_pool;
++
++static void InitializeIndustry(const IndexedPool* pool, void* drop, DropIndex index)
++{
++	ZERO_AND_INDEX(Industry, drop);
+ }
+ 
+-/* Initialize the industry-pool */
+-MemoryPool _industry_pool = { "Industry", INDUSTRY_POOL_MAX_BLOCKS, INDUSTRY_POOL_BLOCK_SIZE_BITS, sizeof(Industry), &IndustryPoolNewBlock, NULL, 0, 0, NULL };
++static void DestroyIndustry(const IndexedPool* pool, void* drop, DropIndex index)
++{
++	Industry* i = (Industry*)drop;
+ 
+-static byte _industry_sound_ctr;
+-static TileIndex _industry_sound_tile;
++	/* Clear all tiles belonging to this industry */
++	BEGIN_TILE_LOOP(tile_cur, i->width, i->height, i->xy);
++		if (IsTileType(tile_cur, MP_INDUSTRY)) {
++			if (GetIndustryIndex(tile_cur) == i->index) {
++				DoClearSquare(tile_cur);
++			}
++		} else if (IsTileType(tile_cur, MP_STATION) && IsOilRig(tile_cur)) {
++			DeleteOilRig(tile_cur);
++		}
++	END_TILE_LOOP(tile_cur, i->width, i->height, i->xy);
+ 
+-void ShowIndustryViewWindow(int industry);
+-void BuildOilRig(TileIndex tile);
+-void DeleteOilRig(TileIndex tile);
++	i->xy = 0;
++	_industry_sort_dirty = true;
++	DeleteSubsidyWithIndustry(i->index);
++	DeleteWindowById(WC_INDUSTRY_VIEW, i->index);
++	InvalidateWindow(WC_INDUSTRY_DIRECTORY, 0);
++}
+ 
+ static const IndustryType _industry_close_mode[IT_END] = {
+ 	/* COAL_MINE */          INDUSTRYLIFE_PRODUCTION,
+@@ -743,25 +764,6 @@
+ 	/* not used */
+ }
+ 
+-void DeleteIndustry(Industry *i)
+-{
+-	BEGIN_TILE_LOOP(tile_cur, i->width, i->height, i->xy);
+-		if (IsTileType(tile_cur, MP_INDUSTRY)) {
+-			if (GetIndustryIndex(tile_cur) == i->index) {
+-				DoClearSquare(tile_cur);
+-			}
+-		} else if (IsTileType(tile_cur, MP_STATION) && IsOilRig(tile_cur)) {
+-			DeleteOilRig(tile_cur);
+-		}
+-	END_TILE_LOOP(tile_cur, i->width, i->height, i->xy);
+-
+-	i->xy = 0;
+-	_industry_sort_dirty = true;
+-	DeleteSubsidyWithIndustry(i->index);
+-	DeleteWindowById(WC_INDUSTRY_VIEW, i->index);
+-	InvalidateWindow(WC_INDUSTRY_DIRECTORY, 0);
+-}
+-
+ static const byte _plantfarmfield_type[] = {1, 1, 1, 1, 1, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 6};
+ 
+ static bool IsBadFarmFieldTile(TileIndex tile)
+@@ -1005,7 +1007,7 @@
+ 	if (_game_mode == GM_EDITOR) return;
+ 
+ 	FOR_ALL_INDUSTRIES(i) {
+-		if (i->xy != 0) ProduceIndustryGoods(i);
++		ProduceIndustryGoods(i);
+ 	}
+ }
+ 
+@@ -1120,8 +1122,7 @@
+ 	if (_patches.multiple_industry_per_town) return t;
+ 
+ 	FOR_ALL_INDUSTRIES(i) {
+-		if (i->xy != 0 &&
+-				i->type == (byte)type &&
++		if (i->type == (byte)type &&
+ 				i->town == t) {
+ 			_error_message = STR_0287_ONLY_ONE_ALLOWED_PER_TOWN;
+ 			return NULL;
+@@ -1241,8 +1242,7 @@
+ 
+ 	FOR_ALL_INDUSTRIES(i) {
+ 		// check if an industry that accepts the same goods is nearby
+-		if (i->xy != 0 &&
+-				DistanceMax(tile, i->xy) <= 14 &&
++		if (DistanceMax(tile, i->xy) <= 14 &&
+ 				indspec->accepts_cargo[0] != CT_INVALID &&
+ 				indspec->accepts_cargo[0] == i->accepts_cargo[0] && (
+ 					_game_mode != GM_EDITOR ||
+@@ -1254,8 +1254,7 @@
+ 		}
+ 
+ 		// check "not close to" field.
+-		if (i->xy != 0 &&
+-				(i->type == indspec->conflicting[0] || i->type == indspec->conflicting[1] || i->type == indspec->conflicting[2]) &&
++		if ((i->type == indspec->conflicting[0] || i->type == indspec->conflicting[1] || i->type == indspec->conflicting[2]) &&
+ 				DistanceMax(tile, i->xy) <= 14) {
+ 			_error_message = STR_INDUSTRY_TOO_CLOSE;
+ 			return false;
+@@ -1264,27 +1263,6 @@
+ 	return true;
+ }
+ 
+-static Industry *AllocateIndustry(void)
+-{
+-	Industry *i;
+-
+-	FOR_ALL_INDUSTRIES(i) {
+-		if (i->xy == 0) {
+-			uint index = i->index;
+-
+-			if (i->index > _total_industries) _total_industries = i->index;
+-
+-			memset(i, 0, sizeof(*i));
+-			i->index = index;
+-
+-			return i;
+-		}
+-	}
+-
+-	/* Check if we can add a block to the pool */
+-	return AddBlockToPool(&_industry_pool) ? AllocateIndustry() : NULL;
+-}
+-
+ static void DoCreateNewIndustry(Industry *i, TileIndex tile, int type, const IndustryTileTable *it, const Town *t, byte owner)
+ {
+ 	const IndustrySpec *indspec = GetIndustrySpec(type);
+@@ -1735,15 +1713,14 @@
+ 	PlayerID old_player = _current_player;
+ 	_current_player = OWNER_NONE;
+ 
+-	FOR_ALL_INDUSTRIES(i) {
+-		if (i->xy != 0) UpdateIndustryStatistics(i);
+-	}
++	FOR_ALL_INDUSTRIES(i)
++		UpdateIndustryStatistics(i);
+ 
+ 	/* 3% chance that we start a new industry */
+ 	if (CHANCE16(3, 100)) {
+ 		MaybeNewIndustry(Random());
+-	} else if (!_patches.smooth_economy && _total_industries > 0) {
+-		i = GetIndustry(RandomRange(_total_industries));
++	} else if (!_patches.smooth_economy && GetNumIndustries() > 0) {
++		i = GetIndustry(RandomRange(GetNumIndustries()));
+ 		if (i->xy != 0) ChangeIndustryProduction(i);
+ 	}
+ 
+@@ -1757,10 +1734,8 @@
+ 
+ void InitializeIndustries(void)
+ {
+-	CleanPool(&_industry_pool);
+-	AddBlockToPool(&_industry_pool);
++	IndexedPoolInitialize(&_industry_pool, &_industry_pool_settings);
+ 
+-	_total_industries = 0;
+ 	_industry_sort_dirty = true;
+ }
+ 
+@@ -1828,18 +1803,14 @@
+ {
+ 	int index;
+ 
+-	_total_industries = 0;
+-
+ 	while ((index = SlIterateArray()) != -1) {
+ 		Industry *i;
+ 
+-		if (!AddBlockIfNeeded(&_industry_pool, index))
++		if (IndexedPoolAllocateIndex(&_industry_pool, index) == NULL)
+ 			error("Industries: failed loading savegame: too many industries");
+ 
+ 		i = GetIndustry(index);
+ 		SlObject(i, _industry_desc);
+-
+-		if (index > _total_industries) _total_industries = index;
+ 	}
+ }
+ 
+=== industry_gui.c
+==================================================================
+--- industry_gui.c	(revision 313)
++++ industry_gui.c	(local)
+@@ -533,12 +533,12 @@
+ 	int n = 0;
+ 
+ 	/* Create array for sorting */
+-	_industry_sort = realloc(_industry_sort, GetIndustryPoolSize() * sizeof(_industry_sort[0]));
++	_industry_sort = realloc(_industry_sort, GetNumIndustries() * sizeof(_industry_sort[0]));
+ 	if (_industry_sort == NULL)
+ 		error("Could not allocate memory for the industry-sorting-list");
+ 
+ 	FOR_ALL_INDUSTRIES(i) {
+-		if (i->xy != 0) _industry_sort[n++] = i->index;
++		_industry_sort[n++] = i->index;
+ 	}
+ 	_num_industry_sort = n;
+ 	_last_industry_idx = 0xFFFF; // used for "cache"
+=== macros.h
+==================================================================
+--- macros.h	(revision 313)
++++ macros.h	(local)
+@@ -4,6 +4,7 @@
+ #define MACROS_H
+ 
+ #include "map.h"
++#include "limits.h"
+ 
+ /// Fetch n bits starting at bit s from x
+ #define GB(x, s, n) (((x) >> (s)) & ((1U << (n)) - 1))
+@@ -147,6 +148,7 @@
+ static inline void swap_int16(int16 *a, int16 *b) { int16 t = *a; *a = *b; *b = t; }
+ static inline void swap_int32(int32 *a, int32 *b) { int32 t = *a; *a = *b; *b = t; }
+ static inline void swap_tile(TileIndex *a, TileIndex *b) { TileIndex t = *a; *a = *b; *b = t; }
++static inline void swap_pointer(void **a, void **b) { void* t = *a; *a = *b; *b = t; }
+ 
+ 
+ static inline uint16 ReadLE16Aligned(const void* x)
+@@ -177,4 +179,20 @@
+  */
+ #define ALIGN(x, n) (((x) + (n) - 1) & ~((n) - 1))
+ 
++/**
++ * Returns the highest value a given type can have. Returns 0xFF for byte, and
++ * 0xFFFF for uint16, for example.
++ */
++#define MAX_VALUE(type) ((((uint64)1) << sizeof(type) * CHAR_BIT) - 1)
++/* uint64 is used to prevent intermediate rounding for 64 bit types */
++
++/**
++ * Returns the number of indices available when using a given type as index.
++ * Keeps one index free for the INVALID_SOMETHING value, which should be equal
++ * to MAX_VALUE(type)
++ */
++#define NUM_INDICES(type) MAX_VALUE(type) 
++/* One element is reserved automatically, because MAX_VALUE returns the
++ * maximum index, and we return the number of available indices (off-by-one). */
++
+ #endif /* MACROS_H */
+=== misc.c
+==================================================================
+--- misc.c	(revision 313)
++++ misc.c	(local)
+@@ -92,7 +92,7 @@
+ 
+ void InitializeVehicles(void);
+ void InitializeWaypoints(void);
+-void InitializeDepot(void);
++void InitializeDepots(void);
+ void InitializeEngines(void);
+ void InitializeOrders(void);
+ void InitializeClearLand(void);
+@@ -151,7 +151,7 @@
+ 	InitializeEngines();
+ 	InitializeVehicles();
+ 	InitializeWaypoints();
+-	InitializeDepot();
++	InitializeDepots();
+ 	InitializeOrders();
+ 
+ 	InitNewsItemStructs();
+@@ -474,16 +474,12 @@
+ /**
+  * Runs the day_proc for every DAY_TICKS vehicle starting at daytick.
+  */
+-static void RunVehicleDayProc(uint daytick)
++static void RunVehicleDayProc(void)
+ {
+-	uint total = _vehicle_pool.total_items;
+-	uint i;
++	Vehicle* v;
+ 
+-	for (i = daytick; i < total; i += DAY_TICKS) {
+-		Vehicle* v = GetVehicle(i);
+-
+-		if (v->type != 0) _on_new_vehicle_day_proc[v->type - 0x10](v);
+-	}
++	FOR_ALL_VEHICLES_EVERY_N_TICKS(v, DAY_TICKS, _vehicle_tick_ctr)
++		_on_new_vehicle_day_proc[v->type - 0x10](v);
+ }
+ 
+ void IncreaseDate(void)
+@@ -495,7 +491,7 @@
+ 		return;
+ 	}
+ 
+-	RunVehicleDayProc(_date_fract);
++	RunVehicleDayProc();
+ 
+ 	/* increase day, and check if a new day is there? */
+ 	_tick_counter++;
+@@ -620,7 +616,7 @@
+ 	    SLEG_VAR(_date,                  SLE_UINT16),
+ 	    SLEG_VAR(_date_fract,            SLE_UINT16),
+ 	    SLEG_VAR(_tick_counter,          SLE_UINT16),
+-	    SLEG_VAR(_vehicle_id_ctr_day,    SLE_UINT16),
++	    SLEG_VAR(_vehicle_tick_ctr,      SLE_UINT16),
+ 	    SLEG_VAR(_age_cargo_skip_counter,SLE_UINT8),
+ 	    SLEG_VAR(_avail_aircraft,        SLE_UINT8),
+ 	SLEG_CONDVAR(_cur_tileloop_tile,     SLE_FILE_U16 | SLE_VAR_U32, 0, 5),
+@@ -629,13 +625,13 @@
+ 	    SLEG_VAR(_station_tick_ctr,      SLE_UINT16),
+ 	    SLEG_VAR(_random_seeds[0][0],    SLE_UINT32),
+ 	    SLEG_VAR(_random_seeds[0][1],    SLE_UINT32),
+-	SLEG_CONDVAR(_cur_town_ctr,          SLE_FILE_U8 | SLE_VAR_U32,  0, 9),
+-	SLEG_CONDVAR(_cur_town_ctr,          SLE_UINT32,                10, SL_MAX_VERSION),
++	SLEG_CONDVAR(_town_tick_ctr,         SLE_FILE_U8 | SLE_VAR_U32,  0, 9),
++	SLEG_CONDVAR(_town_tick_ctr,         SLE_UINT32,                10, SL_MAX_VERSION),
+ 	    SLEG_VAR(_cur_player_tick_index, SLE_FILE_U8  | SLE_VAR_U32),
+ 	    SLEG_VAR(_next_competitor_start, SLE_FILE_U16 | SLE_VAR_U32),
+ 	    SLEG_VAR(_trees_tick_ctr,        SLE_UINT8),
+ 	SLEG_CONDVAR(_pause,                 SLE_UINT8,   4, SL_MAX_VERSION),
+-	SLEG_CONDVAR(_cur_town_iter,         SLE_UINT32, 11, SL_MAX_VERSION),
++	SLEG_CONDVAR(_cur_town_iter,         SLE_UINT32, 11, SL_MAX_VERSION), /* TODO: Unused */
+ 	    SLEG_END()
+ };
+ 
+=== newgrf_spritegroup.c
+==================================================================
+--- newgrf_spritegroup.c	(revision 313)
++++ newgrf_spritegroup.c	(local)
+@@ -8,66 +8,52 @@
+ #include "newgrf_spritegroup.h"
+ 
+ enum {
+-	SPRITEGROUP_POOL_BLOCK_SIZE_BITS = 4, /* (1 << 4) == 16 items */
+-	SPRITEGROUP_POOL_MAX_BLOCKS      = 8000,
++	SPRITE_GROUP_PUDDLE_SIZE           = 128
+ };
+ 
+-static uint _spritegroup_count = 0;
+-static MemoryPool _spritegroup_pool;
++/* Forward declare to be used in the pool settings below */
++void DestroySpriteGroup(const MemoryPool* pool, void* drop);
+ 
++/** Hold the settings of the spritegroup pool. Unlike most other pools, this
++ * is no indexed pool. Drops have no identifying ID, but the pool mainly acts
++ * like a (fast) malloc/free replacement. */
++static MemoryPoolSettings _sprite_group_pool_settings = {"SpriteGroup", POOL_NO_LIMIT, SPRITE_GROUP_PUDDLE_SIZE, sizeof(SpriteGroup), POOL_FAST, NULL, (const PoolDestroyDrop*) &DestroySpriteGroup};
++static MemoryPool _sprite_group_pool;
+ 
+-static void SpriteGroupPoolCleanBlock(uint start_item, uint end_item)
++void DestroySpriteGroup(const MemoryPool* pool, void* drop)
+ {
+-	uint i;
++	SpriteGroup *group = (SpriteGroup*)drop;
++	/* Free dynamically allocated memory */
++	switch (group->type) {
++		case SGT_REAL:
++			free(group->g.real.loaded);
++			free(group->g.real.loading);
++			break;
+ 
+-	for (i = start_item; i <= end_item; i++) {
+-		SpriteGroup *group = (SpriteGroup*)GetItemFromPool(&_spritegroup_pool, i);
++		case SGT_DETERMINISTIC:
++			free(group->g.determ.adjusts);
++			free(group->g.determ.ranges);
++			break;
+ 
+-		/* Free dynamically allocated memory */
+-		switch (group->type) {
+-			case SGT_REAL:
+-				free(group->g.real.loaded);
+-				free(group->g.real.loading);
+-				break;
++		case SGT_RANDOMIZED:
++			free(group->g.random.groups);
++			break;
+ 
+-			case SGT_DETERMINISTIC:
+-				free(group->g.determ.adjusts);
+-				free(group->g.determ.ranges);
+-				break;
+-
+-			case SGT_RANDOMIZED:
+-				free(group->g.random.groups);
+-				break;
+-
+-			default:
+-				break;
+-		}
++		default:
++			break;
+ 	}
+ }
+ 
+-
+-/* Initialize the SpriteGroup pool */
+-static MemoryPool _spritegroup_pool = { "SpriteGr", SPRITEGROUP_POOL_MAX_BLOCKS, SPRITEGROUP_POOL_BLOCK_SIZE_BITS, sizeof(SpriteGroup), NULL, &SpriteGroupPoolCleanBlock, 0, 0, NULL };
+-
+-
+ /* Allocate a new SpriteGroup */
+ SpriteGroup *AllocateSpriteGroup(void)
+ {
+-	/* This is totally different to the other pool allocators, as we never remove an item from the pool. */
+-	if (_spritegroup_count == _spritegroup_pool.total_items) {
+-		if (!AddBlockToPool(&_spritegroup_pool)) return NULL;
+-	}
+-
+-	return (SpriteGroup*)GetItemFromPool(&_spritegroup_pool, _spritegroup_count++);
++		return (SpriteGroup*) PoolAllocateDrop(&_sprite_group_pool);
+ }
+ 
+ 
+ void InitializeSpriteGroupPool(void)
+ {
+-	CleanPool(&_spritegroup_pool);
+-	AddBlockToPool(&_spritegroup_pool);
+-
+-	_spritegroup_count = 0;
++	PoolInitialize(&_sprite_group_pool, &_sprite_group_pool_settings);
+ }
+ 
+ 
+=== npf.c
+==================================================================
+--- npf.c	(revision 313)
++++ npf.c	(local)
+@@ -784,7 +784,7 @@
+ 	FOR_ALL_DEPOTS(depot) {
+ 		/* Check if this is really a valid depot, it is of the needed type and
+ 		 * owner */
+-		if (IsValidDepot(depot) && IsTileDepotType(depot->xy, type) && IsTileOwner(depot->xy, owner))
++		if (IsTileDepotType(depot->xy, type) && IsTileOwner(depot->xy, owner))
+ 			/* If so, let's add it to the queue, sorted by distance */
+ 			depots.push(&depots, depot, DistanceManhattan(tile, depot->xy));
+ 	}
+=== oldloader.c
+==================================================================
+--- oldloader.c	(revision 313)
++++ oldloader.c	(local)
+@@ -338,35 +338,10 @@
+ 	}
+ }
+ 
+-static void FixOldVehicles(void)
+-{
+-	/* Check for shared orders, and link them correctly */
+-	Vehicle* v;
+-
+-	FOR_ALL_VEHICLES(v) {
+-		Vehicle *u;
+-
+-		if (v->type == 0) continue;
+-
+-		FOR_ALL_VEHICLES_FROM(u, v->index + 1) {
+-			if (u->type == 0) continue;
+-
+-			/* If a vehicle has the same orders, add the link to eachother
+-			 * in both vehicles */
+-			if (v->orders == u->orders) {
+-				v->next_shared = u;
+-				u->prev_shared = v;
+-				break;
+-			}
+-		}
+-	}
+-}
+-
+ /*
+  * End -- Stuff to fix the savegames to be OpenTTD compatible
+  */
+ 
+-
+ /* Help:
+  *  - OCL_SVAR: load 'type' to offset 'offset' in a struct of type 'base', which must also
+  *       be given via base in LoadChunk() as real pointer
+@@ -488,12 +463,12 @@
+ 
+ 	OCL_END()
+ };
+-static bool LoadOldTown(LoadgameState *ls, int num)
++static bool LoadOldTown(LoadgameState *ls, int index)
+ {
+-	if (!AddBlockIfNeeded(&_town_pool, num))
++	if(IndexedPoolAllocateIndex(&_town_pool, index) == NULL)
+ 		error("Towns: failed loading savegame: too many towns");
+ 
+-	return LoadChunk(ls, GetTown(num), town_chunk);
++	return LoadChunk(ls, GetTown(index), town_chunk);
+ }
+ 
+ static uint16 _old_order;
+@@ -502,20 +477,20 @@
+ 	OCL_END()
+ };
+ 
+-static bool LoadOldOrder(LoadgameState *ls, int num)
++static bool LoadOldOrder(LoadgameState *ls, int index)
+ {
+-	if (!AddBlockIfNeeded(&_order_pool, num))
++	if(IndexedPoolAllocateIndex(&_order_pool, index) == NULL)
+ 		error("Orders: failed loading savegame: too many orders");
+ 
+ 	if (!LoadChunk(ls, NULL, order_chunk)) return false;
+ 
+-	AssignOrder(GetOrder(num), UnpackOldOrder(_old_order));
++	AssignOrder(GetOrder(index), UnpackOldOrder(_old_order));
+ 
+ 	/* Relink the orders to eachother (in TTD(Patch) the orders for one
+ 	vehicle are behind eachother, with OT_NOTHING as indication that
+ 	it is the last order */
+-	if (num > 0 && GetOrder(num)->type != OT_NOTHING)
+-		GetOrder(num - 1)->next = GetOrder(num);
++	if (index > 0 && GetOrder(index)->type != OT_NOTHING)
++		GetOrder(index - 1)->next = GetOrder(index);
+ 
+ 	return true;
+ }
+@@ -526,15 +501,15 @@
+ 	OCL_END()
+ };
+ 
+-static bool LoadOldDepot(LoadgameState *ls, int num)
++static bool LoadOldDepot(LoadgameState *ls, int index)
+ {
+-	if (!AddBlockIfNeeded(&_depot_pool, num))
++	if (IndexedPoolAllocateIndex(&_depot_pool, index) == NULL)
+ 		error("Depots: failed loading savegame: too many depots");
+ 
+-	if (!LoadChunk(ls, GetDepot(num), depot_chunk)) return false;
++	if (!LoadChunk(ls, GetDepot(index), depot_chunk)) return false;
+ 
+-	if (GetDepot(num)->xy != 0) {
+-		GetDepot(num)->town_index = REMAP_TOWN_IDX(_old_town_index);
++	if (GetDepot(index)->xy != 0) {
++		GetDepot(index)->town_index = REMAP_TOWN_IDX(_old_town_index);
+ 	}
+ 
+ 	return true;
+@@ -638,15 +613,15 @@
+ 
+ 	OCL_END()
+ };
+-static bool LoadOldStation(LoadgameState *ls, int num)
++static bool LoadOldStation(LoadgameState *ls, int index)
+ {
+ 	Station *st;
+ 
+-	if (!AddBlockIfNeeded(&_station_pool, num))
++	if (IndexedPoolAllocateIndex(&_station_pool, index) == NULL)
+ 		error("Stations: failed loading savegame: too many stations");
+ 
+-	st = GetStation(num);
+-	_current_station_id = num;
++	st = GetStation(index);
++	_current_station_id = index;
+ 
+ 	if (!LoadChunk(ls, st, station_chunk))
+ 		return false;
+@@ -712,14 +687,14 @@
+ 	OCL_END()
+ };
+ 
+-static bool LoadOldIndustry(LoadgameState *ls, int num)
++static bool LoadOldIndustry(LoadgameState *ls, int index)
+ {
+ 	Industry *i;
+ 
+-	if (!AddBlockIfNeeded(&_industry_pool, num))
++	if (IndexedPoolAllocateIndex(&_industry_pool, index) == NULL)
+ 		error("Industries: failed loading savegame: too many industries");
+ 
+-	i = GetIndustry(num);
++	i = GetIndustry(index);
+ 	if (!LoadChunk(ls, i, industry_chunk)) return false;
+ 
+ 	if (i->xy != 0) {
+@@ -1203,7 +1178,7 @@
+ 
+ 		_current_vehicle_id = num * _old_vehicle_multiplier + i;
+ 
+-		if (!AddBlockIfNeeded(&_vehicle_pool, _current_vehicle_id))
++		if (IndexedPoolAllocateIndex(&_vehicle_pool, _current_vehicle_id) == NULL)
+ 			error("Vehicles: failed loading savegame: too many vehicles");
+ 
+ 		v = GetVehicle(_current_vehicle_id);
+@@ -1253,12 +1228,12 @@
+ 	OCL_END()
+ };
+ 
+-static bool LoadOldSign(LoadgameState *ls, int num)
++static bool LoadOldSign(LoadgameState *ls, int index)
+ {
+-	if (!AddBlockIfNeeded(&_sign_pool, num))
++	if (IndexedPoolAllocateIndex(&_signstruct_pool, index) == NULL)
+ 		error("Signs: failed loading savegame: too many signs");
+ 
+-	return LoadChunk(ls, GetSign(num), sign_chunk);
++	return LoadChunk(ls, GetSignStruct(index), sign_chunk);
+ }
+ 
+ static const OldChunks engine_chunk[] = {
+@@ -1430,7 +1405,7 @@
+ 	OCL_CHUNK( 40, LoadOldSign ),
+ 	OCL_CHUNK(256, LoadOldEngine ),
+ 
+-	OCL_VAR ( OC_UINT16,    1, &_vehicle_id_ctr_day ),
++	OCL_VAR ( OC_UINT16,    1, &_vehicle_tick_ctr ),
+ 
+ 	OCL_CHUNK(  8, LoadOldSubsidy ),
+ 
+@@ -1511,9 +1486,6 @@
+ 	/* Fix some general stuff */
+ 	_opt.landscape = _opt.landscape & 0xF;
+ 
+-	/* Remap some pointers */
+-	_cur_town_ctr      = REMAP_TOWN_IDX(_old_cur_town_ctr);
+-
+ 	/* _old_map3 is changed in _map3_lo and _map3_hi */
+ 	for (i = 0; i < OLD_MAP_SIZE; i++) {
+ 		_m[i].m3 = _old_map3[i * 2];
+@@ -1537,7 +1509,7 @@
+ 	/* Fix the game to be compatible with OpenTTD */
+ 	FixOldTowns();
+ 	FixOldStations();
+-	FixOldVehicles();
++	FixSharedOrders();
+ 
+ 	AddTypeToEngines();
+ 
+=== openttd.c
+==================================================================
+--- openttd.c	(revision 313)
++++ openttd.c	(local)
+@@ -251,12 +251,19 @@
+ static void UnInitializeDynamicVariables(void)
+ {
+ 	/* Dynamic stuff needs to be free'd somewhere... */
+-	CleanPool(&_town_pool);
+-	CleanPool(&_industry_pool);
+-	CleanPool(&_station_pool);
+-	CleanPool(&_vehicle_pool);
+-	CleanPool(&_sign_pool);
+-	CleanPool(&_order_pool);
++	/* XXX: Shouldn't this be freed where it was allocated? Function like
++	 * DestroyVehicles(), etc? */
++	IndexedPoolEmpty(&_signstruct_pool);
++	IndexedPoolEmpty(&_town_pool);
++	IndexedPoolEmpty(&_industry_pool);
++	IndexedPoolEmpty(&_station_pool);
++	IndexedPoolEmpty(&_roadstop_pool);
++	IndexedPoolEmpty(&_depot_pool);
++	IndexedPoolEmpty(&_vehicle_pool);
++	IndexedPoolEmpty(&_waypoint_pool);
++	/* Note that order is important here! Vehicles and depots will automatically
++	 * clean out orders! */
++	IndexedPoolEmpty(&_order_pool);
+ 
+ 	free(_station_sort);
+ 	free(_town_sort);
+=== openttd.h
+==================================================================
+--- openttd.h	(revision 313)
++++ openttd.h	(local)
+@@ -61,13 +61,23 @@
+ typedef struct NewsItem NewsItem;
+ typedef struct Industry Industry;
+ typedef struct DrawPixelInfo DrawPixelInfo;
++typedef byte PlayerID;
++typedef byte VehicleOrderID; /** ID of an order within its current vehicle. */
++typedef byte CargoID;
++
++/* These IDs are all used in pool. */
++typedef uint16 TownID;
+ typedef uint16 VehicleID;
++typedef uint16 WaypointID;
+ typedef uint16 StationID;
+-typedef uint16 TownID;
+-typedef byte PlayerID;
+-typedef byte OrderID;
+-typedef byte CargoID;
++typedef uint16 DepotID;
++typedef uint16 SignStructID;
++typedef uint16 OrderID;
++typedef uint16 RoadStopID;
+ typedef uint16 StringID;
++typedef uint16 IndustryID;
++typedef uint16 EngineRenewID;
++
+ typedef uint32 SpriteID;    ///< The number of a sprite, without mapping bits and colortables
+ typedef uint32 PalSpriteID; ///< The number of a sprite plus all the mapping bits and colortables
+ typedef uint32 CursorID;
+=== order.h
+==================================================================
+--- order.h	(revision 313)
++++ order.h	(local)
+@@ -89,7 +89,7 @@
+ 
+ typedef struct {
+ 	VehicleID clone;
+-	OrderID orderindex;
++	VehicleOrderID orderindex;
+ 	Order order[MAX_BACKUP_ORDER_COUNT + 1];
+ 	uint16 service_interval;
+ 	char name[32];
+@@ -98,49 +98,20 @@
+ VARDEF TileIndex _backup_orders_tile;
+ VARDEF BackuppedOrders _backup_orders_data[1];
+ 
+-extern MemoryPool _order_pool;
++extern IndexedPool _order_pool;
+ 
+-/**
+- * Get the pointer to the order with index 'index'
+- */
+-static inline Order *GetOrder(uint index)
+-{
+-	return (Order*)GetItemFromPool(&_order_pool, index);
+-}
++#define FOR_ALL_ORDERS(order) FOR_ALL_IN_POOL(_order_pool, order)
++INDEXED_POOL_FUNCTIONS(Order, Orders, _order_pool);
+ 
+ /**
+- * Get the current size of the OrderPool
++ * Iterates all the orders of the given vehicle. Expands to a for loop (add {}
++ * to taste), with order (Order*) set to each order in turn.
+  */
+-static inline uint16 GetOrderPoolSize(void)
+-{
+-	return _order_pool.total_items;
+-}
+-
+-#define FOR_ALL_ORDERS_FROM(order, start) for (order = GetOrder(start); order != NULL; order = (order->index + 1 < GetOrderPoolSize()) ? GetOrder(order->index + 1) : NULL)
+-#define FOR_ALL_ORDERS(order) FOR_ALL_ORDERS_FROM(order, 0)
+-
+-
+ #define FOR_VEHICLE_ORDERS(v, order) for (order = v->orders; order != NULL; order = order->next)
+ 
+-static inline bool HasOrderPoolFree(uint amount)
+-{
+-	const Order *order;
+-
+-	/* There is always room if not all blocks in the pool are reserved */
+-	if (_order_pool.current_blocks < _order_pool.max_blocks)
+-		return true;
+-
+-	FOR_ALL_ORDERS(order)
+-		if (order->type == OT_NOTHING)
+-			if (--amount == 0)
+-				return true;
+-
+-	return false;
+-}
+-
+ static inline bool IsOrderPoolFull(void)
+ {
+-	return !HasOrderPoolFree(1);
++	return GetNumOrdersFree() == 0;
+ }
+ 
+ /* Pack and unpack routines */
+@@ -164,7 +135,7 @@
+ /* Functions */
+ void BackupVehicleOrders(const Vehicle *v, BackuppedOrders *order);
+ void RestoreVehicleOrders(const Vehicle* v, const BackuppedOrders* order);
+-void DeleteDestinationFromVehicleOrder(Order dest);
++void DeleteOrderFromAllVehicles(Order dest);
+ void InvalidateVehicleOrder(const Vehicle *v);
+ bool VehicleHasDepotOrders(const Vehicle *v);
+ void CheckOrders(const Vehicle*);
+=== order_cmd.c
+==================================================================
+--- order_cmd.c	(revision 313)
++++ order_cmd.c	(local)
+@@ -18,23 +18,26 @@
+ 
+ enum {
+ 	/* Max orders: 64000 (64 * 1000) */
+-	ORDER_POOL_BLOCK_SIZE_BITS = 6,       /* In bits, so (1 << 6) == 64 */
+-	ORDER_POOL_MAX_BLOCKS      = 1000,
++	ORDER_PUDDLE_SIZE = 64,
+ };
+ 
+-/**
+- * Called if a new block is added to the order-pool
+- */
+-static void OrderPoolNewBlock(uint start_item)
++/* Forward declare init/destroy proc, referenced by INDEXED_POOL */
++static void InitializeOrder(const IndexedPool* pool, void* drop, DropIndex index);
++static void DestroyOrder(const IndexedPool* pool, void* drop, DropIndex index);
++
++/* Initialize the order-pool */
++static IndexedPoolSettings _order_pool_settings = INDEXED_POOL(Order, ORDER_PUDDLE_SIZE);
++IndexedPool _order_pool;
++
++static void InitializeOrder(const IndexedPool* pool, void* drop, DropIndex index)
+ {
+-	Order *order;
++	ZERO_AND_INDEX(Order, drop);
++}
+ 
+-	FOR_ALL_ORDERS_FROM(order, start_item) order->index = start_item++;
++static void DestroyOrder(const IndexedPool* pool, void* drop, DropIndex index)
++{
+ }
+ 
+-/* Initialize the order-pool */
+-MemoryPool _order_pool = { "Orders", ORDER_POOL_MAX_BLOCKS, ORDER_POOL_BLOCK_SIZE_BITS, sizeof(Order), &OrderPoolNewBlock, NULL, 0, 0, NULL };
+-
+ /**
+  *
+  * Unpacks a order from savegames made with TTD(Patch)
+@@ -103,35 +106,6 @@
+ 
+ /**
+  *
+- * Allocate a new order
+- *
+- * @return Order* if a free space is found, else NULL.
+- *
+- */
+-static Order *AllocateOrder(void)
+-{
+-	Order *order;
+-
+-	FOR_ALL_ORDERS(order) {
+-		if (order->type == OT_NOTHING) {
+-			uint index = order->index;
+-
+-			memset(order, 0, sizeof(*order));
+-			order->index = index;
+-			order->next = NULL;
+-
+-			return order;
+-		}
+-	}
+-
+-	/* Check if we can add a block to the pool */
+-	if (AddBlockToPool(&_order_pool)) return AllocateOrder();
+-
+-	return NULL;
+-}
+-
+-/**
+- *
+  * Assign data to an order (from an other order)
+  *   This function makes sure that the index is maintained correctly
+  *
+@@ -172,10 +146,10 @@
+ {
+ 	Vehicle *v;
+ 	VehicleID veh   = GB(p1,  0, 16);
+-	OrderID sel_ord = GB(p1, 16, 16);
++	VehicleOrderID sel_ord = GB(p1, 16, 16);
+ 	Order new_order = UnpackOrder(p2);
+ 
+-	if (!IsVehicleIndex(veh)) return CMD_ERROR;
++	if (!IsValidVehicleID(veh)) return CMD_ERROR;
+ 	v = GetVehicle(veh);
+ 	if (v->type == 0 || !CheckOwnership(v->owner)) return CMD_ERROR;
+ 
+@@ -185,11 +159,10 @@
+ 		case OT_GOTO_STATION: {
+ 			const Station *st;
+ 
+-			if (!IsStationIndex(new_order.station)) return CMD_ERROR;
++			if (!IsValidStationID(new_order.station)) return CMD_ERROR;
+ 			st = GetStation(new_order.station);
+ 
+-			if (!IsValidStation(st) ||
+-					(st->airport_type != AT_OILRIG && !(IsBuoy(st)) && !CheckOwnership(st->owner))) {
++			if (st->airport_type != AT_OILRIG && !(IsBuoy(st)) && !CheckOwnership(st->owner)) {
+ 				return CMD_ERROR;
+ 			}
+ 
+@@ -247,11 +220,10 @@
+ 			if (v->type == VEH_Aircraft) {
+ 				const Station* st;
+ 
+-				if (!IsStationIndex(new_order.station)) return CMD_ERROR;
++				if (!IsValidStationID(new_order.station)) return CMD_ERROR;
+ 				st = GetStation(new_order.station);
+ 
+-				if (!IsValidStation(st) ||
+-						(st->airport_type != AT_OILRIG && !CheckOwnership(st->owner)) ||
++				if ((st->airport_type != AT_OILRIG && !CheckOwnership(st->owner)) ||
+ 						!(st->facilities & FACIL_AIRPORT) ||
+ 						GetAirport(st->airport_type)->nof_depots == 0) {
+ 					return CMD_ERROR;
+@@ -259,10 +231,10 @@
+ 			} else {
+ 				const Depot* dp;
+ 
+-				if (!IsDepotIndex(new_order.station)) return CMD_ERROR;
+-				dp = GetDepot(new_order.station);
++				if (!IsValidDepotID(new_order.station)) return CMD_ERROR;
++				dp = GetDepot((OrderID)new_order.station);
+ 
+-				if (!IsValidDepot(dp) || !CheckOwnership(GetTileOwner(dp->xy)))
++				if (!CheckOwnership(GetTileOwner(dp->xy)))
+ 					return CMD_ERROR;
+ 
+ 				switch (v->type) {
+@@ -305,7 +277,7 @@
+ 
+ 			if (v->type != VEH_Train) return CMD_ERROR;
+ 
+-			if (!IsWaypointIndex(new_order.station)) return CMD_ERROR;
++			if (!IsValidWaypointID(new_order.station)) return CMD_ERROR;
+ 			wp = GetWaypoint(new_order.station);
+ 
+ 			if (!CheckOwnership(GetTileOwner(wp->xy))) return CMD_ERROR;
+@@ -435,10 +407,10 @@
+ {
+ 	Vehicle *v, *u;
+ 	VehicleID veh_id = p1;
+-	OrderID sel_ord = p2;
++	VehicleOrderID sel_ord = p2;
+ 	Order *order;
+ 
+-	if (!IsVehicleIndex(veh_id)) return CMD_ERROR;
++	if (!IsValidVehicleID(veh_id)) return CMD_ERROR;
+ 	v = GetVehicle(veh_id);
+ 	if (v->type == 0 || !CheckOwnership(v->owner)) return CMD_ERROR;
+ 
+@@ -510,13 +482,13 @@
+ 	Vehicle *v;
+ 	VehicleID veh_id = p1;
+ 
+-	if (!IsVehicleIndex(veh_id)) return CMD_ERROR;
++	if (!IsValidVehicleID(veh_id)) return CMD_ERROR;
+ 	v = GetVehicle(veh_id);
+ 	if (v->type == 0 || !CheckOwnership(v->owner)) return CMD_ERROR;
+ 
+ 	if (flags & DC_EXEC) {
+ 		/* Goto next order */
+-		OrderID b = v->cur_order_index + 1;
++		VehicleOrderID b = v->cur_order_index + 1;
+ 		if (b >= v->num_orders) b = 0;
+ 
+ 		v->cur_order_index = b;
+@@ -554,10 +526,10 @@
+ {
+ 	Vehicle *v;
+ 	Order *order;
+-	OrderID sel_ord = GB(p1, 16, 16); // XXX - automatically truncated to 8 bits.
++	VehicleOrderID sel_ord = GB(p1, 16, 16); // XXX - automatically truncated to 8 bits.
+ 	VehicleID veh   = GB(p1,  0, 16);
+ 
+-	if (!IsVehicleIndex(veh)) return CMD_ERROR;
++	if (!IsValidVehicleID(veh)) return CMD_ERROR;
+ 	if (p2 != OFB_FULL_LOAD && p2 != OFB_UNLOAD && p2 != OFB_NON_STOP && p2 != OFB_TRANSFER) return CMD_ERROR;
+ 
+ 	v = GetVehicle(veh);
+@@ -623,7 +595,7 @@
+ 	VehicleID veh_src = GB(p1, 16, 16);
+ 	VehicleID veh_dst = GB(p1,  0, 16);
+ 
+-	if (!IsVehicleIndex(veh_dst)) return CMD_ERROR;
++	if (!IsValidVehicleID(veh_dst)) return CMD_ERROR;
+ 
+ 	dst = GetVehicle(veh_dst);
+ 
+@@ -633,7 +605,7 @@
+ 		case CO_SHARE: {
+ 			Vehicle *src;
+ 
+-			if (!IsVehicleIndex(veh_src)) return CMD_ERROR;
++			if (!IsValidVehicleID(veh_src)) return CMD_ERROR;
+ 
+ 			src = GetVehicle(veh_src);
+ 
+@@ -680,7 +652,7 @@
+ 			Vehicle *src;
+ 			int delta;
+ 
+-			if (!IsVehicleIndex(veh_src)) return CMD_ERROR;
++			if (!IsValidVehicleID(veh_src)) return CMD_ERROR;
+ 
+ 			src = GetVehicle(veh_src);
+ 
+@@ -708,9 +680,10 @@
+ 				}
+ 			}
+ 
+-			/* make sure there are orders available */
+-			delta = IsOrderListShared(dst) ? src->num_orders + 1 : src->num_orders - dst->num_orders;
+-			if (!HasOrderPoolFree(delta))
++			/* make sure there are enough orders available */
++			delta = ( IsOrderListShared(dst) ? src->num_orders + 1 : src->num_orders - dst->num_orders );
++
++			if (delta > 0 && GetNumOrdersFree() < (uint)delta)
+ 				return_cmd_error(STR_8831_NO_MORE_SPACE_FOR_ORDERS);
+ 
+ 			if (flags & DC_EXEC) {
+@@ -836,10 +809,10 @@
+ int32 CmdRestoreOrderIndex(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v;
+-	OrderID cur_ord = GB(p2,  0, 16);
++	VehicleOrderID cur_ord = GB(p2,  0, 16);
+ 	uint16 serv_int = GB(p2, 16, 16);
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 	/* Check the vehicle type and ownership, and if the service interval and order are in range */
+@@ -934,7 +907,7 @@
+  * @param dest type and station has to be set. This order will be removed from all orders of vehicles
+  *
+  */
+-void DeleteDestinationFromVehicleOrder(Order dest)
++void DeleteOrderFromAllVehicles(Order dest)
+ {
+ 	Vehicle *v;
+ 	Order *order;
+@@ -1002,7 +975,7 @@
+  */
+ void DeleteVehicleOrders(Vehicle *v)
+ {
+-	Order *order, *cur;
++	Order *next, *cur;
+ 
+ 	DeleteOrderWarnings(v);
+ 
+@@ -1040,21 +1013,11 @@
+ 	v->orders = NULL;
+ 	v->num_orders = 0;
+ 
+-	order = NULL;
+ 	while (cur != NULL) {
+-		if (order != NULL) {
+-			order->type = OT_NOTHING;
+-			order->next = NULL;
+-		}
+-
+-		order = cur;
+-		cur = cur->next;
++		next = cur->next;
++		DeleteOrder(cur);
++		cur = next;
+ 	}
+-
+-	if (order != NULL) {
+-		order->type = OT_NOTHING;
+-		order->next = NULL;
+-	}
+ }
+ 
+ /**
+@@ -1087,8 +1050,7 @@
+ 
+ void InitializeOrders(void)
+ {
+-	CleanPool(&_order_pool);
+-	AddBlockToPool(&_order_pool);
++	IndexedPoolInitialize(&_order_pool, &_order_pool_settings);
+ 
+ 	_backup_orders_tile = 0;
+ }
+@@ -1109,10 +1071,8 @@
+ 	Order *order;
+ 
+ 	FOR_ALL_ORDERS(order) {
+-		if (order->type != OT_NOTHING) {
+-			SlSetArrayIndex(order->index);
+-			SlObject(order, _order_desc);
+-		}
++		SlSetArrayIndex(order->index);
++		SlObject(order, _order_desc);
+ 	}
+ }
+ 
+@@ -1135,7 +1095,7 @@
+ 			SlArray(orders, len, SLE_UINT16);
+ 
+ 			for (i = 0; i < len; ++i) {
+-				if (!AddBlockIfNeeded(&_order_pool, i))
++				if (IndexedPoolAllocateIndex(&_order_pool, i) == NULL)
+ 					error("Orders: failed loading savegame: too many orders");
+ 
+ 				AssignOrder(GetOrder(i), UnpackVersion4Order(orders[i]));
+@@ -1149,7 +1109,7 @@
+ 			SlArray(orders, len, SLE_UINT32);
+ 
+ 			for (i = 0; i < len; ++i) {
+-				if (!AddBlockIfNeeded(&_order_pool, i))
++				if (IndexedPoolAllocateIndex(&_order_pool, i) == NULL)
+ 					error("Orders: failed loading savegame: too many orders");
+ 
+ 				AssignOrder(GetOrder(i), UnpackOrder(orders[i]));
+@@ -1170,7 +1130,7 @@
+ 		while ((index = SlIterateArray()) != -1) {
+ 			Order *order;
+ 
+-			if (!AddBlockIfNeeded(&_order_pool, index))
++			if (IndexedPoolAllocateIndex(&_order_pool, index) == NULL)
+ 				error("Orders: failed loading savegame: too many orders");
+ 
+ 			order = GetOrder(index);
+=== order_gui.c
+==================================================================
+--- order_gui.c	(revision 313)
++++ order_gui.c	(local)
+@@ -414,7 +414,7 @@
+ 					xy = GetStation(ord->station)->xy ;
+ 					break;
+ 				case OT_GOTO_DEPOT:				/* goto depot order */
+-					xy = GetDepot(ord->station)->xy;
++					xy = GetDepot((DepotID)ord->station)->xy;
+ 					break;
+ 				case OT_GOTO_WAYPOINT:	/* goto waypoint order */
+ 					xy = GetWaypoint(ord->station)->xy;
+=== pool.c
+==================================================================
+--- pool.c	(revision 313)
++++ pool.c	(local)
+@@ -7,81 +7,405 @@
+ #include "pool.h"
+ 
+ /**
+- * Clean a pool in a safe way (does free all blocks)
++ * Initialise a newly allocated (or emptied) puddle. Will put all the drops in
++ * the puddle into the appropriate free drops stack
+  */
+-void CleanPool(MemoryPool *pool)
++static void PoolInitPuddle(MemoryPool* pool, Puddle* puddle, FreeDrop* drops)
+ {
++	uint drop_size = pool->settings->drop_size;
++	uint puddle_size = pool->settings->puddle_size;
+ 	uint i;
++	FreeDrop* last_drop;
+ 
+-	DEBUG(misc, 4)("[Pool] (%s) Cleaning pool..", pool->name);
++	/* In this function we use some casts to byte*, to ensure we get the correct
++	 * memory locations. If we would just do arithmetic with FreeDrop*,
++	 * arithmetic would be multiplied by sizeof(FreeDrop). Just dividing by that
++	 * amount is not guaranteed to work either I expect, because of alignment
++	 * issues. */
+ 
+-	/* Free all blocks */
+-	for (i = 0; i < pool->current_blocks; i++) {
+-		if (pool->clean_block_proc != NULL) {
+-			pool->clean_block_proc(i * (1 << pool->block_size_bits), (i + 1) * (1 << pool->block_size_bits) - 1);
+-		}
+-		free(pool->blocks[i]);
++	last_drop = (FreeDrop*)((byte*)drops + (puddle_size-1) * drop_size);
++	/* Terminate the list first */
++	if (pool->settings->strategy == POOL_FAST)
++		last_drop->next = pool->free_stack;
++	else
++		last_drop->next = NULL;
++	/* Attach the first drop. We'll attach it to both the puddle and the pool,
++	 * even though only one will be used. */
++	pool->free_stack = drops;
++	puddle->free_stack = drops;
++	/* Build the body of the linked list. We skip the last drop, since it is
++	 * already terminated */
++	for (i=0;i<(puddle_size-1);i++) {
++		FreeDrop* drop      = (FreeDrop*)((byte*)drops + i * drop_size);
++		FreeDrop* next_drop = (FreeDrop*)((byte*)drops + (i+1) * drop_size);
++		drop->next = next_drop;
+ 	}
+ 
+-	/* Free the block itself */
+-	free(pool->blocks);
+-
+-	/* Clear up some critical data */
+-	pool->total_items = 0;
+-	pool->current_blocks = 0;
+-	pool->blocks = NULL;
++	/* Tie up the remaining ends */
++	puddle->drops = drops;
++	puddle->free_drops = puddle_size;
+ }
+ 
+ /**
+- * This function tries to increase the size of array by adding
+- *  1 block too it
+- *
+- * @return Returns false if the pool could not be increased
++ * Adds a puddle to the pool.
++ * @return false if there was an error allocating.
++ * @todo This might reserve memory for more than max_drops drops. The drops
++ * will never actually be allocated, but the memory might be wasted. The last
++ * puddle should probably be smaller.
+  */
+-bool AddBlockToPool(MemoryPool *pool)
++static bool PoolAddPuddle(MemoryPool* pool)
+ {
+-	/* Is the pool at his max? */
+-	if (pool->max_blocks == pool->current_blocks)
+-		return false;
++	Puddle* puddles;
++	FreeDrop* drops;
++	uint drop_size = pool->settings->drop_size;
++	uint puddle_size = pool->settings->puddle_size;
+ 
+-	pool->total_items = (pool->current_blocks + 1) * (1 << pool->block_size_bits);
++	
++	/* See if our puddles array is big enough */
++	if (pool->num_puddles == pool->puddles_length) {
++		/* Cache this value so it remains unchanged if allocation fails */
++		uint puddles_length = pool->puddles_length;
++		/* We need to increase the puddles array first */
++		if (puddles_length == 0)
++			/* Start with room for 5 puddles */
++			puddles_length = 5;
++		else
++			/* Double on subsequent increases */
++			puddles_length *= 2;
+ 
+-	DEBUG(misc, 4)("[Pool] (%s) Increasing size of pool to %d items (%d bytes)", pool->name, pool->total_items, pool->total_items * pool->item_size);
++		puddles = (Puddle*)realloc(pool->puddles, sizeof(Puddle) * puddles_length);
++		if (puddles == NULL) 
++			return false; /* Error allocating */
++		pool->puddles = puddles;
++		pool->puddles_length = puddles_length;
++	}
++	
++	/* Allocate a new puddle */
++	drops = (FreeDrop*)malloc(puddle_size * drop_size);
++	if (drops == NULL)
++			return false; /* Error allocating */
+ 
+-	/* Increase the poolsize */
+-	pool->blocks = realloc(pool->blocks, sizeof(pool->blocks[0]) * (pool->current_blocks + 1));
+-	if (pool->blocks == NULL)
+-		error("Pool: (%s) could not allocate memory for blocks", pool->name);
++	PoolInitPuddle(pool, &pool->puddles[pool->num_puddles], drops);
++	pool->free_drops += puddle_size;
++	pool->num_puddles++;
+ 
+-	/* Allocate memory to the new block item */
+-	pool->blocks[pool->current_blocks] = malloc(pool->item_size * (1 << pool->block_size_bits));
+-	if (pool->blocks[pool->current_blocks] == NULL)
+-		error("Pool: (%s) could not allocate memory for blocks", pool->name);
++	return true;
++}
+ 
+-	/* Clean the content of the new block */
+-	memset(pool->blocks[pool->current_blocks], 0, pool->item_size * (1 << pool->block_size_bits));
++static inline bool PoolDropInPuddle(MemoryPool* pool, Puddle* puddle, FreeDrop* drop) {
++	return (
++		drop >= puddle->drops && 
++		drop < (FreeDrop*)((byte*)puddle->drops + pool->settings->drop_size * pool->settings->puddle_size)
++	);
++}
+ 
+-	/* Call a custom function if defined (e.g. to fill indexes) */
+-	if (pool->new_block_proc != NULL)
+-		pool->new_block_proc(pool->current_blocks * (1 << pool->block_size_bits));
++void PoolInitialize(MemoryPool* pool, const MemoryPoolSettings* settings)
++{
++	/* Set default values. Note that we set values regardless of strategy,
++	 * meaning some of the values won't be used. But hey, who cares? */
++	pool->settings          = settings;
++	pool->num_puddles       = 0;
++	pool->puddles_length    = 0;
++	pool->free_drops        = 0;
++	pool->puddles           = NULL;
++	pool->free_stack        = NULL;
++	pool->first_free_puddle = 0;
++	pool->num_drops         = 0;
++}
+ 
+-	/* We have a new block */
+-	pool->current_blocks++;
++void* PoolAllocateDrop(MemoryPool* pool)
++{
++	PoolInitializeDrop* proc = pool->settings->init_drop_proc;
++	FreeDrop* drop;
++	Puddle* puddle;
+ 
+-	return true;
++	if (pool->settings->max_drops != POOL_NO_LIMIT && pool->num_drops >= pool->settings->max_drops)
++		return NULL; /* Maximum drops reached */
++	
++	/* Do we need to allocate more memory? */
++	if (pool->free_drops == 0)
++		if (!PoolAddPuddle(pool))
++			/* Error allocating */
++			return NULL;
++	assert(pool->free_drops);	
++
++	switch(pool->settings->strategy) {
++		case POOL_FAST:
++			/* Fetch the top drop from the free stack */
++			drop = pool->free_stack;
++			pool->free_stack = drop->next;
++			break;
++
++		case POOL_SMALL:
++			puddle = &pool->puddles[pool->first_free_puddle];
++
++			/* Fetch the top drop from the puddle's free stack */
++			drop = puddle->free_stack;
++			puddle->free_stack = drop->next;
++
++			puddle->free_drops--;
++			if (puddle->free_drops == 0)
++				pool->first_free_puddle++;
++	
++			/* Note that when allocating a drop, the sort order of puddles will
++			 * always remain unchanged. Also, if the puddle becomes full, we can
++			 * safely just increment first_free_puddle, since the next puddle cannot
++			 * be full (it would have sorted before the current puddle then). */
++			break;
++
++		default:
++			NOT_REACHED();
++	}	
++
++	pool->free_drops--;
++	pool->num_drops++;
++	
++	/* Call the callback if needed */
++	if (proc) proc(pool, drop);
++
++	return drop;
+ }
+ 
+-/**
+- * Adds blocks to the pool if needed (and possible) till index fits inside the pool
+- *
+- * @return Returns false if adding failed
+- */
+-bool AddBlockIfNeeded(MemoryPool *pool, uint index)
++void PoolFreeDrop(MemoryPool* pool, void* ptr)
+ {
+-	while (index >= pool->total_items) {
+-		if (!AddBlockToPool(pool))
+-			return false;
++	PoolDestroyDrop* proc = pool->settings->destroy_drop_proc;
++	uint puddle_index;
++	uint swap_index;
++	Puddle swap_puddle;
++	Puddle* puddle = NULL;
++	FreeDrop* drop = (FreeDrop*)ptr;
++	
++	/* Call the callback if needed */
++	if (proc) proc(pool, drop);
++
++	switch(pool->settings->strategy) {
++		case POOL_FAST:
++			/* Push the drop on the free stack */
++			drop->next = pool->free_stack;
++			pool->free_stack = drop;
++			break;
++
++		case POOL_SMALL:
++			/* Find the pool in which the drop was allocated */
++			for(puddle_index=0;puddle_index<pool->num_puddles;puddle_index++) {
++				puddle = &pool->puddles[puddle_index];
++				/* Check if the drop is in the memory area of this puddle */
++				if (PoolDropInPuddle(pool, puddle, drop))
++					break;
++				puddle = NULL;
++			}
++			assert(puddle != NULL);
++			
++			/* Push the drop on the puddle's free stack */
++			drop->next = puddle->free_stack;
++			puddle->free_stack = drop;
++
++			puddle->free_drops++;
++
++			/* See if we need to reorder this puddle to keep the puddles sorted by
++			 * usage (ascending by free_drops) */
++			swap_index = puddle_index + 1;
++			while (swap_index < pool->num_puddles && pool->puddles[swap_index].free_drops < puddle->free_drops)
++				swap_index++; /* Find the highest index for which the puddle has more free drops. */
++			swap_index--; /* We need to swap with one puddle before that */
++			if (swap_index != puddle_index) {
++				/* Since free_drops is only changed by one, we don't have to push back
++				 * all puddles between the new and old position of the puddle, we can
++				 * simply just swap them */
++				swap_puddle = *puddle;
++				*puddle = pool->puddles[swap_index];
++				puddle =  &pool->puddles[swap_index];
++				*puddle = swap_puddle;
++			}
++			if (puddle->free_drops == pool->settings->puddle_size) {
++				/* We've freed a complete puddle, let's free its memory */
++				free(puddle->drops);
++				/* We can just decrement this to record the puddle is now empty, since
++				 * due to sorting, an unused puddle is always at the end */
++				pool->num_puddles--;
++				pool->free_drops -= pool->settings->puddle_size;
++			}
++			break;
++
++		default:
++			NOT_REACHED();
+ 	}
+ 
+-	return true;
++	pool->free_drops++;
++	pool->num_drops--;
+ }
++
++void PoolEmpty(MemoryPool* pool, bool reuse)
++{
++	uint i;
++	if (reuse) {
++		/* Reinitialise values */
++		pool->free_stack        = NULL;
++		pool->free_drops        = pool->settings->puddle_size * pool->num_puddles;
++		pool->first_free_puddle = 0;
++		pool->num_drops         = 0;
++	}
++	for (i=0;i<pool->num_puddles;i++) {
++		Puddle* puddle = &pool->puddles[i];
++		if (reuse)
++			/* Reinitialize the puddle, filling the free stack with the drops */
++			PoolInitPuddle(pool, puddle, puddle->drops);
++		else
++			/* Free the memory used by this puddle */
++			free(puddle->drops);
++	}
++
++	if (!reuse)
++		/* Free the last memory used by the pool */
++		free(pool->puddles);
++}
++
++void IndexedPoolInitialize(IndexedPool* pool, const IndexedPoolSettings* settings)
++{
++	pool->settings = settings;
++	pool->lowest_free_index  = 0;
++	pool->highest_used_index = 0;
++	pool->drops_length       = 0;
++	pool->free_indices       = 0;
++	pool->drops              = NULL; /* We won't allocate any indices yet, will happen on first allocate */
++	PoolInitialize(&pool->sub_pool, &settings->pool_settings);
++}
++
++DropIndex IndexedPoolAllocateDrop(IndexedPool* pool)
++{
++	DropIndex index = pool->lowest_free_index;
++	/* Find a free index */
++	while (index < pool->drops_length && pool->drops[index] != NULL) 
++		index++; 
++
++	/* When we end up here, either index == drops_length, or we have found
++	 * a free index. Either case means that index is an unused index, and
++	 * IndexedPoolAllocateIndex will make sure the drops array gets realloc'd if
++	 * needed */
++
++	pool->lowest_free_index = index + 1;
++
++	if (IndexedPoolAllocateIndex(pool, index) != NULL)
++		return index;
++	else
++		/* Error allocating */
++		return INVALID_DROP;
++}
++
++void* IndexedPoolAllocateIndex(IndexedPool* pool, DropIndex index)
++{
++	if (index > pool->highest_used_index)
++		pool->highest_used_index = index; 
++	
++	if (pool->sub_pool.settings->max_drops != POOL_NO_LIMIT && index >= pool->sub_pool.settings->max_drops)
++		return NULL;
++	
++	/* Check if our drops array is long enough */
++	if (index >= pool->drops_length) {
++		void** ptr;
++		uint new_length = pool->drops_length;
++		uint i;
++		if (new_length == 0) new_length = pool->sub_pool.settings->puddle_size;
++		while(index >= new_length)
++			/* Enlarge it till it fits */
++			new_length *= 2;
++		ptr = realloc(pool->drops, new_length * sizeof(pool->drops[0]));
++		/* Check for allocation error */
++		if (!ptr) return NULL;
++		/* Save and initialize the newly allocated memory, if succesful */
++		pool->drops = ptr;
++		pool->free_indices += new_length - pool->drops_length;
++		for (i=pool->drops_length; i<new_length; i++)
++			pool->drops[i] = NULL;
++		pool->drops_length = new_length;
++	}	
++	
++	/* Allocate a new drop if needed */
++	if (pool->drops[index] == NULL) {
++		IndexedPoolInitializeDrop* proc = pool->settings->init_drop_proc;
++
++		pool->drops[index] = PoolAllocateDrop(&pool->sub_pool);
++		if (pool->drops[index] == NULL)
++			return NULL; /* Allocation failed */
++		pool->free_indices--;
++	
++		/* Call initialisation proc if needed */
++		if (proc)
++			proc(pool, pool->drops[index], index);
++	}
++	
++	return pool->drops[index];
++}
++
++void IndexedPoolFreeDrop(IndexedPool* pool, DropIndex index)
++{
++	IndexedPoolDestroyDrop* proc = pool->settings->destroy_drop_proc;
++	void* drop = IndexedPoolGetItem(pool, index);
++	assert(drop != NULL);
++
++	/* Call the callback before freeing the drop */
++	if (proc) proc(pool, drop, index);
++
++	/* Free the actual drop */
++	PoolFreeDrop(&pool->sub_pool, drop);
++
++	/* Free the index */
++	pool->drops[index] = NULL;
++	
++	/* See if lowest_free_index was changed */
++	if (index < pool->lowest_free_index)
++		pool->lowest_free_index = index;
++
++	pool->free_indices++;
++}
++
++uint IndexedPoolNumUsed(IndexedPool* pool)
++{
++	if (pool->sub_pool.num_drops == 0)
++		return 0;
++
++	/* index >= the highest used index, so we might need to look at lower
++	 * indices to find the actual highest used index. 
++	 * We don't need to check for highest_used_index underflowing, because it
++	 * will always find a used index (since num_used > 0, see above). */
++	while (IndexedPoolGetItem(pool, pool->highest_used_index) == NULL) pool->highest_used_index--; /* Look down while we haven't found an allocated index */ 
++	
++	return pool->highest_used_index + 1; /* The number of used indices is one greater than the highest used index */
++}
++
++uint IndexedPoolNumFree(const IndexedPool* pool)
++{
++	/* TODO: What if max_drops is POOL_NO_LIMIT? */
++	return pool->sub_pool.settings->max_drops - pool->sub_pool.num_drops;
++}
++
++uint IndexedPoolNumAllocated(const IndexedPool* pool)
++{
++	return pool->sub_pool.num_drops;
++}
++
++void IndexedPoolEmpty(IndexedPool* pool)
++{
++	uint i;
++	IndexedPoolDestroyDrop* proc = pool->settings->destroy_drop_proc;
++
++	/* Destroy the drops */
++	if (proc) {
++		/* If there is a callback, call it for all allocated indices */
++		for (i=0;i<pool->drops_length;i++) {
++			void* drop = IndexedPoolGetItem(pool, i);
++			if (drop != NULL)
++				proc(pool, drop, i);
++				/* Note that we do not free the drop here, instead we will just call
++				 * PoolEmpty() below */
++		}
++	}
++
++	/* Free the indices */
++	if (pool->drops != NULL)
++		free(pool->drops);
++	pool->drops_length = 0;
++
++	/* Free the actual drops */
++	PoolEmpty(&pool->sub_pool, false);
++}
+=== pool.h
+==================================================================
+--- pool.h	(revision 313)
++++ pool.h	(local)
+@@ -3,57 +3,555 @@
+ #ifndef POOL_H
+ #define POOL_H
+ 
++#include "functions.h"
++
++/**
++ * @file pool.h
++ * @brief Provides functions to work with pools of memory.
++ *
++ * @section memuse Historical background on memory usage
++ *
++ * In a lot of places, we need memory allocation of certain structs (Vehicles,
++ * Stations, etc.). Originally these were statically allocated as an array of
++ * the given struct type. The main problem with this approach is that the
++ * number of available items is fixed (therefore way too large at first, but
++ * limited later on).
++ *
++ * Naive solutions would be to just realloc() the memory or malloc() the
++ * individual structs. Both of these would mean severe performance penalties,
++ * the latter would also remove the ability to address items by their ID
++ * (translate a VehicleID to a Vehicle* for example).
++ *
++ * The solution we will choose here is a mix of using realloc() and malloc()
++ * to minimise performance penalty. We will be using pools, puddles and drops.
++ * would be to just malloc() a block of memory
++ *
++ * @section pools Using pools
++ *
++ * For allocating memory, we use pools. A pool is a pile of memory from which
++ * we can allocate and deallocate drops. A drop would correspond to a Vehicle
++ * or Station struct for example. All drops within a given pool have the same
++ * size, and typically contain the same struct.
++ *
++ * We acknowledge two uses for pools.
++ * @subsection normalpools Normal pools
++ * These are pools which replace "normal" calls to malloc and free. Typical
++ * uses are elements of linked lists, hashes, etc.
++ *
++ * The interface for this is limited: You can allocated drops, free drops,
++ * and empty the pool. 
++ *
++ * This type of pool will generally be used for memory that is need for short
++ * amounts of time, like buckets for a hash table or nodes in the pathfinder.
++ * This mainly needs fast allocation and freeing of drops.
++ * The pool will therefore use O(1) allocs and frees, at the cost of lots of
++ * fragmentation after freeing nodes. (It also supports avoiding fragmentation
++ * for use with indexed pools, see below).
++ *
++ * @subsection indexedpools Indexed Pools
++ * These are pools for which we need to associate an index with each drop.
++ * Typical uses are structs that need to be referenced from the map arrays
++ * (which doesn't support pointers) such as Stations and Towns.
++ * 
++ * The interface for this consists of allocating drops (either with a specific
++ * index, or just any free index), freeing drops by passing the index, finding
++ * the drop corresponding to a given index and emptying the pool. 
++ *
++ * Indexed pools will be build on top of normal pools. Unlike normal pools,
++ * they will try to prevent fragmentation and reclaim memory whenever
++ * possibly. It will however never move drops around in memory, since that
++ * would invalidate existing pointers.
++ *
++ * @section pools_implementation Implementation of pools using puddles and drops
++ *
++ * Internally, a pool consists of a number of puddles. Each puddle contains a
++ * fixed number of drops (specified at pool initialisation). When a pool is
++ * initialised, a single puddle is allocated (using malloc).
++ *
++ * From this puddle, single drops can be allocated and freed again.
++ * When all the drops in a pool have been allocated, a new puddle will be
++ * malloc'd. A pool will keep track of it's puddles (which will not be
++ * adjacent in memory) using an array of puddle pointers.  This array is
++ * initially malloc'd and realloc'd when it fills up.  To properly support
++ * both types of pools, we define two strategies for allocating and freeing
++ * individiual drops. 
++ *
++ * @subsection fast_strategy Fast strategy
++ * This is for normal pools that will only be used for a small period of time
++ * in which they will do a lot of allocs and de-allocs. Allocing and freeing
++ * will be O(1) operations. The downside of optimising for speed will be lots
++ * of fragmentation, ie it will hardly ever happen that an entire puddle
++ * becomes empty, so it can be reclaimed. If that does indeed happen, we will
++ * not reclaim it, since we will probably need it again right away, or we will
++ * be done soon anyway.
++ * 
++ * When the pool is emptied, optionally only a part of the memory will be
++ * reclaimed so it can be reused easily. We will always reclaim some memory,
++ * since otherwise one peak usage of a pool will keep a lot of unused memory
++ * allocated forever.
++ *
++ * This strategy's implementation is straight-forward. We keep a stack (linked
++ * list) of free drops (using the memory of the drop itself to store the
++ * link). When we need to allocate a new drop, we pop the first drop from the
++ * stack, if a drop gets freed we push it on the stack. Whenever a new pool
++ * gets allocated we will push all the drops in it to the stack.
++ *
++ * @subsection small_strategy Small strategy
++ * This is for indexed pools, or normal pools which will be used over a longer
++ * period of time, with only a few allocs and deallocs. This strategy will
++ * make sure that new allocs always happen in the puddle that's the most full.
++ * This ensures that free drops will group together, possibly allowing the
++ * pool to return one or more puddles to the OS.
++ *
++ * The implementation of this strategy is a little more complicated. Since we
++ * need to be able to allocate a drop in the fullest puddle, we need to keep a
++ * seperate stack of free drops for each puddle. We also need to find the
++ * fullest puddle quickly, so we'll keep the list of puddles sorted by number
++ * of allocated drops (fullest first). Since the first few will probably be
++ * full, we will also keep the index of the first non-full puddle.
++ *
++ * The sorting will be done whenever a drop is allocated or freed. Since the
++ * number of allocated drops will only increase or decrease by one, we can
++ * suffice by swapping the puddle with another (possibly a few) upwards or
++ * downwards.
++ *
++ * The trickiest part of this is when a drop is freed. We will need to find
++ * out in which puddle the drop belongs to put it in the right free drops
++ * stack. We will do this by iterating all the puddles and checking the
++ * address range.
++ *
++ * Lastly, whenever a puddle becomes empty, we will return the memory it uses
++ * to the OS.
++ */
++
++/**
++ * This is the type to store information about a memory pool.
++ */
+ typedef struct MemoryPool MemoryPool;
+ 
+-/* The function that is called after a new block is added
+-     start_item is the first item of the new made block */
+-typedef void MemoryPoolNewBlock(uint start_item);
+-/* The function that is called before a block is cleaned up */
+-typedef void MemoryPoolCleanBlock(uint start_item, uint end_item);
++/**
++ * A callback function to be called after a drop has been allocated.
++ * @param pool  The pool in which the drop was allocated.
++ * @param drop  A pointer to the newly allocated drop.
++ *              GetMemoryPool(pool) == POOL_NORMAL \endcode
++ */
++typedef void PoolInitializeDrop(const MemoryPool* pool, void* drop);
+ 
+ /**
+- * Stuff for dynamic vehicles. Use the wrappers to access the MemoryPool
+- *  please try to avoid manual calls!
++ * A callback function to be called just before a drop will be freed.
++ * @param pool  The pool in which the drop was allocated.
++ * @param drop  A pointer to the about to be freed drop.
++ * @param index The index of the about to be freed drop.
+  */
++typedef void PoolDestroyDrop(const MemoryPool* pool, void* drop);
++
++typedef enum MemoryPoolStrategies {
++	POOL_FAST,  
++	POOL_SMALL,   
++} MemoryPoolStrategy;
++
++enum {
++	POOL_NO_LIMIT = 0,
++};
++
++/** Used to pass settings for a new pool to \c PoolInitialize() */
++typedef struct MemoryPoolSettings {
++	const char name[16];         /**< Name of the pool (just for debugging). */
++	const uint max_drops;        /**< The max amount of drops this pool can have (Artificial limit), or POOL_NO_LIMIT for no limit. */
++	const uint puddle_size;      /**< The size of each puddle */
++	const uint drop_size;        /**< How many bytes one item is. */
++	const MemoryPoolStrategy strategy; /**< The strategy to use for allocating and freeing drops */
++
++	const PoolInitializeDrop* init_drop_proc; 
++	                             /**< Pointer to a function that is called after a drop is allocated or NULL */
++	const PoolDestroyDrop* destroy_drop_proc; 
++	                             /**< Pointer to a function that is called before a drop is freed or NULL */
++
++} MemoryPoolSettings;
++
++/**
++ * Initializes a new memory pool. Must be called before calling any other
++ * function on the pool. May also be used on emptied pools (with reuse=false)
++ * to change the settings.
++ * @param pool The pool to initialize. 
++ * @param settings The settings to use for this pool.
++ * @warning The settings are not copied, but stored by reference. You should
++ * _not_ change the settings after initializing a pool with them!
++ */
++void PoolInitialize(MemoryPool* pool, const MemoryPoolSettings* settings);
++
++/**
++ * Allocate a new drop, possibly expanding the pool if needed.
++ * @return A pointer to the drop of memory, NULL if the drop could not be
++ *         allocated.
++ * @param  pool The pool in which to allocate the drop.
++ */
++void* PoolAllocateDrop(MemoryPool* pool);
++
++/**
++ * Free a previously allocated drop.
++ * @param pool The pool in which the drop was allocated.
++ * @param drop The drop to free.
++ */
++void PoolFreeDrop(MemoryPool* pool, void* drop);
++
++/**
++ * Empties the pool, deallocating all allocated drops.
++ * @param pool  The pool to empty.
++ * @param reuse If you are planning to reuse the pool. If this is true, the
++ *              pool will retain most of its resources, otherwise it will free
++ *              all resources.
++ * @note  that you can always just reuse this a pool, though it will be faster
++ *        if reuse was true. Reinitializing is not neccesary, and will even
++ *        cause memory leaks when reuse=true!
++ */
++void PoolEmpty(MemoryPool* pool, bool reuse);
++
++/**
++ * Keeps info about free drops. Used to build a linked list of free drops.
++ */
++typedef struct FreeDrop FreeDrop;
++struct FreeDrop {
++	FreeDrop* next;
++};
++
++/**
++ * Keeps info about a puddle.
++ */
++typedef struct Puddle {
++	uint free_drops;                  /**< How many drops in this puddle are free (used for the small strategy only) */
++	FreeDrop* free_stack;             /**< A pointer to the first free drop in this puddle (used for the small strategy only) */
++	FreeDrop* drops;                  /**< An array of drops in the puddle */
++} Puddle;
++
++/**
++ * Keeps info about a pool. Never use directly!
++ */
+ struct MemoryPool {
+-	const char name[10];        ///< Name of the pool (just for debugging)
++	const MemoryPoolSettings* settings; /**< The settings for this pool */
++	uint num_puddles;            /**< The number of puddles actually in use */
++	uint puddles_length;         /**< The length of the puddles array */
++	uint free_drops;             /**< How many drops are in the pool are free. This is the number of drops in allocated puddles, this is number is not related to the max_drops in the settings! */
++	uint num_drops;              /**< The total number of drops allocated */
+ 
+-	const uint max_blocks;      ///< The max amount of blocks this pool can have
+-	const uint block_size_bits; ///< The size of each block in bits
+-	const uint item_size;       ///< How many bytes one block is
++	Puddle* puddles;             /**< An array of puddles (Sorted by Puddle.free_drops for the small strategy). */
++	FreeDrop* free_stack;             /**< A pointer to the first free drop in the pool (used for the fast strategy only) */
+ 
+-	/// Pointer to a function that is called after a new block is added
+-	MemoryPoolNewBlock *new_block_proc;
+-	/// Pointer to a function that is called to clean a block
+-	MemoryPoolCleanBlock *clean_block_proc;
++	uint first_free_puddle;      /**< The index of the first puddle that still has free elements (used for the small strategy only) */
++};
+ 
+-	uint current_blocks;        ///< How many blocks we have in our pool
+-	uint total_items;           ///< How many items we now have in this pool
++/**
++ * This is the type to store information about an indexed pool.
++ */
++typedef struct IndexedPool IndexedPool;
+ 
+-	byte **blocks;              ///< An array of blocks (one block hold all the items)
++/**
++ * This is used to index drops in an index pool.
++ */
++typedef uint DropIndex;
++
++enum {
++	INVALID_DROP = ~((uint)0), /**< Used to signify failed allocation of a drop */
+ };
+ 
+ /**
+- * Those are the wrappers:
+- *   CleanPool cleans the pool up, but you can use AddBlockToPool directly again
+- *     (no need to call CreatePool!)
+- *   AddBlockToPool adds 1 more block to the pool. Returns false if there is no
+- *     more room
++ * A callback function to be called after a drop has been allocated.
++ * @param pool  The pool in which the drop was allocated.
++ * @param drop  A pointer to the newly allocated drop.
++ * @param index The index of the newly allocated drop. Unused if \code
++ *              GetMemoryPool(pool) == POOL_NORMAL \endcode
+  */
+-void CleanPool(MemoryPool *array);
+-bool AddBlockToPool(MemoryPool *array);
++typedef void IndexedPoolInitializeDrop(const IndexedPool* pool, void* drop, DropIndex index);
+ 
+ /**
+- * Adds blocks to the pool if needed (and possible) till index fits inside the pool
+- *
+- * @return Returns false if adding failed
++ * A callback function to be called just before a drop will be freed.
++ * @param pool  The pool in which the drop was allocated.
++ * @param drop  A pointer to the about to be freed drop.
++ * @param index The index of the about to be freed drop.
+  */
+-bool AddBlockIfNeeded(MemoryPool *array, uint index);
++typedef void IndexedPoolDestroyDrop(const IndexedPool* pool, void* drop, DropIndex index);
+ 
+-static inline byte *GetItemFromPool(const MemoryPool *pool, uint index)
++/** Used to pass settings for a new indexed pool to \c IndexedPoolInitialize() */
++typedef struct IndexedPoolSettings {
++	const char name[16];         /**< Name of the pool (just for debugging). */
++	const IndexedPoolInitializeDrop* init_drop_proc; 
++	                             /**< Pointer to a function that is called after a drop is allocated or NULL */
++	const IndexedPoolDestroyDrop* destroy_drop_proc; 
++	                             /**< Pointer to a function that is called before a drop is freed or NULL. */
++	const MemoryPoolSettings pool_settings;
++															 /**< Settings to use for the underlying memory
++																		pool. \c strategy  should generally be
++																		POOL_SMALL, init_drop_proc and
++																		destroy_drop_proc should be NULL */
++} IndexedPoolSettings;
++
++/**
++ * Initializes a new indexed pool. Must be called before calling any other
++ * function on the pool. May also be used on emptied pools to change the
++ * settings.
++ * @param pool The pool to initialize. 
++ * @param settings The settings to use for this pool.
++ * @warning The settings are not copied, but stored by reference. You should
++ * _not_ change the settings after initializing a pool with them!
++ */
++void IndexedPoolInitialize(IndexedPool* pool, const IndexedPoolSettings* settings);
++
++/**
++ * Allocate a new drop, possibly expanding the pool if needed.
++ * @return The index of the allocated drop, or INVALID_DROP if the drop could
++ *         not be allocated.
++ * @param  pool The pool in which to allocate the drop.
++ */
++DropIndex IndexedPoolAllocateDrop(IndexedPool* pool);
++
++/**
++ * Allocate a given index, possibly expanding the pool if needed. If the given
++ * index was already allocated, just return the appropriate drop.
++ * @return A pointer to the drop or NULL If allocation failed.
++ * @param  pool  The pool in which to allocate the drop.
++ * @param  index The index that needs to be allocated.
++ */
++void* IndexedPoolAllocateIndex(IndexedPool* pool, DropIndex index);
++
++/**
++ * Free a previously allocated drop.
++ * @param pool  The pool in which the drop was allocated.
++ * @param index The index of the drop to free.
++ */
++void IndexedPoolFreeDrop(IndexedPool* pool, DropIndex index);
++
++/**
++ * Empties the pool, deallocating all allocated drops. This pool is still
++ * usable afterwards.
++ * @param pool  The pool to empty.
++ */
++void IndexedPoolEmpty(IndexedPool* pool);
++
++/**
++ * Returns the number of used indices, counting unused indices that lie between
++ * used indices as used. This value can be used for looping all items in the
++ * pool (with the < operator). Be careful to skip the unused items, though.
++ * In other words, this returns one greater than the largest allocated index.
++ * @note This is not the complement of \c IndexedPoolNumFree(), that would be
++ * \c IndexedPoolNumAllocated().
++ */
++uint IndexedPoolNumUsed(IndexedPool* pool);
++
++/**
++ * Returns the number of unallocated indices in the pool. In other words,
++ * returns the numer of times IndexedPoolAllocateDrop can be called before it
++ * will fail due to reaching the maximum number of drops.
++ */
++uint IndexedPoolNumFree(const IndexedPool* pool);
++
++/**
++ * Returns the numer of allocated indices. This does not count unused indices
++ * between allocated indices as \c IndexedPoolNumUsed() does and might count a
++ * few extra unused indices at the end.
++ */
++uint IndexedPoolNumAllocated(const IndexedPool* pool);
++
++/**
++ * Keeps info about an indexed pool. Never use directly!
++ */
++struct IndexedPool {
++	const IndexedPoolSettings* settings;/**< The settings for this pool */
++	uint lowest_free_index;      /**< An index that is guaranteed to be <= the lowest free index. Is not to be guaranteed to be equal, so that allocating an index is cheaper. */
++	uint highest_used_index;     /**< An index that is guaranteed to be >= the highest used index. Is not to be guaranteed to be equal, so that freeing an index is cheaper. */
++	void** drops;                /**< An array mapping indices to pointers to drops. */
++	MemoryPool sub_pool;         /**< The pool used to allocate drops */
++	uint drops_length;           /**< The length of the drops array */
++	uint free_indices;           /**< The number of free indices in the drops array. Not related to the total maximum in the settings. */
++};
++
++/**
++ * Looks up the given index in the pool and returns the corresponding drop.
++ * @param  pool  The pool in which to look.
++ * @param  index The index of the drop to return.
++ * @return The drop with the given index, or NULL if the drop was not
++ * allocated. Also returns NULL for INVALID_DROP.
++ */
++static inline void* IndexedPoolGetItem(const IndexedPool* pool, DropIndex index)
+ {
+-	assert(index < pool->total_items);
+-	return (pool->blocks[index >> pool->block_size_bits] + (index & ((1 << pool->block_size_bits) - 1)) * pool->item_size);
++	if (index < pool->drops_length) 
++		return pool->drops[index];
++	else
++		return NULL;
+ }
+ 
++/**
++ * Looks up the next allocated index after the given index, skipping n indices
++ * every time. For example, this will first check if index + n is allocated.
++ * If so, it will return. If not, it will check index + 2*n, after that it
++ * will check index + 3*n, etc, until it finds one. Will return the found
++ * index, or INVALID_DROP if there was no such index.
++ * @param   pool  The pool in which the index should be looked up.
++ * @param   index The index after which to look.
++ */
++static inline DropIndex IndexedPoolGetNextSkip(IndexedPool* pool, DropIndex index, uint n)
++{
++	/* Look for the next allocated index */
++	do {
++		index += n;
++		if (index >= IndexedPoolNumUsed(pool))
++			return INVALID_DROP;
++	}
++	while (IndexedPoolGetItem(pool, index) == NULL);
++
++	return index;	
++}
++/**
++ * Looks up the next allocated index after the given index.
++ * @param  pool  The pool in which the index should be looked up.
++ * @param  index The index after which to look.
++ * @param  The smallest allocated index > index, or INVALID_DROP if there is
++ *         no such index is found.
++ */
++static inline DropIndex IndexedPoolGetNext(IndexedPool* pool, DropIndex index)
++{
++	return IndexedPoolGetNextSkip(pool, index, 1);
++}
++
++/**
++ * Same as FOR_ALL_IN_POOL, but only iterates elements with index >= start.
++ */
++#define FOR_ALL_IN_POOL_FROM(pool, ptr, start) \
++	for (ptr = IndexedPoolGetItem(&pool, start); \
++		ptr != NULL; \
++		ptr = IndexedPoolGetItem(&pool, IndexedPoolGetNext(&pool, ptr->index)) \
++	)
++
++/**
++ * Loop all elements in the pool. Behaves similar to a normal for loop, you
++ * should put {} after it if appropriate. Will store a pointer to the current
++ * element in ptr.
++ * @note This will only work for elements that have an "index" field that
++ * contains the index of the element.
++ */
++#define FOR_ALL_IN_POOL(pool, ptr) FOR_ALL_IN_POOL_FROM(pool, ptr, 0)
++
++/**
++ * This loop is designed to iterate all elements in a pool, every so much
++ * ticks. You should use this for loop once every tick, the loop will make
++ * sure that each element (index) gets iterated exactly once every n ticks.
++ * @warning This requires ptr to have a field "index" which contains the index
++ * of the drop!
++ * @param	pool  The pool in which to iterate elements
++ * @param ptr   A pointer in which the pointer to the element is stored.
++ * @param n     The number of ticks between iterations of the same element.
++ *              Different frequencies per pool are supported, but each should
++ *              have a different ctr variable. In other words, don't change
++ *              the value of n between ticks when using the same ctr variable.
++ * @param	ctr   A variable of type DropIndex, used to store the state between
++ *              ticks. Can be initialized to any value, should not be modified
++ *              except for by this macro.
++ */
++#define FOR_ALL_EVERY_N_TICKS(pool, ptr, n, ctr) \
++	for (ctr %= n,ptr = IndexedPoolGetItem(&pool, ctr++); \
++		ptr != NULL; \
++		ptr = IndexedPoolGetItem(&pool, IndexedPoolGetNextSkip(&pool, ptr->index, n)) \
++	)
++	/* This loop works by iterating indices [0, n, 2n, 3n, ...] on the first
++	 * run. On the second run, it iterates [1, n+1, 2n+1, 3n+1, ...]. This goes
++	 * on until it iterates [(n-1), n+(n-1), 2n+(n-1), 3n+(n-1), ...]. After
++	 * that, it iterates the first series again. In other words, we iterate
++	 * [(x % n)n+y], where x is the number of ticks passed, and y is the number
++	 * of the iteration within the current tick.
++	 * 
++	 * A first implementation that comes to mind is:
++	 * \code 
++	 * while ( ctr < poolsize ) {
++	 * 	ctr += n; // Were iterating xn+y
++	 * 	do_stuff(ctr);
++	 * } 
++	 * ctr %= n; // 
++	 * ctr++;
++	 * \endcode
++	 *
++	 * The problem with this code is twofold: We need to do things inside the
++	 * main loop, which means no variable declarations can be made after the
++	 * macro. Second, we need to do stuff after the loop, which means a second
++	 * macro to close the loop.
++	 * We can solve the first by using a for loop instead of while. The second
++	 * we can solve by moving the termination code to the start of the loop.
++	 * This means we can put it in the first element of the for statement.
++	 * The added advantage to this, is that the counter needs no initialisation,
++	 * it'll wrap into valid range because of the %, and it we don't really care
++	 * where we start the iteration (at which value of x). We do need to save
++	 * the value!
++	 * Also, we use the IndexedPoolGetNextSkip function to replace ctr += n,
++	 * since that will skip unallocated elements. This also means we store the
++	 * counter in ptr->index instead of the ctr variable.
++	 */
++
++/**
++ * Shortcut macro for defining IndexedPoolSettings. Assumes the type that is
++ * used to store indices for this pool is named TypeID, where Type is of
++ * course the given type.
++ * The pool will have the POOL_SMALL strategy, a drop size appropriate for the
++ * given type and a maximum number of elements chosen such that there will
++ * never be an index that doesn't fit in an index of type TypeID, while saving
++ * the largest possible index as an invalid index.
++ * @param  type The type of the elements to be stored in this pool.
++ * @param  puddle_size The number of elements that will be allocated at a time.
++ * @param  init_proc A function that will be called for each new element.
++ * @param  destroy_proc A function that will be called for each removed element.
++ */
++#define INDEXED_POOL(type, puddle_size) \
++	{ #type, (const IndexedPoolInitializeDrop*)&Initialize##type, (const IndexedPoolDestroyDrop*)&Destroy##type, { #type "_sub", MAX_VALUE(type##ID), puddle_size, sizeof(type), POOL_SMALL, NULL, NULL}}
++
++/**
++ * To be used in a DestroyProc. Shortcut that zeroes the drop and sets the
++ * index field of the struct to the right index.
++ */
++#define ZERO_AND_INDEX(type, drop) \
++	memset(drop, 0, sizeof(type)), \
++	((type*)drop)->index = index;
++
++/*
++ * Will define \c GetType(), \c GetNumTypes(), \c AllocateType, \c
++ * DeleteType(), \c IsValidTypeID() and \c GetRandomType().
++ */
++#define INDEXED_POOL_FUNCTIONS(type, plural, pool) \
++	static inline type* Get##type(type##ID index) { \
++		/*return (type*)IndexedPoolGetItem(&pool, index); */ \
++		type* ret = (type*)IndexedPoolGetItem(&pool, index); \
++		assert (ret->index == index); \
++		return ret; \
++	} \
++	 \
++	static inline uint GetNum##plural(void) { \
++		return IndexedPoolNumAllocated(&pool); \
++	} \
++	 \
++	static inline uint GetNum##plural##Used(void) { \
++		return IndexedPoolNumUsed(&pool); \
++	} \
++	 \
++	static inline uint GetNum##plural##Free(void) { \
++		return IndexedPoolNumFree(&pool); \
++	} \
++	 \
++	static inline type* Allocate##type(void) { \
++		DropIndex index = IndexedPoolAllocateDrop(&pool); \
++		if (index == INVALID_DROP) return NULL; \
++		return Get##type((type##ID)index); \
++	} \
++	 \
++	static inline void Delete##type(type* ptr) { \
++		IndexedPoolFreeDrop(&pool, ptr->index); \
++	} \
++	 \
++	static inline type* GetRandom##type(void) { \
++		uint num = RandomRange(GetNum##plural()); /* The nth drop we will return. This is _not_ the index, since there may be indices missing */ \
++		type##ID index = 0; \
++		uint i; \
++		for (i=0;i<num;i++) \
++			index = IndexedPoolGetNext(&pool, index); \
++		return Get##type(index); /* If pool is empty, this will return NULL */\
++	} \
++	 \
++	static inline bool IsValid##type##ID(type##ID index) { \
++		return Get##type(index) != NULL; \
++	}
+ #endif /* POOL_H */
+=== queue.c
+==================================================================
+--- queue.c	(revision 313)
++++ queue.c	(local)
+@@ -4,6 +4,7 @@
+ #include "openttd.h"
+ #include "queue.h"
+ 
++#define HASHPOOL
+ static void Stack_Clear(Queue* q, bool free_values)
+ {
+ 	if (free_values) {
+@@ -452,6 +453,20 @@
+  * Hash
+  */
+ 
++enum {
++	/**
++	 * The number of drops (buckets) that are malloc'd at one time. TODO: Find a
++	 * good value for this. Perhaps dependant on num_buckets? If so, we will
++	 * need to make the settings non-global, though.
++	 */
++	HASH_PUDDLE_SIZE = 1024, 
++};
++
++/**
++ * Settings for the pools used in hashes.
++ */
++static const MemoryPoolSettings _hash_pool_settings = {"Hash", POOL_NO_LIMIT, HASH_PUDDLE_SIZE, sizeof(HashNode), POOL_FAST, NULL, NULL};
++
+ void init_Hash(Hash* h, Hash_HashProc* hash, uint num_buckets)
+ {
+ 	/* Allocate space for the Hash, the buckets and the bucket flags */
+@@ -471,6 +486,7 @@
+ 	h->buckets_in_use = (bool*)(h->buckets + num_buckets);
+ 	h->freeh = false;
+ 	for (i = 0; i < num_buckets; i++) h->buckets_in_use[i] = false;
++	PoolInitialize(&h->pool, &_hash_pool_settings);
+ }
+ 
+ Hash* new_Hash(Hash_HashProc* hash, int num_buckets)
+@@ -484,30 +500,14 @@
+ 
+ void delete_Hash(Hash* h, bool free_values)
+ {
+-	uint i;
++	/* Clear out the buckets and the values */
++	clear_Hash(h, free_values);
+ 
+-	/* Iterate all buckets */
+-	for (i = 0; i < h->num_buckets; i++) {
+-		if (h->buckets_in_use[i]) {
+-			HashNode* node;
+-
+-			/* Free the first value */
+-			if (free_values) free(h->buckets[i].value);
+-			node = h->buckets[i].next;
+-			while (node != NULL) {
+-				HashNode* prev = node;
+-
+-				node = node->next;
+-				/* Free the value */
+-				if (free_values) free(prev->value);
+-				/* Free the node */
+-				free(prev);
+-			}
+-		}
+-	}
++	/* Free all other memory */
+ 	free(h->buckets);
+-	/* No need to free buckets_in_use, it is always allocated in one
++	/* No need to free buckets_in_use, it is always allocated in the same
+ 	 * malloc with buckets */
++	PoolEmpty(&h->pool, false);
+ #ifdef HASH_DEBUG
+ 	debug("Freeing Hash: %p", h);
+ #endif
+@@ -587,7 +587,11 @@
+ 
+ 				node = node->next;
+ 				if (free_values) free(prev->value);
++#ifdef HASHPOOL
++					PoolFreeDrop(&h->pool, prev);
++#else
+ 				free(prev);
++#endif
+ 			}
+ 		}
+ 	}
+@@ -664,7 +668,9 @@
+ 			/* Copy the second to the first */
+ 			*node = *next;
+ 			/* Free the second */
+-#ifndef NOFREE
++#ifdef HASHPOOL
++			PoolFreeDrop(&h->pool, next);
++#else
+ 			free(next);
+ #endif
+ 		} else {
+@@ -680,7 +686,9 @@
+ 		/* Link previous and next nodes */
+ 		prev->next = node->next;
+ 		/* Free the node */
+-#ifndef NOFREE
++#ifdef HASHPOOL
++		PoolFreeDrop(&h->pool, node);
++#else
+ 		free(node);
+ #endif
+ 	}
+@@ -709,7 +717,11 @@
+ 		node = h->buckets + hash;
+ 	} else {
+ 		/* Add it after prev */
++#ifdef HASHPOOL
++		node = PoolAllocateDrop(&h->pool);
++#else
+ 		node = malloc(sizeof(*node));
++#endif
+ 		prev->next = node;
+ 	}
+ 	node->next = NULL;
+=== queue.h
+==================================================================
+--- queue.h	(revision 313)
++++ queue.h	(local)
+@@ -1,5 +1,7 @@
+ /* $Id$ */
+ 
++#include "pool.h"
++
+ #ifndef QUEUE_H
+ #define QUEUE_H
+ 
+@@ -143,8 +145,8 @@
+ struct HashNode {
+ 	uint key1;
+ 	uint key2;
+-	void* value;
+-	HashNode* next;
++	void* value; /**< The value associated with this bucket */
++	HashNode* next; /**< Pointer to the next bucket, if there is one */
+ };
+ /**
+  * Generates a hash code from the given key pair. You should make sure that
+@@ -152,21 +154,24 @@
+  */
+ typedef uint Hash_HashProc(uint key1, uint key2);
+ typedef struct Hash {
+-	/* The hash function used */
++	/** The hash function used */
+ 	Hash_HashProc* hash;
+-	/* The amount of items in the hash */
++	/** The amount of items in the hash */
+ 	uint size;
+-	/* The number of buckets allocated */
++	/** The number of buckets allocated */
+ 	uint num_buckets;
+-	/* A pointer to an array of num_buckets buckets. */
++	/** A pointer to an array of num_buckets buckets. */
+ 	HashNode* buckets;
+-	/* A pointer to an array of numbuckets booleans, which will be true if
++	/** 
++	 * A pointer to an array of numbuckets booleans, which will be true if
+ 	 * there are any Nodes in the bucket */
+ 	bool* buckets_in_use;
+-	/* If true, buckets will be freed in delete_hash */
++	/** If true, buckets will be freed in delete_hash */
+ 	bool freeb;
+-	/* If true, the pointer to this struct will be freed in delete_hash */
++	/** If true, the pointer to this struct will be freed in delete_hash */
+ 	bool freeh;
++	/** Memorypool to store the buckets */
++	MemoryPool pool; 
+ } Hash;
+ 
+ /* Call these function to manipulate a hash */
+=== rail_cmd.c
+==================================================================
+--- rail_cmd.c	(revision 313)
++++ rail_cmd.c	(local)
+@@ -941,7 +941,7 @@
+ 	if (flags & DC_EXEC) {
+ 		DiagDirection dir = GetRailDepotDirection(tile);
+ 
+-		DoDeleteDepot(tile);
++		DoClearDepot(tile);
+ 		UpdateSignalsOnSegment(tile, dir);
+ 	}
+ 
+=== road_cmd.c
+==================================================================
+--- road_cmd.c	(revision 313)
++++ road_cmd.c	(local)
+@@ -281,7 +281,7 @@
+ 
+ 	/* Road pieces are max 4 bitset values (NE, NW, SE, SW) and town can only be non-zero
+ 	 * if a non-player is building the road */
+-	if ((p1 >> 4) || (_current_player < MAX_PLAYERS && p2 != 0) || !IsTownIndex(p2)) return CMD_ERROR;
++	if ((p1 >> 4) || (_current_player < MAX_PLAYERS && p2 != 0) || !IsValidTownID(p2)) return CMD_ERROR;
+ 	pieces = p1;
+ 
+ 	tileh = GetTileSlope(tile, NULL);
+@@ -595,7 +595,8 @@
+ 
+ 	if (!EnsureNoVehicle(tile)) return CMD_ERROR;
+ 
+-	if (flags & DC_EXEC) DoDeleteDepot(tile);
++	if (flags & DC_EXEC) { DoClearDepot(tile);
++	}
+ 
+ 	return _price.remove_road_depot;
+ }
+=== roadveh_cmd.c
+==================================================================
+--- roadveh_cmd.c	(revision 313)
++++ roadveh_cmd.c	(local)
+@@ -210,7 +210,7 @@
+ {
+ 	Vehicle *v;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -252,7 +252,7 @@
+ {
+ 	Vehicle *v;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -353,7 +353,7 @@
+ 	Vehicle *v;
+ 	const Depot *dep;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -400,7 +400,7 @@
+ {
+ 	Vehicle *v;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -419,7 +419,6 @@
+ 	return 0;
+ }
+ 
+-
+ static void MarkRoadVehDirty(Vehicle *v)
+ {
+ 	v->cur_image = GetRoadVehImage(v, v->direction);
+@@ -674,7 +673,7 @@
+ 		}
+ 		v->dest_tile = dest;
+ 	} else if (order->type == OT_GOTO_DEPOT) {
+-		v->dest_tile = GetDepot(order->station)->xy;
++		v->dest_tile = GetDepot((DepotID)order->station)->xy;
+ 	}
+ 
+ 	InvalidateVehicleOrder(v);
+=== roadveh_gui.c
+==================================================================
+--- roadveh_gui.c	(revision 313)
++++ roadveh_gui.c	(local)
+@@ -256,7 +256,7 @@
+ 			} break;
+ 
+ 			case OT_GOTO_DEPOT: {
+-				Depot *depot = GetDepot(v->current_order.station);
++				Depot *depot = GetDepot((DepotID)v->current_order.station);
+ 				SetDParam(0, depot->town_index);
+ 				SetDParam(1, v->cur_speed / 2);
+ 				str = STR_HEADING_FOR_ROAD_DEPOT + _patches.vehicle_speed;
+=== saveload.c
+==================================================================
+--- saveload.c	(revision 313)
++++ saveload.c	(local)
+@@ -1002,8 +1002,12 @@
+ //********************************************
+ 
+ enum {
+-	SAVE_POOL_BLOCK_SIZE_BITS = 17,
+-	SAVE_POOL_MAX_BLOCKS = 500
++	/** 
++	 * Since we will mainly use the pool to manage indices and allocation of
++	 * large blocks for us, each puddle will only contain 1 (large) drop. 
++	 * */
++	SAVEGAME_PUDDLE_SIZE = 1, 
++	SAVEGAME_DROP_SIZE = 128 * 1024, /**< Allocation 128K blocks at a time */
+ };
+ 
+ #include "network.h"
+@@ -1011,45 +1015,56 @@
+ #include "table/sprites.h"
+ #include "gfx.h"
+ #include "gui.h"
++#include "pool.h"
+ 
+ typedef struct ThreadedSave {
+-	MemoryPool *save;
+-	uint count;
++	IndexedPool savegame_pool; /**< The memory pool that stores a savegame while it is being written */
++	uint count; /**< The number of bytes that have been written to the memory pool */
+ 	bool ff_state;
+ 	bool saveinprogress;
+ 	CursorID cursor;
+ } ThreadedSave;
+ 
+-/* A maximum size of of 128K * 500 = 64.000KB savegames */
+-static MemoryPool _save_pool = {"Savegame", SAVE_POOL_MAX_BLOCKS, SAVE_POOL_BLOCK_SIZE_BITS, sizeof(byte), NULL, NULL, 0, 0, NULL};
++/* A pool to allocate memory for the savegame as needed. This pool is indexed,
++ * so it will keep the memory ordered. */
++static IndexedPoolSettings _savegame_pool_settings = {"Savegame", NULL, NULL, {"Savegame_sub", 0, SAVEGAME_PUDDLE_SIZE, SAVEGAME_DROP_SIZE, POOL_FAST, NULL, NULL} };
+ static ThreadedSave _ts;
+ 
+ static bool InitMem(void)
+ {
+-	_ts.save = &_save_pool;
+ 	_ts.count = 0;
+ 
+-	CleanPool(_ts.save);
+-	AddBlockToPool(_ts.save);
++	IndexedPoolInitialize(&_ts.savegame_pool, &_savegame_pool_settings);
+ 
+ 	/* A block from the pool is a contigious area of memory, so it is safe to write to it sequentially */
+-	_sl.bufsize = _ts.save->total_items;
+-	_sl.buf = (byte*)GetItemFromPool(_ts.save, _ts.count);
++	_sl.bufsize = SAVEGAME_DROP_SIZE;
++	_sl.buf = (byte*)IndexedPoolAllocateIndex(&_ts.savegame_pool, _ts.count/SAVEGAME_DROP_SIZE);
+ 	return true;
+ }
+ 
+ static void UnInitMem(void)
+ {
+-	CleanPool(_ts.save);
+-	_ts.save = NULL;
++	IndexedPoolEmpty(&_ts.savegame_pool);
+ }
+ 
+ static void WriteMem(uint size)
+ {
++	/* This will be called to write the buffer to "disk". Since the chunk
++	 * handlers write directly into the memory pool, we will just swap the
++	 * buffer with a new one.
++	 * This will always work when a full buffer needs to be written. If the
++	 * buffer is not full, we cannot swap it, since it would produce a "hole" in
++	 * the memory pool. Since the last WriteMem call is usually with a non-full
++	 * buffer, we will allow writing a non-full buffer only once, after that,
++	 * nothing should be written anymore.
++	 * We check this by checking if the count is still a multiple of the
++	 * dropsize. If so, we have written only full buffers. If not, we have
++	 * written a non-full buffer at least once. */
++	assert(_ts.count % SAVEGAME_DROP_SIZE == 0);
+ 	_ts.count += size;
+-	/* Allocate new block and new buffer-pointer */
+-	AddBlockIfNeeded(_ts.save, _ts.count);
+-	_sl.buf = (byte*)GetItemFromPool(_ts.save, _ts.count);
++	/* Allocate new buffer if this was not the last one */
++	if (size == SAVEGAME_DROP_SIZE)
++		_sl.buf = (byte*)IndexedPoolAllocateIndex(&_ts.savegame_pool, _ts.count/SAVEGAME_DROP_SIZE);
+ }
+ 
+ //********************************************
+@@ -1245,32 +1260,32 @@
+ 
+ 	switch (rt) {
+ 		case REF_ORDER: {
+-			if (!AddBlockIfNeeded(&_order_pool, index))
++			if (IndexedPoolAllocateIndex(&_order_pool, index) == NULL)
+ 				error("Orders: failed loading savegame: too many orders");
+ 			return GetOrder(index);
+ 		}
+ 		case REF_VEHICLE: {
+-			if (!AddBlockIfNeeded(&_vehicle_pool, index))
++			if (IndexedPoolAllocateIndex(&_vehicle_pool, index) == NULL)
+ 				error("Vehicles: failed loading savegame: too many vehicles");
+ 			return GetVehicle(index);
+ 		}
+ 		case REF_STATION: {
+-			if (!AddBlockIfNeeded(&_station_pool, index))
++			if (IndexedPoolAllocateIndex(&_station_pool, index) == NULL)
+ 				error("Stations: failed loading savegame: too many stations");
+ 			return GetStation(index);
+ 		}
+ 		case REF_TOWN: {
+-			if (!AddBlockIfNeeded(&_town_pool, index))
++			if (IndexedPoolAllocateIndex(&_town_pool, index) == NULL)
+ 				error("Towns: failed loading savegame: too many towns");
+ 			return GetTown(index);
+ 		}
+ 		case REF_ROADSTOPS: {
+-			if (!AddBlockIfNeeded(&_roadstop_pool, index))
++			if (IndexedPoolAllocateIndex(&_roadstop_pool, index) == NULL)
+ 				error("RoadStops: failed loading savegame: too many RoadStops");
+ 			return GetRoadStop(index);
+ 		}
+ 		case REF_ENGINE_RENEWS: {
+-			if (!AddBlockIfNeeded(&_engine_renew_pool, index))
++			if (IndexedPoolAllocateIndex(&_engine_renew_pool, index) == NULL)
+ 				error("EngineRenews: failed loading savegame: too many EngineRenews");
+ 			return GetEngineRenew(index);
+ 		}
+@@ -1283,7 +1298,7 @@
+ 			if (index == INVALID_VEHICLE)
+ 				return NULL;
+ 
+-			if (!AddBlockIfNeeded(&_vehicle_pool, index))
++			if (IndexedPoolAllocateIndex(&_vehicle_pool, index) == NULL)
+ 				error("Vehicles: failed loading savegame: too many vehicles");
+ 			return GetVehicle(index);
+ 		}
+@@ -1391,7 +1406,7 @@
+ 
+ static Thread* save_thread;
+ 
+-/** We have written the whole game into memory, _save_pool, now find
++/** We have written the whole game into memory, _ts.savegame_pool, now find
+  * and appropiate compressor and start writing to file.
+  */
+ static void* SaveFileToDisk(void *arg)
+@@ -1424,18 +1439,20 @@
+ 
+ 	{
+ 		uint i;
+-		uint count = 1 << _ts.save->block_size_bits;
+-
++		uint num_blocks = _ts.count / SAVEGAME_DROP_SIZE + 1;
++		/* Assert that there are not "holes" in the pool, ie unallocated indices */
++		assert(IndexedPoolNumAllocated(&_ts.savegame_pool) == IndexedPoolNumUsed(&_ts.savegame_pool));
+ 		assert(_ts.count == _sl.offs_base);
+-		for (i = 0; i != _ts.save->current_blocks - 1; i++) {
+-			_sl.buf = _ts.save->blocks[i];
+-			fmt->writer(count);
++		for (i = 0; i != num_blocks - 1; i++) {
++			_sl.buf = IndexedPoolGetItem(&_ts.savegame_pool, i);
++			assert(_sl.buf != NULL);
++			fmt->writer(SAVEGAME_DROP_SIZE);
+ 		}
+ 
+ 		/* The last block is (almost) always not fully filled, so only write away
+ 		 * as much data as it is in there */
+-		_sl.buf = _ts.save->blocks[i];
+-		fmt->writer(_ts.count - (i * count));
++		_sl.buf = IndexedPoolGetItem(&_ts.savegame_pool, i);
++		fmt->writer(_ts.count - (i * SAVEGAME_DROP_SIZE));
+ 	}
+ 
+ 	fmt->uninit_write();
+@@ -1537,7 +1554,8 @@
+ 		SlSaveChunks();
+ 		SlWriteFill(); // flush the save buffer
+ 
+-		if (_network_server ||
++		/* XXX: DONTCOMMIT: Disable threaded saving, it breaks in a debugger? */   
++		if (true || _network_server ||
+ 					(save_thread = OTTDCreateThread(&SaveFileToDisk, (void*)"")) == NULL) {
+ 			DEBUG(misc, 1) ("[Sl] Cannot create savegame thread, reverting to single-threaded mode...");
+ 			SaveFileToDisk(NULL);
+=== ship_cmd.c
+==================================================================
+--- ship_cmd.c	(revision 313)
++++ ship_cmd.c	(local)
+@@ -80,7 +80,7 @@
+ 	} else {
+ 		FOR_ALL_DEPOTS(depot) {
+ 			tile = depot->xy;
+-			if (IsValidDepot(depot) && IsTileDepotType(tile, TRANSPORT_WATER) && IsTileOwner(tile, v->owner)) {
++			if (IsTileDepotType(tile, TRANSPORT_WATER) && IsTileOwner(tile, v->owner)) {
+ 				dist = DistanceManhattan(tile, tile2);
+ 				if (dist < best_dist) {
+ 					best_dist = dist;
+@@ -237,7 +237,7 @@
+ 			v->dest_tile = TILE_ADD(st->dock_tile, ToTileIndexDiff(GetDockOffset(st->dock_tile)));
+ 		}
+ 	} else if (order->type == OT_GOTO_DEPOT) {
+-		v->dest_tile = GetDepot(order->station)->xy;
++		v->dest_tile = GetDepot((DepotID)order->station)->xy;
+ 	} else {
+ 		v->dest_tile = 0;
+ 	}
+@@ -907,7 +907,7 @@
+ {
+ 	Vehicle *v;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -940,7 +940,7 @@
+ {
+ 	Vehicle *v;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -970,7 +970,7 @@
+ 	Vehicle *v;
+ 	const Depot *dep;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -1008,7 +1008,6 @@
+ 	return 0;
+ }
+ 
+-
+ /** Refits a ship to the specified cargo type.
+  * @param tile unused
+  * @param p1 vehicle ID of the ship to refit
+@@ -1021,7 +1020,7 @@
+ 	int32 cost;
+ 	CargoID new_cid = p2 & 0xFF; //gets the cargo number
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+=== ship_gui.c
+==================================================================
+--- ship_gui.c	(revision 313)
++++ ship_gui.c	(local)
+@@ -494,7 +494,7 @@
+ 					} break;
+ 
+ 					case OT_GOTO_DEPOT: {
+-						Depot *depot = GetDepot(v->current_order.station);
++						Depot *depot = GetDepot((DepotID)v->current_order.station);
+ 						SetDParam(0, depot->town_index);
+ 						SetDParam(1, v->cur_speed / 2);
+ 						str = STR_HEADING_FOR_SHIP_DEPOT + _patches.vehicle_speed;
+=== signs.c
+==================================================================
+--- signs.c	(revision 313)
++++ signs.c	(local)
+@@ -13,24 +13,16 @@
+ static SignStruct *_new_sign_struct;
+ 
+ enum {
+-	/* Max signs: 64000 (4 * 16000) */
+-	SIGN_POOL_BLOCK_SIZE_BITS = 2,       /* In bits, so (1 << 2) == 4 */
+-	SIGN_POOL_MAX_BLOCKS      = 16000,
++	SIGN_PUDDLE_SIZE      = 4,
+ };
+ 
+-/**
+- * Called if a new block is added to the sign-pool
+- */
+-static void SignPoolNewBlock(uint start_item)
+-{
+-	SignStruct *ss;
++/* Forward declare init/destroy proc, referenced by INDEXED_POOL */
++static void InitializeSignStruct(const IndexedPool* pool, void* drop, DropIndex index);
++static void DestroySignStruct(const IndexedPool* pool, void* drop, DropIndex index);
+ 
+-	FOR_ALL_SIGNS_FROM(ss, start_item)
+-		ss->index = start_item++;
+-}
+-
+ /* Initialize the sign-pool */
+-MemoryPool _sign_pool = { "Signs", SIGN_POOL_MAX_BLOCKS, SIGN_POOL_BLOCK_SIZE_BITS, sizeof(SignStruct), &SignPoolNewBlock, NULL, 0, 0, NULL };
++static IndexedPoolSettings _signstruct_pool_settings = INDEXED_POOL(SignStruct, SIGN_PUDDLE_SIZE);
++IndexedPool _signstruct_pool;
+ 
+ /**
+  *
+@@ -54,9 +46,7 @@
+ 	SignStruct *ss;
+ 
+ 	FOR_ALL_SIGNS(ss)
+-		if (ss->str != 0)
+-			UpdateSignVirtCoords(ss);
+-
++		UpdateSignVirtCoords(ss);
+ }
+ 
+ /**
+@@ -74,34 +64,20 @@
+ 		ss->sign.top  + 45);
+ }
+ 
+-/**
+- *
+- * Allocates a new sign
+- *
+- * @return The pointer to the new sign, or NULL if there is no more free space
+- */
+-static SignStruct *AllocateSign(void)
++static void InitializeSignStruct(const IndexedPool* pool, void* drop, DropIndex index)
+ {
+-	SignStruct *ss;
+-	FOR_ALL_SIGNS(ss) {
+-		if (ss->str == 0) {
+-			uint index = ss->index;
++	ZERO_AND_INDEX(SignStruct, drop);
++}
+ 
+-			memset(ss, 0, sizeof(SignStruct));
+-			ss->index = index;
+-
+-			return ss;
+-		}
+-	}
+-
+-	/* Check if we can add a block to the pool */
+-	if (AddBlockToPool(&_sign_pool))
+-		return AllocateSign();
+-
+-	return NULL;
++static void DestroySignStruct(const IndexedPool* pool, void* drop, DropIndex index)
++{
++	SignStruct* ss = (SignStruct*)drop;
++	/* Delete the name */
++	DeleteName(ss->str);
+ }
+ 
+-/** Place a sign at the given coordinates. Ownership of sign has
++/** 
++ * Place a sign at the given coordinates. Ownership of sign has
+  * no effect whatsoever except for the colour the sign gets for easy recognition,
+  * but everybody is able to rename/remove it.
+  * @param tile tile to place sign at
+@@ -113,7 +89,7 @@
+ 	SignStruct *ss;
+ 
+ 	/* Try to locate a new sign */
+-	ss = AllocateSign();
++	ss = AllocateSignStruct();
+ 	if (ss == NULL) return_cmd_error(STR_2808_TOO_MANY_SIGNS);
+ 
+ 	/* When we execute, really make the sign */
+@@ -145,7 +121,7 @@
+  */
+ int32 CmdRenameSign(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+-	if (!IsSignIndex(p1)) return CMD_ERROR;
++	if (!IsValidSignStructID(p1)) return CMD_ERROR;
+ 
+ 	/* If _cmd_text 0 means the new text for the sign is non-empty.
+ 	 * So rename the sign. If it is empty, it has no name, so delete it */
+@@ -155,7 +131,7 @@
+ 		if (str == 0) return CMD_ERROR;
+ 
+ 		if (flags & DC_EXEC) {
+-			SignStruct *ss = GetSign(p1);
++			SignStruct *ss = GetSignStruct(p1);
+ 
+ 			/* Delete the old name */
+ 			DeleteName(ss->str);
+@@ -175,13 +151,12 @@
+ 		}
+ 	} else { /* Delete sign */
+ 		if (flags & DC_EXEC) {
+-			SignStruct *ss = GetSign(p1);
++			SignStruct *ss = GetSignStruct(p1);
+ 
+-			/* Delete the name */
+-			DeleteName(ss->str);
+-			ss->str = 0;
+-
+ 			MarkSignDirty(ss);
++
++			DeleteSignStruct(ss);
++
+ 			InvalidateWindow(WC_SIGN_LIST, 0);
+ 			_sign_sort_dirty = true;
+ 		}
+@@ -221,8 +196,7 @@
+  */
+ void InitializeSigns(void)
+ {
+-	CleanPool(&_sign_pool);
+-	AddBlockToPool(&_sign_pool);
++	IndexedPoolInitialize(&_signstruct_pool, &_signstruct_pool_settings);
+ }
+ 
+ static const SaveLoad _sign_desc[] = {
+@@ -246,11 +220,8 @@
+ 	SignStruct *ss;
+ 
+ 	FOR_ALL_SIGNS(ss) {
+-		/* Don't save empty signs */
+-		if (ss->str != 0) {
+-			SlSetArrayIndex(ss->index);
+-			SlObject(ss, _sign_desc);
+-		}
++		SlSetArrayIndex(ss->index);
++		SlObject(ss, _sign_desc);
+ 	}
+ }
+ 
+@@ -263,13 +234,10 @@
+ {
+ 	int index;
+ 	while ((index = SlIterateArray()) != -1) {
+-		SignStruct *ss;
++		if (IndexedPoolAllocateIndex(&_signstruct_pool, index) == NULL)
++			error("Depots: failed loading savegame: too many depots");
+ 
+-		if (!AddBlockIfNeeded(&_sign_pool, index))
+-			error("Signs: failed loading savegame: too many signs");
+-
+-		ss = GetSign(index);
+-		SlObject(ss, _sign_desc);
++		SlObject(GetSignStruct((SignStructID)index), _sign_desc);
+ 	}
+ 
+ 	_sign_sort_dirty = true;
+=== signs.h
+==================================================================
+--- signs.h	(revision 313)
++++ signs.h	(local)
+@@ -14,43 +14,14 @@
+ 	PlayerID owner; // placed by this player. Anyone can delete them though.
+ 							// OWNER_NONE for gray signs from old games.
+ 
+-	uint16       index;
++	SignStructID index;
+ } SignStruct;
+ 
+-extern MemoryPool _sign_pool;
++extern IndexedPool _signstruct_pool;
+ 
+-/**
+- * Check if a Sign really exists.
+- */
+-static inline bool IsValidSign(const SignStruct* ss)
+-{
+-	return ss->str != 0;
+-}
++#define FOR_ALL_SIGNS(ss) FOR_ALL_IN_POOL(_signstruct_pool, ss)
++INDEXED_POOL_FUNCTIONS(SignStruct, SignStructs, _signstruct_pool);
+ 
+-/**
+- * Get the pointer to the sign with index 'index'
+- */
+-static inline SignStruct *GetSign(uint index)
+-{
+-	return (SignStruct*)GetItemFromPool(&_sign_pool, index);
+-}
+-
+-/**
+- * Get the current size of the SignPool
+- */
+-static inline uint16 GetSignPoolSize(void)
+-{
+-	return _sign_pool.total_items;
+-}
+-
+-static inline bool IsSignIndex(uint index)
+-{
+-	return index < GetSignPoolSize();
+-}
+-
+-#define FOR_ALL_SIGNS_FROM(ss, start) for (ss = GetSign(start); ss != NULL; ss = (ss->index + 1 < GetSignPoolSize()) ? GetSign(ss->index + 1) : NULL)
+-#define FOR_ALL_SIGNS(ss) FOR_ALL_SIGNS_FROM(ss, 0)
+-
+ VARDEF bool _sign_sort_dirty;
+ VARDEF uint16 *_sign_sort;
+ 
+=== station.h
+==================================================================
+--- station.h	(revision 313)
++++ station.h	(local)
+@@ -34,7 +34,7 @@
+ 	TileIndex xy;
+ 	bool used;
+ 	byte status;
+-	uint32 index;
++	RoadStopID index;
+ 	byte num_vehicles;
+ 	StationID station;
+ 	struct RoadStop *next;
+@@ -138,56 +138,20 @@
+ 
+ VARDEF SortStruct *_station_sort;
+ 
+-extern MemoryPool _station_pool;
++extern IndexedPool _station_pool;
+ 
+-/**
+- * Get the pointer to the station with index 'index'
+- */
+-static inline Station *GetStation(StationID index)
+-{
+-	return (Station*)GetItemFromPool(&_station_pool, index);
+-}
++#define FOR_ALL_STATIONS(st) FOR_ALL_IN_POOL(_station_pool, st)
++#define FOR_ALL_STATIONS_EVERY_N_TICKS(st, n, ctr) FOR_ALL_EVERY_N_TICKS(_station_pool, st, n, ctr)
++INDEXED_POOL_FUNCTIONS(Station, Stations, _station_pool)
+ 
+-/**
+- * Get the current size of the StationPool
+- */
+-static inline uint16 GetStationPoolSize(void)
+-{
+-	return _station_pool.total_items;
+-}
+ 
+-static inline bool IsStationIndex(StationID index)
+-{
+-	return index < GetStationPoolSize();
+-}
+-
+-#define FOR_ALL_STATIONS_FROM(st, start) for (st = GetStation(start); st != NULL; st = (st->index + 1 < GetStationPoolSize()) ? GetStation(st->index + 1) : NULL)
+-#define FOR_ALL_STATIONS(st) FOR_ALL_STATIONS_FROM(st, 0)
+-
+-
+ /* Stuff for ROADSTOPS */
+ 
+-extern MemoryPool _roadstop_pool;
++extern IndexedPool _roadstop_pool;
+ 
+-/**
+- * Get the pointer to the roadstop with index 'index'
+- */
+-static inline RoadStop *GetRoadStop(uint index)
+-{
+-	return (RoadStop*)GetItemFromPool(&_roadstop_pool, index);
+-}
++#define FOR_ALL_ROADSTOPS(rs) FOR_ALL_IN_POOL(_roadstop_pool, rs)
++INDEXED_POOL_FUNCTIONS(RoadStop, RoadStops, _roadstop_pool)
+ 
+-/**
+- * Get the current size of the RoadStoptPool
+- */
+-static inline uint16 GetRoadStopPoolSize(void)
+-{
+-	return _roadstop_pool.total_items;
+-}
+-
+-#define FOR_ALL_ROADSTOPS_FROM(rs, start) for (rs = GetRoadStop(start); rs != NULL; rs = (rs->index + 1 < GetRoadStopPoolSize()) ? GetRoadStop(rs->index + 1) : NULL)
+-#define FOR_ALL_ROADSTOPS(rs) FOR_ALL_ROADSTOPS_FROM(rs, 0)
+-
+ /* End of stuff for ROADSTOPS */
+ 
+ 
+@@ -203,18 +167,11 @@
+ 
+ RoadStop * GetRoadStopByTile(TileIndex tile, RoadStopType type);
+ RoadStop * GetPrimaryRoadStop(const Station *st, RoadStopType type);
+-uint GetNumRoadStops(const Station* st, RoadStopType type);
+-RoadStop * AllocateRoadStop( void );
+ void ClearSlot(Vehicle *v);
+ 
+ /**
+- * Check if a station really exists.
++ * @todo Replace all manual checks for HVOT_BUOY with this function.
+  */
+-static inline bool IsValidStation(const Station *st)
+-{
+-	return st->xy != 0; /* XXX: Replace by INVALID_TILE someday */
+-}
+-
+ static inline bool IsBuoy(const Station* st)
+ {
+ 	return st->had_vehicle_of_type & HVOT_BUOY; /* XXX: We should really ditch this ugly coding and switch to something sane... */
+=== station_cmd.c
+==================================================================
+--- station_cmd.c	(revision 313)
++++ station_cmd.c	(local)
+@@ -31,51 +31,26 @@
+ #include "industry_map.h"
+ 
+ enum {
+-	/* Max stations: 64000 (64 * 1000) */
+-	STATION_POOL_BLOCK_SIZE_BITS = 6,       /* In bits, so (1 << 6) == 64 */
+-	STATION_POOL_MAX_BLOCKS      = 1000,
+-
+-	/* Max roadstops: 64000 (32 * 2000) */
+-	ROADSTOP_POOL_BLOCK_SIZE_BITS = 5,       /* In bits, so (1 << 5) == 32 */
+-	ROADSTOP_POOL_MAX_BLOCKS      = 2000,
++	STATION_PUDDLE_SIZE      = 64,
++	STATION_TICK_FREQ        = 250, 
++	/**< This frequency is based on revision 1.  Back then, one station (index)
++	 * would get a big tick each tick, and there were 250 station indices. */
++	ROADSTOP_PUDDLE_SIZE     = 32,
+ };
+ 
+-/**
+- * Called if a new block is added to the station-pool
+- */
+-static void StationPoolNewBlock(uint start_item)
+-{
+-	Station *st;
++/* Forward declare init/destroy proc, referenced by INDEXED_POOL */
++static void InitializeStation(const IndexedPool* pool, void* drop, DropIndex index);
++static void DestroyStation(const IndexedPool* pool, void* drop, DropIndex index);
+ 
+-	FOR_ALL_STATIONS_FROM(st, start_item) st->index = start_item++;
+-}
++static void InitializeRoadStop(const IndexedPool* pool, void* drop, DropIndex index);
++static void DestroyRoadStop(const IndexedPool* pool, void* drop, DropIndex index);
+ 
+-static void StationPoolCleanBlock(uint start_item, uint end_item)
+-{
+-	uint i;
++static IndexedPoolSettings _station_pool_settings =  INDEXED_POOL(Station, STATION_PUDDLE_SIZE);
++IndexedPool _station_pool;
++static IndexedPoolSettings _roadstop_pool_settings = INDEXED_POOL(RoadStop, ROADSTOP_PUDDLE_SIZE);
++IndexedPool _roadstop_pool;
+ 
+-	for (i = start_item; i <= end_item; i++) {
+-		Station *st = GetStation(i);
+-		free(st->speclist);
+-		st->speclist = NULL;
+-	}
+-}
+ 
+-/**
+- * Called if a new block is added to the roadstop-pool
+- */
+-static void RoadStopPoolNewBlock(uint start_item)
+-{
+-	RoadStop *rs;
+-
+-	FOR_ALL_ROADSTOPS_FROM(rs, start_item) rs->index = start_item++;
+-}
+-
+-/* Initialize the station-pool and roadstop-pool */
+-MemoryPool _station_pool = { "Stations", STATION_POOL_MAX_BLOCKS, STATION_POOL_BLOCK_SIZE_BITS, sizeof(Station), &StationPoolNewBlock, &StationPoolCleanBlock, 0, 0, NULL };
+-MemoryPool _roadstop_pool = { "RoadStop", ROADSTOP_POOL_MAX_BLOCKS, ROADSTOP_POOL_BLOCK_SIZE_BITS, sizeof(RoadStop), &RoadStopPoolNewBlock, NULL, 0, 0, NULL };
+-
+-
+ // FIXME -- need to be embedded into Airport variable. Is dynamically
+ // deducteable from graphics-tile array, so will not be needed
+ const byte _airport_size_x[] = {4, 6, 1, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+@@ -97,15 +72,37 @@
+ 	}
+ }
+ 
+-static void InitializeRoadStop(RoadStop *road_stop, RoadStop *previous, TileIndex tile, StationID index)
++static void InitializeRoadStop(const IndexedPool* pool, void* drop, DropIndex index)
+ {
++	RoadStop* rs = (RoadStop*)drop;
++	ZERO_AND_INDEX(RoadStop, rs);
++	rs->status = 3; //stop is free
++	rs->xy = INVALID_TILE;
++	rs->next = NULL;
++	rs->prev = NULL;
++	rs->num_vehicles = 0;
++}
++
++static void DestroyRoadStop(const IndexedPool* pool, void* drop, DropIndex index)
++{
++	RoadStop* rs = (RoadStop*)drop;
++	Vehicle* v;
++	/* Clear the slot assignment of all vehicles heading for this road stop */
++	if (rs->num_vehicles != 0) {
++		FOR_ALL_VEHICLES(v) {
++			if (v->type == VEH_Road && v->u.road.slot == rs) {
++				ClearSlot(v);
++			}
++		}
++	}
++	assert(rs->num_vehicles == 0);
++}
++	
++static void SetupRoadStop(RoadStop *road_stop, RoadStop *previous, TileIndex tile, StationID index)
++{
+ 	road_stop->xy = tile;
+-	road_stop->used = true;
+-	road_stop->status = 3; //stop is free
+-	road_stop->next = NULL;
+-	road_stop->prev = previous;
+ 	road_stop->station = index;
+-	road_stop->num_vehicles = 0;
++	road_stop->prev = previous;
+ }
+ 
+ RoadStop* GetPrimaryRoadStop(const Station* st, RoadStopType type)
+@@ -131,7 +128,7 @@
+ 	return rs;
+ }
+ 
+-uint GetNumRoadStops(const Station* st, RoadStopType type)
++uint GetNumRoadStopsInStation(const Station* st, RoadStopType type)
+ {
+ 	uint num = 0;
+ 	const RoadStop *rs;
+@@ -142,27 +139,6 @@
+ 	return num;
+ }
+ 
+-RoadStop *AllocateRoadStop(void)
+-{
+-	RoadStop *rs;
+-
+-	FOR_ALL_ROADSTOPS(rs) {
+-		if (!rs->used) {
+-			uint index = rs->index;
+-
+-			memset(rs, 0, sizeof(*rs));
+-			rs->index = index;
+-
+-			return rs;
+-		}
+-	}
+-
+-	/* Check if we can add a block to the pool */
+-	if (AddBlockToPool(&_roadstop_pool)) return AllocateRoadStop();
+-
+-	return NULL;
+-}
+-
+ /* Calculate the radius of the station. Basicly it is the biggest
+     radius that is available within the station */
+ static uint FindCatchmentRadius(const Station* st)
+@@ -262,26 +238,9 @@
+ 	return true;
+ }
+ 
+-static Station *AllocateStation(void)
++static void InitializeStation(const IndexedPool* pool, void* drop, DropIndex index)
+ {
+-	Station *st = NULL;
+-
+-	FOR_ALL_STATIONS(st) {
+-		if (st->xy == 0) {
+-			StationID index = st->index;
+-
+-			memset(st, 0, sizeof(Station));
+-			st->index = index;
+-
+-			return st;
+-		}
+-	}
+-
+-	/* Check if we can add a block to the pool */
+-	if (AddBlockToPool(&_station_pool)) return AllocateStation();
+-
+-	_error_message = STR_3008_TOO_MANY_STATIONS_LOADING;
+-	return NULL;
++	ZERO_AND_INDEX(Station, drop);
+ }
+ 
+ 
+@@ -351,7 +310,7 @@
+ 		Station *s;
+ 
+ 		FOR_ALL_STATIONS(s) {
+-			if (s != st && s->xy != 0 && s->town==t) {
++			if (s != st && s->town==t) {
+ 				uint str = M(s->string_id);
+ 				if (str <= 0x20) {
+ 					if (str == M(STR_SV_STNAME_FOREST))
+@@ -452,7 +411,7 @@
+ 	Station* st;
+ 
+ 	FOR_ALL_STATIONS(st) {
+-		if (st->xy != 0 && (owner == OWNER_SPECTATOR || st->owner == owner)) {
++		if (owner == OWNER_SPECTATOR || st->owner == owner) {
+ 			uint cur_dist = DistanceManhattan(tile, st->xy);
+ 
+ 			if (cur_dist < threshold) {
+@@ -515,9 +474,8 @@
+ {
+ 	Station* st;
+ 
+-	FOR_ALL_STATIONS(st) {
+-		if (st->xy != 0) UpdateStationVirtCoord(st);
+-	}
++	FOR_ALL_STATIONS(st)
++			UpdateStationVirtCoord(st);
+ }
+ 
+ // Update the station virt coords while making the modified parts dirty.
+@@ -1352,7 +1310,6 @@
+ int32 CmdBuildRoadStop(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Station *st;
+-	RoadStop *road_stop;
+ 	RoadStop **currstop;
+ 	RoadStop *prev = NULL;
+ 	int32 cost;
+@@ -1381,16 +1338,18 @@
+ 	}
+ 
+ 	//give us a road stop in the list, and check if something went wrong
+-	road_stop = AllocateRoadStop();
+-	if (road_stop == NULL) {
++	if (GetNumRoadStopsFree() == 0) {
+ 		return_cmd_error(type ? STR_3008B_TOO_MANY_TRUCK_STOPS : STR_3008A_TOO_MANY_BUS_STOPS);
+ 	}
+ 
+ 	if (st != NULL &&
+-			GetNumRoadStops(st, RS_BUS) + GetNumRoadStops(st, RS_TRUCK) >= ROAD_STOP_LIMIT) {
++			GetNumRoadStopsInStation(st, RS_BUS) + GetNumRoadStopsInStation(st, RS_TRUCK) >= ROAD_STOP_LIMIT) {
+ 		return_cmd_error(type ? STR_3008B_TOO_MANY_TRUCK_STOPS : STR_3008A_TOO_MANY_BUS_STOPS);
+ 	}
+-
++	/* Find a spot in the station's roadstop list to put the roadstop.
++	 * Will create a station if necessary. Will fill prev with the
++	 * roadstop after which to append the new one and currstop with the
++	 * spot for the new stop */
+ 	if (st != NULL) {
+ 		if (st->owner != OWNER_NONE && st->owner != _current_player) {
+ 			return_cmd_error(STR_3009_TOO_CLOSE_TO_ANOTHER_STATION);
+@@ -1423,11 +1382,12 @@
+ 	cost += (type) ? _price.build_truck_station : _price.build_bus_station;
+ 
+ 	if (flags & DC_EXEC) {
++		RoadStop *road_stop = AllocateRoadStop();
+ 		//point to the correct item in the _busstops or _truckstops array
+ 		*currstop = road_stop;
+ 
+ 		//initialize an empty station
+-		InitializeRoadStop(road_stop, prev, tile, st->index);
++		SetupRoadStop(road_stop, prev, tile, st->index);
+ 		if (!st->facilities) st->xy = tile;
+ 		st->facilities |= (type) ? FACIL_TRUCK_STOP : FACIL_BUS_STOP;
+ 		st->owner = _current_player;
+@@ -1467,21 +1427,8 @@
+ 	if (!EnsureNoVehicle(tile)) return CMD_ERROR;
+ 
+ 	if (flags & DC_EXEC) {
+-		Vehicle* v;
+-
+-		/* Clear the slot assignment of all vehicles heading for this road stop */
+-		if (cur_stop->num_vehicles != 0) {
+-			FOR_ALL_VEHICLES(v) {
+-				if (v->type == VEH_Road && v->u.road.slot == cur_stop) {
+-					ClearSlot(v);
+-				}
+-			}
+-		}
+-		assert(cur_stop->num_vehicles == 0);
+-
+ 		DoClearSquare(tile);
+ 
+-		cur_stop->used = false;
+ 		if (cur_stop->prev != NULL) cur_stop->prev->next = cur_stop->next;
+ 		if (cur_stop->next != NULL) cur_stop->next->prev = cur_stop->prev;
+ 
+@@ -1495,7 +1442,9 @@
+ 			//need to set the primary element to the next stop
+ 			*primary_stop = (*primary_stop)->next;
+ 		}
+-
++	
++		/* Remove from pool. Will also clear vehicles heading towards it. */
++		IndexedPoolFreeDrop(&_roadstop_pool, cur_stop->index);
+ 		UpdateStationVirtCoordDirty(st);
+ 		DeleteStationIfEmpty(st);
+ 	}
+@@ -1585,7 +1534,7 @@
+ 	{
+ 		uint num = 0;
+ 		FOR_ALL_STATIONS(st) {
+-			if (st->xy != 0 && st->town == t && st->facilities&FACIL_AIRPORT && st->airport_type != AT_OILRIG)
++			if (st->town == t && st->facilities&FACIL_AIRPORT && st->airport_type != AT_OILRIG)
+ 				num++;
+ 		}
+ 		if (num >= 2) {
+@@ -1776,9 +1725,11 @@
+ 	const Vehicle *v;
+ 	FOR_ALL_VEHICLES(v) {
+ 		if (v->type == VEH_Ship) {
++			/* Iterate all ships */
+ 			const Order *order;
+ 			FOR_VEHICLE_ORDERS(v, order) {
+ 				if (order->type == OT_GOTO_STATION && order->station == st->index) {
++					/* Order targets this station */
+ 					return true;
+ 				}
+ 			}
+@@ -2255,33 +2206,29 @@
+ 	return 0;
+ }
+ 
+-/** Removes a station from the list.
+-  * This is done by setting the .xy property to 0,
+-  * and doing some maintenance, especially clearing vehicle orders.
++ /**
++	* Clean up a station by clearing vehicle orders and invalidating windows.
+   * Aircraft-Hangar orders need special treatment here, as the hangars are
+   * actually part of a station (tiletype is STATION), but the order type
+   * is OT_GOTO_DEPOT.
+-  * @param st Station to be deleted
+   */
+-static void DeleteStation(Station *st)
++static void DestroyStation(const IndexedPool* pool, void* drop, DropIndex index)
+ {
++	Station *st = (Station*)drop;
+ 	Order order;
+-	StationID index;
+ 	Vehicle *v;
+-	st->xy = 0;
+ 
+ 	DeleteName(st->string_id);
+ 	MarkStationDirty(st);
+ 	_global_station_sort_dirty = true; // delete station, remove sign
+ 	InvalidateWindowClasses(WC_STATION_LIST);
+ 
+-	index = st->index;
+ 	DeleteWindowById(WC_STATION_VIEW, index);
+ 
+ 	//Now delete all orders that go to the station
+ 	order.type = OT_GOTO_STATION;
+ 	order.station = index;
+-	DeleteDestinationFromVehicleOrder(order);
++	DeleteOrderFromAllVehicles(order);
+ 
+ 	//And do the same with aircraft that have the station as a hangar-stop
+ 	FOR_ALL_VEHICLES(v) {
+@@ -2300,6 +2247,10 @@
+ 		if (invalidate) InvalidateWindow(WC_VEHICLE_ORDERS, v->index);
+ 	}
+ 
++	/* Free custom station speclist. st->speclist might be NULL, for non-train
++	 * stations. */
++	if (st->speclist != NULL) free(st->speclist);
++
+ 	//Subsidies need removal as well
+ 	DeleteSubsidyWithStation(index);
+ }
+@@ -2309,7 +2260,7 @@
+ 	Station *st;
+ 
+ 	FOR_ALL_STATIONS(st) {
+-		if (st->xy != 0 && st->owner < MAX_PLAYERS) DeleteStation(st);
++		if (st->owner < MAX_PLAYERS) DeleteStation(st);
+ 	}
+ }
+ 
+@@ -2433,20 +2384,17 @@
+ 
+ void OnTick_Station(void)
+ {
+-	uint i;
+ 	Station *st;
+ 
+ 	if (_game_mode == GM_EDITOR) return;
++	
++	/* Call big tick every STATION_TICK_FREQ ticks */
++	FOR_ALL_STATIONS_EVERY_N_TICKS(st, STATION_TICK_FREQ, _station_tick_ctr)
++		StationHandleBigTick(st);
+ 
+-	i = _station_tick_ctr;
+-	if (++_station_tick_ctr == GetStationPoolSize()) _station_tick_ctr = 0;
+-
+-	st = GetStation(i);
+-	if (st->xy != 0) StationHandleBigTick(st);
+-
+-	FOR_ALL_STATIONS(st) {
+-		if (st->xy != 0) StationHandleSmallTick(st);
+-	}
++	/* Call small tick every tick */
++	FOR_ALL_STATIONS(st)
++		StationHandleSmallTick(st);
+ }
+ 
+ void StationMonthlyLoop(void)
+@@ -2459,8 +2407,7 @@
+ 	Station *st;
+ 
+ 	FOR_ALL_STATIONS(st) {
+-		if (st->xy != 0 && st->owner == owner &&
+-				DistanceManhattan(tile, st->xy) <= radius) {
++		if (st->owner == owner && DistanceManhattan(tile, st->xy) <= radius) {
+ 			uint i;
+ 
+ 			for (i = 0; i != NUM_CARGO; i++) {
+@@ -2495,10 +2442,10 @@
+ 	StringID str;
+ 	Station *st;
+ 
+-	if (!IsStationIndex(p1) || _cmd_text[0] == '\0') return CMD_ERROR;
++	if (!IsValidStationID(p1) || _cmd_text[0] == '\0') return CMD_ERROR;
+ 	st = GetStation(p1);
+ 
+-	if (!IsValidStation(st) || !CheckOwnership(st->owner)) return CMD_ERROR;
++	if (!CheckOwnership(st->owner)) return CMD_ERROR;
+ 
+ 	str = AllocateNameUnique(_cmd_text, 6);
+ 	if (str == 0) return CMD_ERROR;
+@@ -2669,7 +2616,6 @@
+ 		DEBUG(misc, 0) ("Couldn't allocate station-name for oilrig at 0x%X, reverting to oilrig only...", tile);
+ 		return;
+ 	}
+-
+ 	st->town = ClosestTownFromTile(tile, (uint)-1);
+ 	st->sign.width_1 = 0;
+ 
+@@ -2699,6 +2645,10 @@
+ 		st->goods[j].rating = 175;
+ 		st->goods[j].last_speed = 0;
+ 		st->goods[j].last_age = 255;
++
++		UpdateStationVirtCoordDirty(st);
++		UpdateStationAcceptance(st, false);
++		return;
+ 	}
+ 
+ 	UpdateStationVirtCoordDirty(st);
+@@ -2715,6 +2665,7 @@
+ 	st->airport_tile = 0;
+ 	st->facilities &= ~(FACIL_AIRPORT | FACIL_DOCK);
+ 	st->airport_flags = 0;
++	/** XXX: Need pool free? */
+ 	UpdateStationVirtCoordDirty(st);
+ 	DeleteStation(st);
+ }
+@@ -2772,13 +2723,11 @@
+ 
+ void InitializeStations(void)
+ {
+-	/* Clean the station pool and create 1 block in it */
+-	CleanPool(&_station_pool);
+-	AddBlockToPool(&_station_pool);
++	/* Initialize the station pool */
++	IndexedPoolInitialize(&_station_pool, &_station_pool_settings);
+ 
+-	/* Clean the roadstop pool and create 1 block in it */
+-	CleanPool(&_roadstop_pool);
+-	AddBlockToPool(&_roadstop_pool);
++	/* Initialize the roadstop pool */
++	IndexedPoolInitialize(&_roadstop_pool, &_roadstop_pool_settings);
+ 
+ 	_station_tick_ctr = 0;
+ 
+@@ -2915,10 +2864,8 @@
+ 	Station *st;
+ 	// Write the stations
+ 	FOR_ALL_STATIONS(st) {
+-		if (st->xy != 0) {
+-			SlSetArrayIndex(st->index);
+-			SlAutolength((AutolengthProc*)SaveLoad_STNS, st);
+-		}
++		SlSetArrayIndex(st->index);
++		SlAutolength((AutolengthProc*)SaveLoad_STNS, st);
+ 	}
+ }
+ 
+@@ -2927,11 +2874,10 @@
+ 	int index;
+ 	while ((index = SlIterateArray()) != -1) {
+ 		Station *st;
+-
+-		if (!AddBlockIfNeeded(&_station_pool, index))
++		st = (Station*)IndexedPoolAllocateIndex(&_station_pool, index);
++		if (st == NULL)
+ 			error("Stations: failed loading savegame: too many stations");
+ 
+-		st = GetStation(index);
+ 		SaveLoad_STNS(st);
+ 
+ 		// this means it's an oldstyle savegame without support for nonuniform stations
+@@ -2952,20 +2898,17 @@
+ 				if (st->bus_stops == NULL)
+ 					error("Station: too many busstations in savegame");
+ 
+-				InitializeRoadStop(st->bus_stops, NULL, st->bus_tile_obsolete, st->index);
++				SetupRoadStop(st->bus_stops, NULL, st->bus_tile_obsolete, st->index);
+ 			}
+ 			if (st->lorry_tile_obsolete != 0) {
+ 				st->truck_stops = AllocateRoadStop();
+ 				if (st->truck_stops == NULL)
+ 					error("Station: too many truckstations in savegame");
+ 
+-				InitializeRoadStop(st->truck_stops, NULL, st->lorry_tile_obsolete, st->index);
++				SetupRoadStop(st->truck_stops, NULL, st->lorry_tile_obsolete, st->index);
+ 			}
+ 		}
+ 	}
+-
+-	/* This is to ensure all pointers are within the limits of _stations_size */
+-	if (_station_tick_ctr > GetStationPoolSize()) _station_tick_ctr = 0;
+ }
+ 
+ static void Save_ROADSTOP(void)
+@@ -2973,10 +2916,8 @@
+ 	RoadStop *rs;
+ 
+ 	FOR_ALL_ROADSTOPS(rs) {
+-		if (rs->used) {
+-			SlSetArrayIndex(rs->index);
+-			SlObject(rs, _roadstop_desc);
+-		}
++		SlSetArrayIndex(rs->index);
++		SlObject(rs, _roadstop_desc);
+ 	}
+ }
+ 
+@@ -2988,10 +2929,10 @@
+ 	while ((index = SlIterateArray()) != -1) {
+ 		RoadStop *rs;
+ 
+-		if (!AddBlockIfNeeded(&_roadstop_pool, index))
++		rs = (RoadStop*)IndexedPoolAllocateIndex(&_roadstop_pool, index);
++		if (rs == NULL)
+ 			error("RoadStops: failed loading savegame: too many RoadStops");
+ 
+-		rs = GetRoadStop(index);
+ 		SlObject(rs, _roadstop_desc);
+ 	}
+ 
+=== station_gui.c
+==================================================================
+--- station_gui.c	(revision 313)
++++ station_gui.c	(local)
+@@ -85,12 +85,12 @@
+ 	memset(_num_station_sort, 0, sizeof(_num_station_sort));
+ 
+ 	/* Create array for sorting */
+-	_station_sort = realloc(_station_sort, GetStationPoolSize() * sizeof(_station_sort[0]));
++	_station_sort = realloc(_station_sort, GetNumStations() * sizeof(_station_sort[0]));
+ 	if (_station_sort == NULL)
+ 		error("Could not allocate memory for the station-sorting-list");
+ 
+ 	FOR_ALL_STATIONS(st) {
+-		if (st->xy != 0 && st->owner != OWNER_NONE) {
++		if (st->owner != OWNER_NONE) {
+ 			_station_sort[n].index = st->index;
+ 			_station_sort[n++].owner = st->owner;
+ 			_num_station_sort[st->owner]++; // add number of stations of player
+=== town.h
+==================================================================
+--- town.h	(revision 313)
++++ town.h	(local)
+@@ -79,9 +79,7 @@
+ uint32 GetWorldPopulation(void);
+ 
+ void UpdateTownVirtCoord(Town *t);
+-void InitializeTown(void);
+ void ShowTownViewWindow(TownID town);
+-void DeleteTown(Town *t);
+ void ExpandTown(Town *t);
+ Town *CreateRandomTown(uint attempts, uint size_mode);
+ 
+@@ -149,46 +147,16 @@
+ 	TOWN_HAS_STADIUM    = 2    // There can be only one stadium by town.
+ };
+ 
++extern IndexedPool _town_pool;
++
+ bool CheckforTownRating(uint32 flags, Town *t, byte type);
+ 
+ VARDEF TownID *_town_sort;
+ 
+-extern MemoryPool _town_pool;
++#define FOR_ALL_TOWNS(town) FOR_ALL_IN_POOL(_town_pool, town)
++#define FOR_ALL_TOWNS_EVERY_N_TICKS(town, n, ctr) FOR_ALL_EVERY_N_TICKS(_town_pool, town, n, ctr)
++INDEXED_POOL_FUNCTIONS(Town, Towns, _town_pool)
+ 
+-/**
+- * Check if a Town really exists.
+- */
+-static inline bool IsValidTown(const Town* town)
+-{
+-	return town->xy != 0; /* XXX: Replace by INVALID_TILE someday */
+-}
+-
+-/**
+- * Get the pointer to the town with index 'index'
+- */
+-static inline Town *GetTown(uint index)
+-{
+-	return (Town*)GetItemFromPool(&_town_pool, index);
+-}
+-
+-/**
+- * Get the current size of the TownPool
+- */
+-static inline uint16 GetTownPoolSize(void)
+-{
+-	return _town_pool.total_items;
+-}
+-
+-static inline bool IsTownIndex(uint index)
+-{
+-	return index < GetTownPoolSize();
+-}
+-
+-#define FOR_ALL_TOWNS_FROM(t, start) for (t = GetTown(start); t != NULL; t = (t->index + 1 < GetTownPoolSize()) ? GetTown(t->index + 1) : NULL)
+-#define FOR_ALL_TOWNS(t) FOR_ALL_TOWNS_FROM(t, 0)
+-
+-VARDEF uint _total_towns; // For the AI: the amount of towns active
+-
+ VARDEF bool _town_sort_dirty;
+ VARDEF byte _town_sort_order;
+ 
+=== town_cmd.c
+==================================================================
+--- town_cmd.c	(revision 313)
++++ town_cmd.c	(local)
+@@ -29,25 +29,67 @@
+ #include "table/town_land.h"
+ 
+ enum {
+-	/* Max towns: 64000 (8 * 8000) */
+-	TOWN_POOL_BLOCK_SIZE_BITS = 3,       /* In bits, so (1 << 3) == 8 */
+-	TOWN_POOL_MAX_BLOCKS      = 8000,
++	TOWN_PUDDLE_SIZE      = 64,
++	TOWN_TICK_FREQ        = 100, /* XXX: Value? */
+ };
+ 
+-/**
+- * Called if a new block is added to the town-pool
+- */
+-static void TownPoolNewBlock(uint start_item)
+-{
+-	Town *t;
++/* Forward declare init/destroy proc, referenced by INDEXED_POOL */
++static void InitializeTown(const IndexedPool* pool, void* drop, DropIndex index);
++static void DestroyTown(const IndexedPool* pool, void* drop, DropIndex index);
+ 
+-	FOR_ALL_TOWNS_FROM(t, start_item)
+-		t->index = start_item++;
++/* Initialize the town-pool */
++static IndexedPoolSettings _town_pool_settings = INDEXED_POOL(Town, TOWN_PUDDLE_SIZE);
++IndexedPool _town_pool;
++
++
++static void InitializeTown(const IndexedPool* pool, void* drop, DropIndex index)
++{
++	ZERO_AND_INDEX(Town, drop);
+ }
+ 
+-/* Initialize the town-pool */
+-MemoryPool _town_pool = { "Towns", TOWN_POOL_MAX_BLOCKS, TOWN_POOL_BLOCK_SIZE_BITS, sizeof(Town), &TownPoolNewBlock, NULL, 0, 0, NULL };
++static void DestroyTown(const IndexedPool* pool, void* drop, DropIndex index)
++{
++	Industry *i;
++	TileIndex tile;
++	Town* t = (Town*)drop;
+ 
++	// Delete town authority window
++	//  and remove from list of sorted towns
++	DeleteWindowById(WC_TOWN_VIEW, t->index);
++	_town_sort_dirty = true;
++
++	// Delete all industries belonging to the town
++	/* TODO: Should we do this here? */
++	FOR_ALL_INDUSTRIES(i) {
++		if (i->xy && i->town == t)
++			DeleteIndustry(i);
++	}
++
++	// Go through all tiles and delete those belonging to the town
++	for (tile = 0; tile < MapSize(); ++tile) {
++		switch (GetTileType(tile)) {
++			case MP_HOUSE:
++				if (GetTownByTile(tile) == t)
++					DoCommand(tile, 0, 0, DC_EXEC, CMD_LANDSCAPE_CLEAR);
++				break;
++
++			case MP_STREET:
++			case MP_TUNNELBRIDGE:
++				if (IsTileOwner(tile, OWNER_TOWN) &&
++						ClosestTownFromTile(tile, (uint)-1) == t)
++					DoCommand(tile, 0, 0, DC_EXEC, CMD_LANDSCAPE_CLEAR);
++				break;
++
++			default:
++				break;
++		}
++	}
++
++	DeleteName(t->townnametype);
++
++	MarkWholeScreenDirty();
++}
++
+ // Local
+ static int _grow_town_result;
+ 
+@@ -407,23 +449,13 @@
+ 
+ void OnTick_Town(void)
+ {
++	Town *t;
++	static DropIndex tick_ctr = 0;
++
+ 	if (_game_mode == GM_EDITOR) return;
+ 
+-	/* Make sure each town's tickhandler invocation frequency is about the
+-	 * same - TOWN_GROWTH_FREQUENCY - independent on the number of towns. */
+-	for (_cur_town_iter += GetTownPoolSize();
+-	     _cur_town_iter >= TOWN_GROWTH_FREQUENCY;
+-	     _cur_town_iter -= TOWN_GROWTH_FREQUENCY) {
+-		uint32 i = _cur_town_ctr;
+-		Town *t;
+-
+-		if (++_cur_town_ctr >= GetTownPoolSize())
+-			_cur_town_ctr = 0;
+-
+-		t = GetTown(i);
+-
+-		if (t->xy != 0) TownTickHandler(t);
+-	}
++	FOR_ALL_TOWNS_EVERY_N_TICKS(t, TOWN_TICK_FREQ, tick_ctr)
++		TownTickHandler(t);
+ }
+ 
+ static RoadBits GetTownRoadMask(TileIndex tile)
+@@ -887,15 +919,16 @@
+ 	t->max_mail = t->population >> 4;
+ }
+ 
+-static void DoCreateTown(Town *t, TileIndex tile, uint32 townnameparts, uint size_mode)
++/**
++ * Allocate and initialize a town. Will not check if a town can be allocated,
++ * assumes the town pool is not full.
++ */
++static Town* DoCreateTown(TileIndex tile, uint32 townnameparts, uint size_mode)
+ {
+ 	int x, i;
++	Town* t = AllocateTown();
++	assert(t);
+ 
+-	// clear the town struct
+-	i = t->index;
+-	memset(t, 0, sizeof(Town));
+-	t->index = i;
+-
+ 	t->xy = tile;
+ 	t->num_houses = 0;
+ 	t->time_until_rebuild = 10;
+@@ -952,32 +985,9 @@
+ 	t->num_houses -= x;
+ 	UpdateTownRadius(t);
+ 	UpdateTownMaxPass(t);
++	return t;
+ }
+ 
+-static Town *AllocateTown(void)
+-{
+-	Town *t;
+-	FOR_ALL_TOWNS(t) {
+-		if (t->xy == 0) {
+-			uint index = t->index;
+-
+-			if (t->index > _total_towns)
+-				_total_towns = t->index;
+-
+-			memset(t, 0, sizeof(Town));
+-			t->index = index;
+-
+-			return t;
+-		}
+-	}
+-
+-	/* Check if we can add a block to the pool */
+-	if (AddBlockToPool(&_town_pool))
+-		return AllocateTown();
+-
+-	return NULL;
+-}
+-
+ /** Create a new town.
+  * This obviously only works in the scenario editor. Function not removed
+  * as it might be possible in the future to fund your own town :)
+@@ -987,7 +997,6 @@
+  */
+ int32 CmdBuildTown(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+-	Town *t;
+ 	uint32 townnameparts;
+ 
+ 	/* Only in the scenario editor */
+@@ -1013,13 +1022,12 @@
+ 		return_cmd_error(STR_023A_TOO_MANY_TOWNS);
+ 
+ 	// Allocate town struct
+-	t = AllocateTown();
+-	if (t == NULL) return_cmd_error(STR_023A_TOO_MANY_TOWNS);
++	if (GetNumTownsFree() == 0) return_cmd_error(STR_023A_TOO_MANY_TOWNS);
+ 
+ 	// Create the town
+ 	if (flags & DC_EXEC) {
+ 		_generating_world = true;
+-		DoCreateTown(t, tile, townnameparts, p1);
++		DoCreateTown(tile, townnameparts, p1);
+ 		_generating_world = false;
+ 	}
+ 	return 0;
+@@ -1028,7 +1036,6 @@
+ Town *CreateRandomTown(uint attempts, uint size_mode)
+ {
+ 	TileIndex tile;
+-	Town *t;
+ 	uint32 townnameparts;
+ 
+ 	do {
+@@ -1045,12 +1052,10 @@
+ 		// Get a unique name for the town.
+ 		if (!CreateTownName(&townnameparts)) break;
+ 
+-		// Allocate a town struct
+-		t = AllocateTown();
+-		if (t == NULL) break;
++		if (GetNumTownsFree() == 0)
++			break;
+ 
+-		DoCreateTown(t, tile, townnameparts, size_mode);
+-		return t;
++		return DoCreateTown(tile, townnameparts, size_mode);
+ 	} while (--attempts);
+ 	return NULL;
+ }
+@@ -1069,11 +1074,9 @@
+ 
+ 	// give it a last try, but now more aggressive
+ 	if (num == 0 && CreateRandomTown(10000, 0) == NULL) {
+-		Town *t;
+-		FOR_ALL_TOWNS(t) { if (IsValidTown(t)) {num = 1; break;}}
+-
+-		//XXX can we handle that more gracefully?
+-		if (num == 0 && _game_mode != GM_EDITOR) error("Could not generate any town");
++		/* XXX: I think the code that used to be here meant the following, but why
++		 * is stuff even here? :-S */
++		if (_game_mode != GM_EDITOR && GetNumTowns() == 0)	error("Could not generate any town");
+ 		return false;
+ 	}
+ 
+@@ -1352,7 +1355,7 @@
+ 	StringID str;
+ 	Town *t;
+ 
+-	if (!IsTownIndex(p1) || _cmd_text[0] == '\0') return CMD_ERROR;
++	if (!IsValidTownID(p1) || _cmd_text[0] == '\0') return CMD_ERROR;
+ 
+ 	t = GetTown(p1);
+ 
+@@ -1374,49 +1377,6 @@
+ }
+ 
+ // Called from GUI
+-void DeleteTown(Town *t)
+-{
+-	Industry *i;
+-	TileIndex tile;
+-
+-	// Delete town authority window
+-	//  and remove from list of sorted towns
+-	DeleteWindowById(WC_TOWN_VIEW, t->index);
+-	_town_sort_dirty = true;
+-
+-	// Delete all industries belonging to the town
+-	FOR_ALL_INDUSTRIES(i) {
+-		if (i->xy && i->town == t)
+-			DeleteIndustry(i);
+-	}
+-
+-	// Go through all tiles and delete those belonging to the town
+-	for (tile = 0; tile < MapSize(); ++tile) {
+-		switch (GetTileType(tile)) {
+-			case MP_HOUSE:
+-				if (GetTownByTile(tile) == t)
+-					DoCommand(tile, 0, 0, DC_EXEC, CMD_LANDSCAPE_CLEAR);
+-				break;
+-
+-			case MP_STREET:
+-			case MP_TUNNELBRIDGE:
+-				if (IsTileOwner(tile, OWNER_TOWN) &&
+-						ClosestTownFromTile(tile, (uint)-1) == t)
+-					DoCommand(tile, 0, 0, DC_EXEC, CMD_LANDSCAPE_CLEAR);
+-				break;
+-
+-			default:
+-				break;
+-		}
+-	}
+-
+-	t->xy = 0;
+-	DeleteName(t->townnametype);
+-
+-	MarkWholeScreenDirty();
+-}
+-
+-// Called from GUI
+ void ExpandTown(Town *t)
+ {
+ 	int amount, n;
+@@ -1605,7 +1565,7 @@
+ 	int32 cost;
+ 	Town *t;
+ 
+-	if (!IsTownIndex(p1) || p2 > lengthof(_town_action_proc)) return CMD_ERROR;
++	if (!IsValidTownID(p1) || p2 > lengthof(_town_action_proc)) return CMD_ERROR;
+ 
+ 	t = GetTown(p1);
+ 
+@@ -1841,17 +1801,13 @@
+ {
+ 	Subsidy *s;
+ 
+-	/* Clean the town pool and create 1 block in it */
+-	CleanPool(&_town_pool);
+-	AddBlockToPool(&_town_pool);
++	IndexedPoolInitialize(&_town_pool, &_town_pool_settings);
+ 
+ 	memset(_subsidies, 0, sizeof(_subsidies));
+ 	for (s=_subsidies; s != endof(_subsidies); s++)
+ 		s->cargo_type = CT_INVALID;
+ 
+-	_cur_town_ctr = 0;
+-	_cur_town_iter = 0;
+-	_total_towns = 0;
++	_town_tick_ctr = 0;
+ 	_town_sort_dirty = true;
+ }
+ 
+@@ -1952,25 +1908,15 @@
+ {
+ 	int index;
+ 
+-	_total_towns = 0;
+-
+ 	while ((index = SlIterateArray()) != -1) {
+ 		Town *t;
+-
+-		if (!AddBlockIfNeeded(&_town_pool, index))
++	
++		t = IndexedPoolAllocateIndex(&_town_pool, index);
++		if (t == NULL)
+ 			error("Towns: failed loading savegame: too many towns");
+ 
+-		t = GetTown(index);
+ 		SlObject(t, _town_desc);
+-
+-		if ((uint)index > _total_towns)
+-			_total_towns = index;
+ 	}
+-
+-	/* This is to ensure all pointers are within the limits of
+-	 *  the size of the TownPool */
+-	if (_cur_town_ctr >= GetTownPoolSize())
+-		_cur_town_ctr = 0;
+ }
+ 
+ void AfterLoadTown(void)
+=== town_gui.c
+==================================================================
+--- town_gui.c	(revision 313)
++++ town_gui.c	(local)
+@@ -410,12 +410,12 @@
+ 	uint n = 0;
+ 
+ 	/* Create array for sorting */
+-	_town_sort = realloc(_town_sort, GetTownPoolSize() * sizeof(_town_sort[0]));
++	_town_sort = realloc(_town_sort, GetNumTowns() * sizeof(_town_sort[0]));
+ 	if (_town_sort == NULL)
+ 		error("Could not allocate memory for the town-sorting-list");
+ 
+ 	FOR_ALL_TOWNS(t) {
+-		if (t->xy != 0) _town_sort[n++] = t->index;
++		_town_sort[n++] = t->index;
+ 	}
+ 
+ 	_num_town_sort = n;
+=== train.h
+==================================================================
+--- train.h	(revision 313)
++++ train.h	(local)
+@@ -173,19 +173,6 @@
+ 	CLRBIT(v->subtype, Train_Multiheaded);
+ }
+ 
+-/** Get the next real (non-articulated part) vehicle in the consist.
+- * @param v Vehicle.
+- * @return Next vehicle in the consist.
+- */
+-static inline Vehicle *GetNextVehicle(const Vehicle *v)
+-{
+-	Vehicle *u = v->next;
+-	while (u != NULL && IsArticulatedPart(u)) {
+-		u = u->next;
+-	}
+-	return u;
+-}
+-
+ /** Check if an engine has an articulated part.
+  * @param v Vehicle.
+  * @return True if the engine has an articulated part.
+@@ -195,16 +182,40 @@
+ 	return (v->next != NULL && IsArticulatedPart(v->next));
+ }
+ 
++/**
++ * Get the next part of a multi-part engine.
++ * Will only work on a multi-part engine (EngineHasArticPart(v) == true),
++ * result is undefined for normal engine.
++ */
++static inline Vehicle *GetNextArticPart(const Vehicle *v)
++{
++	assert(EngineHasArticPart(v));
++	return v->next;
++}
++
++
+ /** Get the last part of a multi-part engine.
+  * @param v Vehicle.
+  * @return Last part of the engine.
+  */
+ static inline Vehicle *GetLastEnginePart(Vehicle *v)
+ {
+-	while (EngineHasArticPart(v)) v = v->next;
++	while (EngineHasArticPart(v)) v = GetNextArticPart(v);
+ 	return v;
+ }
+ 
++/** Get the next real (non-articulated part) vehicle in the consist.
++ * @param v Vehicle.
++ * @return Next vehicle in the consist.
++ */
++static inline Vehicle *GetNextVehicle(const Vehicle *v)
++{
++	while (EngineHasArticPart(v))
++		v = GetNextArticPart(v);
++	/* v now contains the last artic part in the engine */
++	return v->next;
++}
++
+ void ConvertOldMultiheadToNew(void);
+ void ConnectMultiheadedTrains(void);
+ 
+=== train_cmd.c
+==================================================================
+--- train_cmd.c	(revision 313)
++++ train_cmd.c	(local)
+@@ -565,17 +565,18 @@
+ 	num_vehicles = 1 + CountArticulatedParts(rvi, engine);
+ 
+ 	if (!(flags & DC_QUERY_COST)) {
+-		Vehicle *vl[11]; // Allow for wagon and upto 10 artic parts.
+-		Vehicle* v;
+-		int x;
+-		int y;
+-
+-		if (!AllocateVehicles(vl, num_vehicles))
++		if (GetNumVehiclesFree() < num_vehicles)
+ 			return_cmd_error(STR_00E1_TOO_MANY_VEHICLES_IN_GAME);
+ 
+ 		if (flags & DC_EXEC) {
++			Vehicle* vl[11]; // Allow for wagon and upto 10 artic parts.
++			Vehicle* v;
++			int x;
++			int y;
+ 			Vehicle *u, *w;
+ 			DiagDirection dir;
++	
++			AllocateVehicles(vl, num_vehicles);
+ 
+ 			v = vl[0];
+ 			v->spritenum = rvi->image_index;
+@@ -736,12 +737,10 @@
+ 	num_vehicles += CountArticulatedParts(rvi, p1);
+ 
+ 	if (!(flags & DC_QUERY_COST)) {
+-		Vehicle *vl[12]; // Allow for upto 10 artic parts and dual-heads
+-		if (!AllocateVehicles(vl, num_vehicles) || IsOrderPoolFull())
++		/* Vehicle or order pool full? */
++		if (GetNumVehiclesFree() < num_vehicles || IsOrderPoolFull())
+ 			return_cmd_error(STR_00E1_TOO_MANY_VEHICLES_IN_GAME);
+ 
+-		v = vl[0];
+-
+ 		unit_num = GetFreeUnitNumber(VEH_Train);
+ 		if (unit_num > _patches.max_trains)
+ 			return_cmd_error(STR_00E1_TOO_MANY_VEHICLES_IN_GAME);
+@@ -750,7 +749,10 @@
+ 			DiagDirection dir = GetRailDepotDirection(tile);
+ 			int x = TileX(tile) * TILE_SIZE + _vehicle_initial_x_fract[dir];
+ 			int y = TileY(tile) * TILE_SIZE + _vehicle_initial_y_fract[dir];
++			Vehicle *vl[12]; // Allow for upto 10 artic parts and dual-heads
+ 
++			AllocateVehicles(vl, num_vehicles);
++			v = vl[0];
+ 			v->unitnumber = unit_num;
+ 			v->direction = DiagDirToDir(dir);
+ 			v->tile = tile;
+@@ -948,7 +950,7 @@
+ 	VehicleID d = GB(p1, 16, 16);
+ 	Vehicle *src, *dst, *src_head, *dst_head;
+ 
+-	if (!IsVehicleIndex(s)) return CMD_ERROR;
++	if (!IsValidVehicleID(s)) return CMD_ERROR;
+ 
+ 	src = GetVehicle(s);
+ 
+@@ -1216,7 +1218,7 @@
+ {
+ 	Vehicle *v;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -1251,7 +1253,7 @@
+ 	Vehicle *new_f = NULL;
+ 	int32 cost = 0;
+ 
+-	if (!IsVehicleIndex(p1) || p2 > 2) return CMD_ERROR;
++	if (!IsValidVehicleID(p1) || p2 > 2) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -1647,7 +1649,7 @@
+ {
+ 	Vehicle *v;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -1696,7 +1698,7 @@
+ {
+ 	Vehicle *v;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -1719,7 +1721,7 @@
+ 	int32 cost;
+ 	uint num;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -1889,7 +1891,7 @@
+ 	Vehicle *v;
+ 	TrainFindDepotData tfdd;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -2377,7 +2379,7 @@
+ 			break;
+ 
+ 		case OT_GOTO_DEPOT:
+-			v->dest_tile = GetDepot(order->station)->xy;
++			v->dest_tile = GetDepot((DepotID)order->station)->xy;
+ 			result = CheckReverseTrain(v);
+ 			break;
+ 
+=== train_gui.c
+==================================================================
+--- train_gui.c	(revision 313)
++++ train_gui.c	(local)
+@@ -955,7 +955,7 @@
+ 			} break;
+ 
+ 			case OT_GOTO_DEPOT: {
+-				Depot *dep = GetDepot(v->current_order.station);
++				Depot *dep = GetDepot((DepotID)v->current_order.station);
+ 				SetDParam(0, dep->town_index);
+ 				str = STR_HEADING_FOR_TRAIN_DEPOT + _patches.vehicle_speed;
+ 				SetDParam(1, v->u.rail.last_speed);
+=== variables.h
+==================================================================
+--- variables.h	(revision 313)
++++ variables.h	(local)
+@@ -44,9 +44,6 @@
+ // Amount of game ticks
+ VARDEF uint16 _tick_counter;
+ 
+-// This one is not used anymore.
+-VARDEF VehicleID _vehicle_id_ctr_day;
+-
+ // Skip aging of cargo?
+ VARDEF byte _age_cargo_skip_counter;
+ 
+@@ -59,17 +56,22 @@
+ // Also save scrollpos_x, scrollpos_y and zoom
+ VARDEF uint16 _disaster_delay;
+ 
+-// Determines what station to operate on in the
+-//  tick handler.
+-VARDEF uint16 _station_tick_ctr;
+-
+ VARDEF uint32 _random_seeds[2][2];
+ 
+-// Iterator through all towns in OnTick_Town
+-VARDEF uint32 _cur_town_ctr;
+-// Frequency iterator at the same place
++/* Counters for different periodic tick routines (daily vehicle proc, towntick
++ * procs, etc.). */
++
++VARDEF StationID _station_tick_ctr;
++// This one used to be called _cur_town_ctr
++VARDEF TownID _town_tick_ctr;
++// This one used to be called _vehicle_id_ctr_day
++VARDEF VehicleID _vehicle_tick_ctr;
++
++/* This one is no longer used, but still present in savegames */
+ VARDEF uint32 _cur_town_iter;
+ 
++
++
+ VARDEF uint _cur_player_tick_index;
+ VARDEF uint _next_competitor_start;
+ 
+=== vehicle.c
+==================================================================
+--- vehicle.c	(revision 313)
++++ vehicle.c	(local)
+@@ -29,6 +29,8 @@
+ #define INVALID_COORD (-0x8000)
+ #define GEN_HASH(x,y) (((x & 0x1F80)>>7) + ((y & 0xFC0)))
+ 
++/* TODO: Remove artic parts when deleting a vehicle */
++
+ /*
+  *	These command macros are used to call vehicle type specific commands with non type specific commands
+  *	it should be used like: DoCommandP(x, y, p1, p2, flags, CMD_STARTSTOP_VEH(v->type))
+@@ -62,25 +64,85 @@
+ 
+ 
+ enum {
+-	/* Max vehicles: 64000 (512 * 125) */
+-	VEHICLES_POOL_BLOCK_SIZE_BITS = 9,       /* In bits, so (1 << 9) == 512 */
+-	VEHICLES_POOL_MAX_BLOCKS      = 125,
+-
+-	BLOCKS_FOR_SPECIAL_VEHICLES   = 2, ///< Blocks needed for special vehicles
++	VEHICLE_PUDDLE_SIZE           = 128
+ };
+ 
++/* Forward declare init/destroy proc, referenced by INDEXED_POOL */
++static void InitializeVehicle(const IndexedPool* pool, void* drop, DropIndex index);
++static void DestroyVehicle(const IndexedPool* pool, void* drop, DropIndex index);
++
++/* Initialize the vehicle-pool */
++static IndexedPoolSettings _vehicle_pool_settings = INDEXED_POOL(Vehicle, VEHICLE_PUDDLE_SIZE);
++IndexedPool _vehicle_pool;
++
++/* Forward declare for use in DestoryVehicle */
++static void UpdateVehiclePosHash(Vehicle* v, int x, int y);
++
++static void InitializeVehicle(const IndexedPool* pool, void* drop, DropIndex index)
++{
++	Vehicle* v = (Vehicle*)drop;
++	ZERO_AND_INDEX(Vehicle, v);
++
++	v->left_coord = INVALID_COORD;
++	v->first = NULL;
++	v->next = NULL;
++	v->next_hash = INVALID_VEHICLE;
++	v->string_id = 0;
++	v->next_shared = NULL;
++	v->prev_shared = NULL;
++	v->depot_list  = NULL;
++	v->random_bits = 0;
++}
++
++static void DestroyVehicle(const IndexedPool* pool, void* drop, DropIndex index)
++{
++	Vehicle* v = (Vehicle*)drop;
++	
++	DeleteVehicleNews(v->index, INVALID_STRING_ID);
++	DeleteName(v->string_id);
++	UpdateVehiclePosHash(v, INVALID_COORD, 0);
++
++	if (v->orders != NULL)
++		DeleteVehicleOrders(v);
++	
++	/* TODO: Arctic parts? */
++}
++
+ /**
+- * Called if a new block is added to the vehicle-pool
++ * Will allocate the number of vehicles and put them into the given array. You
++ * should make sure the all the allocated arrays fit. 
++ * @param  vl  An array of vehicle pointers in which to store the allocted
++ * vehicles.
++ * @param  num The number of vehicles to allocate.
++ * @return Will return false if the pool was full, true if allocation
++ * succeeded.
+  */
+-static void VehiclePoolNewBlock(uint start_item)
++bool AllocateVehicles(Vehicle** vl, uint num)
+ {
+-	Vehicle *v;
++	uint i;
++	/* Pool full? */
++	if (GetNumVehiclesFree() < num)
++		return false;
+ 
+-	FOR_ALL_VEHICLES_FROM(v, start_item) v->index = start_item++;
++	/* Allocate the vehicles */
++	for (i=0; i<num; i++)
++		vl[i] = AllocateVehicle();
++	return true;
+ }
+ 
+-/* Initialize the vehicle-pool */
+-MemoryPool _vehicle_pool = { "Vehicle", VEHICLES_POOL_MAX_BLOCKS, VEHICLES_POOL_BLOCK_SIZE_BITS, sizeof(Vehicle), &VehiclePoolNewBlock, NULL, 0, 0, NULL };
++/**
++ * This function used to make sure that a vehicle could always be allocated by
++ * setting aside a number of special vehicles that could not be allocated by
++ * the normal AllocateVehicle. Nowadays, the vehicle pool can spawn up to 65K
++ * vehicles, anyone actually having that many vehicles should be shot
++ * anyway....
++ * But, let's just leave this wrapper function here, it's less search
++ * replacing and easier if somebody decides I'm wrong here :-)
++ */
++Vehicle* ForceAllocateSpecialVehicle(void)
++{
++	return AllocateVehicle();
++}
+ 
+ void VehicleServiceInDepot(Vehicle *v)
+ {
+@@ -193,8 +255,6 @@
+ }
+ 
+ 
+-static void UpdateVehiclePosHash(Vehicle* v, int x, int y);
+-
+ void VehiclePositionChanged(Vehicle *v)
+ {
+ 	int img = v->cur_image;
+@@ -228,46 +288,24 @@
+ 	}
+ 
+ 	FOR_ALL_VEHICLES(v) {
+-		if (v->type != 0) {
+-			switch (v->type) {
+-				case VEH_Train: v->cur_image = GetTrainImage(v, v->direction); break;
+-				case VEH_Road: v->cur_image = GetRoadVehImage(v, v->direction); break;
+-				case VEH_Ship: v->cur_image = GetShipImage(v, v->direction); break;
+-				case VEH_Aircraft:
+-					if (v->subtype == 0 || v->subtype == 2) {
+-						v->cur_image = GetAircraftImage(v, v->direction);
+-						if (v->next != NULL) v->next->cur_image = v->cur_image;
+-					}
+-					break;
+-				default: break;
+-			}
+-
+-			v->left_coord = INVALID_COORD;
+-			VehiclePositionChanged(v);
++		switch (v->type) {
++			case VEH_Train: v->cur_image = GetTrainImage(v, v->direction); break;
++			case VEH_Road: v->cur_image = GetRoadVehImage(v, v->direction); break;
++			case VEH_Ship: v->cur_image = GetShipImage(v, v->direction); break;
++			case VEH_Aircraft:
++				if (v->subtype == 0 || v->subtype == 2) {
++					v->cur_image = GetAircraftImage(v, v->direction);
++					if (v->next != NULL) v->next->cur_image = v->cur_image;
++				}
++				break;
++			default: break;
+ 		}
++
++		v->left_coord = INVALID_COORD;
++		VehiclePositionChanged(v);
+ 	}
+ }
+ 
+-static Vehicle *InitializeVehicle(Vehicle *v)
+-{
+-	VehicleID index = v->index;
+-	memset(v, 0, sizeof(Vehicle));
+-	v->index = index;
+-
+-	assert(v->orders == NULL);
+-
+-	v->left_coord = INVALID_COORD;
+-	v->first = NULL;
+-	v->next = NULL;
+-	v->next_hash = INVALID_VEHICLE;
+-	v->string_id = 0;
+-	v->next_shared = NULL;
+-	v->prev_shared = NULL;
+-	v->depot_list  = NULL;
+-	v->random_bits = 0;
+-	return v;
+-}
+-
+ /**
+  * Get a value for a vehicle's random_bits.
+  * @return A random value from 0 to 255.
+@@ -277,91 +315,6 @@
+ 	return GB(Random(), 0, 8);
+ }
+ 
+-Vehicle *ForceAllocateSpecialVehicle(void)
+-{
+-	/* This stays a strange story.. there should always be room for special
+-	 * vehicles (special effects all over the map), but with 65k of vehicles
+-	 * is this realistic to double-check for that? For now we just reserve
+-	 * BLOCKS_FOR_SPECIAL_VEHICLES times block_size vehicles that may only
+-	 * be used for special vehicles.. should work nicely :) */
+-
+-	Vehicle *v;
+-
+-	FOR_ALL_VEHICLES(v) {
+-		/* No more room for the special vehicles, return NULL */
+-		if (v->index >= (1 << _vehicle_pool.block_size_bits) * BLOCKS_FOR_SPECIAL_VEHICLES)
+-			return NULL;
+-
+-		if (v->type == 0)
+-			return InitializeVehicle(v);
+-	}
+-
+-	return NULL;
+-}
+-
+-/*
+- * finds a free vehicle in the memory or allocates a new one
+- * returns a pointer to the first free vehicle or NULL if all vehicles are in use
+- * *skip_vehicles is an offset to where in the array we should begin looking
+- * this is to avoid looping though the same vehicles more than once after we learned that they are not free
+- * this feature is used by AllocateVehicles() since it need to allocate more than one and when
+- * another block is added to _vehicle_pool, since we only do that when we know it's already full
+- */
+-static Vehicle *AllocateSingleVehicle(VehicleID *skip_vehicles)
+-{
+-	/* See note by ForceAllocateSpecialVehicle() why we skip the
+-	 * first blocks */
+-	Vehicle *v;
+-	const int offset = (1 << VEHICLES_POOL_BLOCK_SIZE_BITS) * BLOCKS_FOR_SPECIAL_VEHICLES;
+-
+-	if (*skip_vehicles < (_vehicle_pool.total_items - offset)) {	// make sure the offset in the array is not larger than the array itself
+-		FOR_ALL_VEHICLES_FROM(v, offset + *skip_vehicles) {
+-			(*skip_vehicles)++;
+-			if (v->type == 0)
+-				return InitializeVehicle(v);
+-		}
+-	}
+-
+-	/* Check if we can add a block to the pool */
+-	if (AddBlockToPool(&_vehicle_pool))
+-		return AllocateSingleVehicle(skip_vehicles);
+-
+-	return NULL;
+-}
+-
+-
+-Vehicle *AllocateVehicle(void)
+-{
+-	VehicleID counter = 0;
+-	return AllocateSingleVehicle(&counter);
+-}
+-
+-
+-/** Allocates a lot of vehicles and frees them again
+-* @param vl pointer to an array of vehicles to get allocated. Can be NULL if the vehicles aren't needed (makes it test only)
+-* @param num number of vehicles to allocate room for
+-*	returns true if there is room to allocate all the vehicles
+-*/
+-bool AllocateVehicles(Vehicle **vl, int num)
+-{
+-	int i;
+-	Vehicle *v;
+-	VehicleID counter = 0;
+-
+-	for (i = 0; i != num; i++) {
+-		v = AllocateSingleVehicle(&counter);
+-		if (v == NULL) {
+-			return false;
+-		}
+-		if (vl != NULL) {
+-			vl[i] = v;
+-		}
+-	}
+-
+-	return true;
+-}
+-
+-
+ static VehicleID _vehicle_position_hash[0x1000];
+ 
+ void *VehicleFromPos(TileIndex tile, void *data, VehicleFromPosProc *proc)
+@@ -442,16 +395,8 @@
+ 
+ void InitializeVehicles(void)
+ {
+-	int i;
++	IndexedPoolInitialize(&_vehicle_pool, &_vehicle_pool_settings);
+ 
+-	/* Clean the vehicle pool, and reserve enough blocks
+-	 *  for the special vehicles, plus one for all the other
+-	 *  vehicles (which is increased on-the-fly) */
+-	CleanPool(&_vehicle_pool);
+-	AddBlockToPool(&_vehicle_pool);
+-	for (i = 0; i < BLOCKS_FOR_SPECIAL_VEHICLES; i++)
+-		AddBlockToPool(&_vehicle_pool);
+-
+ 	// clear it...
+ 	memset(_vehicle_position_hash, -1, sizeof(_vehicle_position_hash));
+ }
+@@ -536,28 +481,6 @@
+ 	return count;
+ }
+ 
+-void DeleteVehicle(Vehicle *v)
+-{
+-	Vehicle *u;
+-	bool has_artic_part = false;
+-
+-	DeleteVehicleNews(v->index, INVALID_STRING_ID);
+-
+-	do {
+-		u = v->next;
+-		has_artic_part = EngineHasArticPart(v);
+-		DeleteName(v->string_id);
+-		if (v->type == VEH_Road) ClearSlot(v);
+-		v->type = 0;
+-		UpdateVehiclePosHash(v, INVALID_COORD, 0);
+-		v->next_hash = INVALID_VEHICLE;
+-
+-		if (v->orders != NULL)
+-			DeleteVehicleOrders(v);
+-		v = u;
+-	} while (v != NULL && has_artic_part);
+-}
+-
+ void DeleteVehicleChain(Vehicle *v)
+ {
+ 	do {
+@@ -1501,8 +1424,9 @@
+ 	Vehicle *v_front, *v;
+ 	Vehicle *w_front, *w, *w_rear;
+ 	int cost, total_cost = 0;
++	uint  num_vehicles;
+ 
+-	if (!IsVehicleIndex(p1)) return CMD_ERROR;
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
+ 	v = GetVehicle(p1);
+ 	v_front = v;
+ 	w = NULL;
+@@ -1523,19 +1447,10 @@
+ 	if (v->type == VEH_Train && (!IsFrontEngine(v) || v->u.rail.crash_anim_pos >= 4400)) return CMD_ERROR;
+ 
+ 	// check that we can allocate enough vehicles
+-	if (!(flags & DC_EXEC)) {
+-		int veh_counter = 0;
+-		do {
+-			veh_counter++;
+-		} while ((v = v->next) != NULL);
++	num_vehicles = CountVehiclesInChain(v);
++	if (GetNumVehiclesFree() < num_vehicles)
++		return_cmd_error(STR_00E1_TOO_MANY_VEHICLES_IN_GAME);
+ 
+-		if (!AllocateVehicles(NULL, veh_counter)) {
+-			return_cmd_error(STR_00E1_TOO_MANY_VEHICLES_IN_GAME);
+-		}
+-	}
+-
+-	v = v_front;
+-
+ 	do {
+ 
+ 		if (IsMultiheaded(v) && !IsTrainEngine(v)) {
+@@ -1860,7 +1775,7 @@
+ 	Vehicle *v;
+ 	StringID str;
+ 
+-	if (!IsVehicleIndex(p1) || _cmd_text[0] == '\0') return CMD_ERROR;
++	if (!IsValidVehicleID(p1) || _cmd_text[0] == '\0') return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -1893,7 +1808,7 @@
+ 	Vehicle* v;
+ 	uint16 serv_int = GetServiceIntervalClamped(p2); /* Double check the service interval from the user-input */
+ 
+-	if (serv_int != p2 || !IsVehicleIndex(p1)) return CMD_ERROR;
++	if (serv_int != p2 || !IsValidVehicleID(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+@@ -2346,9 +2261,7 @@
+ 	Vehicle *v;
+ 
+ 	while ((index = SlIterateArray()) != -1) {
+-		Vehicle *v;
+-
+-		if (!AddBlockIfNeeded(&_vehicle_pool, index))
++		if(IndexedPoolAllocateIndex(&_vehicle_pool, index) == NULL)
+ 			error("Vehicles: failed loading savegame: too many vehicles");
+ 
+ 		v = GetVehicle(index);
+@@ -2368,28 +2281,31 @@
+ 
+ 	/* Check for shared order-lists (we now use pointers for that) */
+ 	if (CheckSavegameVersionOldStyle(5, 2)) {
+-		FOR_ALL_VEHICLES(v) {
+-			Vehicle *u;
++		FixSharedOrders();
++	}
++}
+ 
+-			if (v->type == 0)
+-				continue;
++const ChunkHandler _veh_chunk_handlers[] = {
++	{ 'VEHS', Save_VEHS, Load_VEHS, CH_SPARSE_ARRAY | CH_LAST},
++};
+ 
+-			FOR_ALL_VEHICLES_FROM(u, v->index + 1) {
+-				if (u->type == 0)
+-					continue;
++void FixSharedOrders(void)
++{
++	/* Check for shared orders, and link them correctly */
++	Vehicle *v;
+ 
+-				/* If a vehicle has the same orders, add the link to eachother
+-				    in both vehicles */
+-				if (v->orders == u->orders) {
+-					v->next_shared = u;
+-					u->prev_shared = v;
+-					break;
+-				}
++	FOR_ALL_VEHICLES(v) {
++		Vehicle *u;
++
++		FOR_ALL_VEHICLES_FROM(u, v->index + 1) {
++			/* If a vehicle has the same orders, add the link to eachother
++			in both vehicles */
++			if (v->orders == u->orders) {
++				v->next_shared = u;
++				u->prev_shared = v;
++				break;
+ 			}
+ 		}
+ 	}
+ }
+ 
+-const ChunkHandler _veh_chunk_handlers[] = {
+-	{ 'VEHS', Save_VEHS, Load_VEHS, CH_SPARSE_ARRAY | CH_LAST},
+-};
+=== vehicle.h
+==================================================================
+--- vehicle.h	(revision 313)
++++ vehicle.h	(local)
+@@ -189,10 +189,10 @@
+ 
+ 	/* Begin Order-stuff */
+ 	Order current_order;     ///< The current order (+ status, like: loading)
+-	OrderID cur_order_index; ///< The index to the current order
++	VehicleOrderID cur_order_index; ///< The index to the current order
+ 
+ 	Order *orders;           ///< Pointer to the first order for this vehicle
+-	OrderID num_orders;      ///< How many orders there are in the list
++	VehicleOrderID num_orders;      ///< How many orders there are in the list
+ 
+ 	Vehicle *next_shared;    ///< If not NULL, this points to the next vehicle that shared the order
+ 	Vehicle *prev_shared;    ///< If not NULL, this points to the prev vehicle that shared the order
+@@ -245,9 +245,7 @@
+ typedef void *VehicleFromPosProc(Vehicle *v, void *data);
+ 
+ void VehicleServiceInDepot(Vehicle *v);
+-Vehicle *AllocateVehicle(void);
+-bool AllocateVehicles(Vehicle **vl, int num);
+-Vehicle *ForceAllocateVehicle(void);
++bool AllocateVehicles(Vehicle **vl, uint num);
+ Vehicle *ForceAllocateSpecialVehicle(void);
+ void VehiclePositionChanged(Vehicle *v);
+ void AfterLoadVehicles(void);
+@@ -255,7 +253,6 @@
+ Vehicle *GetPrevVehicleInChain(const Vehicle *v);
+ Vehicle *GetFirstVehicleInChain(const Vehicle *v);
+ uint CountVehiclesInChain(const Vehicle* v);
+-void DeleteVehicle(Vehicle *v);
+ void DeleteVehicleChain(Vehicle *v);
+ void *VehicleFromPos(TileIndex tile, void *data, VehicleFromPosProc *proc);
+ void CallVehicleTicks(void);
+@@ -340,45 +337,16 @@
+ #define BEGIN_ENUM_WAGONS(v) do {
+ #define END_ENUM_WAGONS(v) } while ( (v=v->next) != NULL);
+ 
+-extern MemoryPool _vehicle_pool;
+-
+-/**
+- * Get the pointer to the vehicle with index 'index'
++/*
++ * Vehicle pool
+  */
+-static inline Vehicle *GetVehicle(VehicleID index)
+-{
+-	return (Vehicle*)GetItemFromPool(&_vehicle_pool, index);
+-}
++extern IndexedPool _vehicle_pool;
+ 
+-/**
+- * Get the current size of the VehiclePool
+- */
+-static inline uint16 GetVehiclePoolSize(void)
+-{
+-	return _vehicle_pool.total_items;
+-}
++#define FOR_ALL_VEHICLES_FROM(v, start) FOR_ALL_IN_POOL_FROM(_vehicle_pool, v, start)
++#define FOR_ALL_VEHICLES(v) FOR_ALL_IN_POOL(_vehicle_pool, v)
++#define FOR_ALL_VEHICLES_EVERY_N_TICKS(v, n, ctr) FOR_ALL_EVERY_N_TICKS(_vehicle_pool, v, n, ctr)
++INDEXED_POOL_FUNCTIONS(Vehicle, Vehicles, _vehicle_pool)
+ 
+-#define FOR_ALL_VEHICLES_FROM(v, start) for (v = GetVehicle(start); v != NULL; v = (v->index + 1 < GetVehiclePoolSize()) ? GetVehicle(v->index + 1) : NULL)
+-#define FOR_ALL_VEHICLES(v) FOR_ALL_VEHICLES_FROM(v, 0)
+-
+-/**
+- * Check if a Vehicle really exists.
+- */
+-static inline bool IsValidVehicle(const Vehicle *v)
+-{
+-	return v->type != 0;
+-}
+-
+-/**
+- * Check if an index is a vehicle-index (so between 0 and max-vehicles)
+- *
+- * @return Returns true if the vehicle-id is in range
+- */
+-static inline bool IsVehicleIndex(uint index)
+-{
+-	return index < GetVehiclePoolSize();
+-}
+-
+ /* Returns order 'index' of a vehicle or NULL when it doesn't exists */
+ static inline Order *GetVehicleOrder(const Vehicle *v, int index)
+ {
+@@ -415,6 +383,12 @@
+ 	return u;
+ }
+ 
++/**
++ * Finds identical orders in different vehicles and links those vehicles
++ * appropriately. This is used for loading older savegames.
++ */
++void FixSharedOrders(void);
++
+ // NOSAVE: Return values from various commands.
+ VARDEF VehicleID _new_train_id;
+ VARDEF VehicleID _new_wagon_id;
+@@ -424,7 +398,9 @@
+ VARDEF VehicleID _new_vehicle_id;
+ VARDEF uint16 _returned_refit_capacity;
+ 
+-#define INVALID_VEHICLE 0xFFFF
++enum {
++	INVALID_VEHICLE = 0xFFFF,
++};
+ 
+ /**
+  * Get the colour map for an engine. This used for unbuilt engines in the user interface.
+=== vehicle_gui.c
+==================================================================
+--- vehicle_gui.c	(revision 313)
++++ vehicle_gui.c	(local)
+@@ -123,7 +123,8 @@
+ 
+ 	if (!(vl->flags & VL_REBUILD)) return;
+ 
+-	sort_list = malloc(GetVehiclePoolSize() * sizeof(sort_list[0]));
++	/* Create array for sorting */
++	sort_list = malloc(GetNumVehicles() * sizeof(sort_list[0]));
+ 	if (sort_list == NULL) {
+ 		error("Could not allocate memory for the vehicle-sorting-list");
+ 	}
+=== water_cmd.c
+==================================================================
+--- water_cmd.c	(revision 313)
++++ water_cmd.c	(local)
+@@ -104,7 +104,7 @@
+ 
+ 	if (flags & DC_EXEC) {
+ 		/* Kill the depot, which is registered at the northernmost tile. Use that one */
+-		DoDeleteDepot(tile2 < tile ? tile2 : tile);
++		DoClearDepot(tile2 < tile ? tile2 : tile);
+ 
+ 		MakeWater(tile);
+ 		MakeWater(tile2);
+=== waypoint.c
+==================================================================
+--- waypoint.c	(revision 313)
++++ waypoint.c	(local)
+@@ -21,47 +21,41 @@
+ 
+ enum {
+ 	/* Max waypoints: 64000 (8 * 8000) */
+-	WAYPOINT_POOL_BLOCK_SIZE_BITS = 3,       /* In bits, so (1 << 3) == 8 */
+-	WAYPOINT_POOL_MAX_BLOCKS      = 8000,
++	WAYPOINT_PUDDLE_SIZE          = 8,
+ 
+ 	MAX_WAYPOINTS_PER_TOWN        = 64,
+ };
+ 
+-/**
+- * Called if a new block is added to the waypoint-pool
+- */
+-static void WaypointPoolNewBlock(uint start_item)
+-{
+-	Waypoint *wp;
++/* Forward declare init/destroy proc, referenced by INDEXED_POOL */
++static void InitializeWaypoint(const IndexedPool* pool, void* drop, DropIndex index);
++static void DestroyWaypoint(const IndexedPool* pool, void* drop, DropIndex index);
+ 
+-	FOR_ALL_WAYPOINTS_FROM(wp, start_item)
+-		wp->index = start_item++;
++/* Initialize the waypoint-pool */
++static IndexedPoolSettings _waypoint_pool_settings = INDEXED_POOL(Waypoint, WAYPOINT_PUDDLE_SIZE);
++IndexedPool _waypoint_pool;
++
++static void InitializeWaypoint(const IndexedPool* pool, void* drop, DropIndex index)
++{
++	Waypoint* wp = (Waypoint*)drop;
++	ZERO_AND_INDEX(Waypoint, wp);
+ }
+ 
+-/* Initialize the town-pool */
+-MemoryPool _waypoint_pool = { "Waypoints", WAYPOINT_POOL_MAX_BLOCKS, WAYPOINT_POOL_BLOCK_SIZE_BITS, sizeof(Waypoint), &WaypointPoolNewBlock, NULL, 0, 0, NULL };
++/* Forward declare so it can be used in DestroyWaypoint */
++static void RedrawWaypointSign(const Waypoint *wp);
+ 
+-/* Create a new waypoint */
+-static Waypoint* AllocateWaypoint(void)
++static void DestroyWaypoint(const IndexedPool* pool, void* drop, DropIndex index)
+ {
+-	Waypoint *wp;
++	Waypoint* wp = (Waypoint*)drop;
++	Order order;
+ 
+-	FOR_ALL_WAYPOINTS(wp) {
+-		if (wp->xy == 0) {
+-			uint index = wp->index;
++	order.type = OT_GOTO_WAYPOINT;
++	order.station = wp->index;
++	DeleteOrderFromAllVehicles(order);
+ 
+-			memset(wp, 0, sizeof(Waypoint));
+-			wp->index = index;
++	if (wp->string != STR_NULL)
++		DeleteName(wp->string);
+ 
+-			return wp;
+-		}
+-	}
+-
+-	/* Check if we can add a block to the pool */
+-	if (AddBlockToPool(&_waypoint_pool))
+-		return AllocateWaypoint();
+-
+-	return NULL;
++	RedrawWaypointSign(wp);
+ }
+ 
+ /* Update the sign for the waypoint */
+@@ -247,23 +241,6 @@
+ 	return _price.build_train_depot;
+ }
+ 
+-/* Internal handler to delete a waypoint */
+-static void DoDeleteWaypoint(Waypoint *wp)
+-{
+-	Order order;
+-
+-	wp->xy = 0;
+-
+-	order.type = OT_GOTO_WAYPOINT;
+-	order.station = wp->index;
+-	DeleteDestinationFromVehicleOrder(order);
+-
+-	if (wp->string != STR_NULL)
+-		DeleteName(wp->string);
+-
+-	RedrawWaypointSign(wp);
+-}
+-
+ /* Daily loop for waypoints */
+ void WaypointsDailyLoop(void)
+ {
+@@ -272,7 +249,7 @@
+ 	/* Check if we need to delete a waypoint */
+ 	FOR_ALL_WAYPOINTS(wp) {
+ 		if (wp->deleted && !--wp->deleted) {
+-			DoDeleteWaypoint(wp);
++			DeleteWaypoint(wp);
+ 		}
+ 	}
+ }
+@@ -331,7 +308,7 @@
+ 	Waypoint *wp;
+ 	StringID str;
+ 
+-	if (!IsWaypointIndex(p1)) return CMD_ERROR;
++	if (!IsValidWaypointID(p1)) return CMD_ERROR;
+ 
+ 	if (_cmd_text[0] != '\0') {
+ 		str = AllocateNameUnique(_cmd_text, 0);
+@@ -444,8 +421,7 @@
+ 
+ void InitializeWaypoints(void)
+ {
+-	CleanPool(&_waypoint_pool);
+-	AddBlockToPool(&_waypoint_pool);
++	IndexedPoolInitialize(&_waypoint_pool, &_waypoint_pool_settings);
+ }
+ 
+ static const SaveLoad _waypoint_desc[] = {
+@@ -482,7 +458,7 @@
+ 	while ((index = SlIterateArray()) != -1) {
+ 		Waypoint *wp;
+ 
+-		if (!AddBlockIfNeeded(&_waypoint_pool, index))
++		if (IndexedPoolAllocateIndex(&_waypoint_pool, index) == NULL)
+ 			error("Waypoints: failed loading savegame: too many waypoints");
+ 
+ 		wp = GetWaypoint(index);
+=== waypoint.h
+==================================================================
+--- waypoint.h	(revision 313)
++++ waypoint.h	(local)
+@@ -8,7 +8,7 @@
+ 
+ struct Waypoint {
+ 	TileIndex xy;      ///< Tile of waypoint
+-	StationID index;   ///< Index of waypoint
++	WaypointID index;      ///< Index of waypoint /* TODO: StationID? */
+ 
+ 	TownID town_index; ///< Town associated with the waypoint
+ 	byte town_cn;      ///< The Nth waypoint for this town (consecutive number)
+@@ -29,32 +29,15 @@
+ 	RAIL_WAYPOINT_TRACK_MASK = 1,
+ };
+ 
+-extern MemoryPool _waypoint_pool;
+-
+-/**
+- * Get the pointer to the waypoint with index 'index'
++/*
++ * Waypoint pool
+  */
+-static inline Waypoint *GetWaypoint(uint index)
+-{
+-	return (Waypoint*)GetItemFromPool(&_waypoint_pool, index);
+-}
++extern IndexedPool _waypoint_pool;
+ 
+-/**
+- * Get the current size of the WaypointPool
+- */
+-static inline uint16 GetWaypointPoolSize(void)
+-{
+-	return _waypoint_pool.total_items;
+-}
++#define FOR_ALL_WAYPOINTS(w) FOR_ALL_IN_POOL(_waypoint_pool, w)
++#define FOR_ALL_WAYPOINTS_EVERY_N_TICKS(v, n, ctr) FOR_ALL_EVERY_N_TICKS(_waypoint_pool, v, n, ctr)
++INDEXED_POOL_FUNCTIONS(Waypoint, Waypoints, _waypoint_pool)
+ 
+-static inline bool IsWaypointIndex(uint index)
+-{
+-	return index < GetWaypointPoolSize();
+-}
+-
+-#define FOR_ALL_WAYPOINTS_FROM(wp, start) for (wp = GetWaypoint(start); wp != NULL; wp = (wp->index + 1 < GetWaypointPoolSize()) ? GetWaypoint(wp->index + 1) : NULL)
+-#define FOR_ALL_WAYPOINTS(wp) FOR_ALL_WAYPOINTS_FROM(wp, 0)
+-
+ static inline bool IsRailWaypoint(TileIndex tile)
+ {
+ 	return (_m[tile].m5 & 0xFC) == 0xC4;

@@ -1,0 +1,512 @@
+Index: town.h
+===================================================================
+--- town.h	(revision 3348)
++++ town.h	(working copy)
+@@ -21,6 +21,9 @@
+ 	ViewportSign sign;
+ 
+ 	// Makes sure we don't build certain house types twice.
++	// bit 0 = Building funds received
++	// bit 1 = CHURCH
++	// bit 2 = STADIUM
+ 	byte flags12;
+ 
+ 	// Which players have a statue?
+@@ -94,6 +97,14 @@
+ };
+ 
+ enum {
++	TOWN_SORT_BY_NAME = 0,
++	TOWN_SORT_BY_POPULATION = 2,
++
++	TOWN_SORT_ASCENDING = 0,
++	TOWN_SORT_DESCENDING = 1
++};
++
++enum {
+ 	// These refer to the maximums, so Appalling is -1000 to -400
+ 	// MAXIMUM RATINGS BOUNDARIES
+ 	RATING_MINIMUM 		= -1000,
+Index: town_cmd.c
+===================================================================
+--- town_cmd.c	(revision 3348)
++++ town_cmd.c	(working copy)
+@@ -48,6 +48,9 @@
+  * are then scaled based on that. */
+ #define TOWN_GROWTH_FREQUENCY 23
+ 
++#define TOWN_GROW_CITY 0x01
++#define BUILDINGSTAGE_COMPLETED 0x03
++
+ enum {
+ 	TOWN_HAS_CHURCH     = 0x02,
+ 	TOWN_HAS_STADIUM    = 0x04
+@@ -74,6 +77,24 @@
+ 
+ #include "table/town_land.h"
+ 
++static byte NewHouseIDFromMap( TileIndex tile );
++/**
++ * House Construction Scheme.
++ *	Construction counter, for buildings under construction. Incremented on every
++ *	periodic tile processing.
++ *  On wraparound, the stage of construction in m3 is increased.
++ */
++static byte BuildingStage(TileIndex tile);
++static void IncBuildingStage( TileIndex tile );
++static byte ConstructionStage(TileIndex tile);
++static void IncConstructionStage( TileIndex tile );
++static inline Town *GetTownByTile(TileIndex tile);
++static bool GetHouseLiftIsMoving( TileIndex tile );
++static void SetHouseLiftIsMoving( TileIndex tile );
++static byte GetHouseLiftPos( TileIndex tile);
++static void SetHouseLiftPos( TileIndex tile, byte _pos);
++static byte GetHouseLiftDest( TileIndex tile);
++static void SetHouseLiftDest( TileIndex tile, byte _dest);
+ 
+ static void TownDrawHouseLift(const TileInfo *ti)
+ {
+@@ -85,7 +106,6 @@
+ 	TownDrawHouseLift
+ };
+ 
+-
+ static void DrawTile_Town(TileInfo *ti)
+ {
+ 	const DrawTownTileStruct *dcts;
+@@ -94,9 +114,13 @@
+ 
+ 	/* Retrieve pointer to the draw town tile struct */
+ 	{
+-		/* this "randomizes" on the (up to) 4 variants of a building */
+-		byte gfx   = _m[ti->tile].m4;
+-		byte stage = GB(_m[ti->tile].m3, 6, 2);
++		byte gfx = NewHouseIDFromMap(ti->tile);//pointer to house type*/
++		byte stage = BuildingStage(ti->tile);
++		/* this "randomizes" on the (up to) 4 variants of a building
++		 * Retrieve X and Y position of the tile.  Mangle with the bits and get
++		 * the resulting value as if it was random variation. This way, the system
++		 * always knows what variation to use for this house.
++		*/
+ 		uint variant;
+ 		variant  = ti->x >> 4;
+ 		variant ^= ti->x >> 6;
+@@ -164,28 +188,32 @@
+ 	// Not exactly sure when this happens, but probably when a house changes.
+ 	// Before this was just a return...so it'd leak animated tiles..
+ 	// That bug seems to have been here since day 1??
+-	if (!(_housetype_extra_flags[_m[tile].m4] & 0x20)) {
+-		DeleteAnimatedTile(tile);
++	if (!(_housetype_extra_flags[NewHouseIDFromMap(tile)] & 0x20)) {
++		DeleteAnimatedTile( tile );
+ 		return;
+ 	}
+ 
+-	if (!((old = _m[tile].m1) & 0x80)) {
+-		int i;
++	/* Is the lift moving */
++	if (!GetHouseLiftIsMoving( tile )) {
++ 		int i;                            //Then old is compared to 0x80,
++ 		old = GetHouseLiftPos( tile );
++                                        //to see if we have final position of lift on 5..0
++		SetHouseLiftIsMoving( tile );
+ 
+-		_m[tile].m1 |= 0x80;
+-
+ 		do {
+ 			i = (Random() & 7) - 1;
+ 		} while (i < 0 || i == 1 || i * 6 == old);
+ 
+-		SB(_m[tile].m5, 0, 6, i);
++		SetHouseLiftDest( tile, i);
+ 	}
+ 
+-	a = GB(_m[tile].m1, 0, 7);
+-	b = GB(_m[tile].m5, 0, 6) * 6;
++	/* Calculate the new position of the lift */
++	a = GetHouseLiftPos( tile );
++	b = GetHouseLiftDest( tile ) * 6;
+ 	a += (a < b) ? 1 : -1;
+-	SB(_m[tile].m1, 0, 7, a);
++	SetHouseLiftPos( tile, a);
+ 
++	/* Are we at our destination? */
+ 	if (a == b) {
+ 		_m[tile].m1 &= 0x7F;
+ 		_m[tile].m5 &= 0x40;
+@@ -235,8 +263,8 @@
+ 	t->population += mod;
+ 	InvalidateWindow(WC_TOWN_VIEW, t->index);
+ 	UpdateTownVirtCoord(t);
+-
+-	if (_town_sort_order & 2) _town_sort_dirty = true;
++	if (_town_sort_order & TOWN_SORT_BY_POPULATION)
++		_town_sort_dirty = true;
+ }
+ 
+ uint32 GetWorldPopulation(void)
+@@ -253,22 +281,23 @@
+ {
+ 	assert(IsTileType(tile, MP_HOUSE));
+ 
+-	if (_m[tile].m5 & 0x80) return;
++	if (GetHouseLiftIsMoving( tile )) return;  //house with a moving lift is indeed finished
+ 
+-	AB(_m[tile].m5, 0, 3, 1);
+-	if (GB(_m[tile].m5, 0, 3) != 0) return;
++	IncConstructionStage( tile );
++	if (ConstructionStage( tile ) != 0) return;
+ 
+-	_m[tile].m3 = _m[tile].m3 + 0x40;
++	IncBuildingStage( tile );  /*increase construction stage of one more step*/
+ 
+-	if ((_m[tile].m3 & 0xC0) == 0xC0) {
+-		ChangePopulation(GetTown(_m[tile].m2), _housetype_population[_m[tile].m4]);
++	if (BuildingStage( tile ) == BUILDINGSTAGE_COMPLETED){   //House is completed
++		/*Now, construction is completed.  Can add population of building to the town*/
++		ChangePopulation(GetTownByTile(tile), _housetype_population[NewHouseIDFromMap(tile)]);
+ 	}
+ 	MarkTileDirtyByTile(tile);
+ }
+ 
+ static void MakeTownHouseBigger(TileIndex tile)
+ {
+-	uint flags = _house_more_flags[_m[tile].m4];
++	uint flags = _house_more_flags[NewHouseIDFromMap(tile)];
+ 	if (flags & 8) MakeSingleHouseBigger(TILE_ADDXY(tile, 0, 0));
+ 	if (flags & 4) MakeSingleHouseBigger(TILE_ADDXY(tile, 0, 1));
+ 	if (flags & 2) MakeSingleHouseBigger(TILE_ADDXY(tile, 1, 0));
+@@ -281,20 +310,22 @@
+ 	Town *t;
+ 	uint32 r;
+ 
+-	if ((_m[tile].m3 & 0xC0) != 0xC0) {
++
++	if (BuildingStage(tile) != BUILDINGSTAGE_COMPLETED) {
++		/*Construction is not completed. See if we can go further in construction*/
+ 		MakeTownHouseBigger(tile);
+ 		return;
+ 	}
+ 
+-	house = _m[tile].m4;
++	house = NewHouseIDFromMap(tile);
+ 	if (_housetype_extra_flags[house] & 0x20 &&
+-			!(_m[tile].m5 & 0x80) &&
++			!GetHouseLiftIsMoving( tile ) &&
+ 			CHANCE16(1, 2) &&
+ 			AddAnimatedTile(tile)) {
+ 		_m[tile].m5 = (_m[tile].m5 & 0x40) | 0x80;
+ 	}
+ 
+-	t = GetTown(_m[tile].m2);
++	t = GetTownByTile(tile);
+ 
+ 	r = Random();
+ 
+@@ -347,12 +378,12 @@
+ 	if (!EnsureNoVehicle(tile)) return CMD_ERROR;
+ 	if (flags&DC_AUTO && !(flags&DC_AI_BUILDING)) return_cmd_error(STR_2004_BUILDING_MUST_BE_DEMOLISHED);
+ 
+-	house = _m[tile].m4;
++	house = NewHouseIDFromMap(tile);
+ 	cost = _price.remove_house * _housetype_remove_cost[house] >> 8;
+ 
+ 	rating = _housetype_remove_ratingmod[house];
+ 	_cleared_town_rating += rating;
+-	_cleared_town = t = GetTown(_m[tile].m2);
++	_cleared_town = t = GetTownByTile(tile);
+ 
+ 	if (_current_player < MAX_PLAYERS) {
+ 		if (rating > t->ratings[_current_player] && !(flags & DC_NO_TOWN_RATING) && !_cheats.magic_bulldozer.value) {
+@@ -371,7 +402,7 @@
+ 
+ static void GetAcceptedCargo_Town(TileIndex tile, AcceptedCargo ac)
+ {
+-	byte type = _m[tile].m4;
++	byte type = NewHouseIDFromMap(tile);
+ 
+ 	ac[CT_PASSENGERS] = _housetype_cargo_passengers[type];
+ 	ac[CT_MAIL]       = _housetype_cargo_mail[type];
+@@ -381,8 +412,8 @@
+ 
+ static void GetTileDesc_Town(TileIndex tile, TileDesc *td)
+ {
+-	td->str = _town_tile_names[_m[tile].m4];
+-	if ((_m[tile].m3 & 0xC0) != 0xC0) {
++	td->str = _town_tile_names[NewHouseIDFromMap(tile)];
++	if (BuildingStage(tile) != BUILDINGSTAGE_COMPLETED) {
+ 		SetDParamX(td->dparam, 0, td->str);
+ 		td->str = STR_2058_UNDER_CONSTRUCTION;
+ 	}
+@@ -732,7 +763,7 @@
+ 
+ 		if (IsTileType(tile, MP_STREET)) {
+ 			/* Don't allow building over roads of other cities */
+-			if (IsTileOwner(tile, OWNER_TOWN) && GetTown(_m[tile].m2) != t)
++			if (IsTileOwner(tile, OWNER_TOWN) && GetTownByTile(tile) != t)
+ 				_grow_town_result = -1;
+ 			else if (_game_mode == GM_EDITOR) {
+ 				/* If we are in the SE, and this road-piece has no town owner yet, it just found an
+@@ -1126,7 +1157,7 @@
+ 	};
+ 
+ 	slope = GetTileSlope(tile, NULL);
+-	if (slope & 0x10)
++	if (IsSteepTileh(slope))
+ 		return false;
+ 
+ 	b = 0;
+@@ -1240,7 +1271,7 @@
+ 					break;
+ 			}
+ 
+-			if (t->flags12 & oneof)
++			if (HASBITS(t->flags12 , oneof))
+ 				continue;
+ 
+ 			// Make sure there is no slope?
+@@ -1276,7 +1307,7 @@
+ 	t->num_houses++;
+ 
+ 	// Special houses that there can be only one of.
+-	t->flags12 |= oneof;
++	SETBITS(t->flags12,oneof);
+ 
+ 	{
+ 		int m3lo,m5,eflags;
+@@ -1357,7 +1388,7 @@
+ 
+ 	// make sure it's possible
+ 	if (!EnsureNoVehicle(tile)) return false;
+-	if (GetTileSlope(tile, NULL) & 0x10) return false;
++	if (IsSteepTileh(GetTileSlope(tile, NULL))) return false;
+ 
+ 	r = DoCommandByTile(tile, 0, 0, DC_EXEC | DC_AUTO | DC_NO_WATER, CMD_LANDSCAPE_CLEAR);
+ 	if (CmdFailed(r)) return false;
+@@ -1376,7 +1407,7 @@
+ 
+ static void ClearTownHouse(Town *t, TileIndex tile)
+ {
+-	uint house = _m[tile].m4;
++	uint house = NewHouseIDFromMap(tile);
+ 	uint eflags;
+ 
+ 	assert(IsTileType(tile, MP_HOUSE));
+@@ -1398,9 +1429,8 @@
+ 		}
+ 	}
+ 
+-	// Remove population from the town if the
+-	// house is finished.
+-	if ((~_m[tile].m3 & 0xC0) == 0) {
++	// Remove population from the town if the house is finished.
++	if (BuildingStage(tile) == BUILDINGSTAGE_COMPLETED) {
+ 		ChangePopulation(t, -_housetype_population[house]);
+ 	}
+ 
+@@ -1483,7 +1513,7 @@
+ 	for (tile = 0; tile < MapSize(); ++tile) {
+ 		switch (GetTileType(tile)) {
+ 			case MP_HOUSE:
+-				if (GetTown(_m[tile].m2) == t)
++				if (GetTownByTile(tile) == t)
+ 					DoCommandByTile(tile, 0, 0, DC_EXEC, CMD_LANDSCAPE_CLEAR);
+ 				break;
+ 
+@@ -1533,15 +1563,19 @@
+ 
+ typedef void TownActionProc(Town *t, int action);
+ 
++/* Advertise in a town */
+ static void TownActionAdvertise(Town *t, int action)
+ {
++	/* There are 3 types of advertising */
+ 	static const byte _advertising_amount[3] = {0x40, 0x70, 0xA0};
+-	static const byte _advertising_radius[3] = {10,15,20};
++	static const byte _advertising_radius[3] = {10, 15, 20};
++	/* Now increase the rating of all stations surrounding the core */
+ 	ModifyStationRatingAround(t->xy, _current_player,
+ 		_advertising_amount[action],
+ 		_advertising_radius[action]);
+ }
+ 
++/* Do rebuilds in the town */
+ static void TownActionRoadRebuild(Town *t, int action)
+ {
+ 	const Player* p;
+@@ -1571,6 +1605,7 @@
+ 		return false;
+ 
+ 
++	/* Make sure nobody has to pay for this action (as in rating) */
+ 	old = _current_player;
+ 	_current_player = OWNER_NONE;
+ 	r = DoCommandByTile(tile, 0, 0, DC_EXEC, CMD_LANDSCAPE_CLEAR);
+@@ -1611,8 +1646,10 @@
+ 	TileIndex tile = t->xy;
+ 	const TileIndexDiffC *p;
+ 
++	/* Mark the fact that the player has a statue in this town */
+ 	SETBIT(t->statues, _current_player);
+ 
++	/* Go through all the tiles and find a place to build the statue */
+ 	for (p = _statue_tiles; p != endof(_statue_tiles); ++p) {
+ 		if (DoBuildStatueOfCompany(tile)) return;
+ 		tile = TILE_ADD(tile, ToTileIndexDiff(*p));
+@@ -1622,7 +1659,7 @@
+ static void TownActionFundBuildings(Town *t, int action)
+ {
+ 	t->grow_counter = 1;
+-	t->flags12 |= 1;
++	SETBITS(t->flags12,1); //t->flags12 |= 1;
+ 	t->fund_buildings_months = 3;
+ }
+ 
+@@ -1738,7 +1775,7 @@
+ 		}
+ 	}
+ 
+-	t->flags12 &= ~1;
++	CLRBITS(t->flags12,1); //t->flags12 &= ~1;
+ 
+ 	if (t->fund_buildings_months != 0) {
+ 		static const byte _grow_count_values[6] = {
+@@ -1769,7 +1806,7 @@
+ 	if (m <= t->grow_counter)
+ 		t->grow_counter = m;
+ 
+-	t->flags12 |= 1;
++	SETBITS(t->flags12,1); //t->flags12 |= 1;
+ }
+ 
+ static void UpdateTownAmounts(Town *t)
+@@ -1832,7 +1869,7 @@
+ 				IsTileType(tile, MP_STREET) &&
+ 				(IsLevelCrossing(tile) ? _m[tile].m3 : GetTileOwner(tile)) == OWNER_TOWN
+ 			))
+-		return GetTown(_m[tile].m2);
++		return GetTownByTile(tile);
+ 
+ 	FOR_ALL_TOWNS(t) {
+ 		if (t->xy != 0) {
+@@ -2078,3 +2115,71 @@
+ const ChunkHandler _town_chunk_handlers[] = {
+ 	{ 'CITY', Save_TOWN, Load_TOWN, CH_ARRAY | CH_LAST},
+ };
++
++
++static byte NewHouseIDFromMap( TileIndex tile )
++{
++	return _m[tile].m4;  /*Standard ID*/
++}
++
++
++/**
++ * House Construction Scheme.
++ *	Construction counter, for buildings under construction. Incremented on every
++ *	periodic tile processing.
++ *  On wraparound, the stage of construction in m3 is increased.
++ */
++static byte BuildingStage(TileIndex tile)
++{
++	return GB(_m[tile].m3, 6, 2);
++}
++
++static void IncBuildingStage( TileIndex tile )
++{
++	AB(_m[tile].m3, 6, 2, 1); /*increase construction stage of one more step*/
++}
++
++static byte ConstructionStage(TileIndex tile)
++{
++	return GB(_m[tile].m5, 0, 3);
++}
++
++static void IncConstructionStage( TileIndex tile )
++{
++	AB(_m[tile].m5, 0, 3, 1);  /*Add 1 to the 3 bits starting at 0*/
++}
++
++static inline Town *GetTownByTile(TileIndex tile)
++{
++	return GetTown(_m[tile].m2 );
++}
++
++static bool GetHouseLiftIsMoving( TileIndex tile )
++{
++	return HASBIT(_m[tile].m5,7);
++}
++
++static void SetHouseLiftIsMoving( TileIndex tile )
++{
++	SB(_m[tile].m1,7,1,1);
++}
++
++static byte GetHouseLiftPos( TileIndex tile)
++{
++	return GB(_m[tile].m1, 0,6);
++}
++
++static void SetHouseLiftPos( TileIndex tile, byte _pos)
++{
++	SB(_m[tile].m1, 0,6,_pos);
++}
++
++static byte GetHouseLiftDest( TileIndex tile)
++{
++	return GB(_m[tile].m5, 0, 6);
++}
++
++static void SetHouseLiftDest( TileIndex tile, byte _dest)
++{
++	SB(_m[tile].m5,0,6, _dest);
++}
+Index: town_gui.c
+===================================================================
+--- town_gui.c	(revision 3348)
++++ town_gui.c	(working copy)
+@@ -391,8 +391,7 @@
+ 	}
+ 
+ 	r = strcmp(buf1, _bufcache);
+-	if (_town_sort_order & 1) r = -r;
+-	return r;
++	return (_town_sort_order & TOWN_SORT_DESCENDING) ? -r : r;
+ }
+ 
+ static int CDECL TownPopSorter(const void *a, const void *b)
+@@ -400,8 +399,7 @@
+ 	const Town *ta = GetTown(*(const uint16*)a);
+ 	const Town *tb = GetTown(*(const uint16*)b);
+ 	int r = ta->population - tb->population;
+-	if (_town_sort_order & 1) r = -r;
+-	return r;
++	return (_town_sort_order & TOWN_SORT_DESCENDING) ? -r : r;
+ }
+ 
+ static void MakeSortedTownList(void)
+@@ -421,7 +419,7 @@
+ 	_num_town_sort = n;
+ 
+ 	_last_town_idx = 0; // used for "cache"
+-	qsort(_town_sort, n, sizeof(_town_sort[0]), _town_sort_order & 2 ? TownPopSorter : TownNameSorter);
++	qsort(_town_sort, n, sizeof(_town_sort[0]), (_town_sort_order & TOWN_SORT_BY_POPULATION) ? TownPopSorter : TownNameSorter);
+ 
+ 	DEBUG(misc, 1) ("Resorting Towns list...");
+ }
+@@ -468,13 +466,13 @@
+ 	case WE_CLICK:
+ 		switch(e->click.widget) {
+ 		case 3: { /* Sort by Name ascending/descending */
+-			_town_sort_order = (_town_sort_order == 0) ? 1 : 0;
++			_town_sort_order = (_town_sort_order == TOWN_SORT_BY_NAME) ? 1 : 0;
+ 			_town_sort_dirty = true;
+ 			SetWindowDirty(w);
+ 		} break;
+ 
+ 		case 4: { /* Sort by Population ascending/descending */
+-			_town_sort_order = (_town_sort_order == 2) ? 3 : 2;
++			_town_sort_order = (_town_sort_order == TOWN_SORT_BY_POPULATION) ? 3 : 2;
+ 			_town_sort_dirty = true;
+ 			SetWindowDirty(w);
+ 		} break;

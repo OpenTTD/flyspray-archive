@@ -1,0 +1,217 @@
+diff -r 10eaf19ba68a src/build_vehicle_gui.cpp
+--- a/src/build_vehicle_gui.cpp	Sat Mar 21 11:16:10 2009 +0000
++++ b/src/build_vehicle_gui.cpp	Sat Mar 21 23:01:47 2009 +0100
+@@ -31,6 +31,7 @@
+ 	BUILD_VEHICLE_WIDGET_CAPTION,
+ 	BUILD_VEHICLE_WIDGET_SORT_ASSENDING_DESCENDING,
+ 	BUILD_VEHICLE_WIDGET_SORT_DROPDOWN,
++	BUILD_VEHICLE_WIDGET_CARGO_FILTER_DROPDOWN,
+ 	BUILD_VEHICLE_WIDGET_LIST,
+ 	BUILD_VEHICLE_WIDGET_SCROLLBAR,
+ 	BUILD_VEHICLE_WIDGET_PANEL,
+@@ -42,16 +43,17 @@
+ 
+ static const Widget _build_vehicle_widgets[] = {
+ 	{   WWT_CLOSEBOX,   RESIZE_NONE,  COLOUR_GREY,     0,    10,     0,    13, STR_00C5,                STR_018B_CLOSE_WINDOW },
+-	{    WWT_CAPTION,  RESIZE_RIGHT,  COLOUR_GREY,    11,   239,     0,    13, 0x0,                     STR_018C_WINDOW_TITLE_DRAG_THIS },
+-	{ WWT_PUSHTXTBTN,   RESIZE_NONE,  COLOUR_GREY,     0,    80,    14,    25, STR_SORT_BY,             STR_SORT_ORDER_TIP},
+-	{   WWT_DROPDOWN,  RESIZE_RIGHT,  COLOUR_GREY,    81,   239,    14,    25, 0x0,                     STR_SORT_CRITERIA_TIP},
+-	{     WWT_MATRIX,     RESIZE_RB,  COLOUR_GREY,     0,   227,    26,    39, 0x101,                   STR_NULL },
+-	{  WWT_SCROLLBAR,    RESIZE_LRB,  COLOUR_GREY,   228,   239,    26,    39, 0x0,                     STR_0190_SCROLL_BAR_SCROLLS_LIST },
+-	{      WWT_PANEL,    RESIZE_RTB,  COLOUR_GREY,     0,   239,    40,   161, 0x0,                     STR_NULL },
++	{    WWT_CAPTION,  RESIZE_RIGHT,  COLOUR_GREY,    11,   293,     0,    13, 0x0,                     STR_018C_WINDOW_TITLE_DRAG_THIS },
++	{ WWT_PUSHTXTBTN,   RESIZE_NONE,  COLOUR_GREY,     0,    60,    14,    25, STR_SORT_BY,             STR_SORT_ORDER_TIP},
++	{   WWT_DROPDOWN,   RESIZE_NONE,  COLOUR_GREY,    61,   190,    14,    25, 0x0,                     STR_SORT_CRITERIA_TIP},
++	{   WWT_DROPDOWN,  RESIZE_RIGHT,  COLOUR_GREY,   191,   293,    14,    25, 0x0,                     STR_SORT_CRITERIA_TIP},
++	{     WWT_MATRIX,     RESIZE_RB,  COLOUR_GREY,     0,   281,    26,    39, 0x101,                   STR_NULL },
++	{  WWT_SCROLLBAR,    RESIZE_LRB,  COLOUR_GREY,   282,   293,    26,    39, 0x0,                     STR_0190_SCROLL_BAR_SCROLLS_LIST },
++	{      WWT_PANEL,    RESIZE_RTB,  COLOUR_GREY,     0,   293,    40,   161, 0x0,                     STR_NULL },
+ 
+ 	{ WWT_PUSHTXTBTN,     RESIZE_TB,  COLOUR_GREY,     0,   114,   162,   173, 0x0,                     STR_NULL },
+-	{ WWT_PUSHTXTBTN,    RESIZE_RTB,  COLOUR_GREY,   115,   227,   162,   173, 0x0,                     STR_NULL },
+-	{  WWT_RESIZEBOX,   RESIZE_LRTB,  COLOUR_GREY,   228,   239,   162,   173, 0x0,                     STR_RESIZE_BUTTON },
++	{ WWT_PUSHTXTBTN,    RESIZE_RTB,  COLOUR_GREY,   115,   281,   162,   173, 0x0,                     STR_NULL },
++	{  WWT_RESIZEBOX,   RESIZE_LRTB,  COLOUR_GREY,   282,   293,   162,   173, 0x0,                     STR_RESIZE_BUTTON },
+ 	{   WIDGETS_END},
+ };
+ 
+@@ -353,6 +355,50 @@
+ 	INVALID_STRING_ID
+ }};
+ 
++/* 'Show All' cargo filter criteria */
++static byte CF_SHOW_ALL = 0;
++
++/* Cargo Filter function: check engine refit mask against given cargo id */
++static bool CargoFilter(const EngineID *e_id, const CargoID c_id) {
++	const Engine *engine = GetEngine(*e_id);
++
++	/* Filtering on 'None' criteria */
++	if (CT_NO_REFIT == c_id) return !engine->CanCarryCargo();
++
++	const uint32 refit_masks = GetUnionOfArticulatedRefitMasks(*e_id, engine->type, true);
++
++	return HasBit(refit_masks, c_id);
++}
++
++static GUIEngineList::FilterFunction * const _filter_funcs[] = {
++	&CargoFilter,
++};
++
++/* Populate cargo names and ids */
++static void BuildCargoFilterListing(CargoID cargo_id_listing[], StringID cargo_name_listing[]) {
++
++	/* Add the 'Show All' criteria in first position */
++	cargo_id_listing[CF_SHOW_ALL] = CT_INVALID;
++	cargo_name_listing[CF_SHOW_ALL] = STR_PURCHASE_INFO_ALL_TYPES;
++
++	/* Add all valid cargoes */
++	uint i = 1;
++	for (CargoID c_id = 0; c_id < NUM_CARGO; c_id++) {
++		const CargoSpec *cargo = GetCargo(c_id);
++		if(!cargo->IsValid()) continue;
++
++		cargo_id_listing[i] = c_id;
++		cargo_name_listing[i] = cargo->name;
++		i++;
++	}
++
++	/* Add the 'None' criteria in last position */
++	cargo_id_listing[i] = CT_NO_REFIT;
++	cargo_name_listing[i] = STR_01A9_NONE;
++
++	cargo_name_listing[i+1] = INVALID_STRING_ID;
++}
++
+ static int DrawCargoCapacityInfo(int x, int y, EngineID engine, VehicleType type, bool refittable)
+ {
+ 	uint16 *cap = GetCapacityOfArticulatedParts(engine, type);
+@@ -700,6 +746,9 @@
+ 	EngineID sel_engine;
+ 	EngineID rename_engine;
+ 	GUIEngineList eng_list;
++	CargoID cargo_id_listing[NUM_CARGO+2]; // +2 for 'Show All' and 'None'
++	StringID cargo_name_listing[NUM_CARGO+3]; // +3 for 'Show All', 'None' and terminating 'INVALID_STRING_ID'
++	byte cargo_filter_criteria;
+ 
+ 	BuildVehicleWindow(const WindowDesc *desc, TileIndex tile, VehicleType type) : Window(desc, tile == INVALID_TILE ? (int)type : tile)
+ 	{
+@@ -722,6 +771,10 @@
+ 		this->sort_criteria         = _last_sort_criteria[type];
+ 		this->descending_sort_order = _last_sort_order[type];
+ 
++		BuildCargoFilterListing(this->cargo_id_listing, this->cargo_name_listing);
++		this->cargo_filter_criteria = CF_SHOW_ALL; //default cargo filtering criteria
++		(&this->eng_list)->SetFilterFuncs(_filter_funcs); // plug filter into engine list. Don't activate filtering as we are using the 'Show All' criteria by default
++
+ 		switch (type) {
+ 			default: NOT_REACHED();
+ 			case VEH_TRAIN:
+@@ -806,6 +859,7 @@
+ 		EngineID sel_id = INVALID_ENGINE;
+ 		int num_engines = 0;
+ 		int num_wagons  = 0;
++		CargoID cargo_id_criteria = this->cargo_id_listing[this->cargo_filter_criteria];
+ 
+ 		this->filter.railtype = (this->listview_mode) ? RAILTYPE_END : GetRailType(this->window_number);
+ 
+@@ -822,6 +876,8 @@
+ 
+ 			if (this->filter.railtype != RAILTYPE_END && !HasPowerOnRail(rvi->railtype, this->filter.railtype)) continue;
+ 			if (!IsEngineBuildable(eid, VEH_TRAIN, _local_company)) continue;
++			/* Directly call cargo filter to keep 'engines first' sorting */
++			if (this->cargo_filter_criteria != CF_SHOW_ALL && !CargoFilter(&eid, cargo_id_criteria)) continue;
+ 
+ 			*this->eng_list.Append() = eid;
+ 
+@@ -929,10 +985,21 @@
+ 				this->GenerateBuildAircraftList();
+ 				break;
+ 		}
++		this->FilterEngineList(); // filter the generated engine list
+ 		_internal_sort_order = this->descending_sort_order;
+ 		EngList_Sort(&this->eng_list, _sorter[this->vehicle_type][this->sort_criteria]);
+ 	}
+ 
++	/* Filter the engine list against the currently selected cargo filter */
++	void FilterEngineList() {
++		(&this->eng_list)->Filter(this->cargo_id_listing[this->cargo_filter_criteria]);
++		if (0 == (&this->eng_list)->Length()) { // no engine passed through the filter, invalidate the previously selected engine
++			this->sel_engine = INVALID_ENGINE;
++		} else if (!(&this->eng_list)->Contains(this->sel_engine)) { // previously selected engine didn't pass the filter, select the first engine of the list
++			this->sel_engine = this->eng_list[0];
++		}
++	}
++
+ 	void OnClick(Point pt, int widget)
+ 	{
+ 		switch (widget) {
+@@ -955,6 +1022,10 @@
+ 				ShowDropDownMenu(this, _sort_listing[this->vehicle_type], this->sort_criteria, BUILD_VEHICLE_WIDGET_SORT_DROPDOWN, 0, 0);
+ 				break;
+ 
++			case BUILD_VEHICLE_WIDGET_CARGO_FILTER_DROPDOWN: // Select cargo filtering criteria dropdown menu
++				ShowDropDownMenu(this, this->cargo_name_listing, this->cargo_filter_criteria, BUILD_VEHICLE_WIDGET_CARGO_FILTER_DROPDOWN, 0, 0);
++				break;
++
+ 			case BUILD_VEHICLE_WIDGET_BUILD: {
+ 				EngineID sel_eng = this->sel_engine;
+ 				if (sel_eng != INVALID_ENGINE) {
+@@ -1027,6 +1098,9 @@
+ 		/* Set text of sort by dropdown */
+ 		this->widget[BUILD_VEHICLE_WIDGET_SORT_DROPDOWN].data = _sort_listing[this->vehicle_type][this->sort_criteria];
+ 
++		/* Set text of 'cargo filter by' dropdown */
++		this->widget[BUILD_VEHICLE_WIDGET_CARGO_FILTER_DROPDOWN].data = this->cargo_name_listing[this->cargo_filter_criteria];
++
+ 		this->DrawWidgets();
+ 
+ 		DrawEngineList(this->vehicle_type, this->widget[BUILD_VEHICLE_WIDGET_LIST].left + 2, this->widget[BUILD_VEHICLE_WIDGET_LIST].right, this->widget[BUILD_VEHICLE_WIDGET_LIST].top + 1, &this->eng_list, this->vscroll.pos, max, this->sel_engine, 0, DEFAULT_GROUP);
+@@ -1070,10 +1144,22 @@
+ 
+ 	virtual void OnDropdownSelect(int widget, int index)
+ 	{
+-		if (this->sort_criteria != index) {
+-			this->sort_criteria = index;
+-			_last_sort_criteria[this->vehicle_type] = this->sort_criteria;
+-			this->regenerate_list = true;
++		switch (widget) {
++			case BUILD_VEHICLE_WIDGET_SORT_DROPDOWN:
++				if (this->sort_criteria != index) {
++					this->sort_criteria = index;
++					_last_sort_criteria[this->vehicle_type] = this->sort_criteria;
++					this->regenerate_list = true;
++				}
++				break;
++
++			case BUILD_VEHICLE_WIDGET_CARGO_FILTER_DROPDOWN: // Select a cargo filter criteria
++				if (this->cargo_filter_criteria != index) {
++					this->cargo_filter_criteria = index;
++					(&this->eng_list)->SetFilterState(this->cargo_filter_criteria != CF_SHOW_ALL); // deactivate filter if criteria is 'Show All', activate it otherwise
++					this->regenerate_list = true;
++				}
++				break;
+ 		}
+ 		this->SetDirty();
+ 	}
+@@ -1091,7 +1177,7 @@
+ };
+ 
+ static const WindowDesc _build_vehicle_desc(
+-	WDP_AUTO, WDP_AUTO, 240, 174, 240, 256,
++	WDP_AUTO, WDP_AUTO, 294, 174, 294, 256,
+ 	WC_BUILD_VEHICLE, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_RESIZABLE | WDF_CONSTRUCTION,
+ 	_build_vehicle_widgets
+diff -r 10eaf19ba68a src/engine_gui.h
+--- a/src/engine_gui.h	Sat Mar 21 11:16:10 2009 +0000
++++ b/src/engine_gui.h	Sat Mar 21 23:01:47 2009 +0100
+@@ -7,7 +7,7 @@
+ 
+ #include "sortlist_type.h"
+ 
+-typedef GUIList<EngineID> GUIEngineList;
++typedef GUIList<EngineID,CargoID> GUIEngineList;
+ 
+ typedef int CDECL EngList_SortTypeFunction(const void*, const void*); ///< argument type for EngList_Sort()
+ void EngList_Sort(GUIEngineList *el, EngList_SortTypeFunction compare);  ///< qsort of the engine list

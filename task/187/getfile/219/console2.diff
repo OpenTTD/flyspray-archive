@@ -1,0 +1,185 @@
+Index: macros.h
+===================================================================
+--- macros.h	(revision 4969)
++++ macros.h	(working copy)
+@@ -42,6 +42,20 @@
+ 	return a;
+ }
+ 
++static inline int64 clamp64(int64 a, int64 min, int64 max)
++{
++	if (a <= min) return min;
++	if (a >= max) return max;
++	return a;
++}
++
++static inline uint64 clampu64(uint64 a, uint64 min, uint64 max)
++{
++	if (a <= min) return min;
++	if (a >= max) return max;
++	return a;
++}
++
+ static inline int32 BIGMULSS(int32 a, int32 b, int shift) {
+ 	return (int32)(((int64)(a) * (int64)(b)) >> (shift));
+ }
+Index: settings.c
+===================================================================
+--- settings.c	(revision 4969)
++++ settings.c	(working copy)
+@@ -596,19 +596,20 @@
+ 	return NULL;
+ }
+ 
+-/** Set the value of a setting and if needed clamp the value to
+- * the preset minimum and maximum.
++/** Check the value of a setting and if needed clamp the value to
++ * the preset minimum and maximum. Does not actually change the value
+  * @param ptr the variable itself
+  * @param sd pointer to the 'information'-database of the variable
+- * @param val signed long version of the new value
++ * @param val pointer to the new value that might be clamped
++ * @return true or false depending on if current value is valid
+  * @pre SettingDesc is of type SDT_BOOLX, SDT_NUMX,
+  * SDT_ONEOFMANY or SDT_MANYOFMANY. Other types are not supported as of now */
+-static void Write_ValidateSetting(void *ptr, const SettingDesc *sd, int32 val)
++static bool ValidateSetting(const void *ptr, const SettingDesc *sd, int64 *val)
+ {
+ 	const SettingDescBase *sdb = &sd->desc;
+ 
+ 	if (sdb->cmd != SDT_BOOLX && sdb->cmd != SDT_NUMX &&
+-		  sdb->cmd != SDT_ONEOFMANY && sdb->cmd != SDT_MANYOFMANY) return;
++		  sdb->cmd != SDT_ONEOFMANY && sdb->cmd != SDT_MANYOFMANY) return false;
+ 
+ 	/* We cannot know the maximum value of a bitset variable, so just have faith */
+ 	if (sdb->cmd != SDT_MANYOFMANY) {
+@@ -625,22 +626,33 @@
+ 			case SLE_VAR_U16:
+ 			case SLE_VAR_I32: {
+ 				/* Override the minimum value. No value below sdb->min, except special value 0 */
+-				int32 min = ((sdb->flags & SGF_0ISDISABLED) && val <= sdb->min) ? 0 : sdb->min;
+-				val = clamp(val, min, sdb->max);
++				int64 min = ((sdb->flags & SGF_0ISDISABLED) && *val <= sdb->min) ? 0 : sdb->min;
++				*val = clamp64(*val, min, sdb->max);
+ 			} break;
+ 			case SLE_VAR_U32: {
+ 				/* Override the minimum value. No value below sdb->min, except special value 0 */
+-				uint min = ((sdb->flags & SGF_0ISDISABLED) && (uint)val <= (uint)sdb->min) ? 0 : sdb->min;
+-				WriteValue(ptr, SLE_VAR_U32, (int64)clampu(val, min, sdb->max));
+-				return;
+-			}
++				uint64 min = ((sdb->flags & SGF_0ISDISABLED) && (uint64)*val <= (uint64)sdb->min) ? 0 : sdb->min;
++				*val = clampu64(*val, min, sdb->max);
++			} break;
+ 			case SLE_VAR_I64:
+ 			case SLE_VAR_U64:
+ 			default: NOT_REACHED(); break;
+ 		}
+ 	}
++	return true;
++}
+ 
+-	WriteValue(ptr, sd->save.conv, (int64)val);
++/** Set the value of a setting and if needed clamp the value to
++ * the preset minimum and maximum.
++ * @param ptr the variable itself
++ * @param sd pointer to the 'information'-database of the variable
++ * @param val signed long version of the new value */
++static void Write_ValidateSetting(void *ptr, const SettingDesc *sd, int32 val)
++{
++	int64 value = val;
++	if (!ValidateSetting(ptr, sd, &value)) return;
++
++	WriteValue(ptr, sd->save.conv, value);
+ }
+ 
+ /** Load values from a group of an IniFile structure into the internal representation
+@@ -1505,7 +1517,7 @@
+  * This only affects patch-members that are not needed to be the same on all
+  * clients in a network game.
+  * @param value new value of the patch */
+-void SetPatchValue(uint index, const Patches *object, int32 value)
++bool SetPatchValue(uint index, const Patches *object, int32 value)
+ {
+ 	const SettingDesc *sd = &_patch_settings[index];
+ 	/* If an item is player-based, we do not send it over the network
+@@ -1520,9 +1532,10 @@
+ 		 void *var2 = ini_get_variable(&sd->save, &_patches_newgame);
+ 		 Write_ValidateSetting(var2, sd, value);
+ 		}
+-	} else {
+-		DoCommandP(0, index, value, NULL, CMD_CHANGE_PATCH_SETTING);
++		return true;
+ 	}
++
++	return !CmdFailed(DoCommandP(0, index, value, NULL, CMD_CHANGE_PATCH_SETTING));
+ }
+ 
+ const SettingDesc *GetPatchFromName(const char *name, uint *i)
+@@ -1543,29 +1556,48 @@
+ {
+ 	char newval[20];
+ 	int32 val;
++	int64 val64;
+ 	uint index;
+ 	const SettingDesc *sd = GetPatchFromName(name, &index);
+ 	const Patches *patches_ptr;
+ 	void *ptr;
++	static const char *true_table[] = {"on", "yes", "true"};
++	static const char *false_table[] = {"off", "no", "false"};
++	uint i;
++	int res;
+ 
+ 	if (sd == NULL) {
+ 		IConsolePrintF(_icolour_warn, "'%s' is an unknown patch setting.", name);
+ 		return;
+ 	}
+ 
+-	sscanf(value, "%d", &val);
++	if (sd->desc.cmd == SDT_BOOLX) {
++		for (i = 0; i < lengthof(true_table); i++) if (!strcmp(value, true_table[i])) value = "1";
++		for (i = 0; i < lengthof(false_table); i++) if (!strcmp(value, false_table[i])) value = "0";
++	}
++
++	res = sscanf(value, "%d", &val);
++	if (res == 0) {
++		IConsolePrintF(_icolour_warn, "Could not parse new value");
++		return;
++	}
++
+ 	patches_ptr = (_game_mode == GM_MENU) ? &_patches_newgame : &_patches;
+ 	ptr = ini_get_variable(&sd->save, patches_ptr);
+ 
+-	SetPatchValue(index, patches_ptr, val);
+-	val = ReadValue(ptr, sd->save.conv);
++	if (!SetPatchValue(index, patches_ptr, val)) {
++		IConsolePrintF(_icolour_warn, "'%s' cannot be changed because an error occured", name);
++		return;
++	}
+ 
+-	if (sd->desc.proc != NULL) sd->desc.proc(val);
++	val64 = val;
++	ValidateSetting(ptr, sd, &val64);
++	if (sd->desc.proc != NULL) sd->desc.proc((uint32)val64);
+ 
+ 	if (sd->desc.cmd == SDT_BOOLX) {
+-		snprintf(newval, sizeof(newval), (val != 0) ? "on" : "off");
++		snprintf(newval, sizeof(newval), (val64 != 0) ? "on" : "off");
+ 	} else {
+-		snprintf(newval, sizeof(newval), "%d", val);
++		snprintf(newval, sizeof(newval), "%llu", val64);
+ 	}
+ 
+ 	IConsolePrintF(_icolour_warn, "'%s' changed to:  %s", name, newval);
+Index: settings.h
+===================================================================
+--- settings.h	(revision 4969)
++++ settings.h	(working copy)
+@@ -80,6 +80,6 @@
+ void IConsoleSetPatchSetting(const char *name, const char *value);
+ void IConsoleGetPatchSetting(const char *name);
+ const SettingDesc *GetPatchFromName(const char *name, uint *i);
+-void SetPatchValue(uint index, const Patches *object, int32 value);
++bool SetPatchValue(uint index, const Patches *object, int32 value);
+ 
+ #endif /* SETTINGS_H */

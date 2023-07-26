@@ -1,0 +1,428 @@
+Index: aircraft_gui.c
+===================================================================
+--- aircraft_gui.c	(revision 5931)
++++ aircraft_gui.c	(working copy)
+@@ -421,7 +421,7 @@
+ 					/* Cargo names (fix pluralness) */
+ 					SetDParam(0, v->cargo_type);
+ 					SetDParam(1, v->cargo_count);
+-					SetDParam(2, v->cargo_source);
++					SetDParam(2, GetStationIndex(v->cargo_source));
+ 					DrawString(60, y, STR_8813_FROM, 0);
+ 
+ 					y += 10;
+Index: economy.c
+===================================================================
+--- economy.c	(revision 5931)
++++ economy.c	(working copy)
+@@ -8,6 +8,7 @@
+ #include "table/strings.h"
+ #include "table/sprites.h"
+ #include "map.h"
++#include "station_map.h"
+ #include "news.h"
+ #include "player.h"
+ #include "station.h"
+@@ -1201,7 +1202,7 @@
+ 	return false;
+ }
+ 
+-static int32 DeliverGoods(int num_pieces, CargoID cargo_type, StationID source, StationID dest, byte days_in_transit)
++static int32 DeliverGoods(int num_pieces, CargoID cargo_type, TileIndex source, StationID dest, byte days_in_transit)
+ {
+ 	bool subsidised;
+ 	Station *s_from, *s_to;
+@@ -1209,6 +1210,12 @@
+ 
+ 	assert(num_pieces > 0);
+ 
++	/* Try and gracefully handle old cases. This should not be neccessary if there
++	 * were no old games with cargo already enroute from a demolished station. Or
++	 * just leave it as it is, and in AfterLoadVehicles() set source to zero
++	 * and live with a single unethical payment? - Darkvater */
++	if (source == INVALID_TILE) return 0;
++
+ 	// Update player statistics
+ 	{
+ 		Player *p = GetPlayer(_current_player);
+@@ -1217,7 +1224,7 @@
+ 	}
+ 
+ 	// Get station pointers.
+-	s_from = GetStation(source);
++	s_from = GetStationByTile(source);
+ 	s_to = GetStation(dest);
+ 
+ 	// Check if a subsidy applies.
+@@ -1231,7 +1238,7 @@
+ 	DeliverGoodsToIndustry(s_to->xy, cargo_type, num_pieces);
+ 
+ 	// Determine profit
+-	profit = GetTransportedGoodsIncome(num_pieces, DistanceManhattan(s_from->xy, s_to->xy), days_in_transit, cargo_type);
++	profit = GetTransportedGoodsIncome(num_pieces, DistanceManhattan(source, s_to->xy), days_in_transit, cargo_type);
+ 
+ 	// Modify profit if a subsidy is in effect
+ 	if (subsidised) {
+@@ -1262,7 +1269,7 @@
+ 	for (w = u; w != NULL; w = w->next) {
+ 		if (w->cargo_count != 0) {
+ 			if (v->cargo_type == w->cargo_type &&
+-					u->last_station_visited == w->cargo_source) {
++					u->last_station_visited == GetStationIndex(w->cargo_source)) {
+ 				return false;
+ 			}
+ 			has_any_cargo = true;
+@@ -1286,7 +1293,7 @@
+ 
+ 				if (w->cargo_count != 0) {
+ 					if (v->cargo_type == w->cargo_type &&
+-							u->last_station_visited == w->cargo_source) {
++							u->last_station_visited == GetStationIndex(w->cargo_source)) {
+ 						other_has_same_type = true;
+ 					}
+ 					other_has_any_cargo = true;
+@@ -1337,7 +1344,7 @@
+ 
+ 		/* unload? */
+ 		if (v->cargo_count != 0) {
+-			if (v->cargo_source != last_visited && ge->waiting_acceptance & 0x8000 && !(u->current_order.flags & OF_TRANSFER)) {
++			if (v->cargo_source != st->xy && ge->waiting_acceptance & 0x8000 && !(u->current_order.flags & OF_TRANSFER)) {
+ 				// deliver goods to the station
+ 				st->time_since_unload = 0;
+ 
+@@ -1351,7 +1358,7 @@
+ 
+ 				v_profit = GetTransportedGoodsIncome(
+ 					v->cargo_count,
+-					DistanceManhattan(GetStation(v->cargo_source)->xy, GetStation(last_visited)->xy),
++					DistanceManhattan(v->cargo_source, st->xy),
+ 					v->cargo_days,
+ 					v->cargo_type) * 3 / 2;
+ 
+@@ -1367,7 +1374,7 @@
+ 					// Goods already waiting at station. Set counters to the worst value.
+ 					if (v->cargo_days >= ge->enroute_time)
+ 						ge->enroute_time = v->cargo_days;
+-					if (last_visited != ge->enroute_from)
++					if (last_visited != GetStationIndex(ge->enroute_from))
+ 						ge->enroute_from = v->cargo_source;
+ 				}
+ 				// Update amount of waiting cargo
+Index: oldloader.c
+===================================================================
+--- oldloader.c	(revision 5931)
++++ oldloader.c	(working copy)
+@@ -584,7 +584,7 @@
+ 	OCL_SVAR( OC_UINT16, GoodsEntry, waiting_acceptance ),
+ 	OCL_SVAR(  OC_UINT8, GoodsEntry, days_since_pickup ),
+ 	OCL_SVAR(  OC_UINT8, GoodsEntry, rating ),
+-	OCL_SVAR(  OC_FILE_U8 | OC_VAR_U16, GoodsEntry, enroute_from ),
++	OCL_SVAR(  OC_FILE_U8 | OC_VAR_U32, GoodsEntry, enroute_from ),
+ 	OCL_SVAR(  OC_UINT8, GoodsEntry, enroute_time ),
+ 	OCL_SVAR(  OC_UINT8, GoodsEntry, last_speed ),
+ 	OCL_SVAR(  OC_UINT8, GoodsEntry, last_age ),
+@@ -1153,7 +1153,7 @@
+ 	OCL_SVAR(  OC_UINT8, Vehicle, cargo_type ),
+ 	OCL_SVAR( OC_UINT16, Vehicle, cargo_cap ),
+ 	OCL_SVAR( OC_UINT16, Vehicle, cargo_count ),
+-	OCL_SVAR( OC_FILE_U8 | OC_VAR_U16, Vehicle, cargo_source ),
++	OCL_SVAR( OC_FILE_U8 | OC_VAR_U32, Vehicle, cargo_source ),
+ 	OCL_SVAR(  OC_UINT8, Vehicle, cargo_days ),
+ 
+ 	OCL_SVAR( OC_UINT16, Vehicle, age ),
+Index: roadveh_gui.c
+===================================================================
+--- roadveh_gui.c	(revision 5931)
++++ roadveh_gui.c	(working copy)
+@@ -8,6 +8,7 @@
+ #include "table/sprites.h"
+ #include "table/strings.h"
+ #include "map.h"
++#include "station_map.h"
+ #include "window.h"
+ #include "gui.h"
+ #include "gfx.h"
+@@ -228,7 +229,7 @@
+ 		if (v->cargo_count != 0) {
+ 			SetDParam(0, v->cargo_type);
+ 			SetDParam(1, v->cargo_count);
+-			SetDParam(2, v->cargo_source);
++			SetDParam(2, GetStationIndex(v->cargo_source));
+ 			str = STR_8813_FROM;
+ 		}
+ 		DrawString(34, 78, str, 0);
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 5931)
++++ saveload.c	(working copy)
+@@ -30,7 +30,7 @@
+ #include "variables.h"
+ #include <setjmp.h>
+ 
+-const uint16 SAVEGAME_VERSION = 29;
++const uint16 SAVEGAME_VERSION = 30;
+ uint16 _sl_version;       /// the major savegame version identifier
+ byte   _sl_minor_version; /// the minor savegame version, DO NOT USE!
+ 
+Index: ship_gui.c
+===================================================================
+--- ship_gui.c	(revision 5931)
++++ ship_gui.c	(working copy)
+@@ -8,6 +8,7 @@
+ #include "table/strings.h"
+ #include "table/sprites.h"
+ #include "map.h"
++#include "station_map.h"
+ #include "window.h"
+ #include "gui.h"
+ #include "gfx.h"
+@@ -225,7 +226,7 @@
+ 		if (v->cargo_count != 0) {
+ 			SetDParam(0, v->cargo_type);
+ 			SetDParam(1, v->cargo_count);
+-			SetDParam(2, v->cargo_source);
++			SetDParam(2, GetStationIndex(v->cargo_source));
+ 			str = STR_8813_FROM;
+ 		}
+ 		DrawString(74, 78, str, 0);
+Index: station.h
+===================================================================
+--- station.h	(revision 5931)
++++ station.h	(working copy)
+@@ -14,7 +14,7 @@
+ 	uint16 waiting_acceptance;
+ 	byte days_since_pickup;
+ 	byte rating;
+-	StationID enroute_from;
++	TileIndex enroute_from;
+ 	byte enroute_time;
+ 	byte last_speed;
+ 	byte last_age;
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 5931)
++++ station_cmd.c	(working copy)
+@@ -469,7 +469,7 @@
+ 	for (ge = st->goods; ge != endof(st->goods); ge++) {
+ 		ge->waiting_acceptance = 0;
+ 		ge->days_since_pickup = 0;
+-		ge->enroute_from = INVALID_STATION;
++		ge->enroute_from = INVALID_TILE;
+ 		ge->rating = 175;
+ 		ge->last_speed = 0;
+ 		ge->last_age = 0xFF;
+@@ -2463,7 +2463,7 @@
+ 
+ 	ge = st->goods;
+ 	do {
+-		if (ge->enroute_from != INVALID_STATION) {
++		if (ge->enroute_from != INVALID_TILE) {
+ 			byte_inc_sat(&ge->enroute_time);
+ 			byte_inc_sat(&ge->days_since_pickup);
+ 
+@@ -2593,7 +2593,7 @@
+ 			for (i = 0; i != NUM_CARGO; i++) {
+ 				GoodsEntry* ge = &st->goods[i];
+ 
+-				if (ge->enroute_from != INVALID_STATION) {
++				if (ge->enroute_from != INVALID_TILE) {
+ 					ge->rating = clamp(ge->rating + amount, 0, 255);
+ 				}
+ 			}
+@@ -2608,7 +2608,7 @@
+ 	);
+ 
+ 	st->goods[type].enroute_time = 0;
+-	st->goods[type].enroute_from = st->index;
++	st->goods[type].enroute_from = st->xy;
+ 	InvalidateWindow(WC_STATION_VIEW, st->index);
+ }
+ 
+@@ -2822,7 +2822,7 @@
+ 	for (j = 0; j != NUM_CARGO; j++) {
+ 		st->goods[j].waiting_acceptance = 0;
+ 		st->goods[j].days_since_pickup = 0;
+-		st->goods[j].enroute_from = INVALID_STATION;
++		st->goods[j].enroute_from = INVALID_TILE;
+ 		st->goods[j].rating = 175;
+ 		st->goods[j].last_speed = 0;
+ 		st->goods[j].last_age = 255;
+@@ -3024,7 +3024,8 @@
+ 	SLE_VAR(GoodsEntry,days_since_pickup,  SLE_UINT8),
+ 	SLE_VAR(GoodsEntry,rating,             SLE_UINT8),
+ 	SLE_CONDVAR(GoodsEntry,enroute_from,   SLE_FILE_U8 | SLE_VAR_U16, 0, 6),
+-	SLE_CONDVAR(GoodsEntry,enroute_from,   SLE_UINT16, 7, SL_MAX_VERSION),
++	SLE_CONDVAR(GoodsEntry,enroute_from,   SLE_UINT16, 7, 29),
++	SLE_CONDVAR(GoodsEntry,enroute_from,   SLE_UINT32,30, SL_MAX_VERSION),
+ 	SLE_VAR(GoodsEntry,enroute_time,       SLE_UINT8),
+ 	SLE_VAR(GoodsEntry,last_speed,         SLE_UINT8),
+ 	SLE_VAR(GoodsEntry,last_age,           SLE_UINT8),
+@@ -3053,6 +3054,17 @@
+ 		if (CheckSavegameVersion(7) && st->goods[i].enroute_from == 0xFF) {
+ 			st->goods[i].enroute_from = INVALID_STATION;
+ 		}
++
++		/* From version 30 we store the TileIndex of the cargo source instead of the
++		 * StationID; this solves invalid payments when a station is demolished */
++		if (CheckSavegameVersion(30)) {
++			if (st->goods[i].enroute_from == (StationID)INVALID_STATION) {
++				st->goods[i].enroute_from = INVALID_TILE;
++			} else {
++				const Station *st2 = GetStation((StationID)st->goods[i].enroute_from);
++				st->goods[i].enroute_from = st2->xy;
++			}
++		}
+ 	}
+ 
+ 	if (st->num_specs != 0) {
+Index: station_gui.c
+===================================================================
+--- station_gui.c	(revision 5931)
++++ station_gui.c	(working copy)
+@@ -9,6 +9,7 @@
+ #include "window.h"
+ #include "gui.h"
+ #include "station.h"
++#include "station_map.h"
+ #include "gfx.h"
+ #include "player.h"
+ #include "economy.h"
+@@ -536,7 +537,7 @@
+ 	for (i = 0; i != NUM_CARGO; i++) {
+ 		if (GB(st->goods[i].waiting_acceptance, 0, 12) != 0) {
+ 			num++;
+-			if (st->goods[i].enroute_from != station_id) num++;
++			if (st->goods[i].enroute_from != st->xy) num++;
+ 		}
+ 	}
+ 	SetVScrollCount(w, num);
+@@ -582,7 +583,7 @@
+ 			} while (--num);
+ 		}
+ 
+-		if ( st->goods[i].enroute_from == station_id) {
++		if ( st->goods[i].enroute_from == st->xy) {
+ 			if (--pos < 0) {
+ 				SetDParam(1, waiting);
+ 				SetDParam(0, _cargoc.names_long[i]);
+@@ -599,7 +600,7 @@
+ 			}
+ 
+ 			if (pos > -5 && --pos < 0) {
+-				SetDParam(0, st->goods[i].enroute_from);
++				SetDParam(0, GetStationIndex(st->goods[i].enroute_from));
+ 				DrawStringRightAligned(x + 234, y, STR_000B, 0);
+ 				y += 10;
+ 			}
+@@ -633,7 +634,7 @@
+ 
+ 		y = 77;
+ 		for (i = 0; i != NUM_CARGO; i++) {
+-			if (st->goods[i].enroute_from != INVALID_STATION) {
++			if (st->goods[i].enroute_from != INVALID_TILE) {
+ 				SetDParam(0, _cargoc.names_s[i]);
+ 				SetDParam(2, st->goods[i].rating * 101 >> 8);
+ 				SetDParam(1, STR_3035_APPALLING + (st->goods[i].rating >> 5));
+Index: station_map.h
+===================================================================
+--- station_map.h	(revision 5931)
++++ station_map.h	(working copy)
+@@ -10,13 +10,13 @@
+ 
+ static inline StationID GetStationIndex(TileIndex t)
+ {
+-	assert(IsTileType(t, MP_STATION));
+-	return (StationID)_m[t].m2;
++	return IsTileType(t, MP_STATION) ? (StationID)_m[t].m2 : INVALID_STATION;
+ }
+ 
+ static inline Station* GetStationByTile(TileIndex t)
+ {
+-	return GetStation(GetStationIndex(t));
++	StationID id = GetStationIndex(t);
++	return id == INVALID_STATION ? NULL : GetStation(id);
+ }
+ 
+ 
+Index: strings.c
+===================================================================
+--- strings.c	(revision 5931)
++++ strings.c	(working copy)
+@@ -826,10 +826,12 @@
+ 		} break;
+ 
+ 		case 0x9A: { // {STATION}
+-			const Station* st = GetStation(GetInt32(&argv));
++			StationID id = GetInt32(&argv);
++			const Station *st;
+ 			int32 temp[2];
+ 
+-			if (st->xy == 0) { // station doesn't exist anymore
++			/* Station doesn't exist anymore */
++			if (id == INVALID_STATION || (st = GetStation(id), st->xy == 0)) {
+ 				buff = GetStringWithArgs(buff, STR_UNKNOWN_DESTINATION, NULL);
+ 				break;
+ 			}
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 5931)
++++ train_gui.c	(working copy)
+@@ -8,6 +8,7 @@
+ #include "table/sprites.h"
+ #include "table/strings.h"
+ #include "map.h"
++#include "station_map.h"
+ #include "window.h"
+ #include "gui.h"
+ #include "gfx.h"
+@@ -1102,7 +1103,7 @@
+ 		if (num != 0) {
+ 			SetDParam(0, v->cargo_type);
+ 			SetDParam(1, num);
+-			SetDParam(2, v->cargo_source);
++			SetDParam(2, GetStationIndex(v->cargo_source));
+ 			str = STR_8813_FROM;
+ 		}
+ 		DrawString(x, y, str, 0);
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 5931)
++++ vehicle.c	(working copy)
+@@ -241,6 +241,12 @@
+ 
+ 			v->left_coord = INVALID_COORD;
+ 			VehiclePositionChanged(v);
++
++			/* Old savegames used a StationID as cargo source, now we use TileIndex */
++			if (CheckSavegameVersion(29)) {
++				v->cargo_source = GetStation((StationID)v->cargo_source)->xy;
++				if ((StationID)v->cargo_source == INVALID_STATION) v->cargo_source = INVALID_TILE;
++			}
+ 		}
+ 	}
+ }
+@@ -2178,8 +2184,9 @@
+ 
+ 	SLE_VAR(Vehicle,cargo_type,				SLE_UINT8),
+ 	SLE_VAR(Vehicle,cargo_days,				SLE_UINT8),
+-	SLE_CONDVAR(Vehicle,cargo_source,			SLE_FILE_U8 | SLE_VAR_U16, 0, 6),
+-	SLE_CONDVAR(Vehicle,cargo_source,			SLE_UINT16, 7, SL_MAX_VERSION),
++	SLE_CONDVAR(Vehicle,cargo_source, SLE_FILE_U8 | SLE_VAR_U16, 0, 6),
++	SLE_CONDVAR(Vehicle,cargo_source, SLE_UINT16, 7, 29),
++	SLE_CONDVAR(Vehicle,cargo_source, SLE_UINT32, 30, SL_MAX_VERSION),
+ 	SLE_VAR(Vehicle,cargo_cap,				SLE_UINT16),
+ 	SLE_VAR(Vehicle,cargo_count,			SLE_UINT16),
+ 
+Index: vehicle.h
+===================================================================
+--- vehicle.h	(revision 5931)
++++ vehicle.h	(working copy)
+@@ -180,7 +180,7 @@
+ 
+ 	CargoID cargo_type;	// type of cargo this vehicle is carrying
+ 	byte cargo_days; // how many days have the pieces been in transit
+-	StationID cargo_source;// source of cargo
++	TileIndex cargo_source;// source of cargo
+ 	uint16 cargo_cap;	// total capacity
+ 	uint16 cargo_count;// how many pieces are used
+ 	byte cargo_subtype;      ///< Used for livery refits (NewGRF variations)

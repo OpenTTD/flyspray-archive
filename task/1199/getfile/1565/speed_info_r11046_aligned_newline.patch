@@ -1,0 +1,205 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 11046)
++++ src/lang/english.txt	(working copy)
+@@ -3374,3 +3374,9 @@
+ STR_PROSPECT_NEW_INDUSTRY                                       :{BLACK}Prospect
+ STR_BUILD_NEW_INDUSTRY                                          :{BLACK}Build
+ STR_INDUSTRY_SELECTION_HINT                                     :{BLACK}Choose the appropriate industry from this list
++
++#### Vehicle speeds tab
++STR_WAGON_SPEEDS                                                :{BLACK}Speeds
++STR_WAGON_SPEEDS_TOOLTIP                                        :{BLACK}Show engine and wagons speeds
++STR_WAGON_SPEEDS_VELOCITY                                       :{LTBLUE}{VELOCITY}
++STR_WAGON_SPEEDS_VELOCITY_NO_LIMIT                              :{LTBLUE}No limit
+Index: src/train_gui.cpp
+===================================================================
+--- src/train_gui.cpp	(revision 11046)
++++ src/train_gui.cpp	(working copy)
+@@ -19,6 +19,17 @@
+ #include "train.h"
+ #include "newgrf_engine.h"
+ 
++/* Train List Widgets */
++enum {
++	TLW_NAME = 2,
++	TLW_SERVICE_SCROLL_INC = 6,
++	TLW_SERVICE_SCROLL_DEC = 7,
++	TLW_CARGO = 9,
++	TLW_INFORMATION = 10,
++	TLW_CAPACITY = 11,
++	TLW_TOTAL_CARGO = 12,
++	TLW_SPEEDS = 14,
++};
+ void CcBuildWagon(bool success, TileIndex tile, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v, *found;
+@@ -152,7 +163,38 @@
+ 	}
+ }
+ 
++/**
++ * Vehicle speeds detail.
++ * It displays the maximum speed of the vehicle according the GRF settings and patch options
++ * @param *v Vehicle to display
++ * @param x Coordinate (horizontal) of the string to display
++ * @param y Coordinate (vertical) of the string to display
++ * @author Magicbuzz
++ */
++static void TrainDetailsSpeedsTab(const Vehicle *v, int x, int y)
++{
++	/** Vehicle max speed is found from the general vehicle information, not the vehicle itself */
++	const RailVehicleInfo *rvi = RailVehInfo(v->engine_type);
+ 
++	/**
++	 * Wagons can have max speed only when the wagon_speed_limits is set and not using wagon override to reflect the
++	 * value the vehicle actually uses.
++	 * @see train_cmd.cpp TrainConsistChanged(Vehicle* v)
++	 */
++	if ((rvi->railveh_type != RAILVEH_WAGON || _patches.wagon_speed_limits) && !UsesWagonOverride(v)) {
++		uint16 speed = GetVehicleProperty(v, 0x09, rvi->max_speed) * 10 / 16; ///< GRF speeds are in MPH while OTTD uses KMPH
++		if (speed > 0) {
++			/** Max speed is set, so we display it */
++			SetDParam(0, speed);
++			DrawStringRightAligned(x, y, STR_WAGON_SPEEDS_VELOCITY, 0);
++		} else {
++			/** Max speed is not set, so we display "no limit" */
++			DrawStringRightAligned(x, y, STR_WAGON_SPEEDS_VELOCITY_NO_LIMIT, 0);
++			//DrawString(x, y, STR_WAGON_SPEEDS_VELOCITY_NO_LIMIT, 0);
++		}
++	}
++}
++
+ static void DrawTrainDetailsWindow(Window *w)
+ {
+ 	byte det_tab = WP(w, traindetails_d).tab;
+@@ -167,7 +209,7 @@
+ 
+ 	num = 0;
+ 	u = v = GetVehicle(w->window_number);
+-	if (det_tab == 3) { // Total cargo tab
++	if (det_tab == TLW_TOTAL_CARGO) {
+ 		for (CargoID i = 0; i < lengthof(act_cargo); i++) {
+ 			act_cargo[i] = 0;
+ 			max_cargo[i] = 0;
+@@ -193,12 +235,12 @@
+ 
+ 	SetVScrollCount(w, num);
+ 
+-	DisableWindowWidget(w, det_tab + 9);
+-	SetWindowWidgetDisabledState(w, 2, v->owner != _local_player);
++	DisableWindowWidget(w, det_tab);
++	SetWindowWidgetDisabledState(w, TLW_NAME, v->owner != _local_player);
+ 
+ 	/* disable service-scroller when interval is set to disabled */
+-	SetWindowWidgetDisabledState(w, 6, !_patches.servint_trains);
+-	SetWindowWidgetDisabledState(w, 7, !_patches.servint_trains);
++	SetWindowWidgetDisabledState(w, TLW_SERVICE_SCROLL_INC, !_patches.servint_trains);
++	SetWindowWidgetDisabledState(w, TLW_SERVICE_SCROLL_DEC, !_patches.servint_trains);
+ 
+ 	SetDParam(0, v->index);
+ 	DrawWindowWidgets(w);
+@@ -235,8 +277,8 @@
+ 	y = 57;
+ 	sel = w->vscroll.pos;
+ 
+-	/* draw the first 3 details tabs */
+-	if (det_tab != 3) {
++	/* draw the first 4 details tabs */
++	if (det_tab != TLW_TOTAL_CARGO) {
+ 		x = 1;
+ 		for (;;) {
+ 			if (--sel < 0 && sel >= -w->vscroll.cap) {
+@@ -256,14 +298,15 @@
+ 				py = y + 2;
+ 				switch (det_tab) {
+ 					default: NOT_REACHED();
+-					case 0: TrainDetailsCargoTab(   v, px, py); break;
+-					case 1:
++					case TLW_CARGO: TrainDetailsCargoTab(v, px, py); break;
++					case TLW_INFORMATION:
+ 						/* Only show name and value for the 'real' part */
+ 						if (!IsArticulatedPart(v)) {
+ 							TrainDetailsInfoTab(v, px, py);
+ 						}
+ 						break;
+-					case 2: TrainDetailsCapacityTab(v, px, py); break;
++					case TLW_SPEEDS: TrainDetailsSpeedsTab(v, 100, py); break;
++					case TLW_CAPACITY: TrainDetailsCapacityTab(v, px, py); break;
+ 				}
+ 				y += 14;
+ 
+@@ -305,16 +348,16 @@
+ 		int mod;
+ 		const Vehicle *v;
+ 		switch (e->we.click.widget) {
+-		case 2: /* name train */
++		case TLW_NAME: /* name train */
+ 			v = GetVehicle(w->window_number);
+ 			SetDParam(0, v->index);
+ 			ShowQueryString(STR_VEHICLE_NAME, STR_8865_NAME_TRAIN, 31, 150, w, CS_ALPHANUMERAL);
+ 			break;
+-		case 6: /* inc serv interval */
++		case TLW_SERVICE_SCROLL_INC: /* inc serv interval */
+ 			mod = _ctrl_pressed? 5 : 10;
+ 			goto do_change_service_int;
+ 
+-		case 7: /* dec serv interval */
++		case TLW_SERVICE_SCROLL_DEC: /* dec serv interval */
+ 			mod = _ctrl_pressed? -5 : -10;
+ do_change_service_int:
+ 			v = GetVehicle(w->window_number);
+@@ -325,16 +368,18 @@
+ 			DoCommandP(v->tile, v->index, mod, NULL, CMD_CHANGE_SERVICE_INT | CMD_MSG(STR_018A_CAN_T_CHANGE_SERVICING));
+ 			break;
+ 		/* details buttons*/
+-		case 9:  // Cargo
+-		case 10: // Information
+-		case 11: // Capacities
+-		case 12: // Total cargo
+-			EnableWindowWidget(w,  9);
+-			EnableWindowWidget(w, 10);
+-			EnableWindowWidget(w, 11);
+-			EnableWindowWidget(w, 12);
++		case TLW_CARGO:  // Cargo
++		case TLW_INFORMATION: // Information
++		case TLW_SPEEDS: // Speeds
++		case TLW_CAPACITY: // Capacities
++		case TLW_TOTAL_CARGO: // Total cargo
++			EnableWindowWidget(w, TLW_CARGO);
++			EnableWindowWidget(w, TLW_INFORMATION);
++			EnableWindowWidget(w, TLW_SPEEDS);
++			EnableWindowWidget(w, TLW_CAPACITY);
++			EnableWindowWidget(w, TLW_TOTAL_CARGO);
+ 			EnableWindowWidget(w, e->we.click.widget);
+-			WP(w,traindetails_d).tab = e->we.click.widget - 9;
++			WP(w,traindetails_d).tab = e->we.click.widget;
+ 			SetWindowDirty(w);
+ 			break;
+ 		}
+@@ -372,13 +417,16 @@
+ { WWT_PUSHTXTBTN, RESIZE_TB,     14,  90, 178, 152, 163, STR_013D_INFORMATION, STR_8850_SHOW_DETAILS_OF_TRAIN_VEHICLES},
+ { WWT_PUSHTXTBTN, RESIZE_TB,     14, 179, 268, 152, 163, STR_013E_CAPACITIES,  STR_8851_SHOW_CAPACITIES_OF_EACH},
+ { WWT_PUSHTXTBTN, RESIZE_RTB,    14, 269, 357, 152, 163, STR_013E_TOTAL_CARGO, STR_8852_SHOW_TOTAL_CARGO},
+-{  WWT_RESIZEBOX, RESIZE_LRTB,   14, 358, 369, 152, 163, 0x0,                  STR_RESIZE_BUTTON},
++{      WWT_PANEL, RESIZE_LRTB,   14, 358, 369, 152, 163, 0x0,                  STR_NULL},
++{ WWT_PUSHTXTBTN, RESIZE_TB,     14,   0,  89, 164, 175, STR_WAGON_SPEEDS,     STR_WAGON_SPEEDS_TOOLTIP},
++{      WWT_PANEL, RESIZE_RTB,    14,  90, 357, 164, 175, 0x0,                  STR_NULL},
++{  WWT_RESIZEBOX, RESIZE_LRTB,   14, 358, 369, 164, 175, 0x0,                  STR_RESIZE_BUTTON},
+ {   WIDGETS_END},
+ };
+ 
+ 
+ static const WindowDesc _train_details_desc = {
+-	WDP_AUTO, WDP_AUTO, 370, 164, 370, 164,
++	WDP_AUTO, WDP_AUTO, 370, 176, 370, 176,
+ 	WC_VEHICLE_DETAILS,WC_VEHICLE_VIEW,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_RESIZABLE,
+ 	_train_details_widgets,
+@@ -403,5 +451,5 @@
+ 	w->resize.step_height = 14;
+ 	w->resize.height = w->height - 14 * 2; /* Minimum of 4 wagons in the display */
+ 
+-	WP(w,traindetails_d).tab = 0;
++	WP(w,traindetails_d).tab = TLW_CARGO;
+ }

@@ -1,0 +1,503 @@
+diff --git a/source.list b/source.list
+index 68d5433..045048f 100644
+--- a/source.list
++++ b/source.list
+@@ -30,7 +30,6 @@ helpers.cpp
+ landscape.cpp
+ map.cpp
+ md5.cpp
+-mersenne.cpp
+ minilzo.cpp
+ misc.cpp
+ mixer.cpp
+@@ -57,6 +56,7 @@ pathfind.cpp
+ players.cpp
+ queue.cpp
+ rail.cpp
++random/ottd_random.cpp
+ rev.cpp
+ road.cpp
+ saveload.cpp
+@@ -173,6 +173,7 @@ player.h
+ player_face.h
+ queue.h
+ rail.h
++random/ottd_random.h
+ road_cmd.h
+ saveload.h
+ screenshot.h
+diff --git a/src/functions.h b/src/functions.h
+index 4ba233d..3558c13 100644
+--- a/src/functions.h
++++ b/src/functions.h
+@@ -44,21 +44,6 @@ void CDECL ShowInfoF(const char *str, ...);
+ 
+ //#define RANDOM_DEBUG
+ 
+-
+-// Enable this to produce higher quality random numbers.
+-// Doesn't work with network yet.
+-//#define MERSENNE_TWISTER
+-
+-// Mersenne twister functions
+-void SeedMT(uint32 seed);
+-uint32 RandomMT();
+-
+-
+-#ifdef MERSENNE_TWISTER
+-	static inline uint32 Random() { return RandomMT(); }
+-	uint RandomRange(uint max);
+-#else
+-
+ #ifdef RANDOM_DEBUG
+ 	#define Random() DoRandom(__LINE__, __FILE__)
+ 	uint32 DoRandom(int line, const char *file);
+@@ -68,7 +53,6 @@ uint32 RandomMT();
+ 	uint32 Random();
+ 	uint RandomRange(uint max);
+ #endif
+-#endif // MERSENNE_TWISTER
+ 
+ static inline TileIndex RandomTileSeed(uint32 r) { return TILE_MASK(r); }
+ static inline TileIndex RandomTile() { return TILE_MASK(Random()); }
+diff --git a/src/genworld.cpp b/src/genworld.cpp
+index 9d1d92c..19a80b1 100644
+--- a/src/genworld.cpp
++++ b/src/genworld.cpp
+@@ -83,7 +83,7 @@ static void *_GenerateWorld(void *arg)
+ 	if (_network_dedicated) DEBUG(net, 0, "Generating map, please wait...");
+ 	/* Set the Random() seed to generation_seed so we produce the same map with the same seed */
+ 	if (_patches.generation_seed == GENERATE_NEW_SEED) _patches.generation_seed = _patches_newgame.generation_seed = InteractiveRandom();
+-	_random_seeds[0][0] = _random_seeds[0][1] = _patches.generation_seed;
++	_new_random->Seed(_patches.generation_seed);
+ 	SetGeneratingWorldProgress(GWP_MAP_INIT, 2);
+ 	SetObjectToPlace(SPR_CURSOR_ZZZ, PAL_NONE, 0, WC_MAIN_WINDOW, 0);
+ 
+diff --git a/src/mersenne.cpp b/src/mersenne.cpp
+deleted file mode 100644
+index 70a4431..0000000
+--- a/src/mersenne.cpp
++++ /dev/null
+@@ -1,76 +0,0 @@
+-/* $Id$ */
+-
+-/** @file mersenne.cpp */
+-
+-#include "stdafx.h"
+-#include "openttd.h"
+-
+-#ifdef MERSENNE_TWISTER
+-
+-// Source code for Mersenne Twister.
+-// A Random number generator with much higher quality random numbers.
+-
+-#define N              (624)                 // length of _mt_state vector
+-#define M              (397)                 // a period parameter
+-#define K              (0x9908B0DFU)         // a magic constant
+-#define hiBit(u)       ((u) & 0x80000000U)   // mask all but highest   bit of u
+-#define loBit(u)       ((u) & 0x00000001U)   // mask all but lowest    bit of u
+-#define loBits(u)      ((u) & 0x7FFFFFFFU)   // mask     the highest   bit of u
+-#define mixBits(u, v)  (hiBit(u)|loBits(v))  // move hi bit of u to hi bit of v
+-
+-static uint32   _mt_state[N+1];     // _mt_state vector + 1 extra to not violate ANSI C
+-static uint32   *_mt_next;          // _mt_next random value is computed from here
+-static int      _mt_left = -1;      // can *_mt_next++ this many times before reloading
+-
+-void SeedMT(uint32 seed)
+-{
+-    register uint32 x = (seed | 1U) & 0xFFFFFFFFU, *s = _mt_state;
+-    register int    j;
+-
+-    for (_mt_left=0, *s++=x, j=N; --j;
+-        *s++ = (x*=69069U) & 0xFFFFFFFFU);
+- }
+-
+-
+-static uint32 ReloadMT()
+- {
+-    register uint32 *p0=_mt_state, *p2=_mt_state+2, *pM=_mt_state+M, s0, s1;
+-    register int    j;
+-
+-    if (_mt_left < -1)
+-        SeedMT(4357U);
+-
+-    _mt_left=N-1, _mt_next=_mt_state+1;
+-
+-    for (s0=_mt_state[0], s1=_mt_state[1], j=N-M+1; --j; s0=s1, s1=*p2++)
+-        *p0++ = *pM++ ^ (mixBits(s0, s1) >> 1) ^ (loBit(s1) ? K : 0U);
+-
+-    for (pM=_mt_state, j=M; --j; s0=s1, s1=*p2++)
+-        *p0++ = *pM++ ^ (mixBits(s0, s1) >> 1) ^ (loBit(s1) ? K : 0U);
+-
+-    s1=_mt_state[0], *p0 = *pM ^ (mixBits(s0, s1) >> 1) ^ (loBit(s1) ? K : 0U);
+-    s1 ^= (s1 >> 11);
+-    s1 ^= (s1 <<  7) & 0x9D2C5680U;
+-    s1 ^= (s1 << 15) & 0xEFC60000U;
+-    return(s1 ^ (s1 >> 18));
+- }
+-
+-
+-uint32 RandomMT()
+-{
+-	uint32 y;
+-
+-	if (--_mt_left < 0)
+-		return ReloadMT();
+-
+-	y  = *_mt_next++;
+-	y ^= (y >> 11);
+-	y ^= (y <<  7) & 0x9D2C5680U;
+-	y ^= (y << 15) & 0xEFC60000U;
+-	return y ^ (y >> 18);
+-}
+-#else
+-
+-void SeedMT(uint32 seed) {}
+-
+-#endif /* MERSENNE_TWISTER */
+diff --git a/src/misc.cpp b/src/misc.cpp
+index 8a1c297..46d7ef6 100644
+--- a/src/misc.cpp
++++ b/src/misc.cpp
+@@ -26,50 +26,34 @@
+ 
+ char _name_array[512][32];
+ 
+-#ifndef MERSENNE_TWISTER
+-
+ #ifdef RANDOM_DEBUG
+ #include "network/network_data.h"
+ uint32 DoRandom(int line, const char *file)
+-#else // RANDOM_DEBUG
+-uint32 Random()
+-#endif // RANDOM_DEBUG
+ {
+-
+-uint32 s;
+-uint32 t;
+-
+-#ifdef RANDOM_DEBUG
+ 	if (_networking && (DEREF_CLIENT(0)->status != STATUS_INACTIVE || !_network_server))
+ 		printf("Random [%d/%d] %s:%d\n",_frame_counter, (byte)_current_player, file, line);
+-#endif
+-
+-	s = _random_seeds[0][0];
+-	t = _random_seeds[0][1];
+-	_random_seeds[0][0] = s + ROR(t ^ 0x1234567F, 7) + 1;
+-	return _random_seeds[0][1] = ROR(s, 3) - 1;
++	return _new_random();
+ }
+-#endif // MERSENNE_TWISTER
+ 
+-#if defined(RANDOM_DEBUG) && !defined(MERSENNE_TWISTER)
+ uint DoRandomRange(uint max, int line, const char *file)
+ {
+ 	return GB(DoRandom(line, file), 0, 16) * max >> 16;
+ }
+ #else
++uint32 Random()
++{
++	return _new_random->GetRandom();
++}
++
+ uint RandomRange(uint max)
+ {
+-	return GB(Random(), 0, 16) * max >> 16;
++	return _new_random->RandomRange(max);
+ }
+ #endif
+ 
+-
+ uint32 InteractiveRandom()
+ {
+-	uint32 t = _random_seeds[1][1];
+-	uint32 s = _random_seeds[1][0];
+-	_random_seeds[1][0] = s + ROR(t ^ 0x1234567F, 7) + 1;
+-	return _random_seeds[1][1] = ROR(s, 3) - 1;
++	return _new_random->GetRandom();
+ }
+ 
+ uint InteractiveRandomRange(uint max)
+@@ -306,8 +290,8 @@ static const SaveLoadGlobVarList _date_desc[] = {
+ 	SLEG_CONDVAR(_cur_tileloop_tile,      SLE_UINT32,                  6, SL_MAX_VERSION),
+ 	    SLEG_VAR(_disaster_delay,         SLE_UINT16),
+ 	    SLEG_VAR(_station_tick_ctr,       SLE_UINT16),
+-	    SLEG_VAR(_random_seeds[0][0],     SLE_UINT32),
+-	    SLEG_VAR(_random_seeds[0][1],     SLE_UINT32),
++	    SLEG_VAR(&_new_random->Sync(0),   SLE_UINT32),
++	    SLEG_VAR(&_new_random->Sync(1),   SLE_UINT32),
+ 	SLEG_CONDVAR(_cur_town_ctr,           SLE_FILE_U8  | SLE_VAR_U32,  0, 9),
+ 	SLEG_CONDVAR(_cur_town_ctr,           SLE_UINT32,                 10, SL_MAX_VERSION),
+ 	    SLEG_VAR(_cur_player_tick_index,  SLE_FILE_U8  | SLE_VAR_U32),
+diff --git a/src/network/network.cpp b/src/network/network.cpp
+index 828fc3e..0eb5685 100644
+--- a/src/network/network.cpp
++++ b/src/network/network.cpp
+@@ -1226,9 +1226,9 @@ static bool NetworkDoClientLoop()
+ 	if (_sync_frame != 0) {
+ 		if (_sync_frame == _frame_counter) {
+ #ifdef NETWORK_SEND_DOUBLE_SEED
+-			if (_sync_seed_1 != _random_seeds[0][0] || _sync_seed_2 != _random_seeds[0][1]) {
++			if (_sync_seed_1 != _new_random->GetSync(0) || _sync_seed_2 != _new_random->GetSync(1)) {
+ #else
+-			if (_sync_seed_1 != _random_seeds[0][0]) {
++			if (_sync_seed_1 != _new_random->GetSync(0)) {
+ #endif
+ 				NetworkError(STR_NETWORK_ERR_DESYNC);
+ #ifdef DEBUG_DUMP_COMMANDS
+@@ -1325,9 +1325,9 @@ void NetworkGameLoop()
+ 		// Then we make the frame
+ 		StateGameLoop();
+ 
+-		_sync_seed_1 = _random_seeds[0][0];
++		_sync_seed_1 = _new_random->GetSync(0);
+ #ifdef NETWORK_SEND_DOUBLE_SEED
+-		_sync_seed_2 = _random_seeds[0][1];
++		_sync_seed_2 = _new_random->GetSync(1);
+ #endif
+ 
+ 		NetworkServer_Tick(send_frame);
+diff --git a/src/oldloader.cpp b/src/oldloader.cpp
+index 7dc995f..2b5ed23 100644
+--- a/src/oldloader.cpp
++++ b/src/oldloader.cpp
+@@ -1439,7 +1439,7 @@ static const OldChunks main_chunk[] = {
+ 	OCL_VAR ( OC_FILE_U16 | OC_VAR_U32, 1, &_date ),
+ 	OCL_VAR ( OC_UINT16,   1, &_date_fract ),
+ 	OCL_NULL( 600 ),            ///< TextEffects
+-	OCL_VAR ( OC_UINT32,   2, &_random_seeds[0] ),
++	OCL_VAR ( OC_UINT32,   2, &_new_random->Sync(0)),
+ 
+ 	OCL_ASSERT( 0x264 ),
+ 	OCL_CHUNK(  70, LoadOldTown ),
+diff --git a/src/os2.cpp b/src/os2.cpp
+index 7f26265..ff36b8b 100644
+--- a/src/os2.cpp
++++ b/src/os2.cpp
+@@ -163,8 +163,7 @@ void ShowOSErrorBox(const char *buf)
+ 
+ int CDECL main(int argc, char* argv[])
+ {
+-	_random_seeds[1][1] = _random_seeds[1][0] = _random_seeds[0][1] = _random_seeds[0][0] = time(NULL);
+-
++	_new_random = new OTTDRandom;
+ 	return ttd_main(argc, argv);
+ }
+ 
+diff --git a/src/random/ottd_random.cpp b/src/random/ottd_random.cpp
+new file mode 100644
+index 0000000..a09e441
+--- /dev/null
++++ b/src/random/ottd_random.cpp
+@@ -0,0 +1,130 @@
++#include "../openttd.h"
++#include "../functions.h"
++#include "ottd_random.h"
++
++/** Constructor for the original randomiser object */
++OTTDRandom::OTTDRandom()
++{
++#if defined(WIN32)
++	this->Seed(GetTickCount());
++#else
++	this->Seed(time(NULL));
++#endif
++}
++
++/**
++ * Get a random number.
++ * Use the () operator to get a random number
++ * from the randomiser object.
++ *
++ * @return a 32bit random number
++ */
++uint32 OTTDRandom::operator() ()
++{
++	return this->GetRandom();
++}
++
++/**
++ * Get a random number with a max number set.
++ * Use the () operator with an uint32 argument to
++ * get a random number resised to max.
++ *
++ * @param max The maximum number we want to reach
++ * @return a random number with max as maximum
++ */
++uint32 OTTDRandom::operator() (uint32 max)
++{
++	return this->RandomRange(max);
++}
++
++/**
++ * Seed the random values
++ * @note code ripped from win32.cpp
++ * @note unix implementation is a bit different
++ * @note but it should be unified IMO
++ *
++ * @param seed The given seed
++ */
++void OTTDRandom::Seed(uint32 seed)
++{
++	this->seeds[0] = seed;             // _random_seeds[0][0]
++	this->seeds[1] = seed;             // _random_seeds[0][1]
++#if defined(WIN32)
++	this->seeds[2] = seed * 0x1234567; // _random_seeds[1][1]
++	this->seeds[3] = this->seeds[1];   // _random_seeds[1][0]
++#else
++	this->seeds[2] = seed;
++	this->seeds[3] = seed;
++#endif
++}
++
++/**
++ * Get a random number
++ *
++ * @return a 32bit random number
++ */
++uint32 OTTDRandom::GetRandom()
++{
++	register uint32 s = this->seeds[0];
++	register uint32 t = this->seeds[1];
++
++	this->seeds[0] = s + ROR(t ^ 0x1234567F, 7) + 1;
++	t = ROR(s, 3) - 1;
++	this->seeds[1] = t;
++
++	return t;
++}
++
++/**
++ * Get a random number with a max number set.
++ *
++ * @param max The maximum number we want to reach
++ * @return a random number with max as maximum
++ */
++uint32 OTTDRandom::RandomRange(uint32 max)
++{
++	return GB(this->GetRandom(), 0, 16) * max >> 16;
++}
++
++/**
++ * Get the values needed to sync the randomiser
++ * in a network or savegame.
++ *
++ * @param p0 The state witch we want to check for sync
++ * @return The value of the requested state
++ */
++uint32 OTTDRrandom::GetSync(uint8 p0)
++{
++	assert(p0 < 3);
++
++	return this->seeds[p0];
++}
++
++/**
++ * Set the values to sync the randomiser
++ * in network or savegame.
++ *
++ * @param p0 The state witch we want to sync
++ * @param p1 The value for the state
++ */
++void OTTDRrandom::SetSync(uint8 p0, uint32 p1)
++{
++	assert(p0 < 3);
++
++	this->seeds[p0] = p1;
++}
++
++/**
++ * Get the position in memory of the
++ *  value we want to sync.
++ * This is needed for savegame stuff.
++ *
++ * @param p0 The state witch we want to sync
++ */
++uint32* OTTDRandom::Sync(uint8 p0)
++{
++	assert(p0 < 3);
++
++	uint32 *pos = this->seeds[p0];
++	return pos;
++}
+diff --git a/src/random/ottd_random.h b/src/random/ottd_random.h
+new file mode 100644
+index 0000000..c7ccacf
+--- /dev/null
++++ b/src/random/ottd_random.h
+@@ -0,0 +1,23 @@
++#ifndef OTTD_RANDOM_H
++#define OTTD_RANDOM_H
++
++#include "../stdafx.h"
++
++struct OTTDRandom {
++	protected:
++		uint32 seeds[4];
++	public:
++		OTTDRandom() {};
++		uint32 operator() ();
++		uint32 operator() (uint32 max);
++
++		void Seed(uint32 seed);
++		uint32 GetRandom();
++		uint32 RandomRange(uint32 max);
++		uint32 GetSync(uint8 p0);
++		void SetSync(uint8 p0, uint32 p1);
++		uint32* Sync(uint8 p0);
++};
++
++#endif // OTTD_RANOM_H
++
+diff --git a/src/unix.cpp b/src/unix.cpp
+index 9808503..ff83775 100644
+--- a/src/unix.cpp
++++ b/src/unix.cpp
+@@ -136,8 +136,7 @@ int CDECL main(int argc, char* argv[])
+ 	}
+ #endif
+ 
+-	_random_seeds[1][1] = _random_seeds[1][0] = _random_seeds[0][1] = _random_seeds[0][0] = time(NULL);
+-	SeedMT(_random_seeds[0][1]);
++	_new_random = new OTTDRandom;
+ 
+ 	signal(SIGPIPE, SIG_IGN);
+ 
+diff --git a/src/variables.h b/src/variables.h
+index 02e1888..9078288 100644
+--- a/src/variables.h
++++ b/src/variables.h
+@@ -5,6 +5,7 @@
+ #ifndef VARIABLES_H
+ #define VARIABLES_H
+ 
++#include "random/ottd_random.h"
+ #include "yapf/yapf_settings.h"
+ 
+ /* ********* START OF SAVE REGION */
+@@ -59,7 +60,8 @@ VARDEF uint16 _disaster_delay;
+  *  tick handler. */
+ VARDEF uint16 _station_tick_ctr;
+ 
+-VARDEF uint32 _random_seeds[2][2];
++/* OOP implementation of the random number generator */
++VARDEF OTTDRandom *_new_random;
+ 
+ /* Iterator through all towns in OnTick_Town */
+ VARDEF uint32 _cur_town_ctr;
+diff --git a/src/win32.cpp b/src/win32.cpp
+index 14ae640..a8af260 100644
+--- a/src/win32.cpp
++++ b/src/win32.cpp
+@@ -970,10 +970,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
+ 	_set_error_mode(_OUT_TO_MSGBOX); // force assertion output to messagebox
+ #endif
+ 
+-	/* setup random seed to something quite random */
+-	_random_seeds[1][0] = _random_seeds[0][0] = GetTickCount();
+-	_random_seeds[1][1] = _random_seeds[0][1] = _random_seeds[0][0] * 0x1234567;
+-	SeedMT(_random_seeds[0][0]);
++	_new_random = new OTTDRandom;
+ 
+ 	argc = ParseCommandLine(cmdline, argv, lengthof(argv));
+ 

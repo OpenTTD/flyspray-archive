@@ -1,0 +1,292 @@
+Index: src/viewport.h
+===================================================================
+--- src/viewport.h	(revision 11092)
++++ src/viewport.h	(working copy)
+@@ -48,7 +48,7 @@
+ 
+ void DrawGroundSprite(SpriteID image, SpriteID pal);
+ void DrawGroundSpriteAt(SpriteID image, SpriteID pal, int32 x, int32 y, byte z);
+-void AddSortableSpriteToDraw(SpriteID image, SpriteID pal, int x, int y, int w, int h, byte dz, byte z, bool transparent = false);
++void AddSortableSpriteToDraw(SpriteID image, SpriteID pal, int x, int y, int w, int h, int dz, int z, bool transparent = false, int bb_offset_x = 0, int bb_offset_y = 0, int bb_offset_z = 0);
+ void *AddStringToDraw(int x, int y, StringID string, uint64 params_1, uint64 params_2);
+ void AddChildSpriteScreen(SpriteID image, SpriteID pal, int x, int y);
+ 
+Index: src/tree_cmd.cpp
+===================================================================
+--- src/tree_cmd.cpp	(revision 11092)
++++ src/tree_cmd.cpp	(working copy)
+@@ -404,7 +404,7 @@
+ 
+ 			if (tep == NULL) break;
+ 
+-			AddSortableSpriteToDraw(tep->image, tep->pal, ti->x + tep->x, ti->y + tep->y, 5, 5, 0x10, z, HASBIT(_transparent_opt, TO_TREES));
++			AddSortableSpriteToDraw(tep->image, tep->pal, ti->x + tep->x, ti->y + tep->y, 16 - tep->x, 16 - tep->y, 0x30, z, HASBIT(_transparent_opt, TO_TREES), -tep->x, -tep->y);
+ 			tep->image = 0;
+ 		}
+ 	}
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 11092)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -846,11 +846,11 @@
+ 			 * sprites is at the top
+ 			 */
+ 			if (z >= front_height) { // front facing pillar
+-				AddSortableSpriteToDraw(image, psid->pal, x, y, p[4], p[5], 1, z, HASBIT(_transparent_opt, TO_BRIDGES));
++				AddSortableSpriteToDraw(image, psid->pal, x, y, p[4], p[5], 0, z, HASBIT(_transparent_opt, TO_BRIDGES), 0, 0, -5);
+ 			}
+ 
+ 			if (drawfarpillar && z >= back_height && z < i - TILE_HEIGHT) { // back facing pillar
+-				AddSortableSpriteToDraw(image, psid->pal, x - p[6], y - p[7], p[4], p[5], 1, z, HASBIT(_transparent_opt, TO_BRIDGES));
++				AddSortableSpriteToDraw(image, psid->pal, x - p[6], y - p[7], p[4], p[5], 0, z, HASBIT(_transparent_opt, TO_BRIDGES), 0, 0, -5);
+ 			}
+ 		}
+ 	}
+@@ -880,9 +880,13 @@
+ 	static const uint size_x[6] = { 11, 16, 16, 16, 16, 16 };
+ 	static const uint size_y[6] = { 16, 11, 16, 16, 16, 16 };
+ 
++	/* The sprites under the vehicles are drawn as SpriteCombine. StartSpriteCombine() has already been called */
+ 	AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + tram_offsets[overlay][offset], PAL_NONE, x, y, size_x[offset], size_y[offset], offset >= 2 ? 1 : 0, z, HASBIT(_transparent_opt, TO_BRIDGES));
+ 
+ 	AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + back_offsets[offset],  PAL_NONE, x, y, size_x[offset], size_y[offset], 0, z, HASBIT(_transparent_opt, TO_BUILDINGS));
++
++	EndSpriteCombine(); // Do not draw the roof part as SpriteCombine
++
+ 	/* For sloped sprites the bounding box needs to be higher, as the pylons stop on a higher point */
+ 	AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + front_offsets[offset], PAL_NONE, x, y, size_x[offset], size_y[offset], offset >= 2 ? 0x30 : 0x10, z, HASBIT(_transparent_opt, TO_BUILDINGS));
+ }
+@@ -962,6 +966,9 @@
+ 			DrawGroundSprite(SPR_FLAT_SNOWY_TILE + _tileh_to_sprite[ti->tileh], PAL_NONE);
+ 		}
+ 
++		/* Draw Trambits as SpriteCombine */
++		if (GetBridgeTransportType(ti->tile) == TRANSPORT_ROAD) StartSpriteCombine();
++
+ 		/* draw ramp */
+ 
+ 		/* HACK set the height of the BB of a sloped ramp to 1 so a vehicle on
+@@ -983,7 +990,10 @@
+ 				} else {
+ 					offset += 2;
+ 				}
++				/* DrawBridgeTramBits() calls EndSpriteCombine() */
+ 				DrawBridgeTramBits(ti->x, ti->y, z, offset, HASBIT(rts, ROADTYPE_ROAD));
++			} else {
++				EndSpriteCombine();
+ 			}
+ 		} else if (GetRailType(ti->tile) == RAILTYPE_ELECTRIC) {
+ 			DrawCatenary(ti);
+@@ -1067,10 +1077,14 @@
+ 	uint bridge_z = GetBridgeHeight(rampsouth);
+ 	z = bridge_z - 3;
+ 
++	/* Draw Trambits as SpriteCombine */
++	if (GetBridgeTransportType(rampsouth) == TRANSPORT_ROAD) StartSpriteCombine();
++
++	/* Vehicles' BB extent from z_min=0 to z_max=5, start the bridge BB at z_min=6. */
+ 	if (axis == AXIS_X) {
+-		AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 16, 11, 1, z, HASBIT(_transparent_opt, TO_BRIDGES));
++		AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 16, 16, 2, z, HASBIT(_transparent_opt, TO_BRIDGES), 0, 0, 1);
+ 	} else {
+-		AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 11, 16, 1, z, HASBIT(_transparent_opt, TO_BRIDGES));
++		AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 16, 16, 2, z, HASBIT(_transparent_opt, TO_BRIDGES), 0, 0, 1);
+ 	}
+ 
+ 	psid++;
+@@ -1079,7 +1093,10 @@
+ 		RoadTypes rts = GetRoadTypes(rampsouth);
+ 
+ 		if (HASBIT(rts, ROADTYPE_TRAM)) {
++			/* DrawBridgeTramBits() calls EndSpriteCombine() */
+ 			DrawBridgeTramBits(x, y, bridge_z, axis ^ 1, HASBIT(rts, ROADTYPE_ROAD));
++		} else {
++			EndSpriteCombine();
+ 		}
+ 	} else if (GetRailType(rampsouth) == RAILTYPE_ELECTRIC) {
+ 		DrawCatenary(ti);
+@@ -1088,10 +1105,10 @@
+ 	/* draw roof, the component of the bridge which is logically between the vehicle and the camera */
+ 	if (axis == AXIS_X) {
+ 		y += 12;
+-		if (psid->sprite & SPRITE_MASK) AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 16, 1, 0x28, z, HASBIT(_transparent_opt, TO_BRIDGES));
++		if (psid->sprite & SPRITE_MASK) AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 16, 1, 0x28, z, HASBIT(_transparent_opt, TO_BRIDGES), 0, 0, 3);
+ 	} else {
+ 		x += 12;
+-		if (psid->sprite & SPRITE_MASK) AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 1, 16, 0x28, z, HASBIT(_transparent_opt, TO_BRIDGES));
++		if (psid->sprite & SPRITE_MASK) AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 1, 16, 0x28, z, HASBIT(_transparent_opt, TO_BRIDGES), 0, 0, 3);
+ 	}
+ 
+ 	psid++;
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 11092)
++++ src/viewport.cpp	(working copy)
+@@ -81,25 +81,33 @@
+ };
+ 
+ struct ParentSpriteToDraw {
+-	SpriteID image;
+-	SpriteID pal;
+-	int32 left;
+-	int32 top;
+-	int32 right;
+-	int32 bottom;
+-	int32 xmin;
+-	int32 ymin;
+-	int32 xmax;
+-	int32 ymax;
+-	ChildScreenSpriteToDraw *child;
+-	byte unk16;
+-	byte zmin;
+-	byte zmax;
++	SpriteID image;                  ///< sprite to draw
++	SpriteID pal;                    ///< palette to use
++
++	int32 x;                         ///< screen X coordinate of sprite
++	int32 y;                         ///< screen Y coordinate of sprite
++
++	int32 left;                      ///< minimal screen X coordinate of sprite (= x + sprite->x_offs), reference point for child sprites
++	int32 top;                       ///< minimal screen Y coordinate of sprite (= y + sprite->y_offs), reference point for child sprites
++
++	int32 xmin;                      ///< minimal world X coordinate of bounding box
++	int32 xmax;                      ///< maximal world X coordinate of bounding box
++	int32 ymin;                      ///< minimal world Y coordinate of bounding box
++	int32 ymax;                      ///< maximal world Y coordinate of bounding box
++	int zmin;                        ///< minimal world Z coordinate of bounding box
++	int zmax;                        ///< maximal world Z coordinate of bounding box
++
++	ChildScreenSpriteToDraw *child;  ///< head of child list
++	byte unk16;                      ///< Used during sprite sorting: 1 = sprite has been compared with all other sprites, else 0
+ };
+ 
+ /* Quick hack to know how much memory to reserve when allocating from the spritelist
+  * to prevent a buffer overflow. */
+ #define LARGEST_SPRITELIST_STRUCT ParentSpriteToDraw
++assert_compile(sizeof(LARGEST_SPRITELIST_STRUCT) >= sizeof(StringSpriteToDraw));
++assert_compile(sizeof(LARGEST_SPRITELIST_STRUCT) >= sizeof(TileSpriteToDraw));
++assert_compile(sizeof(LARGEST_SPRITELIST_STRUCT) >= sizeof(ChildScreenSpriteToDraw));
++assert_compile(sizeof(LARGEST_SPRITELIST_STRUCT) >= sizeof(ParentSpriteToDraw));
+ 
+ struct ViewportDrawer {
+ 	DrawPixelInfo dpi;
+@@ -479,18 +487,29 @@
+ 	AddChildSpriteScreen(image, pal, pt.x - vd->parent_list[-1]->left, pt.y - vd->parent_list[-1]->top);
+ }
+ 
+-/** Draw a (transparent) sprite at given coordinates
++/** Draw a (transparent) sprite at given coordinates with a given bounding box.
++ * The bounding box extends from (x + bb_offset_x, y + bb_offset_y, z + bb_offset_z) to (x + w - 1, y + h - 1, z + dz - 1), both corners included.
++ *
++ * @note Bounding boxes are normally specified with bb_offset_x = bb_offset_y = bb_offset_z = 0. The extent of the bounding box in negative direction is
++ *       defined by the sprite offset in the grf file.
++ *       However if modifying the sprite offsets is not suitable (e.g. when using existing graphics), the bounding box can be tuned by bb_offset.
++ *
++ * @pre w > bb_offset_x, h > bb_offset_y, dz > bb_offset_z. Else w, h or dz are ignored.
++ *
+  * @param image the image to combine and draw,
+  * @param pal the provided palette,
+- * @param x position x of the sprite,
+- * @param y position y of the sprite,
+- * @param w width of the sprite,
+- * @param h height of the sprite,
+- * @param dz delta z, difference of elevation between sprite and parent sprite,
+- * @param z elevation of the sprite,
+- * @param transparent if true, switch the palette between the provided palette and the transparent palette
++ * @param x position X (world) of the sprite,
++ * @param y position Y (world) of the sprite,
++ * @param w bounding box extent towards positive X (world),
++ * @param h bounding box extent towards positive Y (world),
++ * @param dz bounding box extent towards positive Z (world),
++ * @param z position Z (world) of the sprite,
++ * @param transparent if true, switch the palette between the provided palette and the transparent palette,
++ * @param bb_offset_x bounding box extent towards negative X (world),
++ * @param bb_offset_y bounding box extent towards negative Y (world),
++ * @param bb_offset_z bounding box extent towards negative Z (world)
+  */
+-void AddSortableSpriteToDraw(SpriteID image, SpriteID pal, int x, int y, int w, int h, byte dz, byte z, bool transparent)
++void AddSortableSpriteToDraw(SpriteID image, SpriteID pal, int x, int y, int w, int h, int dz, int z, bool transparent, int bb_offset_x, int bb_offset_y, int bb_offset_z)
+ {
+ 	ViewportDrawer *vd = _cur_vd;
+ 	ParentSpriteToDraw *ps;
+@@ -530,11 +549,13 @@
+ 	}
+ 
+ 	pt = RemapCoords(x, y, z);
++	ps->x = pt.x;
++	ps->y = pt.y;
+ 	spr = GetSprite(image & SPRITE_MASK);
+ 	if ((ps->left   = (pt.x += spr->x_offs)) >= vd->dpi.left + vd->dpi.width ||
+-			(ps->right  = (pt.x +  spr->width )) <= vd->dpi.left ||
++			(             (pt.x +  spr->width )) <= vd->dpi.left ||
+ 			(ps->top    = (pt.y += spr->y_offs)) >= vd->dpi.top + vd->dpi.height ||
+-			(ps->bottom = (pt.y +  spr->height)) <= vd->dpi.top) {
++			(             (pt.y +  spr->height)) <= vd->dpi.top) {
+ 		return;
+ 	}
+ 
+@@ -542,14 +563,14 @@
+ 
+ 	ps->image = image;
+ 	ps->pal = pal;
+-	ps->xmin = x;
+-	ps->xmax = x + w - 1;
++	ps->xmin = x + bb_offset_x;
++	ps->xmax = x + max(bb_offset_x, w - 1);
+ 
+-	ps->ymin = y;
+-	ps->ymax = y + h - 1;
++	ps->ymin = y + bb_offset_y;
++	ps->ymax = y + max(bb_offset_y, h - 1);
+ 
+-	ps->zmin = z;
+-	ps->zmax = z + dz - 1;
++	ps->zmin = z + bb_offset_z;
++	ps->zmax = z + max(bb_offset_z, dz - 1);
+ 
+ 	ps->unk16 = 0;
+ 	ps->child = NULL;
+@@ -1144,9 +1165,9 @@
+ 				/* Decide which comparator to use, based on whether the bounding
+ 				 * boxes overlap
+ 				 */
+-				if (ps->xmax > ps2->xmin && ps->xmin < ps2->xmax && // overlap in X?
+-						ps->ymax > ps2->ymin && ps->ymin < ps2->ymax && // overlap in Y?
+-						ps->zmax > ps2->zmin && ps->zmin < ps2->zmax) { // overlap in Z?
++				if (ps->xmax >= ps2->xmin && ps->xmin <= ps2->xmax && // overlap in X?
++						ps->ymax >= ps2->ymin && ps->ymin <= ps2->ymax && // overlap in Y?
++						ps->zmax >= ps2->zmin && ps->zmin <= ps2->zmax) { // overlap in Z?
+ 					/* Use X+Y+Z as the sorting order, so sprites closer to the bottom of
+ 					 * the screen and with higher Z elevation, are drawn in front.
+ 					 * Here X,Y,Z are the coordinates of the "center of mass" of the sprite,
+@@ -1158,13 +1179,13 @@
+ 						continue;
+ 					}
+ 				} else {
++					/* We only change the order, if it is definite.
++					 * I.e. every single order of X, Y, Z says ps2 is behind ps or they overlap.
++					 * That is: If one partial order says ps behind ps2, do not change the order.
++					 */
+ 					if (ps->xmax < ps2->xmin ||
+ 							ps->ymax < ps2->ymin ||
+-							ps->zmax < ps2->zmin || (
+-								ps->xmin < ps2->xmax &&
+-								ps->ymin < ps2->ymax &&
+-								ps->zmin < ps2->zmax
+-							)) {
++							ps->zmax < ps2->zmin) {
+ 						continue;
+ 					}
+ 				}
+@@ -1189,10 +1210,9 @@
+ {
+ 	for (; *psd != NULL; psd++) {
+ 		const ParentSpriteToDraw* ps = *psd;
+-		Point pt = RemapCoords(ps->xmin, ps->ymin, ps->zmin);
+ 		const ChildScreenSpriteToDraw* cs;
+ 
+-		DrawSprite(ps->image, ps->pal, pt.x, pt.y);
++		DrawSprite(ps->image, ps->pal, ps->x, ps->y);
+ 
+ 		for (cs = ps->child; cs != NULL; cs = cs->next) {
+ 			DrawSprite(cs->image, cs->pal, ps->left + cs->x, ps->top + cs->y);

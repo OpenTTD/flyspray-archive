@@ -1,0 +1,1161 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 11123)
++++ src/settings.cpp	(working copy)
+@@ -1340,7 +1340,6 @@
+ 	 SDT_VAR(Patches, errmsg_duration,    SLE_UINT8, S, 0,  5, 0, 20, 0, STR_CONFIG_PATCHES_ERRMSG_DURATION,       NULL),
+ 	 SDT_VAR(Patches, toolbar_pos,        SLE_UINT8, S,MS,  0, 0,  2, 0, STR_CONFIG_PATCHES_TOOLBAR_POS,           v_PositionMainToolbar),
+ 	 SDT_VAR(Patches, window_snap_radius, SLE_UINT8, S,D0, 10, 1, 32, 0, STR_CONFIG_PATCHES_SNAP_RADIUS,           NULL),
+-	SDT_BOOL(Patches, invisible_trees,               S, 0, false,        STR_CONFIG_PATCHES_INVISIBLE_TREES,       RedrawScreen),
+ 	SDT_BOOL(Patches, population_in_label,           S, 0,  true,        STR_CONFIG_PATCHES_POPULATION_IN_LABEL,   PopulationInLabelActive),
+ 	 SDT_VAR(Patches, map_x,              SLE_UINT8, S, 0,  8, 6, 11, 0, STR_CONFIG_PATCHES_MAP_X,                 NULL),
+ 	 SDT_VAR(Patches, map_y,              SLE_UINT8, S, 0,  8, 6, 11, 0, STR_CONFIG_PATCHES_MAP_Y,                 NULL),
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 11123)
++++ src/lang/english.txt	(working copy)
+@@ -1067,7 +1067,6 @@
+ STR_CONFIG_PATCHES_AUTORENEW_MONEY                              :{LTBLUE}Autorenew minimum needed money for renew: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_ERRMSG_DURATION                              :{LTBLUE}Duration of error message: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_POPULATION_IN_LABEL                          :{LTBLUE}Show town population in the town name label: {ORANGE}{STRING1}
+-STR_CONFIG_PATCHES_INVISIBLE_TREES                              :{LTBLUE}Invisible trees (with transparent buildings): {ORANGE}{STRING1}
+ 
+ STR_CONFIG_PATCHES_LAND_GENERATOR                               :{LTBLUE}Land generator: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_LAND_GENERATOR_ORIGINAL                      :Original
+@@ -3315,10 +3314,12 @@
+ STR_TRANSPARENT_TREES_DESC                                      :{BLACK}Toggle transparency for trees
+ STR_TRANSPARENT_HOUSES_DESC                                     :{BLACK}Toggle transparency for houses
+ STR_TRANSPARENT_INDUSTRIES_DESC                                 :{BLACK}Toggle transparency for industries
+-STR_TRANSPARENT_BUILDINGS_DESC                                  :{BLACK}Toggle transparency for buildables like stations, depots, waypoints and catenary
++STR_TRANSPARENT_BUILDINGS_DESC                                  :{BLACK}Toggle transparency for buildables like stations, depots and waypoints
+ STR_TRANSPARENT_BRIDGES_DESC                                    :{BLACK}Toggle transparency for bridges
+ STR_TRANSPARENT_STRUCTURES_DESC                                 :{BLACK}Toggle transparency for structures like lighthouses and antennas, maybe in future for eyecandy
++STR_TRANSPARENT_CATENARY_DESC                                   :{BLACK}Toggle transparency for catenary
+ STR_TRANSPARENT_LOADING_DESC                                    :{BLACK}Toggle transparency for loading indicators
++STR_TRANSPARENT_INVISIBLE_DESC                                  :{BLACK}Set objects invisible instead of transparent
+ 
+ STR_PERCENT_UP_SMALL                                            :{TINYFONT}{WHITE}{NUM}%{UPARROW}
+ STR_PERCENT_UP                                                  :{WHITE}{NUM}%{UPARROW}
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 11123)
++++ src/settings_gui.cpp	(working copy)
+@@ -640,7 +640,6 @@
+ 	"toolbar_pos",
+ 	"measure_tooltip",
+ 	"window_snap_radius",
+-	"invisible_trees",
+ 	"population_in_label",
+ 	"link_terraform_toolbar",
+ 	"liveries",
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(revision 11123)
++++ src/rail_cmd.cpp	(working copy)
+@@ -38,6 +38,7 @@
+ #include "newgrf_callbacks.h"
+ #include "newgrf_station.h"
+ #include "train.h"
++#include "transparency.h"
+ #include "misc/autoptr.hpp"
+ #include "autoslope.h"
+ 
+@@ -1491,7 +1492,12 @@
+ 		if (ti->tileh != SLOPE_FLAT) DrawFoundation(ti, FOUNDATION_LEVELED);
+ 
+ 		if (IsRailDepot(ti->tile)) {
+-			dts = &_depot_gfx_table[GetRailDepotDirection(ti->tile)];
++			if (IsOptionInvisible(TO_BUILDINGS)) {
++				/* Draw rail instead of depot */
++				dts = &_depot_invisible_gfx_table[GetRailDepotDirection(ti->tile)];
++			} else {
++				dts = &_depot_gfx_table[GetRailDepotDirection(ti->tile)];
++			}
+ 
+ 			relocation = rti->total_offset;
+ 
+@@ -1555,6 +1561,9 @@
+ 
+ 		if (GetRailType(ti->tile) == RAILTYPE_ELECTRIC) DrawCatenary(ti);
+ 
++		/* End now if buildings are invisible */
++		if (IsOptionInvisible(TO_BUILDINGS)) return;
++
+ 		foreach_draw_tile_seq(dtss, dts->seq) {
+ 			SpriteID image = dtss->image;
+ 			SpriteID pal;
+@@ -1568,7 +1577,7 @@
+ 				image += relocation;
+ 			}
+ 
+-			if (!HASBIT(_transparent_opt, TO_BUILDINGS) && HASBIT(image, PALETTE_MODIFIER_COLOR)) {
++			if (!IsOptionTransparent(TO_BUILDINGS) && HASBIT(image, PALETTE_MODIFIER_COLOR)) {
+ 				pal = _drawtile_track_palette;
+ 			} else {
+ 				pal = dtss->pal;
+@@ -1580,7 +1589,7 @@
+ 					ti->x + dtss->delta_x, ti->y + dtss->delta_y,
+ 					dtss->size_x, dtss->size_y,
+ 					dtss->size_z, ti->z + dtss->delta_z,
+-					HASBIT(_transparent_opt, TO_BUILDINGS)
++					IsOptionTransparent(TO_BUILDINGS)
+ 				);
+ 			} else {
+ 				AddChildSpriteScreen(image, pal, dtss->delta_x, dtss->delta_y);
+Index: src/station_cmd.cpp
+===================================================================
+--- src/station_cmd.cpp	(revision 11123)
++++ src/station_cmd.cpp	(working copy)
+@@ -42,6 +42,7 @@
+ #include "road.h"
+ #include "cargotype.h"
+ #include "strings.h"
++#include "transparency.h"
+ #include "autoslope.h"
+ 
+ DEFINE_OLD_POOL_GENERIC(Station, Station)
+@@ -2090,6 +2091,9 @@
+ 
+ 	if (IsBuoyTile(ti->tile) && (ti->z != 0 || !IsTileOwner(ti->tile, OWNER_WATER))) DrawCanalWater(ti->tile);
+ 
++	/* End now if buildings are invisible */
++	if (IsOptionInvisible(TO_BUILDINGS)) return;
++
+ 	const DrawTileSeqStruct *dtss;
+ 	foreach_draw_tile_seq(dtss, t->seq) {
+ 		image = dtss->image;
+@@ -2100,19 +2104,20 @@
+ 		}
+ 
+ 		SpriteID pal;
+-		if (!HASBIT(_transparent_opt, TO_BUILDINGS) && HASBIT(image, PALETTE_MODIFIER_COLOR)) {
++		if (!IsOptionTransparent(TO_BUILDINGS) && HASBIT(image, PALETTE_MODIFIER_COLOR)) {
+ 			pal = palette;
+ 		} else {
+ 			pal = dtss->pal;
+ 		}
+ 
+ 		if ((byte)dtss->delta_z != 0x80) {
++
+ 			AddSortableSpriteToDraw(
+ 				image, pal,
+ 				ti->x + dtss->delta_x, ti->y + dtss->delta_y,
+ 				dtss->size_x, dtss->size_y,
+ 				dtss->size_z, ti->z + dtss->delta_z,
+-				HASBIT(_transparent_opt, TO_BUILDINGS)
++				IsOptionTransparent(TO_BUILDINGS)
+ 			);
+ 		} else {
+ 			AddChildSpriteScreen(image, pal, dtss->delta_x, dtss->delta_y);
+Index: src/table/track_land.h
+===================================================================
+--- src/table/track_land.h	(revision 11123)
++++ src/table/track_land.h	(working copy)
+@@ -33,6 +33,12 @@
+ 	{ SPR_FLAT_GRASS_TILE, PAL_NONE, _depot_gfx_NW }
+ };
+ 
++static const DrawTileSprites _depot_invisible_gfx_table[] = {
++	{ SPR_RAIL_TRACK_X, PAL_NONE, _depot_gfx_NE },
++	{ SPR_RAIL_TRACK_Y, PAL_NONE, _depot_gfx_SE },
++	{ SPR_RAIL_TRACK_X, PAL_NONE, _depot_gfx_SW },
++	{ SPR_RAIL_TRACK_Y, PAL_NONE, _depot_gfx_NW }
++};
+ 
+ static const DrawTileSeqStruct _waypoint_gfx_X[] = {
+ 	TILE_SEQ_LINE((1 << PALETTE_MODIFIER_COLOR) | SPR_WAYPOINT_X_1,  0,  0,  16,  5)
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revision 11123)
++++ src/town_cmd.cpp	(working copy)
+@@ -41,6 +41,7 @@
+ #include "newgrf_commons.h"
+ #include "newgrf_townname.h"
+ #include "misc/autoptr.hpp"
++#include "transparency.h"
+ #include "autoslope.h"
+ 
+ /* Initialize the town-pool */
+@@ -177,6 +178,9 @@
+ 	pal   = dcts->ground.pal;
+ 	DrawGroundSprite(image, pal);
+ 
++	/* If houses are invisible, do not draw the upper part */
++	if (IsOptionInvisible(TO_HOUSES)) return;
++
+ 	/* Add a house on top of the ground? */
+ 	image = dcts->building.sprite;
+ 	if (image != 0) {
+@@ -187,10 +191,10 @@
+ 			dcts->height,
+ 			dcts->dz,
+ 			ti->z,
+-			HASBIT(_transparent_opt, TO_HOUSES)
++			IsOptionTransparent(TO_HOUSES)
+ 		);
+ 
+-		if (HASBIT(_transparent_opt, TO_HOUSES)) return;
++		if (IsOptionTransparent(TO_HOUSES)) return;
+ 	}
+ 
+ 	{
+Index: src/road_cmd.cpp
+===================================================================
+--- src/road_cmd.cpp	(revision 11123)
++++ src/road_cmd.cpp	(working copy)
+@@ -32,6 +32,7 @@
+ #include "station_map.h"
+ #include "tunnel_map.h"
+ #include "misc/autoptr.hpp"
++#include "transparency.h"
+ #include "autoslope.h"
+ 
+ #define M(x) (1 << (x))
+@@ -896,8 +897,11 @@
+  */
+ void DrawTramCatenary(TileInfo *ti, RoadBits tram)
+ {
++	/* Do not draw catenary if they are invisible */
++	if (IsOptionInvisible(TO_CATENARY)) return;
++
+ 	/* Don't draw the catenary under a low bridge */
+-	if (MayHaveBridgeAbove(ti->tile) && IsBridgeAbove(ti->tile) && !HASBIT(_transparent_opt, TO_BUILDINGS)) {
++	if (MayHaveBridgeAbove(ti->tile) && IsBridgeAbove(ti->tile) && !IsOptionTransparent(TO_CATENARY) && !IsOptionTransparent(TO_BRIDGES)) {
+ 		uint height = GetBridgeHeight(GetNorthernBridgeEnd(ti->tile));
+ 
+ 		if (height <= GetTileMaxZ(ti->tile) + TILE_HEIGHT) return;
+@@ -914,8 +918,8 @@
+ 		front = SPR_TRAMWAY_BASE + _road_frontwire_sprites_1[tram];
+ 	}
+ 
+-	AddSortableSpriteToDraw(back,  PAL_NONE, ti->x, ti->y, 16, 16, 0x1F, ti->z, HASBIT(_transparent_opt, TO_BUILDINGS));
+-	AddSortableSpriteToDraw(front, PAL_NONE, ti->x, ti->y, 16, 16, 0x1F, ti->z, HASBIT(_transparent_opt, TO_BUILDINGS));
++	AddSortableSpriteToDraw(back,  PAL_NONE, ti->x, ti->y, 16, 16, 0x1F, ti->z, IsOptionTransparent(TO_CATENARY));
++	AddSortableSpriteToDraw(front, PAL_NONE, ti->x, ti->y, 16, 16, 0x1F, ti->z, IsOptionTransparent(TO_CATENARY));
+ }
+ 
+ /**
+@@ -1067,11 +1071,14 @@
+ 
+ 			DrawGroundSprite(dts->ground_sprite, PAL_NONE);
+ 
++			/* End now if buildings are invisible */
++			if (IsOptionInvisible(TO_BUILDINGS)) break;
++
+ 			for (dtss = dts->seq; dtss->image != 0; dtss++) {
+ 				SpriteID image = dtss->image;
+ 				SpriteID pal;
+ 
+-				if (!HASBIT(_transparent_opt, TO_BUILDINGS) && HASBIT(image, PALETTE_MODIFIER_COLOR)) {
++				if (!IsOptionTransparent(TO_BUILDINGS) && HASBIT(image, PALETTE_MODIFIER_COLOR)) {
+ 					pal = palette;
+ 				} else {
+ 					pal = PAL_NONE;
+@@ -1082,7 +1089,7 @@
+ 					ti->x + dtss->delta_x, ti->y + dtss->delta_y,
+ 					dtss->size_x, dtss->size_y,
+ 					dtss->size_z, ti->z,
+-					HASBIT(_transparent_opt, TO_BUILDINGS)
++					IsOptionTransparent(TO_BUILDINGS)
+ 				);
+ 			}
+ 			break;
+Index: src/tree_cmd.cpp
+===================================================================
+--- src/tree_cmd.cpp	(revision 11123)
++++ src/tree_cmd.cpp	(working copy)
+@@ -20,6 +20,7 @@
+ #include "sound.h"
+ #include "variables.h"
+ #include "genworld.h"
++#include "transparency.h"
+ 
+ enum TreePlacer {
+ 	TP_NONE,
+@@ -337,6 +338,9 @@
+ 
+ 	DrawClearLandFence(ti);
+ 
++	/* End now, if trees are invisible */
++	if (IsOptionInvisible(TO_TREES)) return;
++
+ 	z = ti->z;
+ 	if (ti->tileh != SLOPE_FLAT) {
+ 		z += 4;
+@@ -371,42 +375,40 @@
+ 
+ 	StartSpriteCombine();
+ 
+-	if (!HASBIT(_transparent_opt, TO_TREES) || !_patches.invisible_trees) {
+-		TreeListEnt te[4];
+-		uint i;
++	TreeListEnt te[4];
++	uint i;
+ 
+-		/* put the trees to draw in a list */
++	/* put the trees to draw in a list */
++	i = GetTreeCount(ti->tile) + 1;
++	do {
++		SpriteID image = s[0].sprite + (--i == 0 ? GetTreeGrowth(ti->tile) : 3);
++		SpriteID pal = s[0].pal;
++
++		te[i].image = image;
++		te[i].pal   = pal;
++		te[i].x = d->x;
++		te[i].y = d->y;
++		s++;
++		d++;
++	} while (i);
++
++	/* draw them in a sorted way */
++	for (;;) {
++		byte min = 0xFF;
++		TreeListEnt *tep = NULL;
++
+ 		i = GetTreeCount(ti->tile) + 1;
+ 		do {
+-			SpriteID image = s[0].sprite + (--i == 0 ? GetTreeGrowth(ti->tile) : 3);
+-			SpriteID pal = s[0].pal;
+-
+-			te[i].image = image;
+-			te[i].pal   = pal;
+-			te[i].x = d->x;
+-			te[i].y = d->y;
+-			s++;
+-			d++;
++			if (te[--i].image != 0 && te[i].x + te[i].y < min) {
++				min = te[i].x + te[i].y;
++				tep = &te[i];
++			}
+ 		} while (i);
+ 
+-		/* draw them in a sorted way */
+-		for (;;) {
+-			byte min = 0xFF;
+-			TreeListEnt *tep = NULL;
++		if (tep == NULL) break;
+ 
+-			i = GetTreeCount(ti->tile) + 1;
+-			do {
+-				if (te[--i].image != 0 && te[i].x + te[i].y < min) {
+-					min = te[i].x + te[i].y;
+-					tep = &te[i];
+-				}
+-			} while (i);
+-
+-			if (tep == NULL) break;
+-
+-			AddSortableSpriteToDraw(tep->image, tep->pal, ti->x + tep->x, ti->y + tep->y, 5, 5, 0x10, z, HASBIT(_transparent_opt, TO_TREES));
+-			tep->image = 0;
+-		}
++		AddSortableSpriteToDraw(tep->image, tep->pal, ti->x + tep->x, ti->y + tep->y, 5, 5, 0x10, z, IsOptionTransparent(TO_TREES));
++		tep->image = 0;
+ 	}
+ 
+ 	EndSpriteCombine();
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 11123)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -32,6 +32,7 @@
+ #include "yapf/yapf.h"
+ #include "date.h"
+ #include "newgrf_sound.h"
++#include "transparency.h"
+ #include "autoslope.h"
+ 
+ #include "table/bridge_land.h"
+@@ -832,6 +833,11 @@
+ static void DrawBridgePillars(const PalSpriteID *psid, const TileInfo* ti, Axis axis, uint type, int x, int y, int z)
+ {
+ 	SpriteID image = psid->sprite;
++
++	/* Do not draw bridge pillars if they are invisible */
++	// not needed - function is not called when bridges are invisible
++	//if (IsOptionInvisible(TO_BRIDGES)) return;
++
+ 	if (image != 0) {
+ 		bool drawfarpillar = !HASBIT(GetBridgeFlags(type), 0);
+ 		int back_height, front_height;
+@@ -859,11 +865,11 @@
+ 			 * sprites is at the top
+ 			 */
+ 			if (z >= front_height) { // front facing pillar
+-				AddSortableSpriteToDraw(image, psid->pal, x, y, p[4], p[5], 1, z, HASBIT(_transparent_opt, TO_BRIDGES));
++				AddSortableSpriteToDraw(image, psid->pal, x, y, p[4], p[5], 1, z, IsOptionTransparent(TO_BRIDGES));
+ 			}
+ 
+ 			if (drawfarpillar && z >= back_height && z < i - TILE_HEIGHT) { // back facing pillar
+-				AddSortableSpriteToDraw(image, psid->pal, x - p[6], y - p[7], p[4], p[5], 1, z, HASBIT(_transparent_opt, TO_BRIDGES));
++				AddSortableSpriteToDraw(image, psid->pal, x - p[6], y - p[7], p[4], p[5], 1, z, IsOptionTransparent(TO_BRIDGES));
+ 			}
+ 		}
+ 	}
+@@ -893,11 +899,15 @@
+ 	static const uint size_x[6] = { 11, 16, 16, 16, 16, 16 };
+ 	static const uint size_y[6] = { 16, 11, 16, 16, 16, 16 };
+ 
+-	AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + tram_offsets[overlay][offset], PAL_NONE, x, y, size_x[offset], size_y[offset], offset >= 2 ? 1 : 0, z, HASBIT(_transparent_opt, TO_BRIDGES));
++	if (!IsOptionInvisible(TO_BRIDGES))
++		AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + tram_offsets[overlay][offset], PAL_NONE, x, y, size_x[offset], size_y[offset], offset >= 2 ? 1 : 0, z, IsOptionTransparent(TO_BRIDGES));
+ 
+-	AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + back_offsets[offset],  PAL_NONE, x, y, size_x[offset], size_y[offset], 0, z, HASBIT(_transparent_opt, TO_BUILDINGS));
++	if (!IsOptionInvisible(TO_CATENARY))
++		AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + back_offsets[offset],  PAL_NONE, x, y, size_x[offset], size_y[offset], 0, z, IsOptionTransparent(TO_CATENARY));
++
+ 	/* For sloped sprites the bounding box needs to be higher, as the pylons stop on a higher point */
+-	AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + front_offsets[offset], PAL_NONE, x, y, size_x[offset], size_y[offset], offset >= 2 ? 0x30 : 0x10, z, HASBIT(_transparent_opt, TO_BUILDINGS));
++	if (!IsOptionInvisible(TO_CATENARY))
++		AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + front_offsets[offset], PAL_NONE, x, y, size_x[offset], size_y[offset], offset >= 2 ? 0x30 : 0x10, z, IsOptionTransparent(TO_CATENARY));
+ }
+ 
+ /**
+@@ -936,7 +946,10 @@
+ 				static const SpriteID tunnel_sprites[2][4] = { { 28, 78, 79, 27 }, {  5, 76, 77,  4 } };
+ 
+ 				DrawGroundSprite(SPR_TRAMWAY_BASE + tunnel_sprites[rts - ROADTYPES_TRAM][dir], PAL_NONE);
+-				AddSortableSpriteToDraw(SPR_TRAMWAY_TUNNEL_WIRES + dir, PAL_NONE, ti->x, ti->y, 16, 16, 16, (byte)ti->z, HASBIT(_transparent_opt, TO_BUILDINGS));
++
++				/* Do not draw wires if they are invisible */
++				if (!IsOptionInvisible(TO_CATENARY))
++					AddSortableSpriteToDraw(SPR_TRAMWAY_TUNNEL_WIRES + dir, PAL_NONE, ti->x, ti->y, 16, 16, 16, (byte)ti->z, IsOptionTransparent(TO_CATENARY));
+ 			}
+ 		} else if (GetRailType(ti->tile) == RAILTYPE_ELECTRIC) {
+ 			DrawCatenary(ti);
+@@ -980,9 +993,11 @@
+ 		/* HACK set the height of the BB of a sloped ramp to 1 so a vehicle on
+ 		 * it doesn't disappear behind it
+ 		 */
+-		AddSortableSpriteToDraw(
+-			psid->sprite, psid->pal, ti->x, ti->y, 16, 16, ti->tileh == SLOPE_FLAT ? 0 : 8, ti->z, HASBIT(_transparent_opt, TO_BRIDGES)
+-		);
++		if (!IsOptionInvisible(TO_BRIDGES)) {
++			AddSortableSpriteToDraw(
++				psid->sprite, psid->pal, ti->x, ti->y, 16, 16, ti->tileh == SLOPE_FLAT ? 0 : 8, ti->z, IsOptionTransparent(TO_BRIDGES)
++			);
++		}
+ 
+ 		if (GetBridgeTransportType(ti->tile) == TRANSPORT_ROAD) {
+ 			RoadTypes rts = GetRoadTypes(ti->tile);
+@@ -1080,10 +1095,12 @@
+ 	uint bridge_z = GetBridgeHeight(rampsouth);
+ 	z = bridge_z - 3;
+ 
+-	if (axis == AXIS_X) {
+-		AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 16, 11, 1, z, HASBIT(_transparent_opt, TO_BRIDGES));
+-	} else {
+-		AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 11, 16, 1, z, HASBIT(_transparent_opt, TO_BRIDGES));
++	if (!IsOptionInvisible(TO_BRIDGES)) {
++		if (axis == AXIS_X) {
++			AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 16, 11, 1, z, IsOptionTransparent(TO_BRIDGES));
++		} else {
++			AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 11, 16, 1, z, IsOptionTransparent(TO_BRIDGES));
++		}
+ 	}
+ 
+ 	psid++;
+@@ -1098,22 +1115,26 @@
+ 		DrawCatenary(ti);
+ 	}
+ 
++	/* Do not draw anything more if bridges are invisible */
++	if (IsOptionInvisible(TO_BRIDGES)) return;
++
+ 	/* draw roof, the component of the bridge which is logically between the vehicle and the camera */
+ 	if (axis == AXIS_X) {
+ 		y += 12;
+-		if (psid->sprite & SPRITE_MASK) AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 16, 1, 0x28, z, HASBIT(_transparent_opt, TO_BRIDGES));
++		if (psid->sprite & SPRITE_MASK) AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 16, 1, 0x28, z, IsOptionTransparent(TO_BRIDGES));
+ 	} else {
+ 		x += 12;
+-		if (psid->sprite & SPRITE_MASK) AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 1, 16, 0x28, z, HASBIT(_transparent_opt, TO_BRIDGES));
++		if (psid->sprite & SPRITE_MASK) AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 1, 16, 0x28, z, IsOptionTransparent(TO_BRIDGES));
+ 	}
+ 
++
+ 	psid++;
+ 	if (ti->z + 5 == z) {
+ 		/* draw poles below for small bridges */
+ 		if (psid->sprite != 0) {
+ 			SpriteID image = psid->sprite;
+ 			SpriteID pal   = psid->pal;
+-			if (HASBIT(_transparent_opt, TO_BRIDGES)) {
++			if (IsOptionTransparent(TO_BRIDGES)) {
+ 				SETBIT(image, PALETTE_MODIFIER_TRANSPARENT);
+ 				pal = PALETTE_TO_TRANSPARENT;
+ 			}
+Index: src/texteff.cpp
+===================================================================
+--- src/texteff.cpp	(revision 11123)
++++ src/texteff.cpp	(working copy)
+@@ -20,6 +20,7 @@
+ #include "date.h"
+ #include "texteff.hpp"
+ #include "video/video_driver.hpp"
++#include "transparency.h"
+ 
+ enum {
+ 	MAX_TEXTMESSAGE_LENGTH = 200,
+@@ -392,7 +393,7 @@
+ 						dpi->top  <= te->bottom &&
+ 						dpi->left + dpi->width  > te->x &&
+ 						dpi->top  + dpi->height > te->y) {
+-					if (te->mode == TE_RISING || (_patches.loading_indicators && !HASBIT(_transparent_opt, TO_LOADING))) {
++					if (te->mode == TE_RISING || (_patches.loading_indicators && !IsOptionTransparent(TO_LOADING))) {
+ 						AddStringToDraw(te->x, te->y, te->string_id, te->params_1, te->params_2);
+ 					}
+ 				}
+@@ -407,7 +408,7 @@
+ 						dpi->top  <= te->bottom * 2 - te->y &&
+ 						dpi->left + dpi->width  > te->x &&
+ 						dpi->top  + dpi->height > te->y) {
+-					if (te->mode == TE_RISING || (_patches.loading_indicators && !HASBIT(_transparent_opt, TO_LOADING))) {
++					if (te->mode == TE_RISING || (_patches.loading_indicators && !IsOptionTransparent(TO_LOADING))) {
+ 						AddStringToDraw(te->x, te->y, (StringID)(te->string_id - 1), te->params_1, te->params_2);
+ 					}
+ 				}
+Index: src/unmovable_cmd.cpp
+===================================================================
+--- src/unmovable_cmd.cpp	(revision 11123)
++++ src/unmovable_cmd.cpp	(working copy)
+@@ -24,6 +24,7 @@
+ #include "table/unmovable_land.h"
+ #include "genworld.h"
+ #include "bridge.h"
++#include "transparency.h"
+ #include "autoslope.h"
+ 
+ /** Destroy a HQ.
+@@ -126,10 +127,12 @@
+ 
+ 			dtus = &_draw_tile_unmovable_data[GetUnmovableType(ti->tile)];
+ 
++			if (IsOptionInvisible(TO_STRUCTURES)) break;
++
+ 			AddSortableSpriteToDraw(
+ 				dtus->image, PAL_NONE, ti->x | dtus->subcoord_x, ti->y | dtus->subcoord_y,
+ 				dtus->width, dtus->height, dtus->z_size, ti->z,
+-				HASBIT(_transparent_opt, TO_STRUCTURES)
++				IsOptionTransparent(TO_STRUCTURES)
+ 			);
+ 			break;
+ 		}
+@@ -140,7 +143,9 @@
+ 
+ 			DrawGroundSprite(SPR_CONCRETE_GROUND, PAL_NONE);
+ 
+-			AddSortableSpriteToDraw(SPR_STATUE_COMPANY, PLAYER_SPRITE_COLOR(GetTileOwner(ti->tile)), ti->x, ti->y, 16, 16, 25, ti->z, HASBIT(_transparent_opt, TO_STRUCTURES));
++			if (IsOptionInvisible(TO_STRUCTURES)) break;
++
++			AddSortableSpriteToDraw(SPR_STATUE_COMPANY, PLAYER_SPRITE_COLOR(GetTileOwner(ti->tile)), ti->x, ti->y, 16, 16, 25, ti->z, IsOptionTransparent(TO_STRUCTURES));
+ 			break;
+ 
+ 		case UNMOVABLE_OWNED_LAND:
+@@ -166,13 +171,15 @@
+ 			t = &_unmovable_display_datas[GetCompanyHQSection(ti->tile)];
+ 			DrawGroundSprite(t->ground_sprite, palette);
+ 
++			if (IsOptionInvisible(TO_STRUCTURES)) break;
++
+ 			foreach_draw_tile_seq(dtss, t->seq) {
+ 				AddSortableSpriteToDraw(
+ 					dtss->image, palette,
+ 					ti->x + dtss->delta_x, ti->y + dtss->delta_y,
+ 					dtss->size_x, dtss->size_y,
+ 					dtss->size_z, ti->z + dtss->delta_z,
+-					HASBIT(_transparent_opt, TO_STRUCTURES)
++					IsOptionTransparent(TO_STRUCTURES)
+ 				);
+ 			}
+ 			break;
+Index: src/transparency.h
+===================================================================
+--- src/transparency.h	(revision 0)
++++ src/transparency.h	(revision 0)
+@@ -0,0 +1,27 @@
++#ifndef TRANSPARENCY_H
++#define TRANSPARENCY_H
++
++/* Transparency and Invisibility Option Bits */
++enum transp_bit {
++	TO_SIGNS,      ///< Signs. Must be first, some parts of code suppose that
++	TO_TREES,      ///< Trees
++	TO_HOUSES,     ///< Town buildings
++	TO_INDUSTRIES, ///< Industries
++	TO_BUILDINGS,  ///< Player buildings - depots, stations, ...
++	TO_BRIDGES,    ///< Bridges
++	TO_STRUCTURES, ///< Unmovable structures
++	TO_CATENARY,   ///< Catenary and pilons
++	TO_LOADING,    ///< Loading indicators
++};
++
++static inline bool IsOptionTransparent(transp_bit what)
++{
++	return HASBIT(_transparent_opt, what);
++}
++
++static inline bool IsOptionInvisible(transp_bit what)
++{
++	return HASBIT(_transparent_opt, what) && HASBIT(_invisible_opt, what);
++}
++
++#endif /* TRANSPARENCY_H */
+Index: src/water_cmd.cpp
+===================================================================
+--- src/water_cmd.cpp	(revision 11123)
++++ src/water_cmd.cpp	(working copy)
+@@ -30,6 +30,7 @@
+ #include "newgrf.h"
+ #include "newgrf_canal.h"
+ #include "misc/autoptr.hpp"
++#include "transparency.h"
+ 
+ static const SpriteID _water_shore_sprites[] = {
+ 	0,
+@@ -443,12 +444,15 @@
+ 	if (image < 4) image += water_base;
+ 	DrawGroundSprite(image, PAL_NONE);
+ 
++	/* End now if buildings are invisible */
++	if (IsOptionInvisible(TO_BUILDINGS)) return;
++
+ 	for (; wdts->delta_x != 0x80; wdts++) {
+ 		AddSortableSpriteToDraw(wdts->image + base + ((wdts->image < 24) ? locks_base : 0), palette,
+ 			ti->x + wdts->delta_x, ti->y + wdts->delta_y,
+ 			wdts->width, wdts->height,
+ 			wdts->unk, ti->z + wdts->delta_z,
+-			HASBIT(_transparent_opt, TO_BUILDINGS));
++			IsOptionTransparent(TO_BUILDINGS));
+ 	}
+ }
+ 
+Index: src/variables.h
+===================================================================
+--- src/variables.h	(revision 11123)
++++ src/variables.h	(working copy)
+@@ -120,7 +120,6 @@
+ 	bool realistic_acceleration;        // realistic acceleration for trains
+ 	bool wagon_speed_limits;            // enable wagon speed limits
+ 	bool forbid_90_deg;                 // forbid trains to make 90 deg turns
+-	bool invisible_trees;               // don't show trees when buildings are transparent
+ 	bool no_servicing_if_no_breakdowns; // dont send vehicles to depot when breakdowns are disabled
+ 	bool link_terraform_toolbar;        // display terraform toolbar when displaying rail, road, water and airport toolbars
+ 	bool reverse_scroll;                // Right-Click-Scrolling scrolls in the opposite direction
+@@ -285,7 +284,14 @@
+ VARDEF int _autosave_ctr;
+ 
+ VARDEF byte _display_opt;
+-VARDEF byte _transparent_opt;
++
++/*
++ * Transparent and invisible bits,
++ * see transparency.h for enum
++ */
++VARDEF uint16 _transparent_opt;
++VARDEF uint16 _invisible_opt;
++
+ VARDEF int _caret_timer;
+ VARDEF uint32 _news_display_opt;
+ VARDEF bool _news_ticker_sound;
+Index: src/news_gui.cpp
+===================================================================
+--- src/news_gui.cpp	(revision 11123)
++++ src/news_gui.cpp	(working copy)
+@@ -129,7 +129,7 @@
+ 						ni->string_id, w->width - 4);
+ 				} else {
+ 					/* Back up transparency options to draw news view */
+-					byte to_backup = _transparent_opt;
++					uint16 to_backup = _transparent_opt;
+ 					_transparent_opt = 0;
+ 					DrawWindowViewport(w);
+ 					_transparent_opt = to_backup;
+Index: src/transparency_gui.cpp
+===================================================================
+--- src/transparency_gui.cpp	(revision 11123)
++++ src/transparency_gui.cpp	(working copy)
+@@ -11,6 +11,7 @@
+ #include "gfx.h"
+ #include "sound.h"
+ #include "variables.h"
++#include "transparency.h"
+ 
+ enum TransparencyToolbarWidgets{
+ 	/* Widgets not toggled when pressing the X key */
+@@ -23,7 +24,11 @@
+ 	TTW_WIDGET_BUILDINGS,    ///< Make player buildings and structures transparent
+ 	TTW_WIDGET_BRIDGES,      ///< Make bridges transparent
+ 	TTW_WIDGET_STRUCTURES,   ///< Make unmovable structures transparent
+-	TTW_WIDGET_LOADING,      ///< Make loading indicators transperent
++	TTW_WIDGET_CATENARY,     ///< Make catenary transparent
++	TTW_WIDGET_LOADING,      ///< Make loading indicators transparent
++
++	TTW_WIDGET_BUTTONS,      ///< Pannel with buttons pressed
++
+ 	TTW_WIDGET_END,          ///< End of toggle buttons
+ };
+ 
+@@ -31,9 +36,9 @@
+  * when clicking on a widget, and play a sound
+  * @param widget been clicked.
+  */
+-static void Transparent_Click(byte widget)
++static inline void Transparent_Click(uint16 *opt, uint index)
+ {
+-	TOGGLEBIT(_transparent_opt, widget);
++	TOGGLEBIT(*opt, index);
+ 	SndPlayFx(SND_15_BEEP);
+ }
+ 
+@@ -47,11 +52,34 @@
+ 				SetWindowWidgetLoweredState(w, i, HASBIT(_transparent_opt, i - TTW_WIDGET_SIGNS));
+ 			}
+ 			DrawWindowWidgets(w);
++			/* Do not draw button for invisible loading indicators */
++			for (uint i = 0; i < 8; i++) {
++				if (i < TTW_WIDGET_BRIDGES - TTW_WIDGET_SIGNS) {
++					DrawFrameRect(i * 22, 38, i * 22 + 19, 46, true, HASBIT(_invisible_opt, i) ? FR_LOWERED : FR_NONE);
++				} else if (i == TTW_WIDGET_BRIDGES - TTW_WIDGET_SIGNS) {
++					DrawFrameRect(i * 22, 38, i * 22 + 41, 46, true, HASBIT(_invisible_opt, i) ? FR_LOWERED : FR_NONE);
++				} else { /* i > TTW_WIDGET_BRIDGES - TTW_WIDGET_SIGNS */
++					DrawFrameRect((i + 1) * 22, 38, (i + 1) * 22 + 19, 46, true, HASBIT(_invisible_opt, i) ? FR_LOWERED : FR_NONE);
++				}
++			}
+ 			break;
+ 
+ 		case WE_CLICK:
+-			if (e->we.click.widget >= TTW_WIDGET_SIGNS) {
+-				Transparent_Click(e->we.click.widget - TTW_WIDGET_SIGNS);
++			if (e->we.click.widget == TTW_WIDGET_BUTTONS) {
++				uint x = e->we.click.pt.x / 22;
++				if (x > TTW_WIDGET_BRIDGES - TTW_WIDGET_SIGNS) x--;
++				if (x > TTW_WIDGET_CATENARY - TTW_WIDGET_SIGNS) break;
++
++				Transparent_Click(&_invisible_opt, x);
++
++				/* Redraw whole screen only if transparency is set */
++				if (HASBIT(_transparent_opt, x)) {
++					MarkWholeScreenDirty();
++				} else {
++					SetWindowDirty(w);
++				}
++			} else if (e->we.click.widget >= TTW_WIDGET_SIGNS) {
++				Transparent_Click(&_transparent_opt, e->we.click.widget - TTW_WIDGET_SIGNS);
+ 				MarkWholeScreenDirty();
+ 			}
+ 			break;
+@@ -60,8 +88,8 @@
+ 
+ static const Widget _transparency_widgets[] = {
+ { WWT_CLOSEBOX,   RESIZE_NONE,  7,   0,  10,   0,  13, STR_00C5,                 STR_018B_CLOSE_WINDOW},
+-{  WWT_CAPTION,   RESIZE_NONE,  7,  11, 184,   0,  13, STR_TRANSPARENCY_TOOLB,   STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{WWT_STICKYBOX,   RESIZE_NONE,  7, 185, 196,   0,  13, STR_NULL,                 STR_STICKY_BUTTON},
++{  WWT_CAPTION,   RESIZE_NONE,  7,  11, 206,   0,  13, STR_TRANSPARENCY_TOOLB,   STR_018C_WINDOW_TITLE_DRAG_THIS},
++{WWT_STICKYBOX,   RESIZE_NONE,  7, 207, 218,   0,  13, STR_NULL,                 STR_STICKY_BUTTON},
+ 
+ /* transparency widgets:
+  * transparent signs, trees, houses, industries, player's buildings, bridges, unmovable structures and loading indicators */
+@@ -72,13 +100,16 @@
+ {   WWT_IMGBTN,   RESIZE_NONE,  7,  88, 109,  14,  35, SPR_IMG_COMPANY_LIST, STR_TRANSPARENT_BUILDINGS_DESC},
+ {   WWT_IMGBTN,   RESIZE_NONE,  7, 110, 152,  14,  35, SPR_IMG_BRIDGE,       STR_TRANSPARENT_BRIDGES_DESC},
+ {   WWT_IMGBTN,   RESIZE_NONE,  7, 153, 174,  14,  35, SPR_IMG_TRANSMITTER,  STR_TRANSPARENT_STRUCTURES_DESC},
+-{   WWT_IMGBTN,   RESIZE_NONE,  7, 175, 196,  14,  35, SPR_IMG_TRAINLIST,    STR_TRANSPARENT_LOADING_DESC},
++{   WWT_IMGBTN,   RESIZE_NONE,  7, 175, 196,  14,  35, SPR_BUILD_X_ELRAIL,   STR_TRANSPARENT_CATENARY_DESC},
++{   WWT_IMGBTN,   RESIZE_NONE,  7, 197, 218,  14,  35, SPR_IMG_TRAINLIST,    STR_TRANSPARENT_LOADING_DESC},
+ 
++{    WWT_PANEL,   RESIZE_NONE,  7,   0, 218,  36,  48, 0x0,                  STR_TRANSPARENT_INVISIBLE_DESC},
++
+ {   WIDGETS_END},
+ };
+ 
+ static const WindowDesc _transparency_desc = {
+-	WDP_ALIGN_TBR, 58+36, 197, 36, 197, 36,
++	WDP_ALIGN_TBR, 58+36, 219, 48, 219, 48,
+ 	WC_TRANSPARENCY_TOOLBAR, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_STICKY_BUTTON,
+ 	_transparency_widgets,
+Index: src/openttd.h
+===================================================================
+--- src/openttd.h	(revision 11123)
++++ src/openttd.h	(working copy)
+@@ -184,17 +184,6 @@
+ 	DO_WAYPOINTS          = 6,
+ };
+ 
+-enum {
+-	TO_SIGNS,
+-	TO_TREES,
+-	TO_HOUSES,
+-	TO_INDUSTRIES,
+-	TO_BUILDINGS,
+-	TO_BRIDGES,
+-	TO_STRUCTURES,
+-	TO_LOADING,
+-};
+-
+ /* Landscape types */
+ enum {
+ 	LT_TEMPERATE  = 0,
+Index: src/newgrf_industrytiles.cpp
+===================================================================
+--- src/newgrf_industrytiles.cpp	(revision 11123)
++++ src/newgrf_industrytiles.cpp	(working copy)
+@@ -22,6 +22,7 @@
+ #include "table/sprites.h"
+ #include "table/strings.h"
+ #include "sprite.h"
++#include "transparency.h"
+ 
+ /**
+  * Based on newhouses equivalent, but adapted for newindustries
+@@ -162,6 +163,9 @@
+ 
+ 	if (GB(image, 0, SPRITE_WIDTH) != 0) DrawGroundSprite(image, pal);
+ 
++	/* End now if industries are invisible */
++	if (IsOptionInvisible(TO_INDUSTRIES)) return;
++
+ 	foreach_draw_tile_seq(dtss, dts->seq) {
+ 		if (GB(dtss->image, 0, SPRITE_WIDTH) == 0) continue;
+ 
+@@ -180,7 +184,7 @@
+ 				ti->x + dtss->delta_x, ti->y + dtss->delta_y,
+ 				dtss->size_x, dtss->size_y,
+ 				dtss->size_z, ti->z + dtss->delta_z,
+-				!HASBIT(image, SPRITE_MODIFIER_OPAQUE) && HASBIT(_transparent_opt, TO_INDUSTRIES)
++				!HASBIT(image, SPRITE_MODIFIER_OPAQUE) && IsOptionTransparent(TO_INDUSTRIES)
+ 			);
+ 		} else {
+ 			AddChildSpriteScreen(image, pal, dtss->delta_x, dtss->delta_y);
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 11123)
++++ src/viewport.cpp	(working copy)
+@@ -26,6 +26,7 @@
+ #include "roadveh.h"
+ #include "vehicle_gui.h"
+ #include "blitter/factory.hpp"
++#include "transparency.h"
+ 
+ #define VIEWPORT_DRAW_MEM (65536 * 2)
+ 
+@@ -995,8 +996,8 @@
+ 	const Sign *si;
+ 	int left, top, right, bottom;
+ 
+-	if (!HASBIT(_display_opt, DO_SHOW_SIGNS))
+-		return;
++	/* Signs are turned off or are invisible */
++	if (!HASBIT(_display_opt, DO_SHOW_SIGNS) || IsOptionInvisible(TO_SIGNS)) return;
+ 
+ 	left = dpi->left;
+ 	top = dpi->top;
+@@ -1240,6 +1241,12 @@
+ 		uint16 colour;
+ 
+ 		if (ss->width != 0) {
++			/* Do not draw signs nor station names if they are set invisible */
++			if (IsOptionInvisible(TO_SIGNS) && ss->string != STR_2806) {
++				ss = ss->next;
++				continue;
++			}
++
+ 			int x = UnScaleByZoom(ss->x, zoom) - 1;
+ 			int y = UnScaleByZoom(ss->y, zoom) - 1;
+ 			int bottom = y + 11;
+@@ -1254,10 +1261,10 @@
+ 
+ 		/* Draw the rectangle if 'tranparent station signs' is off,
+ 		 * or if we are drawing a general text sign (STR_2806) */
+-			if (!HASBIT(_transparent_opt, TO_SIGNS) || ss->string == STR_2806) {
++			if (!IsOptionTransparent(TO_SIGNS) || ss->string == STR_2806) {
+ 				DrawFrameRect(
+ 					x, y, x + w, bottom, ss->color,
+-					HASBIT(_transparent_opt, TO_SIGNS) ? FR_TRANSPARENT : FR_NONE
++					IsOptionTransparent(TO_SIGNS) ? FR_TRANSPARENT : FR_NONE
+ 				);
+ 			}
+ 		}
+@@ -1266,7 +1273,7 @@
+ 		SetDParam(1, ss->params[1]);
+ 		/* if we didn't draw a rectangle, or if transparant building is on,
+ 		 * draw the text in the color the rectangle would have */
+-		if (HASBIT(_transparent_opt, TO_SIGNS) && ss->string != STR_2806 && ss->width != 0) {
++		if (IsOptionTransparent(TO_SIGNS) && ss->string != STR_2806 && ss->width != 0) {
+ 			/* Real colors need the IS_PALETTE_COLOR flag
+ 			 * otherwise colors from _string_colormap are assumed. */
+ 			colour = _colour_gradient[ss->color][6] | IS_PALETTE_COLOR;
+@@ -1700,8 +1707,11 @@
+ {
+ 	const Sign *si;
+ 
+-	if (!HASBIT(_display_opt, DO_SHOW_SIGNS) || _current_player == PLAYER_SPECTATOR) return false;
++	/* Signs are turned off, or they are transparent and invisibility is ON, or player is a spectator */
++	if (!HASBIT(_display_opt, DO_SHOW_SIGNS) || IsOptionInvisible(TO_SIGNS) || _current_player == PLAYER_SPECTATOR)
++		return false;
+ 
++
+ 	switch (vp->zoom) {
+ 		case ZOOM_LVL_NORMAL:
+ 			x = x - vp->left + vp->virtual_left;
+Index: src/elrail.cpp
+===================================================================
+--- src/elrail.cpp	(revision 11123)
++++ src/elrail.cpp	(working copy)
+@@ -65,6 +65,7 @@
+ #include "vehicle.h"
+ #include "train.h"
+ #include "gui.h"
++#include "transparency.h"
+ 
+ static inline TLG GetTLG(TileIndex t)
+ {
+@@ -302,7 +303,7 @@
+ 
+ 					AddSortableSpriteToDraw(pylon_sprites[temp], PAL_NONE, x, y, 1, 1, 10,
+ 							GetPCPElevation(ti->tile, i),
+-							HASBIT(_transparent_opt, TO_BUILDINGS));
++							IsOptionTransparent(TO_CATENARY));
+ 					break; /* We already have drawn a pylon, bail out */
+ 				}
+ 			}
+@@ -310,7 +311,7 @@
+ 	}
+ 
+ 	/* Don't draw a wire under a low bridge */
+-	if (MayHaveBridgeAbove(ti->tile) && IsBridgeAbove(ti->tile) && !HASBIT(_transparent_opt, TO_BUILDINGS)) {
++	if (MayHaveBridgeAbove(ti->tile) && IsBridgeAbove(ti->tile) && !IsOptionTransparent(TO_CATENARY) && !IsOptionTransparent(TO_BRIDGES)) {
+ 		uint height = GetBridgeHeight(GetNorthernBridgeEnd(ti->tile));
+ 
+ 		if (height <= GetTileMaxZ(ti->tile) + TILE_HEIGHT) return;
+@@ -326,7 +327,7 @@
+ 					sss->image, PAL_NONE, ti->x + sss->x_offset, ti->y + sss->y_offset,
+ 					sss->x_size, sss->y_size, sss->z_size,
+ 					GetTileZ(ti->tile) + sss->z_offset,
+-					HASBIT(_transparent_opt, TO_BUILDINGS)
++					IsOptionTransparent(TO_CATENARY)
+ 				);
+ 				break;
+ 			}
+@@ -347,7 +348,7 @@
+ 			 */
+ 			AddSortableSpriteToDraw(sss->image, PAL_NONE, ti->x + sss->x_offset, ti->y + sss->y_offset,
+ 				sss->x_size, sss->y_size, sss->z_size, GetSlopeZ(ti->x + sss->x_offset, ti->y + sss->y_offset) + sss->z_offset,
+-				HASBIT(_transparent_opt, TO_BUILDINGS));
++				IsOptionTransparent(TO_CATENARY));
+ 		}
+ 	}
+ }
+@@ -380,7 +381,7 @@
+ 
+ 	AddSortableSpriteToDraw(sss->image, PAL_NONE, ti->x + sss->x_offset, ti->y + sss->y_offset,
+ 		sss->x_size, sss->y_size, sss->z_size, height + sss->z_offset,
+-		HASBIT(_transparent_opt, TO_BUILDINGS)
++		IsOptionTransparent(TO_CATENARY)
+ 	);
+ 
+ 	/* Finished with wires, draw pylons */
+@@ -391,7 +392,7 @@
+ 		if (HASBIT(tlg, (axis == AXIS_X ? 0 : 1))) PPPpos = ReverseDir(PPPpos);
+ 		uint x = ti->x + x_pcp_offsets[PCPpos] + x_ppp_offsets[PPPpos];
+ 		uint y = ti->y + y_pcp_offsets[PCPpos] + y_ppp_offsets[PPPpos];
+-		AddSortableSpriteToDraw(pylon_sprites[PPPpos], PAL_NONE, x, y, 1, 1, 10, height, HASBIT(_transparent_opt, TO_BUILDINGS));
++		AddSortableSpriteToDraw(pylon_sprites[PPPpos], PAL_NONE, x, y, 1, 1, 10, height, IsOptionTransparent(TO_CATENARY));
+ 	}
+ 
+ 	/* need a pylon on the southern end of the bridge */
+@@ -401,7 +402,7 @@
+ 		if (HASBIT(tlg, (axis == AXIS_X ? 0 : 1))) PPPpos = ReverseDir(PPPpos);
+ 		uint x = ti->x + x_pcp_offsets[PCPpos] + x_ppp_offsets[PPPpos];
+ 		uint y = ti->y + y_pcp_offsets[PCPpos] + y_ppp_offsets[PPPpos];
+-		AddSortableSpriteToDraw(pylon_sprites[PPPpos], PAL_NONE, x, y, 1, 1, 10, height, HASBIT(_transparent_opt, TO_BUILDINGS));
++		AddSortableSpriteToDraw(pylon_sprites[PPPpos], PAL_NONE, x, y, 1, 1, 10, height, IsOptionTransparent(TO_CATENARY));
+ 	}
+ }
+ 
+@@ -409,6 +410,9 @@
+ {
+ 	if (_patches.disable_elrails) return;
+ 
++	/* Do not draw catenary if it is invisible */
++	if (IsOptionInvisible(TO_CATENARY)) return;
++
+ 	if (MayHaveBridgeAbove(ti->tile) && IsBridgeAbove(ti->tile)) {
+ 		TileIndex head = GetNorthernBridgeEnd(ti->tile);
+ 
+@@ -427,7 +431,7 @@
+ 					sss->image, PAL_NONE, ti->x + sss->x_offset, ti->y + sss->y_offset,
+ 					sss->x_size, sss->y_size, sss->z_size,
+ 					GetTileMaxZ(ti->tile) + sss->z_offset,
+-					HASBIT(_transparent_opt, TO_BUILDINGS)
++					IsOptionTransparent(TO_CATENARY)
+ 				);
+ 				return;
+ 			}
+Index: src/newgrf_house.cpp
+===================================================================
+--- src/newgrf_house.cpp	(revision 11123)
++++ src/newgrf_house.cpp	(working copy)
+@@ -25,6 +25,7 @@
+ #include "newgrf_town.h"
+ #include "newgrf_sound.h"
+ #include "newgrf_commons.h"
++#include "transparency.h"
+ 
+ static BuildingCounts    _building_counts;
+ static HouseClassMapping _class_mapping[HOUSE_CLASS_MAX];
+@@ -310,13 +311,16 @@
+ 
+ 	if (GB(image, 0, SPRITE_WIDTH) != 0) DrawGroundSprite(image, pal);
+ 
++	/* End now, if houses are invisible */
++	if (IsOptionInvisible(TO_HOUSES)) return;
++
+ 	foreach_draw_tile_seq(dtss, dts->seq) {
+ 		if (GB(dtss->image, 0, SPRITE_WIDTH) == 0) continue;
+ 
+ 		image = dtss->image + stage;
+ 		pal   = dtss->pal;
+ 
+-		if ((HASBIT(image, SPRITE_MODIFIER_OPAQUE) || !HASBIT(_transparent_opt, TO_HOUSES)) && HASBIT(image, PALETTE_MODIFIER_COLOR)) {
++		if ((HASBIT(image, SPRITE_MODIFIER_OPAQUE) || !IsOptionTransparent(TO_HOUSES)) && HASBIT(image, PALETTE_MODIFIER_COLOR)) {
+ 			if (pal == 0) {
+ 				const HouseSpec *hs = GetHouseSpecs(house_id);
+ 				if (HASBIT(hs->callback_mask, CBM_BUILDING_COLOUR)) {
+@@ -339,7 +343,7 @@
+ 				ti->x + dtss->delta_x, ti->y + dtss->delta_y,
+ 				dtss->size_x, dtss->size_y,
+ 				dtss->size_z, ti->z + dtss->delta_z,
+-				HASBIT(_transparent_opt, TO_HOUSES)
++				IsOptionTransparent(TO_HOUSES)
+ 			);
+ 		} else {
+ 			AddChildSpriteScreen(image, pal, dtss->delta_x, dtss->delta_y);
+Index: src/industry_cmd.cpp
+===================================================================
+--- src/industry_cmd.cpp	(revision 11123)
++++ src/industry_cmd.cpp	(working copy)
+@@ -36,6 +36,7 @@
+ #include "newgrf_industrytiles.h"
+ #include "newgrf_callbacks.h"
+ #include "misc/autoptr.hpp"
++#include "transparency.h"
+ #include "autoslope.h"
+ 
+ void ShowIndustryViewWindow(int industry);
+@@ -293,6 +294,9 @@
+ 
+ 	DrawGroundSprite(image, pal);
+ 
++	/* If industries are transparent and invisible, do not draw the upper part */
++	if (IsOptionInvisible(TO_INDUSTRIES)) return;
++
+ 	/* Add industry on top of the ground? */
+ 	image = dits->building.sprite;
+ 	if (image != 0) {
+@@ -304,9 +308,9 @@
+ 			dits->height,
+ 			dits->dz,
+ 			ti->z,
+-			HASBIT(_transparent_opt, TO_INDUSTRIES));
++			IsOptionTransparent(TO_INDUSTRIES));
+ 
+-		if (HASBIT(_transparent_opt, TO_INDUSTRIES)) return;
++		if (IsOptionTransparent(TO_INDUSTRIES)) return;
+ 	}
+ 
+ 	{
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 11123)
++++ src/openttd.cpp	(working copy)
+@@ -321,6 +321,7 @@
+ 
+ 	/* Clear transparency options */
+ 	_transparent_opt = 0;
++	_invisible_opt = 0;
+ 
+ 	_opt_ptr = &_opt_newgame;
+ 	ResetGRFConfig(false);
+Index: src/main_gui.cpp
+===================================================================
+--- src/main_gui.cpp	(revision 11123)
++++ src/main_gui.cpp	(working copy)
+@@ -40,6 +40,7 @@
+ #include "date.h"
+ #include "vehicle_gui.h"
+ #include "transparency_gui.h"
++#include "transparency.h"
+ #include "newgrf_config.h"
+ 
+ #include "network/network_data.h"
+@@ -157,13 +158,13 @@
+ /** Toggle all transparency options, except for signs */
+ static void ToggleTransparency()
+ {
+-	static byte trans_opt = ~0;
++	static uint16 trans_opt = ~0;
+ 
+-	if (GB(_transparent_opt, 1, 7) == 0) {
+-		SB(_transparent_opt, 1, 7, GB(trans_opt, 1, 7));
++	if (GB(_transparent_opt, 1, 8) == 0) {
++		SB(_transparent_opt, 1, 8, GB(trans_opt, 1, 8));
+ 	} else {
+ 		trans_opt = _transparent_opt;
+-		SB(_transparent_opt, 1, 7, 0);
++		SB(_transparent_opt, 1, 8, 0);
+ 	}
+ 
+ 	MarkWholeScreenDirty();
+@@ -985,8 +986,8 @@
+ 	if (HASBIT(_display_opt, DO_WAYPOINTS))          SETBIT(x,  9);
+ 	if (HASBIT(_display_opt, DO_FULL_ANIMATION))     SETBIT(x, 10);
+ 	if (HASBIT(_display_opt, DO_FULL_DETAIL))        SETBIT(x, 11);
+-	if (GB(_transparent_opt, 1, 7) != 0)      SETBIT(x, 12);
+-	if (HASBIT(_transparent_opt, TO_SIGNS))   SETBIT(x, 13);
++	if (GB(_transparent_opt, 1, 8) != 0)             SETBIT(x, 12);
++	if (IsOptionTransparent(TO_SIGNS))               SETBIT(x, 13);
+ 	WP(w,menu_d).checked_items = x;
+ }
+ 
+Index: projects/openttd.vcproj
+===================================================================
+--- projects/openttd.vcproj	(revision 11123)
++++ projects/openttd.vcproj	(working copy)
+@@ -682,6 +682,9 @@
+ 				RelativePath=".\..\src\transparency_gui.h">
+ 			</File>
+ 			<File
++				RelativePath=".\..\src\transparency.h">
++			</File>
++			<File
+ 				RelativePath=".\..\src\variables.h">
+ 			</File>
+ 			<File
+Index: projects/openttd_vs80.vcproj
+===================================================================
+--- projects/openttd_vs80.vcproj	(revision 11123)
++++ projects/openttd_vs80.vcproj	(working copy)
+@@ -1140,6 +1140,10 @@
+ 				>
+ 			</File>
+ 			<File
++				RelativePath=".\..\src\transparency.h"
++				>
++			</File>
++			<File
+ 				RelativePath=".\..\src\variables.h"
+ 				>
+ 			</File>
+Index: source.list
+===================================================================
+--- source.list	(revision 11123)
++++ source.list	(working copy)
+@@ -193,6 +193,7 @@
+ town.h
+ train.h
+ transparency_gui.h
++transparency.h
+ variables.h
+ vehicle.h
+ vehicle_gui.h

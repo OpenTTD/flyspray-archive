@@ -1,0 +1,162 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 11339)
++++ src/settings.cpp	(working copy)
+@@ -1462,6 +1462,7 @@
+ 	SDT_BOOL(Patches, ai_disable_veh_roadveh, 0, 0, false, STR_CONFIG_PATCHES_AI_BUILDS_ROADVEH, NULL),
+ 	SDT_BOOL(Patches, ai_disable_veh_aircraft,0, 0, false, STR_CONFIG_PATCHES_AI_BUILDS_AIRCRAFT,NULL),
+ 	SDT_BOOL(Patches, ai_disable_veh_ship,    0, 0, false, STR_CONFIG_PATCHES_AI_BUILDS_SHIPS,   NULL),
++	 SDT_VAR(Patches, ai_veh_price,SLE_UINT8, 0, 0, 100, 10, 200, 10, STR_CONFIG_PATCHES_AI_VEH_PRICE, NULL),
+ 
+ 	/***************************************************************************/
+ 	/* Patches without any GUI representation */
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 11339)
++++ src/lang/english.txt	(working copy)
+@@ -1146,6 +1146,7 @@
+ 
+ STR_CONFIG_PATCHES_AINEW_ACTIVE                                 :{LTBLUE}Enable new AI (alpha): {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_AI_IN_MULTIPLAYER                            :{LTBLUE}Allow AIs in multiplayer (experimental): {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_AI_VEH_PRICE                                 :{LTBLUE}Vehicle cost for AI players: {ORANGE}{STRING1} %
+ 
+ STR_CONFIG_PATCHES_SERVINT_TRAINS                               :{LTBLUE}Default service interval for trains: {ORANGE}{STRING1} days/%
+ STR_CONFIG_PATCHES_SERVINT_TRAINS_DISABLED                      :{LTBLUE}Default service interval for trains: {ORANGE}disabled
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 11339)
++++ src/settings_gui.cpp	(working copy)
+@@ -715,6 +715,7 @@
+ 	"ai_disable_veh_roadveh",
+ 	"ai_disable_veh_aircraft",
+ 	"ai_disable_veh_ship",
++	"ai_veh_price",
+ };
+ 
+ static const char *_patches_vehicles[] = {
+Index: src/ship_cmd.cpp
+===================================================================
+--- src/ship_cmd.cpp	(revision 11339)
++++ src/ship_cmd.cpp	(working copy)
+@@ -815,6 +815,12 @@
+ 	SET_EXPENSES_TYPE(EXPENSES_NEW_VEHICLES);
+ 
+ 	value = EstimateShipCost(p1);
++
++	if (!IsHumanPlayer(_current_player)) {
++		value.MultiplyCost(_patches.ai_veh_price);
++		value.DivideCost(100);
++	}
++
+ 	if (flags & DC_QUERY_COST) return value;
+ 
+ 	/* The ai_new queries the vehicle cost before building the route,
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 11339)
++++ src/train_cmd.cpp	(working copy)
+@@ -514,6 +514,11 @@
+ 	const RailVehicleInfo *rvi = RailVehInfo(engine);
+ 	CommandCost value((GetEngineProperty(engine, 0x17, rvi->base_cost) * _price.build_railwagon) >> 8);
+ 
++	if (!IsHumanPlayer(_current_player)) {
++		value.MultiplyCost(_patches.ai_veh_price);
++		value.DivideCost(100);
++	}
++
+ 	uint num_vehicles = 1 + CountArticulatedParts(engine, false);
+ 
+ 	if (!(flags & DC_QUERY_COST)) {
+@@ -681,6 +686,11 @@
+ 
+ 	CommandCost value = EstimateTrainCost(p1, rvi);
+ 
++	if (!IsHumanPlayer(_current_player)) {
++		value.MultiplyCost(_patches.ai_veh_price);
++		value.DivideCost(100);
++	}
++
+ 	uint num_vehicles =
+ 		(rvi->railveh_type == RAILVEH_MULTIHEAD ? 2 : 1) +
+ 		CountArticulatedParts(p1, false);
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revision 11339)
++++ src/command.cpp	(working copy)
+@@ -687,6 +687,12 @@
+ 	return *this;
+ }
+ 
++CommandCost CommandCost::DivideCost(int factor)
++{
++	this->cost /= factor;
++	return *this;
++}
++
+ Money CommandCost::GetCost() const
+ {
+ 	return this->cost;
+Index: src/variables.h
+===================================================================
+--- src/variables.h	(revision 11339)
++++ src/variables.h	(working copy)
+@@ -247,6 +247,8 @@
+ 
+ 	bool exclusive_rights;   ///< allow buying exclusive rights
+ 	bool give_money;         ///< allow giving other players money
++
++	uint8 ai_veh_price;  // Vehicle price adjustment for AI players
+ };
+ 
+ VARDEF Patches _patches;
+Index: src/openttd.h
+===================================================================
+--- src/openttd.h	(revision 11339)
++++ src/openttd.h	(working copy)
+@@ -416,6 +416,13 @@
+ 	CommandCost MultiplyCost(int factor);
+ 
+ 	/**
++	 * Divides the cost of the command by the given factor.
++	 * @param cost factor to divide the costs with
++	 * @return this class
++	 */
++	CommandCost DivideCost(int factor);
++
++	/**
+ 	 * The costs as made up to this moment
+ 	 * @return the costs
+ 	 */
+Index: src/roadveh_cmd.cpp
+===================================================================
+--- src/roadveh_cmd.cpp	(revision 11339)
++++ src/roadveh_cmd.cpp	(working copy)
+@@ -170,6 +170,12 @@
+ 	SET_EXPENSES_TYPE(EXPENSES_NEW_VEHICLES);
+ 
+ 	cost = EstimateRoadVehCost(p1);
++
++	if (!IsHumanPlayer(_current_player)) {
++		cost.MultiplyCost(_patches.ai_veh_price);
++		cost.DivideCost(100);
++	}
++
+ 	if (flags & DC_QUERY_COST) return cost;
+ 
+ 	/* The ai_new queries the vehicle cost before building the route,
+Index: src/aircraft_cmd.cpp
+===================================================================
+--- src/aircraft_cmd.cpp	(revision 11339)
++++ src/aircraft_cmd.cpp	(working copy)
+@@ -274,6 +274,11 @@
+ 	const AircraftVehicleInfo *avi = AircraftVehInfo(p1);
+ 	CommandCost value = EstimateAircraftCost(p1, avi);
+ 
++	if (!IsHumanPlayer(_current_player)) {
++		value.MultiplyCost(_patches.ai_veh_price);
++		value.DivideCost(100);
++	}
++
+ 	/* to just query the cost, it is not neccessary to have a valid tile (automation/AI) */
+ 	if (flags & DC_QUERY_COST) return value;
+ 

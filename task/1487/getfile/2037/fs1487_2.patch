@@ -1,0 +1,159 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(Revision 11567)
++++ src/settings.cpp	(Arbeitskopie)
+@@ -1207,6 +1207,50 @@
+ 	return 0;
+ }
+ 
++/**
++ * Update the playtime of the game by the starting_year.
++ *
++ * The ending_year needs to be updated if we change starting_year.
++ * If the change causes any problems give a warning.
++ *
++ * @param p1 unused
++ * @return always 0
++ */
++static int32 UpdatePlaytimeByStartingYear(int32 p1)
++{
++	/* As we don't know the previous starting year we've to set
++	 * the playtime to the default 101 years */
++	_patches.ending_year = _patches.starting_year + 101;
++	if (_patches.ending_year > MAX_YEAR) {
++		if (_patches.starting_year < MAX_YEAR) {
++			ShowErrorMessage(INVALID_STRING_ID, STR_CONFIG_PATCHES_MODIFIED_PLAYTIME, 0, 0);
++			_patches.ending_year = MAX_YEAR;
++		} else {
++			ShowErrorMessage(INVALID_STRING_ID, STR_CONFIG_PATCHES_INVALID_STARTING_YEAR, 0, 0);
++			_patches.starting_year = 1950;
++			_patches.ending_year = 2051;
++		}
++	}
++	return 0;
++}
++
++/**
++ * Check if the ending year is past starting year.
++ * If not, set it one year past and give a warning.
++ *
++ * @param p1 unused
++ * @return always 0
++ */
++static int32 CheckEndingYear(int32 p1)
++{
++	if (_patches.ending_year <= _patches.starting_year) {
++		ShowErrorMessage(INVALID_STRING_ID, STR_CONFIG_PATCHES_INVALID_ENDING_YEAR, 0, 0);
++		/* Set min size to one year */
++		_patches.ending_year = _patches.starting_year + 1;
++	}
++	return 0;
++}
++
+ /** Conversion callback for _gameopt_settings.landscape
+  * It converts (or try) between old values and the new ones,
+  * without loosing initial setting  of the user
+@@ -1450,8 +1494,8 @@
+ 	SDT_CONDBOOL(Patches, give_money,                 79, SL_MAX_VERSION, 0, 0, true,           STR_CONFIG_PATCHES_ALLOW_GIVE_MONEY, NULL),
+ 	 SDT_VAR(Patches, snow_line_height,SLE_UINT8, 0, 0,     7,  2, 13, 0, STR_CONFIG_PATCHES_SNOWLINE_HEIGHT,  NULL),
+ 	 SDT_VAR(Patches, colored_news_year,SLE_INT32, 0,NC,  2000, MIN_YEAR, MAX_YEAR, 1, STR_CONFIG_PATCHES_COLORED_NEWS_YEAR,NULL),
+-	 SDT_VAR(Patches, starting_year,    SLE_INT32, 0,NC,  1950, MIN_YEAR, MAX_YEAR, 1, STR_CONFIG_PATCHES_STARTING_YEAR,NULL),
+-	 SDT_VAR(Patches, ending_year,      SLE_INT32,0,NC|NO,2051, MIN_YEAR, MAX_YEAR, 1, STR_CONFIG_PATCHES_ENDING_YEAR,  NULL),
++	 SDT_VAR(Patches, starting_year,    SLE_INT32, 0,NC,  1950, MIN_YEAR, MAX_YEAR, 1, STR_CONFIG_PATCHES_STARTING_YEAR, UpdatePlaytimeByStartingYear),
++	 SDT_VAR(Patches, ending_year,      SLE_INT32,0,NC|NO,2051, MIN_YEAR, MAX_YEAR, 1, STR_CONFIG_PATCHES_ENDING_YEAR, CheckEndingYear),
+ 	SDT_BOOL(Patches, smooth_economy,             0, 0,  true,            STR_CONFIG_PATCHES_SMOOTH_ECONOMY,   NULL),
+ 	SDT_BOOL(Patches, allow_shares,               0, 0, false,            STR_CONFIG_PATCHES_ALLOW_SHARES,     NULL),
+ 	SDT_CONDVAR(Patches, town_growth_rate,  SLE_UINT8, 54, SL_MAX_VERSION, 0, MS, 2, 0,   4, 0, STR_CONFIG_PATCHES_TOWN_GROWTH,          NULL),
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(Revision 11567)
++++ src/lang/english.txt	(Arbeitskopie)
+@@ -1165,6 +1165,10 @@
+ STR_CONFIG_PATCHES_COLORED_NEWS_YEAR                            :{LTBLUE}Coloured news appears in: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_STARTING_YEAR                                :{LTBLUE}Starting year: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_ENDING_YEAR                                  :{LTBLUE}End game in: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_MODIFIED_PLAYTIME                            :{WHITE}Used starting year causes modification of the ending year
++STR_CONFIG_PATCHES_INVALID_STARTING_YEAR                        :{WHITE}Invalid starting year! Falling back to default
++STR_CONFIG_PATCHES_INVALID_ENDING_YEAR                          :{WHITE}Invalid ending year! Setting highscore playtime to 1 year
++
+ STR_CONFIG_PATCHES_SMOOTH_ECONOMY                               :{LTBLUE}Enable smooth economy (more, smaller changes)
+ STR_CONFIG_PATCHES_ALLOW_SHARES                                 :{LTBLUE}Allow buying shares from other companies
+ STR_CONFIG_PATCHES_DRAG_SIGNALS_DENSITY                         :{LTBLUE}When dragging, place signals every: {ORANGE}{STRING1} tile(s)
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(Revision 11567)
++++ src/settings_gui.cpp	(Arbeitskopie)
+@@ -826,9 +826,11 @@
+ 			bool disabled = false;
+ 
+ 			// We do not allow changes of some items when we are a client in a networkgame
+-			if (!(sd->save.conv & SLF_NETWORK_NO) && _networking && !_network_server) editable = false;
+-			if ((sdb->flags & SGF_NETWORK_ONLY) && !_networking) editable = false;
+-			if ((sdb->flags & SGF_NO_NETWORK) && _networking) editable = false;
++			if (_game_mode != GM_EDITOR) {
++				if (!(sd->save.conv & SLF_NETWORK_NO) && _networking && !_network_server) editable = false;
++				if ((sdb->flags & SGF_NETWORK_ONLY) && !_networking) editable = false;
++				if ((sdb->flags & SGF_NO_NETWORK) && _networking) editable = false;
++			}
+ 
+ 			if (sdb->cmd == SDT_BOOLX) {
+ 				static const int _bool_ctabs[2][2] = {{9, 4}, {7, 6}};
+@@ -888,9 +890,11 @@
+ 			sd = page->entries[btn].setting;
+ 
+ 			/* return if action is only active in network, or only settable by server */
+-			if (!(sd->save.conv & SLF_NETWORK_NO) && _networking && !_network_server) return;
+-			if ((sd->desc.flags & SGF_NETWORK_ONLY) && !_networking) return;
+-			if ((sd->desc.flags & SGF_NO_NETWORK) && _networking) return;
++			if (_game_mode != GM_EDITOR) {
++				if (!(sd->save.conv & SLF_NETWORK_NO) && _networking && !_network_server) return;
++				if ((sd->desc.flags & SGF_NETWORK_ONLY) && !_networking) return;
++				if ((sd->desc.flags & SGF_NO_NETWORK) && _networking) return;
++			}
+ 
+ 			var = GetVariableAddress(patches_ptr, &sd->save);
+ 			value = (int32)ReadValue(var, sd->save.conv);
+Index: src/players.cpp
+===================================================================
+--- src/players.cpp	(Revision 11567)
++++ src/players.cpp	(Arbeitskopie)
+@@ -1108,9 +1108,6 @@
+ 		}
+ 		fclose(fp);
+ 	}
+-
+-	/* Initialize end of game variable (when to show highscore chart) */
+-	_patches.ending_year = 2051;
+ }
+ 
+ /* Save/load of players */
+Index: src/genworld.cpp
+===================================================================
+--- src/genworld.cpp	(Revision 11567)
++++ src/genworld.cpp	(Arbeitskopie)
+@@ -260,6 +260,9 @@
+ 	/* Set the date before loading sprites as some newgrfs check it */
+ 	SetDate(ConvertYMDToDate(_patches.starting_year, 0, 1));
+ 
++	/* The player has got 101 years to get enough points for the highscore */
++	_patches.ending_year = _patches.starting_year + 101;
++
+ 	/* Load the right landscape stuff */
+ 	GfxLoadSprites();
+ 	LoadStringWidthTable();
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(Revision 11567)
++++ src/openttd.cpp	(Arbeitskopie)
+@@ -1329,6 +1329,11 @@
+ 	/* from version 4.2 of the savegame, currencies are in a different order */
+ 	if (CheckSavegameVersionOldStyle(4, 2)) UpdateCurrencies();
+ 
++	if (CheckSavegameVersionOldStyle(5, 1)) {
++		/* Set the runtime of oldgames to 101 years too */
++		_patches.ending_year = _patches.starting_year + 101;
++	}
++
+ 	/* from version 6.1 of the savegame, signs have an "owner" */
+ 	if (CheckSavegameVersionOldStyle(6, 1)) UpdateSignOwner();
+ 

@@ -1,0 +1,315 @@
+Index: src/functions.h
+===================================================================
+--- src/functions.h	(revision 11199)
++++ src/functions.h	(working copy)
+@@ -132,7 +132,6 @@
+ 
+ bool ScrollMainWindowToTile(TileIndex tile, bool instant = false);
+ bool ScrollMainWindowTo(int x, int y, bool instant = false);
+-void DrawSprite(SpriteID img, SpriteID pal, int x, int y);
+ bool EnsureNoVehicle(TileIndex tile);
+ bool EnsureNoVehicleOnGround(TileIndex tile);
+ 
+Index: src/viewport.h
+===================================================================
+--- src/viewport.h	(revision 11199)
++++ src/viewport.h	(working copy)
+@@ -57,11 +57,11 @@
+ 
+ void OffsetGroundSprite(int x, int y);
+ 
+-void DrawGroundSprite(SpriteID image, SpriteID pal);
+-void DrawGroundSpriteAt(SpriteID image, SpriteID pal, int32 x, int32 y, byte z);
+-void AddSortableSpriteToDraw(SpriteID image, SpriteID pal, int x, int y, int w, int h, int dz, int z, bool transparent = false, int bb_offset_x = 0, int bb_offset_y = 0, int bb_offset_z = 0);
++void DrawGroundSprite(SpriteID image, SpriteID pal, const SubSprite *sub = NULL);
++void DrawGroundSpriteAt(SpriteID image, SpriteID pal, int32 x, int32 y, byte z, const SubSprite *sub = NULL);
++void AddSortableSpriteToDraw(SpriteID image, SpriteID pal, int x, int y, int w, int h, int dz, int z, bool transparent = false, int bb_offset_x = 0, int bb_offset_y = 0, int bb_offset_z = 0, const SubSprite *sub = NULL);
+ void *AddStringToDraw(int x, int y, StringID string, uint64 params_1, uint64 params_2);
+-void AddChildSpriteScreen(SpriteID image, SpriteID pal, int x, int y, bool transparent = false);
++void AddChildSpriteScreen(SpriteID image, SpriteID pal, int x, int y, bool transparent = false, const SubSprite *sub = NULL);
+ 
+ 
+ void StartSpriteCombine();
+Index: src/gfx.h
+===================================================================
+--- src/gfx.h	(revision 11199)
++++ src/gfx.h	(working copy)
+@@ -242,7 +242,17 @@
+ void RedrawScreenRect(int left, int top, int right, int bottom);
+ void GfxScroll(int left, int top, int width, int height, int xo, int yo);
+ 
++/**
++ * Used to only draw a part of the sprite.
++ * Draw the subsprite in the rect (sprite_x_offset + left, sprite_y_offset + top) to (sprite_x_offset + right, sprite_y_offset + bottom).
++ * Both corners are included in the drawing area.
++ */
++struct SubSprite {
++	int left, top, right, bottom;
++};
+ 
++void DrawSprite(SpriteID img, SpriteID pal, int x, int y, const SubSprite *sub = NULL);
++
+ /* XXX doesn't really belong here, but the only
+  * consumers always use it in conjunction with DoDrawString() */
+ #define UPARROW   "\xEE\x8A\x80"
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 11199)
++++ src/viewport.cpp	(working copy)
+@@ -66,6 +66,7 @@
+ struct TileSpriteToDraw {
+ 	SpriteID image;
+ 	SpriteID pal;
++	const SubSprite *sub;           ///< only draw a rectangular part of the sprite
+ 	TileSpriteToDraw *next;
+ 	int32 x;
+ 	int32 y;
+@@ -75,6 +76,7 @@
+ struct ChildScreenSpriteToDraw {
+ 	SpriteID image;
+ 	SpriteID pal;
++	const SubSprite *sub;           ///< only draw a rectangular part of the sprite
+ 	int32 x;
+ 	int32 y;
+ 	ChildScreenSpriteToDraw *next;
+@@ -83,6 +85,7 @@
+ struct ParentSpriteToDraw {
+ 	SpriteID image;                 ///< sprite to draw
+ 	SpriteID pal;                   ///< palette to use
++	const SubSprite *sub;           ///< only draw a rectangular part of the sprite
+ 
+ 	int32 x;                        ///< screen X coordinate of sprite
+ 	int32 y;                        ///< screen Y coordinate of sprite
+@@ -428,7 +431,18 @@
+ 	InvalidateWidget(w, widget_zoom_out);
+ }
+ 
+-void DrawGroundSpriteAt(SpriteID image, SpriteID pal, int32 x, int32 y, byte z)
++/**
++ * Draws a ground sprite at a specific world-coordinate.
++ *
++ * @param image the image to draw.
++ * @param pal the provided palette.
++ * @param x position x of the sprite.
++ * @param y position y of the sprite.
++ * @param z position z of the sprite.
++ * @param sub Only draw a part of the sprite.
++ *
++ */
++void DrawGroundSpriteAt(SpriteID image, SpriteID pal, int32 x, int32 y, byte z, const SubSprite *sub)
+ {
+ 	ViewportDrawer *vd = _cur_vd;
+ 	TileSpriteToDraw *ts;
+@@ -445,6 +459,7 @@
+ 
+ 	ts->image = image;
+ 	ts->pal = pal;
++	ts->sub = sub;
+ 	ts->next = NULL;
+ 	ts->x = x;
+ 	ts->y = y;
+@@ -453,14 +468,22 @@
+ 	vd->last_tile = &ts->next;
+ }
+ 
+-void DrawGroundSprite(SpriteID image, SpriteID pal)
++/**
++ * Draws a ground sprite for the current tile.
++ * If the current tile is drawn on top of a foundation the sprite is added as child sprite to the "foundation"-ParentSprite.
++ *
++ * @param image the image to draw.
++ * @param pal the provided palette.
++ * @param sub Only draw a part of the sprite.
++ */
++void DrawGroundSprite(SpriteID image, SpriteID pal, const SubSprite *sub)
+ {
+ 	if (_offset_ground_sprites) {
+ 		/* offset ground sprite because of foundation? */
+-		AddChildSpriteScreen(image, pal, _cur_vd->offs_x, _cur_vd->offs_y);
++		AddChildSpriteScreen(image, pal, _cur_vd->offs_x, _cur_vd->offs_y, false, sub);
+ 	} else {
+ 		_added_tile_sprite = true;
+-		DrawGroundSpriteAt(image, pal, _cur_ti->x, _cur_ti->y, _cur_ti->z);
++		DrawGroundSpriteAt(image, pal, _cur_ti->x, _cur_ti->y, _cur_ti->z, sub);
+ 	}
+ }
+ 
+@@ -472,7 +495,18 @@
+ 	_offset_ground_sprites = true;
+ }
+ 
+-static void AddCombinedSprite(SpriteID image, SpriteID pal, int x, int y, byte z)
++/**
++ * Adds a child sprite to a parent sprite.
++ * In contrast to "AddChildSpriteScreen()" the sprite position is in world coordinates
++ *
++ * @param image the image to draw.
++ * @param pal the provided palette.
++ * @param x position x of the sprite.
++ * @param y position y of the sprite.
++ * @param z position z of the sprite.
++ * @param sub Only draw a part of the sprite.
++ */
++static void AddCombinedSprite(SpriteID image, SpriteID pal, int x, int y, byte z, const SubSprite *sub)
+ {
+ 	const ViewportDrawer *vd = _cur_vd;
+ 	Point pt = RemapCoords(x, y, z);
+@@ -484,7 +518,7 @@
+ 			pt.y + spr->y_offs + spr->height <= vd->dpi.top)
+ 		return;
+ 
+-	AddChildSpriteScreen(image, pal, pt.x - vd->parent_list[-1]->left, pt.y - vd->parent_list[-1]->top);
++	AddChildSpriteScreen(image, pal, pt.x - vd->parent_list[-1]->left, pt.y - vd->parent_list[-1]->top, false, sub);
+ }
+ 
+ /** Draw a (transparent) sprite at given coordinates with a given bounding box.
+@@ -509,8 +543,9 @@
+  * @param bb_offset_x bounding box extent towards negative X (world),
+  * @param bb_offset_y bounding box extent towards negative Y (world),
+  * @param bb_offset_z bounding box extent towards negative Z (world)
++ * @param sub Only draw a part of the sprite.
+  */
+-void AddSortableSpriteToDraw(SpriteID image, SpriteID pal, int x, int y, int w, int h, int dz, int z, bool transparent, int bb_offset_x, int bb_offset_y, int bb_offset_z)
++void AddSortableSpriteToDraw(SpriteID image, SpriteID pal, int x, int y, int w, int h, int dz, int z, bool transparent, int bb_offset_x, int bb_offset_y, int bb_offset_z, const SubSprite *sub)
+ {
+ 	ViewportDrawer *vd = _cur_vd;
+ 	ParentSpriteToDraw *ps;
+@@ -526,7 +561,7 @@
+ 	}
+ 
+ 	if (vd->combine_sprites == 2) {
+-		AddCombinedSprite(image, pal, x, y, z);
++		AddCombinedSprite(image, pal, x, y, z, sub);
+ 		return;
+ 	}
+ 
+@@ -585,6 +620,7 @@
+ 
+ 	ps->image = image;
+ 	ps->pal = pal;
++	ps->sub = sub;
+ 	ps->xmin = x + bb_offset_x;
+ 	ps->xmax = x + max(bb_offset_x, w) - 1;
+ 
+@@ -613,7 +649,17 @@
+ 	_cur_vd->combine_sprites = 0;
+ }
+ 
+-void AddChildSpriteScreen(SpriteID image, SpriteID pal, int x, int y, bool transparent)
++/**
++ * Add a child sprite to a parent sprite.
++ *
++ * @param image the image to draw.
++ * @param pal the provided palette.
++ * @param x sprite x-offset (screen coordinates) relative to parent sprite.
++ * @param y sprite y-offset (screen coordinates) relative to parent sprite.
++ * @param transparent if true, switch the palette between the provided palette and the transparent palette,
++ * @param sub Only draw a part of the sprite.
++ */
++void AddChildSpriteScreen(SpriteID image, SpriteID pal, int x, int y, bool transparent, const SubSprite *sub)
+ {
+ 	ViewportDrawer *vd = _cur_vd;
+ 	ChildScreenSpriteToDraw *cs;
+@@ -642,6 +688,7 @@
+ 
+ 	cs->image = image;
+ 	cs->pal = pal;
++	cs->sub = sub;
+ 	cs->x = x;
+ 	cs->y = y;
+ 	cs->next = NULL;
+@@ -1170,7 +1217,7 @@
+ {
+ 	do {
+ 		Point pt = RemapCoords(ts->x, ts->y, ts->z);
+-		DrawSprite(ts->image, ts->pal, pt.x, pt.y);
++		DrawSprite(ts->image, ts->pal, pt.x, pt.y, ts->sub);
+ 		ts = ts->next;
+ 	} while (ts != NULL);
+ }
+@@ -1241,10 +1288,10 @@
+ 		const ParentSpriteToDraw* ps = *psd;
+ 		const ChildScreenSpriteToDraw* cs;
+ 
+-		if (ps->image != SPR_EMPTY_BOUNDING_BOX) DrawSprite(ps->image, ps->pal, ps->x, ps->y);
++		if (ps->image != SPR_EMPTY_BOUNDING_BOX) DrawSprite(ps->image, ps->pal, ps->x, ps->y, ps->sub);
+ 
+ 		for (cs = ps->child; cs != NULL; cs = cs->next) {
+-			DrawSprite(cs->image, cs->pal, ps->left + cs->x, ps->top + cs->y);
++			DrawSprite(cs->image, cs->pal, ps->left + cs->x, ps->top + cs->y, cs->sub);
+ 		}
+ 	}
+ }
+Index: src/gfx.cpp
+===================================================================
+--- src/gfx.cpp	(revision 11199)
++++ src/gfx.cpp	(working copy)
+@@ -43,7 +43,7 @@
+ Colour _cur_palette[256];
+ byte _stringwidth_table[FS_END][224];
+ 
+-static void GfxMainBlitter(const Sprite *sprite, int x, int y, BlitterMode mode);
++static void GfxMainBlitter(const Sprite *sprite, int x, int y, BlitterMode mode, const SubSprite *sub = NULL);
+ 
+ FontSize _cur_fontsize;
+ static FontSize _last_fontsize;
+@@ -652,24 +652,33 @@
+ 	return DoDrawString(buffer, x, y, color);
+ }
+ 
+-void DrawSprite(SpriteID img, SpriteID pal, int x, int y)
++void DrawSprite(SpriteID img, SpriteID pal, int x, int y, const SubSprite *sub)
+ {
+ 	if (HASBIT(img, PALETTE_MODIFIER_TRANSPARENT)) {
+ 		_color_remap_ptr = GetNonSprite(GB(pal, 0, PALETTE_WIDTH)) + 1;
+-		GfxMainBlitter(GetSprite(GB(img, 0, SPRITE_WIDTH)), x, y, BM_TRANSPARENT);
++		GfxMainBlitter(GetSprite(GB(img, 0, SPRITE_WIDTH)), x, y, BM_TRANSPARENT, sub);
+ 	} else if (pal != PAL_NONE) {
+ 		_color_remap_ptr = GetNonSprite(GB(pal, 0, PALETTE_WIDTH)) + 1;
+-		GfxMainBlitter(GetSprite(GB(img, 0, SPRITE_WIDTH)), x, y, BM_COLOUR_REMAP);
++		GfxMainBlitter(GetSprite(GB(img, 0, SPRITE_WIDTH)), x, y, BM_COLOUR_REMAP, sub);
+ 	} else {
+-		GfxMainBlitter(GetSprite(GB(img, 0, SPRITE_WIDTH)), x, y, BM_NORMAL);
++		GfxMainBlitter(GetSprite(GB(img, 0, SPRITE_WIDTH)), x, y, BM_NORMAL, sub);
+ 	}
+ }
+ 
+-static inline void GfxMainBlitter(const Sprite *sprite, int x, int y, BlitterMode mode)
++static inline void GfxMainBlitter(const Sprite *sprite, int x, int y, BlitterMode mode, const SubSprite *sub)
+ {
+ 	const DrawPixelInfo *dpi = _cur_dpi;
+ 	Blitter::BlitterParams bp;
+ 
++	/* Amount of pixels to clip from the source sprite */
++	int clip_left   = (sub != NULL ? max(0,                   -sprite->x_offs + sub->left       ) : 0);
++	int clip_top    = (sub != NULL ? max(0,                   -sprite->y_offs + sub->top        ) : 0);
++	int clip_right  = (sub != NULL ? max(0, sprite->width  - (-sprite->x_offs + sub->right  + 1)) : 0);
++	int clip_bottom = (sub != NULL ? max(0, sprite->height - (-sprite->y_offs + sub->bottom + 1)) : 0);
++
++	if (clip_left + clip_right >= sprite->width) return;
++	if (clip_top + clip_bottom >= sprite->height) return;
++
+ 	/* Move to the correct offset */
+ 	x += sprite->x_offs;
+ 	y += sprite->y_offs;
+@@ -678,12 +687,16 @@
+ 	bp.sprite = sprite->data;
+ 	bp.sprite_width = sprite->width;
+ 	bp.sprite_height = sprite->height;
+-	bp.width = UnScaleByZoom(sprite->width, dpi->zoom);
+-	bp.height = UnScaleByZoom(sprite->height, dpi->zoom);
++	bp.width = UnScaleByZoom(sprite->width - clip_left - clip_right, dpi->zoom);
++	bp.height = UnScaleByZoom(sprite->height - clip_top - clip_bottom, dpi->zoom);
+ 	bp.top = 0;
+ 	bp.left = 0;
+-	bp.skip_left = 0;
+-	bp.skip_top = 0;
++	bp.skip_left = UnScaleByZoom(clip_left, dpi->zoom);
++	bp.skip_top = UnScaleByZoom(clip_top, dpi->zoom);
++
++	x += ScaleByZoom(bp.skip_left, dpi->zoom);
++	y += ScaleByZoom(bp.skip_top, dpi->zoom);
++
+ 	bp.dst = dpi->dst_ptr;
+ 	bp.pitch = dpi->pitch;
+ 	bp.remap = _color_remap_ptr;

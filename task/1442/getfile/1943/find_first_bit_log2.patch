@@ -1,0 +1,383 @@
+Index: src/functions.h
+===================================================================
+--- src/functions.h	(Revision 11427)
++++ src/functions.h	(Arbeitskopie)
+@@ -150,8 +150,6 @@
+ uint GetTownRadiusGroup(const Town* t, TileIndex tile);
+ void ShowHighscoreTable(int difficulty, int8 rank);
+ 
+-int FindFirstBit(uint32 x);
+-
+ void AfterLoadTown();
+ void UpdatePatches();
+ void AskExitGame();
+Index: src/rail.h
+===================================================================
+--- src/rail.h	(Revision 11427)
++++ src/rail.h	(Arbeitskopie)
+@@ -311,7 +311,7 @@
+ static inline Track RemoveFirstTrack(TrackBits *tracks)
+ {
+ 	if (*tracks != TRACK_BIT_NONE && *tracks != INVALID_TRACK_BIT) {
+-		Track first = (Track)FIND_FIRST_BIT(*tracks);
++		const Track first = (Track)FindFirstBit(*tracks);
+ 		ClrBitT(*tracks, first);
+ 		return first;
+ 	}
+@@ -335,7 +335,7 @@
+ static inline Trackdir RemoveFirstTrackdir(TrackdirBits *trackdirs)
+ {
+ 	if (*trackdirs != TRACKDIR_BIT_NONE && *trackdirs != INVALID_TRACKDIR_BIT) {
+-		Trackdir first = (Trackdir)FindFirstBit2x64(*trackdirs);
++		const Trackdir first = (Trackdir)FindFirstBit(*trackdirs);
+ 		ClrBitT(*trackdirs, first);
+ 		return first;
+ 	}
+@@ -354,7 +354,7 @@
+  */
+ static inline Track FindFirstTrack(TrackBits tracks)
+ {
+-	return (tracks != TRACK_BIT_NONE && tracks != INVALID_TRACK_BIT) ? (Track)FIND_FIRST_BIT(tracks) : INVALID_TRACK;
++	return (tracks != TRACK_BIT_NONE && tracks != INVALID_TRACK_BIT) ? (Track)FindFirstBit(tracks) : INVALID_TRACK;
+ }
+ 
+ /**
+@@ -371,7 +371,7 @@
+ static inline Track TrackBitsToTrack(TrackBits tracks)
+ {
+ 	assert(tracks == INVALID_TRACK_BIT || (tracks != TRACK_BIT_NONE && KillFirstBit(tracks & TRACK_BIT_MASK) == TRACK_BIT_NONE));
+-	return tracks != INVALID_TRACK_BIT ? (Track)FIND_FIRST_BIT(tracks & TRACK_BIT_MASK) : INVALID_TRACK;
++	return tracks != INVALID_TRACK_BIT ? (Track)FindFirstBit(tracks & TRACK_BIT_MASK) : INVALID_TRACK;
+ }
+ 
+ /**
+@@ -389,7 +389,7 @@
+ static inline Trackdir FindFirstTrackdir(TrackdirBits trackdirs)
+ {
+ 	assert((trackdirs & ~TRACKDIR_BIT_MASK) == TRACKDIR_BIT_NONE);
+-	return (trackdirs != TRACKDIR_BIT_NONE) ? (Trackdir)FindFirstBit2x64(trackdirs) : INVALID_TRACKDIR;
++	return (trackdirs != TRACKDIR_BIT_NONE) ? (Trackdir)FindFirstBit(trackdirs) : INVALID_TRACKDIR;
+ }
+ 
+ /**
+Index: src/macros.h
+===================================================================
+--- src/macros.h	(Revision 11427)
++++ src/macros.h	(Arbeitskopie)
+@@ -350,41 +350,31 @@
+  */
+ #define IS_CUSTOM_SPRITE(sprite) ((sprite) >= SPR_SIGNALS_BASE)
+ 
+-extern const byte _ffb_64[64];
+-
+ /**
+- * Returns the first occure of a bit in a 6-bit value (from right).
++ * Returns the first occure of a bit in a value (from right).
+  *
+  * Returns the position of the first bit that is not zero, counted from the
+  * LSB. Ie, 110100 returns 2, 000001 returns 0, etc. When x == 0 returns
+- * 0.
++ * 0. The way the algorithm works is a log2 search algorithm.
+  *
+- * @param x The 6-bit value to check the first zero-bit
++ * @param x The value to check the first zero-bit
+  * @return The first position of a bit started from the LSB or 0 if x is 0.
+  */
+-#define FIND_FIRST_BIT(x) _ffb_64[(x)]
+-
+-/**
+- * Finds the position of the first bit in an integer.
+- *
+- * This function returns the position of the first bit set in the
+- * integer. It does only check the bits of the bitmask
+- * 0x3F3F (0011111100111111) and checks only the
+- * bits of the bitmask 0x3F00 if and only if the
+- * lower part 0x00FF is 0. This results the bits at 0x00C0 must
+- * be also zero to check the bits at 0x3F00.
+- *
+- * @param value The value to check the first bits
+- * @return The position of the first bit which is set
+- * @see FIND_FIRST_BIT
+- */
+-static inline int FindFirstBit2x64(int value)
++template<typename T> static inline uint8 FindFirstBit(T x)
+ {
+-	if ((value & 0xFF) == 0) {
+-		return FIND_FIRST_BIT((value >> 8) & 0x3F) + 8;
+-	} else {
+-		return FIND_FIRST_BIT(value & 0x3F);
++	if (x == 0) return 0;
++
++	uint pos = 0;
++	/* Assume 8 bit as minimum
++	 * bipo is half the bitsize of x */
++	for (uint bipo = (2U << max(1U, sizeof(x))); bipo != 0; bipo >>= 1) {
++		if (GB(x, 0, bipo) == 0) {i
++			x = (T)(x >> bipo);
++			pos += bipo;
++		}
+ 	}
++
++	return pos;
+ }
+ 
+ /**
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(Revision 11427)
++++ src/rail_cmd.cpp	(Arbeitskopie)
+@@ -545,7 +545,7 @@
+ 		TrackBits to_remove = lower_track & rail_bits;
+ 		if (to_remove != 0) {
+ 			_current_player = OWNER_WATER;
+-			if (CmdFailed(DoCommand(t, 0, FIND_FIRST_BIT(to_remove), DC_EXEC, CMD_REMOVE_SINGLE_RAIL))) return; // not yet floodable
++			if (CmdFailed(DoCommand(t, 0, FindFirstBit(to_remove), DC_EXEC, CMD_REMOVE_SINGLE_RAIL))) return; // not yet floodable
+ 			rail_bits = rail_bits & ~to_remove;
+ 			if (rail_bits == 0) {
+ 				MakeShore(t);
+Index: src/misc.cpp
+===================================================================
+--- src/misc.cpp	(Revision 11427)
++++ src/misc.cpp	(Arbeitskopie)
+@@ -254,25 +254,6 @@
+ 	}
+ }
+ 
+-
+-
+-int FindFirstBit(uint32 value)
+-{
+-	/* The macro FIND_FIRST_BIT is better to use when your value is
+-	  not more than 128. */
+-	byte i = 0;
+-
+-	if (value == 0) return 0;
+-
+-	if ((value & 0x0000ffff) == 0) { value >>= 16; i += 16; }
+-	if ((value & 0x000000ff) == 0) { value >>= 8;  i += 8;  }
+-	if ((value & 0x0000000f) == 0) { value >>= 4;  i += 4;  }
+-	if ((value & 0x00000003) == 0) { value >>= 2;  i += 2;  }
+-	if ((value & 0x00000001) == 0) { i += 1; }
+-
+-	return i;
+-}
+-
+ static void Save_NAME()
+ {
+ 	int i;
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(Revision 11427)
++++ src/train_cmd.cpp	(Arbeitskopie)
+@@ -2302,7 +2302,7 @@
+ 
+ 	assert(v->u.rail.track);
+ 
+-	int i = _search_directions[FIND_FIRST_BIT(v->u.rail.track)][DirToDiagDir(v->direction)];
++	int i = _search_directions[FindFirstBit((uint)v->u.rail.track)][DirToDiagDir(v->direction)];
+ 
+ 	if (_patches.yapf.rail_use_yapf) {
+ 		reverse_best = YapfCheckReverseTrain(v);
+@@ -2681,7 +2681,7 @@
+ {
+ 	if (IsTileType(tile, MP_RAILWAY) &&
+ 			GetRailTileType(tile) == RAIL_TILE_SIGNALS) {
+-		uint i = FindFirstBit2x64(GetTrackBits(tile) * 0x101 & _reachable_tracks[dir]);
++		uint i = FindFirstBit(GetTrackBits(tile) * 0x101 & _reachable_tracks[dir]);
+ 		UpdateSignalsOnSegment(tile, _otherside_signal_directions[i]);
+ 	}
+ }
+@@ -2890,7 +2890,7 @@
+ 					if ((tracks >> 16) & chosen_track && v->u.rail.force_proceed == 0) {
+ 						/* In front of a red signal
+ 						 * find the first set bit in ts. need to do it in 2 steps, since
+-						 * FIND_FIRST_BIT only handles 6 bits at a time. */
++						 * FindFirstBit only handles 6 bits at a time. */
+ 						Trackdir i = FindFirstTrackdir((TrackdirBits)(uint16)ts);
+ 
+ 						if (!HasSignalOnTrackdir(gp.new_tile, ReverseTrackdir(i))) {
+@@ -2933,7 +2933,7 @@
+ 						chosen_track == TRACK_BIT_LEFT  || chosen_track == TRACK_BIT_RIGHT);
+ 
+ 				/* Update XY to reflect the entrance to the new tile, and select the direction to use */
+-				const byte *b = _initial_tile_subcoord[FIND_FIRST_BIT(chosen_track)][enterdir];
++				const byte *b = _initial_tile_subcoord[FindFirstBit(chosen_track)][enterdir];
+ 				gp.x = (gp.x & ~0xF) | b[0];
+ 				gp.y = (gp.y & ~0xF) | b[1];
+ 				Direction chosen_dir = (Direction)b[2];
+@@ -3052,7 +3052,7 @@
+ 	delete v;
+ 
+ 	if (v->u.rail.track != TRACK_BIT_DEPOT && v->u.rail.track != TRACK_BIT_WORMHOLE)
+-		SetSignalsOnBothDir(v->tile, FIND_FIRST_BIT(v->u.rail.track));
++		SetSignalsOnBothDir(v->tile, FindFirstBit((uint)v->u.rail.track));
+ 
+ 	/* Check if the wagon was on a road/rail-crossing and disable it if no
+ 	 * others are on it */
+Index: src/pathfind.cpp
+===================================================================
+--- src/pathfind.cpp	(Revision 11427)
++++ src/pathfind.cpp	(Arbeitskopie)
+@@ -160,7 +160,7 @@
+ 
+ 	assert(TileX(tile) != MapMaxX() && TileY(tile) != MapMaxY());
+ 
+-	if ( (bits & (bits - 1)) == 0 ) {
++	if (KillFirstBit(bits) == 0) {
+ 		/* only one direction */
+ 		i = 0;
+ 		while (!(bits & 1))
+@@ -234,17 +234,6 @@
+ 	return flotr.tile;
+ }
+ 
+-const byte _ffb_64[64] = {
+- 0,  0,  1,  0,  2,  0,  1,  0,
+- 3,  0,  1,  0,  2,  0,  1,  0,
+- 4,  0,  1,  0,  2,  0,  1,  0,
+- 3,  0,  1,  0,  2,  0,  1,  0,
+- 5,  0,  1,  0,  2,  0,  1,  0,
+- 3,  0,  1,  0,  2,  0,  1,  0,
+- 4,  0,  1,  0,  2,  0,  1,  0,
+- 3,  0,  1,  0,  2,  0,  1,  0,
+-};
+-
+ static void TPFMode1(TrackPathFinder* tpf, TileIndex tile, DiagDirection direction);
+ 
+ /** Most code of the "Normal" case of TPF Mode 1; for signals special tricks
+@@ -300,8 +289,8 @@
+ 	if (bits != 0) {
+ 		if (!tpf->disable_tile_hash || (tpf->rd.cur_length <= 64 && (KillFirstBit(bits) == 0 || ++tpf->rd.depth <= 7))) {
+ 			do {
+-				int i = FIND_FIRST_BIT(bits);
+-				bits = KillFirstBit(bits);
++				const uint8 i = FindFirstBit(bits);
++				ClrBitT(bits, i);
+ 
+ 				tpf->the_dir = (Trackdir)((_otherdir_mask[direction] & (byte)(1 << i)) ? (i + 8) : i);
+ 				RememberData rd = tpf->rd;
+@@ -381,8 +370,8 @@
+ 		return;
+ 
+ 	do {
+-		uint i = FIND_FIRST_BIT(bits);
+-		bits = KillFirstBit(bits);
++		const uint8 i = FindFirstBit(bits);
++		ClrBitT(bits, i);
+ 
+ 		tpf->the_dir = (Trackdir)((_otherdir_mask[direction] & (byte)(1 << i)) ? (i + 8) : i);
+ 		RememberData rd = tpf->rd;
+@@ -807,7 +796,7 @@
+ 				 *   bits - bitmask of which track that exist on the tile (exactly one bit is set)
+ 				 *   direction - which direction are we moving in?
+ 				 *******************/
+-				si.track = _new_trackdir[FIND_FIRST_BIT(bits)][direction];
++				si.track = _new_trackdir[FindFirstBit(bits)][direction];
+ 				si.cur_length += _length_of_track[si.track];
+ 				goto callback_and_continue;
+ 			}
+@@ -830,7 +819,7 @@
+ 			/* If we reach here, the tile has exactly one track, and this
+ 			 track is reachable = > Rail segment continues */
+ 
+-			track = _new_trackdir[FIND_FIRST_BIT(bits)][direction];
++			track = _new_trackdir[FindFirstBit(bits)][direction];
+ 			assert(track != INVALID_TRACKDIR);
+ 
+ 			si.cur_length += _length_of_track[track];
+Index: src/yapf/yapf_base.hpp
+===================================================================
+--- src/yapf/yapf_base.hpp	(Revision 11427)
++++ src/yapf/yapf_base.hpp	(Arbeitskopie)
+@@ -194,7 +194,7 @@
+ 	{
+ 		bool is_choice = (KillFirstBit(tf.m_new_td_bits) != TRACKDIR_BIT_NONE);
+ 		for (TrackdirBits rtds = tf.m_new_td_bits; rtds != TRACKDIR_BIT_NONE; rtds = KillFirstBit(rtds)) {
+-			Trackdir td = (Trackdir)FindFirstBit2x64(rtds);
++			Trackdir td = (Trackdir)FindFirstBit(rtds);
+ 			Node& n = Yapf().CreateNewNode();
+ 			n.Set(parent, tf.m_new_tile, td, is_choice);
+ 			Yapf().AddNewNode(n, tf);
+Index: src/yapf/yapf_costrail.hpp
+===================================================================
+--- src/yapf/yapf_costrail.hpp	(Revision 11427)
++++ src/yapf/yapf_costrail.hpp	(Arbeitskopie)
+@@ -394,7 +394,7 @@
+ 			}
+ 
+ 			/* Gather the next tile/trackdir/tile_type/rail_type. */
+-			TILE next(tf_local.m_new_tile, (Trackdir)FindFirstBit2x64(tf_local.m_new_td_bits));
++			TILE next(tf_local.m_new_tile, (Trackdir)FindFirstBit(tf_local.m_new_td_bits));
+ 
+ 			/* Check the next tile for the rail type. */
+ 			if (next.rail_type != cur.rail_type) {
+Index: src/yapf/yapf_road.cpp
+===================================================================
+--- src/yapf/yapf_road.cpp	(Revision 11427)
++++ src/yapf/yapf_road.cpp	(Arbeitskopie)
+@@ -99,7 +99,7 @@
+ 			// if there are more trackdirs available & reachable, we are at the end of segment
+ 			if (KillFirstBit(F.m_new_td_bits) != TRACKDIR_BIT_NONE) break;
+ 
+-			Trackdir new_td = (Trackdir)FindFirstBit2x64(F.m_new_td_bits);
++			Trackdir new_td = (Trackdir)FindFirstBit(F.m_new_td_bits);
+ 
+ 			// stop if RV is on simple loop with no junctions
+ 			if (F.m_new_tile == n.m_key.m_tile && new_td == n.m_key.m_td) return false;
+Index: src/yapf/yapf_common.hpp
+===================================================================
+--- src/yapf/yapf_common.hpp	(Revision 11427)
++++ src/yapf/yapf_common.hpp	(Arbeitskopie)
+@@ -34,7 +34,7 @@
+ 	{
+ 		bool is_choice = (KillFirstBit(m_orgTrackdirs) != TRACKDIR_BIT_NONE);
+ 		for (TrackdirBits tdb = m_orgTrackdirs; tdb != TRACKDIR_BIT_NONE; tdb = KillFirstBit(tdb)) {
+-			Trackdir td = (Trackdir)FindFirstBit2x64(tdb);
++			Trackdir td = (Trackdir)FindFirstBit(tdb);
+ 			Node& n1 = Yapf().CreateNewNode();
+ 			n1.Set(NULL, m_orgTile, td, is_choice);
+ 			Yapf().AddStartupNode(n1);
+Index: src/yapf/yapf_ship.cpp
+===================================================================
+--- src/yapf/yapf_ship.cpp	(Revision 11427)
++++ src/yapf/yapf_ship.cpp	(Arbeitskopie)
+@@ -42,7 +42,7 @@
+ 			TrackdirBits trackdirs = (TrackdirBits)(tracks | ((int)tracks << 8));
+ 			// choose any trackdir reachable from enterdir
+ 			trackdirs &= DiagdirReachesTrackdirs(enterdir);
+-			return (Trackdir)FindFirstBit2x64(trackdirs);
++			return (Trackdir)FindFirstBit(trackdirs);
+ 		}
+ 
+ 		// move back to the old tile/trackdir (where ship is coming from)
+Index: src/roadveh_cmd.cpp
+===================================================================
+--- src/roadveh_cmd.cpp	(Revision 11427)
++++ src/roadveh_cmd.cpp	(Arbeitskopie)
+@@ -1212,7 +1212,7 @@
+ 
+ 	/* Only one track to choose between? */
+ 	if (KillFirstBit(trackdirs) == TRACKDIR_BIT_NONE) {
+-		return_track(FindFirstBit2x64(trackdirs));
++		return_track(FindFirstBit(trackdirs));
+ 	}
+ 
+ 	if (_patches.yapf.road_use_yapf) {
+@@ -1233,7 +1233,7 @@
+ 			/* We are already at our target. Just do something
+ 			 * @todo: maybe display error?
+ 			 * @todo: go straight ahead if possible? */
+-			return_track(FindFirstBit2x64(trackdirs));
++			return_track(FindFirstBit(trackdirs));
+ 		} else {
+ 			/* If ftd.best_bird_dist is 0, we found our target and ftd.best_trackdir contains
+ 			the direction we need to take to get there, if ftd.best_bird_dist is not 0,
+@@ -1262,7 +1262,7 @@
+ 					/* If we are already in front of the
+ 					 * station/depot and we can get in from here,
+ 					 * we enter */
+-					return_track(FindFirstBit2x64(trackdirs & _road_exit_dir_to_incoming_trackdirs[dir]));
++					return_track(FindFirstBit(trackdirs & _road_exit_dir_to_incoming_trackdirs[dir]));
+ 				}
+ 			}
+ 		}

@@ -1,0 +1,171 @@
+Index: src/toolbar_gui.cpp
+===================================================================
+--- src/toolbar_gui.cpp	(revision 12872)
++++ src/toolbar_gui.cpp	(working copy)
+@@ -50,6 +50,8 @@
+ RailType _last_built_railtype;
+ RoadType _last_built_roadtype;
+ 
++bool _switched_bar;
++
+ static void SelectSignTool()
+ {
+ 	if (_cursor.sprite == SPR_CURSOR_SIGN) {
+@@ -516,6 +518,16 @@
+ 	}
+ }
+ 
++/* --- Switch toolbar button --- */
++
++static void ToolbarSwitchClick(Window *w)
++{
++	_switched_bar ^= true;
++	CallWindowEventNP(w, WE_RESIZE);
++	SetWindowDirty(w);
++	SndPlayFx(SND_15_BEEP);
++}
++
+ /* --- Scenario editor specific handlers. */
+ 
+ static void ToolbarScenDateBackward(Window *w)
+@@ -614,7 +626,89 @@
+ {
+ }
+ 
++/* --- Resizing the toolbar */
+ 
++void ResizeToolbar(Window *w)
++{
++	/* There are 27 buttons plus some spacings if the space allows it */
++	uint button_width;
++	uint spacing;
++	if (w->width >= 27 * 22) {
++		button_width = 22;
++		spacing = w->width - (27 * button_width);
++	} else {
++		button_width = w->width / 27;
++		spacing = 0;
++	}
++	uint extra_spacing_at[] = { 4, 8, 13, 17, 19, 24, 0 };
++
++	for (uint i = 0, x = 0, j = 0; i < 27; i++) {
++		if (extra_spacing_at[j] == i) {
++			j++;
++			uint add = spacing / (lengthof(extra_spacing_at) - j);
++			spacing -= add;
++			x += add;
++		}
++
++		w->widget[i].type = WWT_IMGBTN;
++		w->widget[i].left = x;
++		x += (spacing != 0) ? button_width : (w->width - x) / (27 - i);
++		w->widget[i].right = x - 1;
++	}
++
++	w->widget[27].type = WWT_EMPTY;
++}
++
++/* --- Split the toolbar */
++
++/* The order in which the buttons should be checked. This will determine the order they'll appear on screen. */
++uint split_order[] =    { 0, 1,  2,  3, 6, 13, 14, 15, 16, 19, 20,   21, 22, 23,  5,  7,  8, 9, 10, 12, 24, 25, 26,  4, 17, 18, 27, 11 };
++/* The priority determines on which toolbar the button will appear. The lowest number will (if possible) appear on both bars. Higher numbers only on the second bar. */
++uint split_priority[] = { 1, 2, 16, 26, 5, 17, 6, 18, 19, 20, 21, 0xFF, 22, 7, 8, 9, 10, 3, 4, 11, 13, 14, 15, 12, 23, 24, 25, 0 };
++
++void SplitToolbar(Window *w)
++{
++	uint icon_size = 22;
++	uint button_width = icon_size;
++	uint max_icons = w->width / icon_size;
++
++	if (max_icons < 14) {
++		button_width = w->width / 14;
++		max_icons = 14;
++	}
++
++	w->width = (max_icons - 1) * button_width + icon_size;
++
++	uint show_on_both = 2 * max_icons - 28; // 28 is total number of icons
++
++	for (uint i = 0, x = 0; i < 28; i++) {
++		uint icon = split_order[i];
++		uint priority = split_priority[icon];
++		bool show = false;
++
++		if (!_switched_bar)
++			show = (priority < max_icons);
++		else
++			show = (priority >= max_icons && priority != 0xFF); // special case for the Company League button. Menu will be merged with Graphs menu
++
++		if (priority <= show_on_both)
++			show = true;
++
++		if ( show ) {
++			w->widget[icon].type = WWT_IMGBTN;
++			w->widget[icon].left = x;
++			x += button_width;
++			w->widget[icon].right = w->widget[icon].left + icon_size - 1;
++		} else {
++			w->widget[icon].type = WWT_EMPTY;
++		}
++	}
++
++	w->widget[27].data = _switched_bar?SPR_IMG_TERRAFORM_UP:SPR_IMG_TERRAFORM_DOWN;
++	w->widget[27].type = WWT_PUSHIMGBTN;
++	w->widget[27].color = 15;
++}
++
+ /* --- Toolbar handling for the 'normal' case */
+ 
+ typedef void ToolbarButtonProc(Window *w);
+@@ -647,6 +741,7 @@
+ 	ToolbarMusicClick,
+ 	ToolbarNewspaperClick,
+ 	ToolbarHelpClick,
++	ToolbarSwitchClick,
+ };
+ 
+ static void MainToolbarWndProc(Window *w, WindowEvent *e)
+@@ -740,30 +835,10 @@
+ 			break;
+ 
+ 		case WE_RESIZE: {
+-			/* There are 27 buttons plus some spacings if the space allows it */
+-			uint button_width;
+-			uint spacing;
+-			if (w->width >= 27 * 22) {
+-				button_width = 22;
+-				spacing = w->width - (27 * button_width);
+-			} else {
+-				button_width = w->width / 27;
+-				spacing = 0;
+-			}
+-			uint extra_spacing_at[] = { 4, 8, 13, 17, 19, 24, 0 };
+-
+-			for (uint i = 0, x = 0, j = 0; i < 27; i++) {
+-				if (extra_spacing_at[j] == i) {
+-					j++;
+-					uint add = spacing / (lengthof(extra_spacing_at) - j);
+-					spacing -= add;
+-					x += add;
+-				}
+-
+-				w->widget[i].left = x;
+-				x += (spacing != 0) ? button_width : (w->width - x) / (27 - i);
+-				w->widget[i].right = x - 1;
+-			}
++			if (w->width <= 20 * 22)
++				SplitToolbar(w);
++			else
++				ResizeToolbar(w);
+ 		} break;
+ 
+ 		case WE_TIMEOUT:
+@@ -815,6 +890,7 @@
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,     0,     0,     0,    21, SPR_IMG_MUSIC,           STR_01D4_SHOW_SOUND_MUSIC_WINDOW},
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,     0,     0,     0,    21, SPR_IMG_MESSAGES,        STR_0203_SHOW_LAST_MESSAGE_NEWS},
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,     0,     0,     0,    21, SPR_IMG_QUERY,           STR_0186_LAND_BLOCK_INFORMATION},
++{     WWT_EMPTY,    RESIZE_NONE,    14,     0,     0,     0,    21, SPR_IMG_TERRAFORM_UP,    STR_EMPTY}, // switch toolbar button. only active when toolbar has been split
+ {   WIDGETS_END},
+ };
+ 

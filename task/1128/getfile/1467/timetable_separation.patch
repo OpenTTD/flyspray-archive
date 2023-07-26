@@ -1,0 +1,361 @@
+Index: src/autoreplace_cmd.cpp
+===================================================================
+--- src/autoreplace_cmd.cpp	(revision 10980)
++++ src/autoreplace_cmd.cpp	(working copy)
+@@ -209,7 +209,7 @@
+ 			DoCommand(0, (front->index << 16) | new_v->index, 1, DC_EXEC, CMD_MOVE_RAIL_VEHICLE);
+ 		} else {
+ 			// copy/clone the orders
+-			DoCommand(0, (old_v->index << 16) | new_v->index, IsOrderListShared(old_v) ? CO_SHARE : CO_COPY, DC_EXEC, CMD_CLONE_ORDER);
++			DoCommand(0, (old_v->index << 16) | new_v->index, old_v->IsOrderListShared() ? CO_SHARE : CO_COPY, DC_EXEC, CMD_CLONE_ORDER);
+ 			new_v->cur_order_index = old_v->cur_order_index;
+ 			ChangeVehicleViewWindow(old_v, new_v);
+ 			new_v->profit_this_year = old_v->profit_this_year;
+Index: src/order.h
+===================================================================
+--- src/order.h	(revision 10980)
++++ src/order.h	(working copy)
+@@ -211,7 +211,6 @@
+ bool VehicleHasDepotOrders(const Vehicle *v);
+ void CheckOrders(const Vehicle*);
+ void DeleteVehicleOrders(Vehicle *v);
+-bool IsOrderListShared(const Vehicle *v);
+ void AssignOrder(Order *order, Order data);
+ bool CheckForValidOrders(const Vehicle* v);
+ 
+Index: src/order_cmd.cpp
+===================================================================
+--- src/order_cmd.cpp	(revision 10980)
++++ src/order_cmd.cpp	(working copy)
+@@ -19,6 +19,7 @@
+ #include "vehicle_gui.h"
+ #include "cargotype.h"
+ #include "strings.h"
++#include "station_map.h"
+ 
+ DEFINE_OLD_POOL_GENERIC(Order, Order)
+ 
+@@ -830,7 +831,7 @@
+ 			}
+ 
+ 			/* make sure there are orders available */
+-			delta = IsOrderListShared(dst) ? src->num_orders + 1 : src->num_orders - dst->num_orders;
++			delta = dst->IsOrderListShared() ? src->num_orders + 1 : src->num_orders - dst->num_orders;
+ 			if (!HasOrderPoolFree(delta))
+ 				return_cmd_error(STR_8831_NO_MORE_SPACE_FOR_ORDERS);
+ 
+@@ -933,7 +934,7 @@
+ 	}
+ 
+ 	/* If we have shared orders, store it on a special way */
+-	if (IsOrderListShared(v)) {
++	if (v->IsOrderListShared()) {
+ 		const Vehicle *u = (v->next_shared) ? v->next_shared : v->prev_shared;
+ 
+ 		bak->clone = u->index;
+@@ -1196,7 +1197,7 @@
+ 
+ 	/* If we have a shared order-list, don't delete the list, but just
+ 	    remove our pointer */
+-	if (IsOrderListShared(v)) {
++	if (v->IsOrderListShared()) {
+ 		Vehicle *u = v;
+ 
+ 		v->orders = NULL;
+@@ -1241,18 +1242,6 @@
+ 
+ /**
+  *
+- * Check if we share our orders with an other vehicle
+- *
+- * @return Returns the vehicle who has the same order
+- *
+- */
+-bool IsOrderListShared(const Vehicle *v)
+-{
+-	return v->next_shared != NULL || v->prev_shared != NULL;
+-}
+-
+-/**
+- *
+  * Check if a vehicle has any valid orders
+  *
+  * @return false if there are no valid orders
+Index: src/order_gui.cpp
+===================================================================
+--- src/order_gui.cpp	(revision 10980)
++++ src/order_gui.cpp	(working copy)
+@@ -118,7 +118,7 @@
+ 
+ 	v = GetVehicle(w->window_number);
+ 
+-	shared_orders = IsOrderListShared(v);
++	shared_orders = v->IsOrderListShared();
+ 
+ 	SetVScrollCount(w, v->num_orders + 1);
+ 
+Index: src/timetable_cmd.cpp
+===================================================================
+--- src/timetable_cmd.cpp	(revision 10980)
++++ src/timetable_cmd.cpp	(working copy)
+@@ -11,8 +11,8 @@
+ #include "date.h"
+ #include "player.h"
+ #include "vehicle.h"
++#include "station_map.h"
+ 
+-
+ static void ChangeTimetable(Vehicle *v, VehicleOrderID order_number, uint16 time, bool is_journey)
+ {
+ 	Order *order = GetVehicleOrder(v, order_number);
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 10980)
++++ src/vehicle.cpp	(working copy)
+@@ -598,6 +598,139 @@
+ 	}
+ }
+ 
++/**
++ * Checks if the vehicle is part of the shared orders list
++ */
++bool Vehicle::IsVehicleInSharedOrdersList(Vehicle *v)
++{
++	for (Vehicle *vShared = this->prev_shared; vShared != NULL; vShared = vShared->prev_shared) {
++		if (vShared == v) return true;
++	}
++
++	for (Vehicle *vShared = this->next_shared; vShared != NULL; vShared = vShared->next_shared) {
++		if (vShared == v) return true;
++	}
++
++	return false;
++}
++
++/**
++ * Counts the vehicles that share it's orders list
++ */
++int Vehicle::CountSharedOrderdList()
++{
++	int count = 1; ///< Includes this one first
++	for (Vehicle *v = this->prev_shared; v != NULL; v = v->prev_shared) count++;
++	for (Vehicle *v = this->next_shared; v != NULL; v = v->next_shared) count++;
++	return count;
++}
++
++/**
++ * Finds this vehicle position in the shared order list chain
++ */
++int Vehicle::GetPositionInSharedOrderList()
++{
++	int count = 0; ///< Do not include this one
++	for (Vehicle *v = this->prev_shared; v != NULL; v = v->prev_shared) count++;
++	return count;
++}
++
++/**
++ * Gets the total timetable duration
++ */
++int Vehicle::GetTimetableTotalDuration()
++{
++	int total = 0;
++	for (Order *o = this->orders; o != NULL; o = o->next) {
++		total += o->wait_time + o->travel_time;
++	}
++	return total;
++}
++
++/**
++ * Get the current theorical separation with the first shared order vehicle.
++ * This includes its lateness_counter.
++ * The vehicle must be in the first order station for this function to work.
++ */
++int Vehicle::GetFirstSharedSeparation()
++{
++	if (this->prev_shared == NULL) return 0;
++
++	Vehicle *first;
++	/// Gets the first vehicle in the chain
++	for (first = this->prev_shared; first->prev_shared != NULL; first = first->prev_shared);
++
++	return this->GetVehicleSeparation(first, false, true) + first->lateness_counter;
++}
++
++/**
++ * Get the current separation with the given vehicle.
++ */
++int Vehicle::GetVehicleSeparation(Vehicle *v, bool add_this_current_order_time, bool add_other_current_order_time)
++{
++	if (this == v) return 0;
++
++	int this_position = this->GetTimetablePosition(add_this_current_order_time);
++	int other_position = v->GetTimetablePosition(add_other_current_order_time);
++
++	if (this_position <= other_position) {
++		/// The other vehicle is in front of this one. It's really easy to compute.
++		return other_position - this_position;
++	} else {
++		/// The other vehicle is behind this one. We must add the total timetable duration minus the current order wait_time as we may start immediately.
++		int total_timetable = this->GetTimetableTotalDuration();
++		return total_timetable + other_position - this_position;
++	}
++}
++
++/**
++ * Get the theorical current vehicle position in the timetable
++ * @param bool adds current_order_time
++ * @return numbers of ticks from the begining of the timetable without lateness_counter.
++ */
++int Vehicle::GetTimetablePosition(bool add_current_order_time)
++{
++	int total = 0;
++
++	/// Add current order time
++	if (add_current_order_time) total += current_order_time;
++
++	Order *o = orders;
++	for (int i = 0; i < cur_order_index%(this->num_orders); i++) {
++		total += o->travel_time + o->wait_time;
++		o = o->next;
++	}
++
++	if (last_station_visited == o->dest)
++	{
++		total += o->travel_time;
++	}
++
++	return total;
++}
++
++/**
++ * Returns the vehicle order index where it first stops at a station
++ */
++VehicleOrderID Vehicle::FirstStopStationOrderID()
++{
++	VehicleOrderID index = 0;
++	for (Order *first = this->orders; first != NULL; first = first->next) {
++		if (first->type == OT_GOTO_STATION && first->wait_time > 0) {
++			/**
++			 * Take it easy : if wait_time is 0 then it means the train won't wait here
++			 * because user choice or because station type (waypoint, buoy) or because
++			 * order type (non-stop, etc.)
++			 * This test is quite filthy, but it should always work unlikely all my previous
++			 * attempts of cleaner code.
++			 */
++			return index;
++		}
++		++index;
++	}
++	return INVALID_VEH_ORDER_ID;
++}
++
+ Vehicle::~Vehicle()
+ {
+ 	DeleteName(this->string_id);
+@@ -3104,12 +3237,70 @@
+ 		 * that arrives at random stations is bad. */
+ 		this->current_order.flags |= OF_NON_STOP;
+ 		UpdateVehicleTimetable(this, true);
++
++		/**
++		 * We ensure the vehicle is well positionned in the shared order list
++		 * This means the last vehicle from this shared order list that visited the 
++		 * station must be its ->prev_shared
++		 */
++		if (_patches.timetabling && this->prev_shared != NULL && this->IsOrderListShared() && this->FirstStopStationOrderID() == this->cur_order_index) {
++			/**
++			 * Find the previous vehicle of the shared order that visited the station
++			 */
++			int min_separation = -1;
++			int tmp_separation = 0;
++			Vehicle *previous = NULL;
++			/// Check for previous vehicles
++			for (Vehicle *v = this->prev_shared; v != NULL; v = v->prev_shared) {
++				tmp_separation = this->GetVehicleSeparation(v, false, true);
++				if (min_separation > 0 && tmp_separation < min_separation || min_separation == -1) {
++					min_separation = tmp_separation;
++					previous = v;
++				}
++			}
++			/// Check for next vehicles
++			for (Vehicle *v = this->next_shared; v != NULL; v = v->next_shared) {
++				tmp_separation = this->GetVehicleSeparation(v, false, true);
++				if (min_separation > 0 && tmp_separation < min_separation || min_separation == -1) {
++					min_separation = tmp_separation;
++					previous = v;
++				}
++			}
++
++			/// Check if prev_shared vehicle is really the previous one and reorder the chain if needed
++			if (this->prev_shared != previous && previous != NULL) {
++				// Remove this vehicle from the list
++				this->prev_shared->next_shared = this->next_shared;
++				if (this->next_shared != NULL) this->next_shared->prev_shared = this->prev_shared;
++				// Insert in the list
++				this->prev_shared = previous;
++				this->next_shared = previous->next_shared;
++				// Update previous and next
++				if (previous->next_shared != NULL) previous->next_shared->prev_shared = this;
++				previous->next_shared = this;
++			}
++		}
+ 	} else {
+ 		/* This is just an unordered intermediate stop */
+ 		this->current_order.flags = 0;
+ 	}
+ 
+ 	current_order.type = OT_LOADING;
++
++	/**
++	 * For shared orders vehicles other than the first in chain arriving to the
++	 * first order station, we have to recompute the separation
++	 */
++	if (_patches.timetabling && this->IsOrderListShared() && this->prev_shared != NULL && this->cur_order_index == this->FirstStopStationOrderID()) {
++		/**
++		 * This vehicle have to ensure separation
++		 */
++		/// Compute wait_time for auto-separation system
++		/// The vehicle can leave the station. Fill the lateness counter with separation informations, and override the actual waiting time.
++		this->lateness_counter = -((GetTimetableTotalDuration() / CountSharedOrderdList()) - GetVehicleSeparation(prev_shared, false, true) - prev_shared->lateness_counter);
++		//this->current_order_time = this->current_order.wait_time;
++	}
++
+ 	GetStation(this->last_station_visited)->loading_vehicles.push_back(this);
+ 
+ 	SET_EXPENSES_TYPE(this->GetExpenseType(true));
+@@ -3144,8 +3335,8 @@
+ {
+ 	switch (this->current_order.type) {
+ 		case OT_LOADING: {
++			/// Uses standard timetable system (no timetable, no shared orders, first vehicle, etc.)
+ 			uint wait_time = max(this->current_order.wait_time - this->lateness_counter, 0);
+-
+ 			/* Not the first call for this tick, or still loading */
+ 			if (mode || !HASBIT(this->vehicle_flags, VF_LOADING_FINISHED) ||
+ 					(_patches.timetabling && this->current_order_time < wait_time)) return;
+Index: src/vehicle.h
+===================================================================
+--- src/vehicle.h	(revision 10980)
++++ src/vehicle.h	(working copy)
+@@ -420,6 +420,21 @@
+ 	virtual void Tick() {};
+ 
+ 	bool IsValid() const { return this->type != VEH_INVALID; }
++
++	/**
++	 * Check if we share our orders with an other vehicle
++	 *
++	 * @return Returns the vehicle who has the same order
++	 */
++	bool IsOrderListShared() const { return this->prev_shared != NULL || this->next_shared != NULL; }
++	bool IsVehicleInSharedOrdersList(Vehicle *v);
++	int CountSharedOrderdList();
++	int GetPositionInSharedOrderList();
++	int GetTimetableTotalDuration();
++	int GetFirstSharedSeparation();
++	int GetVehicleSeparation(Vehicle *v, bool add_this_current_order_time, bool add_other_current_order_time);
++	int GetTimetablePosition(bool add_current_order_time);
++	VehicleOrderID FirstStopStationOrderID();
+ };
+ 
+ /**

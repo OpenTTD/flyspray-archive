@@ -1,0 +1,166 @@
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(r‚vision 4906)
++++ train_cmd.c	(copie de travail)
+@@ -112,6 +112,7 @@
+ 	if (v->u.rail.cached_power != power) {
+ 		v->u.rail.cached_power = power;
+ 		InvalidateWindow(WC_VEHICLE_DETAILS, v->index);
++		InvalidateWindow(WC_VEHICLE_VIEW, v->index);
+ 	}
+ }
+ 
+@@ -1495,6 +1496,7 @@
+ static void ReverseTrainSwapVeh(Vehicle *v, int l, int r)
+ {
+ 	Vehicle *a, *b;
++	bool dochange = true;
+ 
+ 	/* locate vehicles to swap */
+ 	for (a = v; l != 0; l--) a = a->next;
+@@ -1538,7 +1540,16 @@
+ 	}
+ 
+ 	/* Update train's power incase tiles were different rail type */
+-	TrainPowerChanged(v);
++	/* but don't do it if the train is now going in depot */
++	if (IsTileDepotType(v->tile, TRANSPORT_RAIL)) {
++		for (a = v; a != NULL; a = a->next) {
++			if (a->u.rail.track != 0x80 || a->tile != v->tile) {
++				dochange = false;
++				break;
++			}
++		}
++	}
++	if (dochange) TrainPowerChanged(v);
+ }
+ 
+ /* Check if the vehicle is a train and is on the tile we are testing */
+@@ -2045,6 +2056,9 @@
+ {
+ 	Vehicle *u;
+ 
++	/* the train must stay in depot if it doesn't have power */
++	if (v->u.rail.track == 0x80 && v->u.rail.cached_power == 0) return true;
++
+ 	// bail out if not all wagons are in the same depot or not in a depot at all
+ 	for (u = v; u != NULL; u = u->next) {
+ 		if (u->u.rail.track != 0x80 || u->tile != v->tile) return false;
+@@ -2947,7 +2961,7 @@
+ 				if (!(r&0x4)) {
+ 					v->tile = gp.new_tile;
+ 
+-					if (GetTileRailType(gp.new_tile, chosen_track) != GetTileRailType(gp.old_tile, v->u.rail.track)) {
++					if (!IsTileDepotType(gp.new_tile, TRANSPORT_RAIL) && GetTileRailType(gp.new_tile, chosen_track) != GetTileRailType(gp.old_tile, v->u.rail.track)) {
+ 						TrainPowerChanged(GetFirstVehicleInChain(v));
+ 					}
+ 
+@@ -3367,10 +3381,21 @@
+ 
+ void TrainEnterDepot(Vehicle *v, TileIndex tile)
+ {
++	bool last = v->next == NULL;
++
+ 	UpdateSignalsOnSegment(tile, GetRailDepotDirection(tile));
+ 
+ 	if (!IsFrontEngine(v)) v = GetFirstVehicleInChain(v);
+ 
++	if (last) {
++		TrainPowerChanged(v);
++		/* if the vehicle now have no power, change his order so it will be stopped */
++		if (v->u.rail.cached_power == 0) {
++			v->current_order.type = OT_GOTO_DEPOT;
++			SETBIT(v->current_order.flags, OFB_HALT_IN_DEPOT);
++		}
++	}
++
+ 	VehicleServiceInDepot(v);
+ 
+ 	InvalidateWindow(WC_VEHICLE_DETAILS, v->index);
+Index: rail_cmd.c
+===================================================================
+--- rail_cmd.c	(r‚vision 4906)
++++ rail_cmd.c	(copie de travail)
+@@ -29,6 +29,7 @@
+ #include "newgrf.h"
+ #include "newgrf_callbacks.h"
+ #include "newgrf_station.h"
++#include "train.h"
+ 
+ const byte _track_sloped_sprites[14] = {
+ 	14, 15, 22, 13,
+@@ -864,11 +865,28 @@
+ 
+ 		/* Update build vehicle window related to this depot */
+ 		if (IsTileDepotType(tile, TRANSPORT_RAIL)) {
++			Vehicle *v;
+ 			Window *w = FindWindowById(WC_BUILD_VEHICLE, tile);
+ 			if (w != NULL) {
+ 				WP(w,buildtrain_d).railtype = totype;
+ 				SetWindowDirty(w);
+ 			}
++
++			/* Update vehicule power */
++			FOR_ALL_VEHICLES(v) {
++				if (v->type == VEH_Train && IsFrontEngine(v) && v->tile == tile && v->u.rail.track == 0x80) {
++					Vehicle *u;
++					bool dochange = true;
++					for (u = v; u != NULL; u = u->next) {
++						if (u->u.rail.track != 0x80 || u->tile != v->tile) {
++							dochange = false;
++							break;
++						}
++					}
++					if (dochange) TrainPowerChanged(v);
++				}
++			}
++			InvalidateWindow(WC_VEHICLE_DEPOT, tile);
+ 		}
+ 	}
+ 
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(r‚vision 4906)
++++ train_gui.c	(copie de travail)
+@@ -445,6 +445,10 @@
+ 			/* Draw the pretty flag */
+ 			DrawSprite(v->vehstatus & VS_STOPPED ? SPR_FLAG_VEH_STOPPED : SPR_FLAG_VEH_RUNNING, x + 15, y);
+ 
++			/* Draw a lock if the train can't be started */
++			if (v->vehstatus & VS_STOPPED && v->u.rail.cached_power == 0)
++				DrawSprite(SPR_LOCK,  x + 15, y);
++
+ 			y += 14;
+ 		}
+ 	}
+@@ -594,7 +598,8 @@
+ 		break;
+ 
+ 	case -2: // click start/stop flag
+-		DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_TRAIN | CMD_MSG(STR_883B_CAN_T_STOP_START_TRAIN));
++		if (!(v->vehstatus & VS_STOPPED && v->u.rail.cached_power == 0))
++			DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_TRAIN | CMD_MSG(STR_883B_CAN_T_STOP_START_TRAIN));
+ 		break;
+ 	}
+ }
+@@ -917,6 +922,10 @@
+ 
+ 			SETBIT(w->disabled_state, 12);
+ 
++			/* disable start button if stopped in depot and no power */
++			if (v->vehstatus & VS_STOPPED && v->u.rail.track == 0x80 && v->u.rail.cached_power == 0)
++				SETBIT(w->disabled_state, 5);
++
+ 			/* See if any vehicle can be refitted */
+ 			for (u = v; u != NULL; u = u->next) {
+ 				if (EngInfo(u->engine_type)->refit_mask != 0 ||
+@@ -983,6 +992,9 @@
+ 
+ 		/* draw the flag plus orders */
+ 		DrawSprite(v->vehstatus & VS_STOPPED ? SPR_FLAG_VEH_STOPPED : SPR_FLAG_VEH_RUNNING, 2, w->widget[5].top + 1);
++		/* draw a lock if the train can't be started */
++		if (v->vehstatus & VS_STOPPED && v->vehstatus & VS_HIDDEN && v->u.rail.cached_power == 0)
++			DrawSprite(SPR_LOCK, 2, w->widget[5].top + 1);
+ 		DrawStringCenteredTruncated(w->widget[5].left + 8, w->widget[5].right, w->widget[5].top + 1, str, 0);
+ 		DrawWindowViewport(w);
+ 	}	break;

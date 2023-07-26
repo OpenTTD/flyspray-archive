@@ -1,0 +1,546 @@
+diff -Naur windows_split/src/viewport.cpp windows_split2/src/viewport.cpp
+--- windows_split/src/viewport.cpp	2008-04-04 21:18:03.000000000 +0200
++++ windows_split2/src/viewport.cpp	2008-04-05 12:38:01.000000000 +0200
+@@ -1,6 +1,23 @@
+ /* $Id: viewport.cpp 12547 2008-04-03 19:55:40Z smatz $ */
+ 
+-/** @file viewport.cpp */
++/**
++ * @file viewport.cpp
++ *
++ * The in-game coordiante system looks like this
++ * \verbatim
++ *                                               *
++ *                    ^ Z                        *
++ *                    |                          *
++ *                    |                          *
++ *                    |                          *
++ *                    |                          *
++ *                 /     \                       *
++ *              /           \                    *
++ *           /                 \                 *
++ *        /                       \              *
++ *   X <                             > Y         *
++ * \endverbatim
++ */
+ 
+ #include "stdafx.h"
+ #include "openttd.h"
+@@ -42,38 +59,6 @@
+ Point _tile_fract_coords;
+ ZoomLevel _saved_scrollpos_zoom;
+ 
+-/**
+- * The maximum number of viewports depends on the maximum number
+- * of windows. Technically is could be the maximum number of
+- * windows, but there is always at least one window that does
+- * not need a viewport. Not having 'support' for that viewport
+- * saves some time and memory.
+- * For the introduction GUI and create game GUIs there is no
+- * need for more than one viewport, however in the normal game
+- * and scenario editor one can make a lot of viewports. For the
+- * normal game one always has a main toolbar and a status bar,
+- * however the statusbar does not exist on the scenario editor.
+- *
+- * This means that we can only safely assume that there is one
+- * window without viewport.
+- */
+-static ViewPort _viewports[MAX_NUMBER_OF_WINDOWS - 1];
+-static uint32 _active_viewports;    ///< bitmasked variable where each bit signifies if a viewport is in use or not
+-assert_compile(lengthof(_viewports) < sizeof(_active_viewports) * 8);
+-
+-/* The in-game coordiante system looks like this *
+- *                                               *
+- *                    ^ Z                        *
+- *                    |                          *
+- *                    |                          *
+- *                    |                          *
+- *                    |                          *
+- *                 /     \                       *
+- *              /           \                    *
+- *           /                 \                 *
+- *        /                       \              *
+- *   X <                             > Y         *
+- */
+ 
+ struct StringSpriteToDraw {
+ 	uint16 string;
+@@ -179,31 +164,11 @@
+ 	return p;
+ }
+ 
+-void InitViewports()
+-{
+-	memset(_viewports, 0, sizeof(_viewports));
+-	_active_viewports = 0;
+-}
+-
+-void DeleteWindowViewport(Window *w)
+-{
+-	ClrBit(_active_viewports, w->viewport - _viewports);
+-	w->viewport->width = 0;
+-	w->viewport = NULL;
+-}
+-
+ void AssignWindowViewport(Window *w, int x, int y,
+ 	int width, int height, uint32 follow_flags, ZoomLevel zoom)
+ {
+-	ViewPort *vp;
++	ViewPort *vp = &w->vp_data;
+ 	Point pt;
+-	uint32 bit;
+-
+-	for (vp = _viewports, bit = 0; ; vp++, bit++) {
+-		assert(vp != endof(_viewports));
+-		if (vp->width == 0) break;
+-	}
+-	SetBit(_active_viewports, bit);
+ 
+ 	vp->left = x + w->left;
+ 	vp->top = y + w->top;
+@@ -234,7 +199,7 @@
+ 	WP(w, vp_d).dest_scrollpos_x = pt.x;
+ 	WP(w, vp_d).dest_scrollpos_y = pt.y;
+ 
+-	w->viewport = vp;
++	w->SetViewport(vp);
+ 	vp->virtual_left = 0;//pt.x;
+ 	vp->virtual_top = 0;//pt.y;
+ }
+@@ -1759,14 +1724,15 @@
+ 
+ void MarkAllViewportsDirty(int left, int top, int right, int bottom)
+ {
+-	const ViewPort *vp = _viewports;
+-	uint32 act = _active_viewports;
+-	do {
+-		if (act & 1) {
++	Window* const *wz;
++
++	FOR_ALL_WINDOWS(wz) {
++		const ViewPort *vp = (*wz)->viewport;
++		if (vp != NULL) {
+ 			assert(vp->width != 0);
+ 			MarkViewportDirty(vp, left, top, right, bottom);
+ 		}
+-	} while (vp++,act>>=1);
++	}
+ }
+ 
+ void MarkTileDirtyByTile(TileIndex tile)
+diff -Naur windows_split/src/viewport_func.h windows_split2/src/viewport_func.h
+--- windows_split/src/viewport_func.h	2008-03-27 21:30:01.000000000 +0100
++++ windows_split2/src/viewport_func.h	2008-04-05 12:39:05.000000000 +0200
+@@ -12,8 +12,6 @@
+ 
+ void SetSelectionRed(bool);
+ 
+-void InitViewports();
+-void DeleteWindowViewport(Window *w);
+ void AssignWindowViewport(Window *w, int x, int y, int width, int height, uint32 follow_flags, ZoomLevel zoom);
+ ViewPort *IsPtInWindowViewport(const Window *w, int x, int y);
+ Point GetTileBelowCursor();
+diff -Naur windows_split/src/viewport_type.h windows_split2/src/viewport_type.h
+--- windows_split/src/viewport_type.h	2008-04-04 21:18:03.000000000 +0200
++++ windows_split2/src/viewport_type.h	2008-04-05 10:36:30.000000000 +0200
+@@ -11,7 +11,7 @@
+ #include "tile_type.h"
+ 
+ /**
+- * Data structure for viewport, a continuously moving part of the world
++ * Data structure for viewport, display of a part of the world
+  */
+ struct ViewPort {
+ 	int left,top;                       ///< screen coordinates for the viewport
+@@ -61,7 +61,9 @@
+ 	VHM_RAIL    = 5, ///< rail pieces
+ };
+ 
+-/* highlighting draw styles */
++/**
++ * highlighting draw styles
++ */
+ enum HighLightStyle {
+ 	HT_NONE   = 0x00,
+ 	HT_RECT   = 0x80,
+diff -Naur windows_split/src/window.cpp windows_split2/src/window.cpp
+--- windows_split/src/window.cpp	2008-04-03 20:40:09.000000000 +0200
++++ windows_split2/src/window.cpp	2008-04-06 10:56:33.000000000 +0200
+@@ -25,6 +25,113 @@
+ 
+ #include "table/sprites.h"
+ 
++/*
++ * BaseWindow class methods
++ */
++
++
++BaseWindow::BaseWindow(WindowClass p_cls, WindowNumber p_window_number,
++			int p_left, int p_top, int p_min_width, int p_min_height)
++{
++	window_class = p_cls;
++	window_number = p_window_number;
++
++	left = p_left;
++	top = p_top;
++	width = p_min_width;
++	height = p_min_height;
++	resize.width = p_min_width;
++	resize.height = p_min_height;
++	resize.step_width = 1;
++	resize.step_height = 1;
++
++	desc_flags = 0;
++	viewport = NULL;
++	parent = NULL;
++}
++
++BaseWindow::~BaseWindow()
++{
++	SetViewport(NULL);  // Remove any viewport
++	parent = NULL;
++}
++
++/**
++ * Make the given viewport available for the viewport code. Caller should initialize the
++ * data structure before this call by using InitializeViewport().
++ * Disable the viewport by calling this function with \c NULL .
++ *
++ * @param vp New viewport to display by this window (\c NULL means display no viewport)
++ */
++void BaseWindow::SetViewport(ViewPort *vp)
++{
++	if (viewport != NULL) {
++		viewport->width = 0;  // Ensure old viewport is not used any more
++	}
++	viewport = vp;
++}
++
++/*
++ * Window class methods
++ */
++
++Window::Window(WindowClass p_cls, uint16 p_flags4, byte p_caption_color,
++		int p_left, int p_top, int p_min_width, int p_min_height,
++		WindowProc *p_proc, const Widget *p_widget, WindowNumber p_window_number)
++	: BaseWindow(p_cls, p_window_number, p_left, p_top, p_min_width, p_min_height)
++{
++	flags4 = p_flags4;
++	caption_color = p_caption_color;
++	wndproc = p_proc;
++
++	hscroll.count = 0;
++	hscroll.cap = 0;
++	hscroll.pos = 0;
++
++	vscroll.count = 0;
++	vscroll.cap = 0;
++	vscroll.pos = 0;
++
++	vscroll2.count = 0;
++	vscroll2.cap = 0;
++	vscroll2.pos = 0;
++
++	original_widget = p_widget;
++	if (p_widget != NULL) {
++		uint index = 1;
++		const Widget *wi;
++
++		for (wi = p_widget; wi->type != WWT_LAST; wi++) index++;
++
++		widget = NULL;
++		widget = ReallocT(widget, index);
++		memcpy(widget, p_widget, sizeof(widget[0]) * index);
++		widget_count = index - 1;
++	} else {
++		widget = NULL;
++		widget_count = 0;
++	}
++
++	message.msg = 0;
++	message.wparam = 0;
++	message.lparam = 0;
++	for (int i = 0; i < WINDOW_CUSTOM_SIZE; i++) {
++		custom[i] = 0;
++	}
++}
++
++
++Window::~Window()
++{
++	SetViewport(NULL);  // Remove viewport
++
++	/* Release widgets */
++	if (widget != NULL) {
++		free(widget); widget = NULL;
++	}
++	widget_count = 0;
++}
++
+ 
+ void CDECL Window::SetWidgetsDisabledState(bool disab_stat, int widgets, ...)
+ {
+@@ -240,28 +347,6 @@
+ 	return (w->original_widget == widget);
+ }
+ 
+-/** Copies 'widget' to 'w->widget' to allow for resizable windows
+- * @param w Window on which to attach the widget array
+- * @param widget pointer of widget array to fill the window with */
+-void AssignWidgetToWindow(Window *w, const Widget *widget)
+-{
+-	w->original_widget = widget;
+-
+-	if (widget != NULL) {
+-		uint index = 1;
+-		const Widget *wi;
+-
+-		for (wi = widget; wi->type != WWT_LAST; wi++) index++;
+-
+-		w->widget = ReallocT(w->widget, index);
+-		memcpy(w->widget, widget, sizeof(*w->widget) * index);
+-		w->widget_count = index - 1;
+-	} else {
+-		w->widget = NULL;
+-		w->widget_count = 0;
+-	}
+-}
+-
+ 
+ /**
+  * Resize the window.
+diff -Naur windows_split/src/window_gui.h windows_split2/src/window_gui.h
+--- windows_split/src/window_gui.h	2008-04-06 09:04:26.000000000 +0200
++++ windows_split2/src/window_gui.h	2008-04-06 11:36:49.000000000 +0200
+@@ -287,10 +287,17 @@
+ };
+ 
+ /**
+- * Data structure for an opened window
++ * Base class for an opened window
+  */
+-struct Window {
+-	uint16 flags4;              ///< Window flags, @see WindowFlags
++class BaseWindow
++{
++public:
++	BaseWindow(WindowClass p_cls, WindowNumber p_window_number,
++			int p_left, int p_top, int p_min_width, int p_min_height);
++	virtual ~BaseWindow();
++
++	void SetViewport(ViewPort *vp);
++
+ 	WindowClass window_class;   ///< Window class
+ 	WindowNumber window_number; ///< Window number within the window class
+ 
+@@ -298,25 +305,47 @@
+ 	    top,    ///< y position of top edge of the window
+ 	    width,  ///< width of the window (number of pixels to the right in x direction)
+ 	    height; ///< Height of the window (number of pixels down in y direction)
++	ResizeInfo resize;  ///< Resize information
++
++	uint32 desc_flags;  ///< Window/widgets default flags setting, @see WindowDefaultFlag
++	ViewPort *viewport; ///< Pointer to viewport, if present (structure is part of derived class)
++	Window *parent;     ///< Parent window
++};
++
++/**
++ * Data structure for an opened window
++ */
++class Window: public BaseWindow
++{
++public:
++	Window(WindowClass p_cls, uint16 p_flags4, byte p_caption_color,
++		int p_left, int p_top, int p_min_width, int p_min_height,
++		WindowProc *p_proc, const Widget *p_widget, WindowNumber p_window_number);
++	/* virtual */ ~Window();
++
++	uint16 flags4;              ///< Window flags, @see WindowFlags
+ 
+ 	Scrollbar hscroll,  ///< Horizontal scroll bar
+ 	          vscroll,  ///< First vertical scroll bar
+ 	          vscroll2; ///< Second vertical scroll bar
+-	ResizeInfo resize;  ///< Resize information
+ 
+ 	byte caption_color; ///< Background color of the window caption, contains PlayerID
+ 
+ 	WindowProc *wndproc; ///< Event handler function for the window
+-	ViewPort *viewport;  ///< Pointer to viewport, if present
+ 	const Widget *original_widget; ///< Original widget layout, copied from WindowDesc
+ 	Widget *widget;     ///< Widgets of the window
+ 	uint widget_count;  ///< Number of widgets of the window
+-	uint32 desc_flags;  ///< Window/widgets default flags setting, @see WindowDefaultFlag
+ 
+ 	WindowMessage message; ///< Buffer for storing received messages (for communication between different window events)
+-	Window *parent;     ///< Parent window
+ 	byte custom[WINDOW_CUSTOM_SIZE]; ///< Additional data depending on window type
+ 
++	/** Viewport data of the window.
++	 * Do not access directly, instead use BaseWindow::viewport.
++	 * @see BaseWindow::SetViewport()
++	 */
++	ViewPort vp_data;
++
++
+ 	void HandleButtonClick(byte widget);
+ 
+ 	void SetWidgetDisabledState(byte widget_index, bool disab_stat);
+@@ -542,7 +571,6 @@
+ 
+ bool IsVitalWindow(const Window *w);
+ bool IsWindowOfPrototype(const Window *w, const Widget *widget);
+-void AssignWidgetToWindow(Window *w, const Widget *widget);
+ void ResizeWindow(Window *w, int x, int y);
+ int GetWidgetFromPos(const Window *w, int x, int y);
+ void DrawWindowWidgets(const Window *w);
+diff -Naur windows_split/src/window_list.cpp windows_split2/src/window_list.cpp
+--- windows_split/src/window_list.cpp	2008-04-06 09:05:08.000000000 +0200
++++ windows_split2/src/window_list.cpp	2008-04-06 10:44:44.000000000 +0200
+@@ -29,9 +29,9 @@
+ 
+ static Point _drag_delta; //< delta between mouse cursor and upper left corner of dragged window
+ 
+-static Window _windows[MAX_NUMBER_OF_WINDOWS]; // @todo: Move this to window.cpp
+-Window *_z_windows[lengthof(_windows)]; ///< Window stack, lowest window (behind all others) is at index 0
++Window *_z_windows[MAX_NUMBER_OF_WINDOWS]; ///< Window stack, lowest window (behind all others) is at index 0
+ Window **_last_z_window; ///< always points to the next free space in the z-array
++static Window *_mouseover_last_w = NULL; ///< Pointer to window last called with MOUSEOVER event
+ 
+ Point _cursorpos_drag_start;
+ 
+@@ -214,13 +214,7 @@
+ 	}
+ 
+ 	CallWindowEventNP(w, WE_DESTROY);
+-	if (w->viewport != NULL) DeleteWindowViewport(w);
+-
+-	SetWindowDirty(w);
+-	free(w->widget);
+-	w->widget = NULL;
+-	w->widget_count = 0;
+-	w->parent = NULL;
++	SetWindowDirty(w); // Ensure that the area covered by the deleted window will be redrawn
+ 
+ 	/* Find the window in the z-array, and effectively remove it
+ 	 * by moving all windows after it one to the left */
+@@ -228,6 +222,11 @@
+ 	if (wz == NULL) return;
+ 	memmove(wz, wz + 1, (byte*)_last_z_window - (byte*)wz);
+ 	_last_z_window--;
++
++	if (w == _mouseover_last_w) {
++		_mouseover_last_w = NULL; // Don't let HandleMouseOver() call this window
++	}
++	delete w;
+ }
+ 
+ /**
+@@ -425,32 +424,6 @@
+ }
+ 
+ /**
+- * Find a free window in the global _window Window data structures.
+- * @return A window data structure not currently in use, or \c NULL if all windows are being used
+- */
+-static Window *FindFreeWindow()
+-{
+-	Window *w;
+-
+-	for (w = _windows; w < endof(_windows); w++) {
+-		Window* const *wz;
+-		bool window_in_use = false;
+-
+-		FOR_ALL_WINDOWS(wz) {
+-			if (*wz == w) {
+-				window_in_use = true;
+-				break;
+-			}
+-		}
+-
+-		if (!window_in_use) return w;
+-	}
+-
+-	assert(_last_z_window == endof(_z_windows));
+-	return NULL;
+-}
+-
+-/**
+  * Open a new window.
+  * This function is called from AllocateWindow() or AllocateWindowDesc()
+  * See descriptions for those functions for usage
+@@ -471,31 +444,17 @@
+ static Window *LocalAllocateWindow(int x, int y, int min_width, int min_height, int def_width, int def_height,
+ 				WindowProc *proc, WindowClass cls, const Widget *widget, int window_number, void *data)
+ {
+-	Window *w = FindFreeWindow();
++	assert(_last_z_window >= _z_windows && _last_z_window <= endof(_z_windows)); // _last_z_window sanity check
+ 
+-	/* We have run out of windows, close one and use that as the place for our new one */
+-	if (w == NULL) {
+-		w = FindDeletableWindow();
++	/* We have too many open windows, close one first */
++	if (_last_z_window == endof(_z_windows)) {
++		Window *w = FindDeletableWindow();
+ 		if (w == NULL) w = ForceFindDeletableWindow();
+ 		DeleteWindow(w);
+ 	}
+ 
+-	/* Set up window properties */
+-	memset(w, 0, sizeof(*w));
+-	w->window_class = cls;
+-	w->flags4 = WF_WHITE_BORDER_MASK; // just opened windows have a white border
+-	w->caption_color = 0xFF;
+-	w->left = x;
+-	w->top = y;
+-	w->width = min_width;
+-	w->height = min_height;
+-	w->wndproc = proc;
+-	AssignWidgetToWindow(w, widget);
+-	w->resize.width = min_width;
+-	w->resize.height = min_height;
+-	w->resize.step_width = 1;
+-	w->resize.step_height = 1;
+-	w->window_number = window_number;
++	Window *w = new Window(cls, WF_WHITE_BORDER_MASK, 0xff,
++				x, y, min_width, min_height, proc, widget, window_number);
+ 
+ 	{
+ 		Window **wz = _last_z_window;
+@@ -833,9 +792,8 @@
+ {
+ 	IConsoleClose();
+ 
+-	memset(&_windows, 0, sizeof(_windows));
+ 	_last_z_window = _z_windows;
+-	InitViewports();
++	_mouseover_last_w = NULL;
+ 	_no_scroll = 0;
+ }
+ 
+@@ -977,18 +935,21 @@
+ {
+ 	Window *w;
+ 	WindowEvent e;
+-	static Window *last_w = NULL;
+ 
+ 	w = FindWindowFromPt(_cursor.pos.x, _cursor.pos.y);
+ 
+-	/* We changed window, put a MOUSEOVER event to the last window */
+-	if (last_w != NULL && last_w != w) {
++	/* We changed window, put a MOUSEOVER event to the last window.
++	 * There is one minor snag, the Window data structure may have disappeared due to a call to delete
++	 * To prevent this from crashing the application, _mouseover_last_w is reset with each delete
++	 * if the window deleted is equal to _mouseover_last_w in DeleteWindow()
++	 */
++	if (_mouseover_last_w != NULL && _mouseover_last_w != w) {
+ 		e.event = WE_MOUSEOVER;
+ 		e.we.mouseover.pt.x = -1;
+ 		e.we.mouseover.pt.y = -1;
+-		if (last_w->wndproc) last_w->wndproc(last_w, &e);
++		if (_mouseover_last_w->wndproc) _mouseover_last_w->wndproc(_mouseover_last_w, &e);
+ 	}
+-	last_w = w;
++	_mouseover_last_w = w;
+ 
+ 	if (w != NULL) {
+ 		/* send an event in client coordinates. */

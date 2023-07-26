@@ -1,0 +1,913 @@
+diff -r 258ca04a6c17 src/widget.cpp
+--- a/src/widget.cpp	Fri Mar 06 21:07:01 2009 +0000
++++ b/src/widget.cpp	Sat Mar 07 18:33:53 2009 +0100
+@@ -623,3 +623,765 @@
+ 	int offset = this->IsWidgetLowered(widget) ? 1 : 0;
+ 	DoDrawString(state == SBS_DOWN ? DOWNARROW : UPARROW, this->widget[widget].right - 11 + offset, this->widget[widget].top + 1 + offset, TC_BLACK);
+ }
++
++
++/* == Nested widgets == */
++
++/**
++ * Base class constructor.
++ * @param tp Nested widget type.
++ */
++NWidgetBase::NWidgetBase(byte tp): ZeroedMemoryAllocator()
++{
++	this->type = tp;
++	this->min_x = 0;
++	this->min_y = 0;
++	this->fill_x = false;
++	this->fill_y = false;
++	this->resize_x = 0;
++	this->resize_y = 0;
++	this->pos_x = 0;
++	this->pos_y = 0;
++
++	this->next = NULL;
++	this->prev = NULL;
++}
++
++NWidgetBase::~NWidgetBase()
++{
++	/* ~NWidgetContainer() takes care of #next data member. */
++}
++
++/**
++ * @fn int NWidgetBase::ComputeMinimalSize()
++ * @brief Compute minimal size needed by the widget.
++ *
++ * The minimal size of a widget is the smallest size that a widget needs to
++ * display itself properly.
++ * In addition, filling and resizing of the widget are computed.
++ * @return Biggest index in the widget array of all child widgets.
++ *
++ * @note After the computation, the results can be queried by accessing the data members of the widget.
++ */
++
++/**
++ * @fn void NWidgetBase::AssignPosition(int x, int y, int width, int height, bool allow_rx, bool allow_ry, bool rtl)
++ * @brief Assign a position to the widget.
++ * @param x        Horizontal offset of the widget relative to the left edge of the window.
++ * @param y        Vertical offset of the widget relative to the top edge of the window.
++ * @param width    Width allocated to the widget.
++ * @param height   Height allocated to the widget.
++ * @param allow_rx Horizontal resizing is allowed.
++ * @param allow_ry Vertical resizing is allowed.
++ * @param rtl      Adapt for right-to-left languages (position contents of horizontal containers backwards).
++ */
++
++/**
++ * @fn void NWidgetBase::StoreWidgets(Widget *widgets, int length, bool left_moving, bool top_moving, bool rtl)
++ * @brief Store all child widgets with a valid index into the widget array.
++ * @param widgets     Widget array to store the nested widgets in.
++ * @param length      Length of the array.
++ * @param left_moving Left edge of the widget may move due to resizing (right edge if \a rtl).
++ * @param top_moving  Top edge of the widget may move due to reisizing.
++ * @param rtl         Adapt for right-to-left languages (position contents of horizontal containers backwards).
++ *
++ * @note When storing a nested widget, the type in the \a widgets array should be #WWT_LAST.
++ *       This is used to detect double widget allocations as well as holes in the widget array.
++ */
++
++/**
++ * Constructor for resizable nested widgets.
++ * @param tp Nested widget type.
++ * @param fx Allow horizontal filling from initial size.
++ * @param fy Allow vertical filling from initial size.
++ */
++NWidgetResizeBase::NWidgetResizeBase(byte tp, bool dfx, bool dfy): NWidgetBase(tp)
++{
++	this->min_x = 0;
++	this->min_y = 0;
++	this->fill_x = dfx;
++	this->fill_y = dfy;
++	this->resize_x = 0;
++	this->resize_y = 0;
++	this->pos_x = 0;
++	this->pos_y = 0;
++}
++
++/**
++ * Set minimal size of the widget.
++ * @param msX Horizontal minimal size of the widget (\c -1 means 'not set').
++ * @param msY Vertical minimal size of the widget (\c -1 means 'not set').
++ */
++void NWidgetResizeBase::SetMinimalSize(int mx, int my)
++{
++	assert(mx >= 0 && my >= 0);
++	this->min_x = mx;
++	this->min_y = my;
++}
++
++/**
++ * Set the filling of the widget from initial size.
++ * @param fx Allow horizontal filling from initial size.
++ * @param fy Allow vertical filling from initial size.
++ */
++void NWidgetResizeBase::SetFill(bool fx, bool fy)
++{
++	this->fill_x = fx;
++	this->fill_y = fy;
++}
++
++/**
++ * Set resize step of the widget.
++ * @param rx Resize step in horizontal direction.
++ * @param ry Resize step in vertical direction.
++ */
++void NWidgetResizeBase::SetResize(int rx, int ry)
++{
++	assert(rx >= 0 && ry >= 0);
++	this->resize_x = rx;
++	this->resize_y = ry;
++}
++
++void NWidgetResizeBase::AssignPosition(int x, int y, int given_width, int given_height, bool allow_rx, bool allow_ry, bool rtl)
++{
++	assert(x >= 0 && y >= 0);
++	assert(given_width >= 0 && given_height >= 0);
++	this->pos_x = x;
++	this->pos_y = y;
++	this->min_x = given_width;
++	this->min_y = given_height;
++	if (!allow_rx) this->resize_x = 0;
++	if (!allow_ry) this->resize_y = 0;
++}
++
++/**
++ * Initialization of a 'real' widget.
++ * @param tp Type of the widget.
++ * @param col Colour of the widget.
++ * @param dfx Default horizontal filling.
++ * @param dfy Default vertical filling.
++ * @param idx Index into the widget array.
++ */
++NWidgetCore::NWidgetCore(byte tp, Colours col, bool dfx, bool dfy, uint16 data, StringID tip): NWidgetResizeBase(tp, dfx, dfy)
++{
++	this->colour = col;
++	this->index = -1;
++	this->widget_data = data;
++	this->tool_tip = tip;
++}
++
++int NWidgetCore::ComputeMinimalSize()
++{
++	/* All data is already at the right place. */
++	return this->index;
++}
++
++
++void NWidgetCore::StoreWidgets(Widget *widgets, int length, bool left_moving, bool top_moving, bool rtl)
++{
++	if (this->index >= 0) {
++		assert(this->index < length);
++		Widget *w = widgets + this->index;
++		assert(w->type == WWT_LAST);
++
++		DisplayFlags flags = RESIZE_NONE; // resize flags.
++		/* Compute vertical resizing. */
++		if (this->resize_y == 0) {
++			flags |= top_moving ? RESIZE_TB : RESIZE_NONE;
++		} else {
++			flags |= top_moving ? RESIZE_TB : RESIZE_BOTTOM; // Only 1 widget can resize in the widget array.
++		}
++
++		/* Compute horizontal resizing. */
++		if (this->resize_x == 0) {
++			flags |= left_moving ? RESIZE_LR : RESIZE_NONE;
++		} else {
++			flags |= left_moving ? RESIZE_LR : RESIZE_RIGHT; // Only 1 widget can resize in the widget array.
++		}
++
++		/* Copy nested widget data into its widget array entry. */
++		w->type = (WidgetType)(this->type); // XXX We have made some extensions, so we used a different type
++		w->display_flags = flags;
++		w->colour = this->colour;
++		w->left = this->pos_x;
++		w->right = this->pos_x + this->min_x - 1;
++		w->top = this->pos_y;
++		w->bottom = this->pos_y + this->min_y - 1;
++		w->data = this->widget_data;
++		w->tooltips = this->tool_tip;
++	}
++}
++
++/**
++ * Set index of the nested widget in the widget array.
++ * @param index Index to use.
++ * @return The nested widget with set index.
++ */
++void NWidgetCore::SetIndex(int idx)
++{
++	assert(idx >= 0);
++	this->index = idx;
++}
++
++/**
++ * Set data and tool tip of the nested widget.
++ * @param data Data to use.
++ * @param tip  Tool tip string to use.
++ */
++void NWidgetCore::SetDataTip(uint16 data, StringID tip)
++{
++	this->widget_data = data;
++	this->tool_tip = tip;
++}
++
++/*
++ * Smallest common multiple is computed by splitting each value into its
++ * prime numbers, and counting the maximal number of occurences of each prime
++ * in each value. The multiplication of max-count times the prime for each
++ * occurring prime is the smallest common multiple.
++ *
++ * #SplitInPrimes() decodes a value into its primes.
++ * #SmallestCommonMultiplier() computes the resulting smallest common multiplier.
++ */
++
++/** List of small primes used to compute smallest common multiple. */
++static const byte _primes[] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29};
++
++/**
++ * Split value \a num (bigger than 0) in prime numbers (using the #_primes
++ * array), and keep track of the maximal count of each prime in the \a maxcount array.
++ * @param num      Number to split into primes.
++ * @param maxcount For each prime in #_primes, keep track of how often it
++ *                 was used in all values encountered so far.
++ */
++static void SplitInPrimes(int num, uint maxcount[lengthof(_primes)])
++{
++	for (uint idx = 0; idx < lengthof(_primes) && num > 1; idx++) {
++		uint cnt = 0;
++		while (num > 1 && (num % _primes[idx]) == 0) {
++			cnt++;
++			num /= _primes[idx];
++		}
++		if (maxcount[idx] < cnt) maxcount[idx] = cnt;
++	}
++	assert(num == 1); // otherwise the list _primes is not long enough
++}
++
++/**
++ * Compute the smallest common multiple.
++ * @param maxcount Array of prime counts.
++ * @return Smallest common multiple of all values previously fed to #SplitInPrimes.
++ */
++static int SmallestCommonMultiple(uint maxcount[lengthof(_primes)])
++{
++	uint val = 1;
++	for (uint idx = 0; idx < lengthof(_primes); idx++) {
++		if (maxcount[idx] > 0) val *= _primes[idx] * maxcount[idx];
++	}
++	assert(val <= 0xffff);
++	return (uint16)(val & 0xffff);
++}
++
++/**
++ * Constructor container baseclass.
++ * @param tp Type of the container.
++ */
++NWidgetContainer::NWidgetContainer(byte tp): NWidgetBase(tp)
++{
++	this->head = NULL;
++	this->tail = NULL;
++}
++
++NWidgetContainer::~NWidgetContainer()
++{
++	NWidgetBase *wid;
++
++	while (this->head != NULL) {
++		wid = this->head->next;
++		delete this->head;
++		this->head = wid;
++	}
++	this->tail = NULL;
++}
++
++/**
++ * Append widget \a wid to container.
++ * @param wid Widget to append.
++ */
++void NWidgetContainer::Add(NWidgetBase *wid)
++{
++	assert(wid->next == NULL && wid->prev == NULL);
++
++	if (this->head == NULL) {
++		this->head = wid;
++		this->tail = wid;
++	} else {
++		assert(this->tail != NULL);
++		assert(this->tail->next == NULL);
++
++		this->tail->next = wid;
++		wid->prev = this->tail;
++		this->tail = wid;
++	}
++}
++
++NWidgetHorizontal::NWidgetHorizontal(): NWidgetContainer(NWID_HORIZONTAL)
++{
++}
++
++int NWidgetHorizontal::ComputeMinimalSize()
++{
++	int biggest_index = -1;
++
++	uint maxcount[lengthof(_primes)];
++	for (uint i = 0; i < lengthof(_primes); i++) {
++		maxcount[i] = 0;
++	}
++	this->min_x = 0; // Sum of minimal size of all childs.
++	this->min_y = 0; // Biggest child.
++	this->fill_x = false; // true if at least one child allows fill_x.
++	this->fill_y = true; // true if all childs allow fill_y.
++	this->resize_x = 0; // smallest non-zero child widget resize step.
++
++	bool allow_vertical_resize = true; // Possible when all childs allow it.
++	for (NWidgetBase *child_wid = this->head; child_wid; child_wid = child_wid->next) {
++		int idx = child_wid->ComputeMinimalSize();
++		biggest_index = max(biggest_index, idx);
++
++		this->min_x += child_wid->min_x;
++		this->min_y = max(this->min_y, child_wid->min_y);
++		this->fill_x |= child_wid->fill_x;
++		this->fill_y &= child_wid->fill_y;
++
++		if (child_wid->resize_x > 0) {
++			if (this->resize_x == 0 || this->resize_x > child_wid->resize_x) this->resize_x = child_wid->resize_x;
++		}
++
++		if (allow_vertical_resize) {
++			if (child_wid->resize_y > 0) {
++				SplitInPrimes(child_wid->resize_y, maxcount);
++			} else {
++				allow_vertical_resize = false;
++			}
++		}
++	}
++
++	/* smallest common resize step */
++	if (allow_vertical_resize) {
++		this->resize_y = SmallestCommonMultiple(maxcount);
++	} else {
++		this->resize_y = 0;
++	}
++
++	return biggest_index;
++}
++
++void NWidgetHorizontal::AssignPosition(int x, int y, int given_width, int given_height, bool allow_rx, bool allow_ry, bool rtl)
++{
++	NWidgetBase *child_wid;
++
++	assert(x >= 0 && y >= 0);
++	assert(given_width >= 0 && given_height >= 0);
++	this->pos_x = x;
++	this->pos_y = y;
++	this->min_x = given_width;
++	this->min_y = given_height;
++	if (!allow_rx) this->resize_x = 0;
++	if (!allow_ry) this->resize_y = 0;
++
++	/* count number of childs that would like a piece of the pie.
++	 */
++	int num_changing_childs = 0; // Number of childs that can change size.
++	for (child_wid = this->head; child_wid; child_wid = child_wid->next) {
++		if (child_wid->fill_x) num_changing_childs++;
++	}
++
++	/* Fill and position the child widgets.
++	 */
++	int additional_length = given_width - this->min_x; // Additional width given to us.
++	int position = 0; // Place to put next child relative to origin of the container.
++
++	allow_rx = (this->resize_x > 0);
++	child_wid = rtl ? this->tail : this->head;
++	while (child_wid != NULL) {
++
++		/* Decide about vertical filling of the child. */
++		int child_height; // Height of the child widget.
++		int child_pos_y; // Vertical position of child relative to the top of the container.
++		if (child_wid->fill_y) {
++			child_height = given_height;
++			child_pos_y = 0;
++		} else {
++			child_height = child_wid->min_y;
++			child_pos_y = (given_height - child_height) / 2;
++		}
++
++		/* Decide about horizontal filling of the child. */
++		int child_width; // Width of the child widget.
++		if (child_wid->fill_x && num_changing_childs > 0) {
++			/* Hand out a piece of the pie while compensating for rounding errors. */
++			int increment = additional_length / num_changing_childs;
++			additional_length -= increment;
++			num_changing_childs--;
++
++			child_width = child_wid->min_x + increment;
++		} else {
++			child_width = child_wid->min_x;
++		}
++
++		child_wid->AssignPosition(x + position, y + child_pos_y, child_width, child_height, allow_rx, (this->resize_y > 0), rtl);
++		position += child_width;
++		if (child_wid->resize_x > 0) allow_rx = false; // Widget array allows only one child resizing
++
++		child_wid = rtl ? child_wid->prev : child_wid->next;
++	}
++}
++
++void NWidgetHorizontal::StoreWidgets(Widget *widgets, int length, bool left_moving, bool top_moving, bool rtl)
++{
++	NWidgetBase *child_wid = rtl ? this->tail : this->head;
++	while (child_wid != NULL) {
++		child_wid->StoreWidgets(widgets, length, left_moving, top_moving, rtl);
++		left_moving |= (child_wid->resize_x > 0);
++
++		child_wid = rtl ? child_wid->prev : child_wid-> next;
++	}
++}
++
++NWidgetVertical::NWidgetVertical(): NWidgetContainer(NWID_VERTICAL)
++{
++}
++
++int NWidgetVertical::ComputeMinimalSize()
++{
++	int biggest_index = -1;
++	uint maxcount[lengthof(_primes)];
++	for (uint i = 0; i < lengthof(_primes); i++) {
++		maxcount[i] = 0;
++	}
++	this->min_x = 0; // Biggest child.
++	this->min_y = 0; // Sum of minimal size of all childs.
++	this->fill_x = true; // true if all childs allow fill_x.
++	this->fill_y = false; // true if at least one child allows fill_y.
++	this->resize_y = 0; // smallest non-zero child widget resize step.
++
++	bool allow_horizontal_resize = true; // Possible when all childs allow it.
++	for (NWidgetBase *child_wid = this->head; child_wid; child_wid = child_wid->next) {
++		int idx = child_wid->ComputeMinimalSize();
++		biggest_index = max(biggest_index, idx);
++
++		this->min_y += child_wid->min_y;
++		this->min_x = max(this->min_x, child_wid->min_x);
++		this->fill_y |= child_wid->fill_y;
++		this->fill_x &= child_wid->fill_x;
++
++		if (child_wid->resize_y > 0) {
++			if (this->resize_y == 0 || this->resize_y > child_wid->resize_y) this->resize_y = child_wid->resize_y;
++		}
++
++		if (allow_horizontal_resize) {
++			if (child_wid->resize_x > 0) {
++				SplitInPrimes(child_wid->resize_x, maxcount);
++			} else {
++				allow_horizontal_resize = false;
++			}
++		}
++	}
++
++	/* smallest common resize step */
++	if (allow_horizontal_resize) {
++		this->resize_x = SmallestCommonMultiple(maxcount);
++	} else {
++		this->resize_x = 0;
++	}
++
++	return biggest_index;
++}
++
++void NWidgetVertical::AssignPosition(int x, int y, int given_width, int given_height, bool allow_rx, bool allow_ry, bool rtl)
++{
++	NWidgetBase *child_wid;
++
++	assert(x >= 0 && y >= 0);
++	assert(given_width >= 0 && given_height >= 0);
++	this->pos_x = x;
++	this->pos_y = y;
++	this->min_x = given_width;
++	this->min_y = given_height;
++	if (!allow_rx) this->resize_x = 0;
++	if (!allow_ry) this->resize_y = 0;
++
++	/* count number of childs that would like a piece of the pie.
++	 */
++	int num_changing_childs = 0; // Number of childs that can change size.
++	for (child_wid = this->head; child_wid; child_wid = child_wid->next) {
++		if (child_wid->fill_x) num_changing_childs++;
++	}
++
++	/* Fill and position the child widgets.
++	 */
++	int additional_length = given_height - this->min_y; // Additional width given to us.
++	int position = 0; // Place to put next child relative to origin of the container.
++
++	allow_ry = (this->resize_y > 0);
++	for (child_wid = this->head; child_wid; child_wid = child_wid->next) {
++
++		/* Decide about horizontal filling of the child. */
++		int child_width; // Width of the child widget.
++		int child_pos_x; // Horizontal position of child relative to the left of the container.
++		if (child_wid->fill_x) {
++			child_width = given_width;
++			child_pos_x = 0;
++		} else {
++			child_width = child_wid->min_x;
++			child_pos_x = (given_width - child_width) / 2;
++		}
++
++		/* Decide about vertical filling of the child. */
++		int child_height; // Height of the child widget.
++		if (child_wid->fill_y && num_changing_childs > 0) {
++			/* Hand out a piece of the pie while compensating for rounding errors. */
++			int increment = additional_length / num_changing_childs;
++			additional_length -= increment;
++			num_changing_childs--;
++
++			child_height = child_wid->min_y + increment;
++		} else {
++			child_height = child_wid->min_y;
++		}
++
++		child_wid->AssignPosition(x + child_pos_x, y + position, child_width, child_height, (this->resize_x > 0), allow_ry, rtl);
++		position += child_height;
++		if (child_wid->resize_y > 0) allow_ry = false; // Widget array allows only one child resizing
++	}
++}
++
++void NWidgetVertical::StoreWidgets(Widget *widgets, int length, bool left_moving, bool top_moving, bool rtl)
++{
++	for (NWidgetBase *child_wid = this->head; child_wid; child_wid = child_wid->next) {
++		child_wid->StoreWidgets(widgets, length, left_moving, top_moving, rtl);
++		top_moving |= (child_wid->resize_y > 0);
++	}
++}
++
++/**
++ * Generic spacer widget.
++ * @param length Horizontal size of the spacer widget.
++ * @param height Vertical size of the spacer widget.
++ */
++NWidgetSpacer::NWidgetSpacer(int length, int height): NWidgetResizeBase(NWID_SPACER, false, false)
++{
++	assert(NWID_SPACER <= (int)WWT_MASK); // Make sure we don't walk out of the allocated range for widgets
++
++	this->SetMinimalSize(length, height);
++	this->SetResize(0, 0);
++}
++
++int NWidgetSpacer::ComputeMinimalSize()
++{
++	/* No further computation needed. */
++	return -1;
++}
++
++void NWidgetSpacer::StoreWidgets(Widget *widgets, int length, bool left_moving, bool top_moving, bool rtl)
++{
++	/* Spacer widgets are never stored in the widget array. */
++}
++
++/**
++ * Constructor parent nested widgets.
++ * @param tp     Type of parent widget.
++ * @param colour Colour of the parent widget.
++ * @param index  Index in the widget array used by the window system.
++ * @param chld   Child container widget (if supplied). If not supplied, a
++ *               vertical container will be inserted while adding the first
++ *               child widget.
++ */
++NWidgetBackground::NWidgetBackground(byte tp, Colours colour, int index, NWidgetContainer *chld)
++		: NWidgetCore(tp, colour, true, true, 0x0, STR_NULL)
++{
++	this->SetIndex(index);
++	assert(tp == WWT_PANEL || tp == WWT_INSET || tp == WWT_FRAME);
++	assert(index >= 0);
++	this->child = chld;
++}
++
++NWidgetBackground::~NWidgetBackground()
++{
++	if (this->child) delete this->child;
++}
++
++/**
++ * Add a child to the parent.
++ *
++ * A parent behaves as a vertical container, you can add several childs to it,
++ * and they are put underneath each other.
++ */
++void NWidgetBackground::Add(NWidgetBase *nwid)
++{
++	if (this->child == NULL) {
++		this->child = new NWidgetVertical();
++	}
++	this->child->Add(nwid);
++}
++
++int NWidgetBackground::ComputeMinimalSize()
++{
++	int biggest_index = this->index;
++	if (this->child) {
++		int idx = this->child->ComputeMinimalSize();
++		biggest_index = max(biggest_index, idx);
++
++		this->min_x = this->child->min_x;
++		this->min_y = this->child->min_y;
++		this->fill_x = this->child->fill_x;
++		this->fill_y = this->child->fill_y;
++		this->resize_x = this->child->resize_x;
++		this->resize_y = this->child->resize_y;
++	}
++	/* Otherwise, the program should have already set the above values. */
++
++	return biggest_index;
++}
++
++void NWidgetBackground::AssignPosition(int x, int y, int given_width, int given_height, bool allow_rx, bool allow_ry, bool rtl)
++{
++	assert(x >= 0 && y >= 0);
++	assert(given_width >= 0 && given_height >= 0);
++	this->pos_x = x;
++	this->pos_y = y;
++	this->min_x = given_width;
++	this->min_y = given_height;
++	if (!allow_rx) this->resize_x = 0;
++	if (!allow_ry) this->resize_y = 0;
++
++	if (this->child) this->child->AssignPosition(x, y, given_width, given_height, (this->resize_x > 0), (this->resize_y > 0), rtl);
++}
++
++void NWidgetBackground::StoreWidgets(Widget *widgets, int length, bool left_moving, bool top_moving, bool rtl)
++{
++	NWidgetCore::StoreWidgets(widgets, length, left_moving, top_moving, rtl);
++	if (this->child) this->child->StoreWidgets(widgets, length, left_moving, top_moving, rtl);
++}
++
++/**
++ * Nested leaf widget.
++ * @param tp Type of leaf widget.
++ * @param index Index in the widget array used by the window system.
++ * @param data Data of the widget (by default \c 0).
++ * @param tip  Tooltip of the widget (by default \c 0x0).
++ */
++NWidgetLeaf::NWidgetLeaf(byte tp, Colours colour, int index, uint16 data, StringID tip)
++		: NWidgetCore(tp, colour, true, true, data, tip)
++{
++	this->SetIndex(index);
++	this->SetMinimalSize(0, 0);
++	this->SetResize(0, 0);
++
++	switch (tp) {
++		case WWT_PUSHBTN:
++			this->SetFill(false, false);
++			break;
++
++		case WWT_IMGBTN:
++		case WWT_PUSHIMGBTN:
++		case WWT_IMGBTN_2:
++			this->SetFill(false, false);
++			break;
++
++		case WWT_TEXTBTN:
++		case WWT_PUSHTXTBTN:
++		case WWT_TEXTBTN_2:
++		case WWT_LABEL:
++		case WWT_TEXT:
++		case WWT_MATRIX:
++		case WWT_EDITBOX:
++			this->SetFill(false, false);
++			break;
++
++		case WWT_SCROLLBAR:
++		case WWT_SCROLL2BAR:
++			this->SetFill(false, true);
++			this->SetResize(0, 1);
++			this->min_x = 12;
++			this->SetDataTip(0x0, STR_0190_SCROLL_BAR_SCROLLS_LIST);
++			break;
++
++		case WWT_CAPTION:
++			this->SetFill(true, false);
++			this->SetResize(1, 0);
++			this->min_y = 14;
++			break;
++
++		case WWT_HSCROLLBAR:
++			this->SetFill(true, false);
++			this->SetResize(1, 0);
++			this->min_y = 12;
++			break;
++
++		case WWT_STICKYBOX:
++			this->SetFill(false, false);
++			this->SetMinimalSize(12, 14);
++			this->SetDataTip(STR_NULL, STR_STICKY_BUTTON);
++			break;
++
++		case WWT_RESIZEBOX:
++			this->SetFill(false, false);
++			this->SetMinimalSize(12, 12);
++			this->SetDataTip(STR_NULL, STR_RESIZE_BUTTON);
++			break;
++
++		case WWT_CLOSEBOX:
++			this->SetFill(false, false);
++			this->SetMinimalSize(11, 14);
++			this->SetDataTip(STR_00C5, STR_018B_CLOSE_WINDOW);
++			break;
++
++		case WWT_DROPDOWN:
++		case WWT_DROPDOWNIN:
++			this->SetFill(false, false);
++			this->min_y = 12;
++			break;
++
++		default:
++			NOT_REACHED();
++	}
++}
++
++/**
++ * Intialize nested widget tree and convert to widget array.
++ * @param nwid Nested widget tree.
++ * @param rtl  Direction of the language.
++ * @return Widget array with the converted widgets.
++ * @note Caller should release returned widget array with \c free(widgets).
++ */
++Widget *InitializeNWidgets(NWidgetBase *nwid, bool rtl)
++{
++	int i;
++
++	/* Initialize nested widgets. */
++	int biggest_index = nwid->ComputeMinimalSize();
++	nwid->AssignPosition(0, 0, nwid->min_x, nwid->min_y, (nwid->resize_x > 0), (nwid->resize_y > 0), rtl);
++
++	/* Construct a local widget array and initialize all its types to #WWT_LAST. */
++	Widget *widgets = MallocT<Widget>(biggest_index + 2);
++	for (i = 0; i < biggest_index + 2; i++) {
++		widgets[i].type = WWT_LAST;
++	}
++
++	/* Store nested widgets in the array. */
++	nwid->StoreWidgets(widgets, biggest_index + 1, false, false, rtl);
++
++	/* Check that all widgets are used. */
++	for (i = 0; i < biggest_index + 2; i++) {
++		if (widgets[i].type == WWT_LAST) break;
++	}
++	assert(i == biggest_index + 1);
++
++	/* Fill terminating widget */
++	static const Widget last_widget = {WIDGETS_END};
++	widgets[biggest_index + 1] = last_widget;
++
++	return widgets;
++}
++
+diff -r 258ca04a6c17 src/widget_type.h
+--- a/src/widget_type.h	Fri Mar 06 21:07:01 2009 +0000
++++ b/src/widget_type.h	Sat Mar 07 18:33:53 2009 +0100
+@@ -123,4 +123,140 @@
+ 	StringID tooltips;                ///< Tooltips that are shown when rightclicking on a widget
+ };
+ 
++/**
++ * Types of nested widgets.
++ * @note Extends #WidgetType.
++ */
++enum NewWidgetType {
++	NWID_HORIZONTAL = WWT_LAST + 1, ///< Horizontal container
++	NWID_VERTICAL,          ///< Vertical container
++	NWID_SPACER,            ///< Invisible widget that takes some space
++};
++
++class NWidgetContainer; // Forward declaration.
++
++/**
++ * Baseclass for nested widgets.
++ */
++class NWidgetBase: public ZeroedMemoryAllocator {
++public:
++	NWidgetBase(byte tp);
++	virtual ~NWidgetBase();
++
++	virtual int ComputeMinimalSize() = 0;
++	virtual void AssignPosition(int x, int y, int width, int height, bool allow_rx, bool allow_ry, bool rtl) = 0;
++
++	virtual void StoreWidgets(Widget *widgets, int length, bool left_moving, bool top_moving, bool rtl) = 0;
++
++	byte type;    ///< Type of the widget / nested widget.
++	int min_x;    ///< Minimal horizontal size.
++	int min_y;    ///< Minimal vertical size.
++	bool fill_x;  ///< Allow horizontal filling from initial size.
++	bool fill_y;  ///< Allow vertical filling from initial size.
++	int resize_x; ///< Horizontal resize step (\c 0 means not resizable).
++	int resize_y; ///< Vertical resize step (\c 0 means not resizable).
++
++	int pos_x;    ///< Horizontal position of top-left corner of the widget in the window.
++	int pos_y;    ///< Vertical position of top-left corner of the widget in the window.
++
++	NWidgetBase *next; ///< Pointer to next widget in container. Managed by parent container widget.
++	NWidgetBase *prev; ///< Pointer to previous widget in container. Managed by parent container widget.
++};
++
++/** Base class for a resizable nested widget. */
++class NWidgetResizeBase: public NWidgetBase {
++public:
++	NWidgetResizeBase(byte tp, bool fill_x, bool fill_y);
++
++	void SetMinimalSize(int min_x, int min_y);
++	void SetFill(bool fill_x, bool fill_y);
++	void SetResize(int resize_x, int resize_y);
++
++	void AssignPosition(int x, int y, int given_width, int given_height, bool allow_rx, bool allow_ry, bool rtl);
++};
++
++/** Base class for a 'real' widget. */
++class NWidgetCore: public NWidgetResizeBase {
++public:
++	NWidgetCore(byte tp, Colours colour, bool def_fill_x, bool def_fill_y, uint16 data, StringID tip);
++
++	void SetIndex(int index);
++	void SetDataTip(uint16 data, StringID tip);
++
++	int ComputeMinimalSize();
++	void StoreWidgets(Widget *widgets, int length, bool left_moving, bool top_moving, bool rtl);
++
++	Colours colour;     ///< Colour of this widget.
++	int index;          ///< Index of the nested widget in the widget array of the window (\c -1 means 'not used').
++	uint16 widget_data; ///< Data of the widget.
++	StringID tool_tip;  ///< Tooltip of the widget.
++};
++
++/** Baseclass for container widgets. */
++class NWidgetContainer: public NWidgetBase {
++public:
++	NWidgetContainer(byte tp);
++	~NWidgetContainer();
++
++	void Add(NWidgetBase *wid);
++protected:
++	NWidgetBase *head; ///< Pointer to first widget in container.
++	NWidgetBase *tail; ///< Pointer to last widget in container.
++};
++
++/** Horizontal container. */
++class NWidgetHorizontal: public NWidgetContainer {
++public:
++	NWidgetHorizontal();
++
++	int ComputeMinimalSize();
++	void AssignPosition(int x, int y, int given_width, int given_height, bool allow_rx, bool allow_ry, bool rtl);
++
++	void StoreWidgets(Widget *widgets, int length, bool left_moving, bool top_moving, bool rtl);
++};
++
++/** Vertical container */
++class NWidgetVertical: public NWidgetContainer {
++public:
++	NWidgetVertical();
++
++	int ComputeMinimalSize();
++	void AssignPosition(int x, int y, int given_width, int given_height, bool allow_rx, bool allow_ry, bool rtl);
++
++	void StoreWidgets(Widget *widgets, int length, bool left_moving, bool top_moving, bool rtl);
++};
++
++
++/** Spacer widget */
++class NWidgetSpacer: public NWidgetResizeBase {
++public:
++	NWidgetSpacer(int length, int height);
++
++	int ComputeMinimalSize();
++	void StoreWidgets(Widget *widgets, int length, bool left_moving, bool top_moving, bool rtl);
++};
++
++/** Nested widget with a child. */
++class NWidgetBackground: public NWidgetCore {
++public:
++	NWidgetBackground(byte tp, Colours colour, int index, NWidgetContainer *child = NULL);
++	~NWidgetBackground();
++
++	void Add(NWidgetBase *wid);
++
++	int ComputeMinimalSize();
++	void AssignPosition(int x, int y, int width, int height, bool allow_rx, bool allow_ry, bool rtl);
++
++	void StoreWidgets(Widget *widgets, int length, bool left_moving, bool top_moving, bool rtl);
++private:
++	NWidgetContainer *child; ///< Child widget.
++};
++
++/** Leaf widget. */
++class NWidgetLeaf: public NWidgetCore {
++public:
++	NWidgetLeaf(byte tp, Colours colour, int index, uint16 data, StringID tip);
++};
++
++Widget *InitializeNWidgets(NWidgetBase *nwid, bool rtl = false);
+ #endif /* WIDGET_TYPE_H */

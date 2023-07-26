@@ -1,0 +1,168 @@
+Index: src/airport.h
+===================================================================
+--- src/airport.h	2007-07-04 01:23:38.000000000 +0200
++++ src/airport.h	2007-09-24 22:39:31.000000000 +0200
+@@ -111,7 +111,9 @@
+ 	OUT_WAY_block2           = 1ULL << 31,
+ // end of new blocks
+ 
+-	NOTHING_block            = 1ULL << 30;
++	NOTHING_block            = 1ULL << 30,
++
++	AIRPORT_CLOSED_block     = 1ULL << 32;
+ 
+ struct AirportMovingData {
+ 	int16 x;
+Index: src/aircraft_cmd.cpp
+===================================================================
+--- src/aircraft_cmd.cpp	2007-09-09 19:42:59.000000000 +0200
++++ src/aircraft_cmd.cpp	2007-09-24 22:58:22.000000000 +0200
+@@ -1694,6 +1694,7 @@
+ 
+ 	/* runway busy or not allowed to use this airstation, circle */
+ 	if (apc->flags & (v->subtype == AIR_HELICOPTER ? AirportFTAClass::HELICOPTERS : AirportFTAClass::AIRPLANES) &&
++			!HASBITS(st->airport_flags, AIRPORT_CLOSED_block) &&
+ 			st->airport_tile != 0 &&
+ 			(st->owner == OWNER_NONE || st->owner == v->owner)) {
+ 		// {32,FLYING,NOTHING_block,37}, {32,LANDING,N,33}, {32,HELILANDING,N,41},
+Index: src/command.h
+===================================================================
+--- src/command.h	2007-09-10 17:36:33.000000000 +0200
++++ src/command.h	2007-09-24 22:58:56.000000000 +0200
+@@ -166,6 +166,8 @@
+ 	CMD_CHANGE_TIMETABLE             = 128, ///< change the timetable for a vehicle
+ 	CMD_SET_VEHICLE_ON_TIME          = 129, ///< set the vehicle on time feature (timetable)
+ 	CMD_AUTOFILL_TIMETABLE           = 130, ///< autofill the timetable
++
++	CMD_OPEN_CLOSE_AIRPORT           = 131, ///< open/close an airport
+ };
+ 
+ /**
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	2007-09-22 14:59:43.000000000 +0200
++++ src/command.cpp	2007-09-24 23:00:35.000000000 +0200
+@@ -191,6 +191,8 @@
+ DEF_COMMAND(CmdChangeTimetable);
+ DEF_COMMAND(CmdSetVehicleOnTime);
+ DEF_COMMAND(CmdAutofillTimetable);
++
++DEF_COMMAND(CmdOpenCloseAirport);
+ #undef DEF_COMMAND
+ 
+ /**
+@@ -355,6 +357,8 @@
+ 	{CmdChangeTimetable,                     0}, /* 128, CMD_CHANGE_TIMETABLE */
+ 	{CmdSetVehicleOnTime,                    0}, /* 129, CMD_SET_VEHICLE_ON_TIME */
+ 	{CmdAutofillTimetable,                   0}, /* 130, CMD_AUTOFILL_TIMETABLE */
++
++	{CmdOpenCloseAirport,                    0}, /* 131, CMD_OPEN_CLOSE_AIRPORT */
+ };
+ 
+ /*!
+Index: src/station_cmd.cpp
+===================================================================
+--- src/station_cmd.cpp	2007-09-15 00:27:40.000000000 +0200
++++ src/station_cmd.cpp	2007-09-24 23:39:35.000000000 +0200
+@@ -1807,6 +1807,7 @@
+ 
+ 		st->airport_tile = 0;
+ 		st->facilities &= ~FACIL_AIRPORT;
++		st->airport_flags = 0;
+ 
+ 		UpdateStationVirtCoordDirty(st);
+ 		DeleteStationIfEmpty(st);
+@@ -1815,6 +1816,31 @@
+ 	return cost;
+ }
+ 
++/** Open/close an airport.
++ * @param tile unused
++ * @param flags type of operation
++ * @param p1 station ID of the airport
++ * @param p2 new status (0 open, 1 closed)
++ */
++CommandCost CmdOpenCloseAirport(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++{
++	if (!IsValidStationID(p1)) return CMD_ERROR;
++	Station *st = GetStation(p1);
++
++	if (!CheckOwnership(st->owner)) return CMD_ERROR;
++
++	if (flags & DC_EXEC) {
++		if (p2) {
++			st->airport_flags |= AIRPORT_CLOSED_block;
++		} else {
++			st->airport_flags &= ~AIRPORT_CLOSED_block;
++		}
++		InvalidateWindowWidget(WC_STATION_VIEW, st->index, 14);
++	}
++
++	return CommandCost();
++}
++
+ /** Build a buoy.
+  * @param tile tile where to place the bouy
+  * @param flags operation to perform
+Index: src/station_gui.cpp
+===================================================================
+--- src/station_gui.cpp	2007-08-26 15:55:36.000000000 +0200
++++ src/station_gui.cpp	2007-09-24 23:44:34.000000000 +0200
+@@ -647,6 +647,7 @@
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   207,   220,   198,   209, STR_LORRY,         STR_SCHEDULED_ROAD_VEHICLES_TIP },
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   221,   234,   198,   209, STR_PLANE,         STR_SCHEDULED_AIRCRAFT_TIP },
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   235,   248,   198,   209, STR_SHIP,          STR_SCHEDULED_SHIPS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   129,   248,   186,   197, STR_CLOSE_AIRPORT, STR_CLOSE_AIRPORT_TIP },
+ {   WIDGETS_END},
+ };
+ 
+@@ -665,6 +666,7 @@
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   207,   220,    98,   109, STR_LORRY,         STR_SCHEDULED_ROAD_VEHICLES_TIP },
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   221,   234,    98,   109, STR_PLANE,         STR_SCHEDULED_AIRCRAFT_TIP },
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   235,   248,    98,   109, STR_SHIP,          STR_SCHEDULED_SHIPS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   129,   248,    86,    97, STR_CLOSE_AIRPORT, STR_CLOSE_AIRPORT_TIP },
+ {   WIDGETS_END},
+ };
+ 
+@@ -715,6 +717,13 @@
+ 	SetWindowWidgetDisabledState(w, 11, !(st->facilities & FACIL_TRUCK_STOP) && !(st->facilities & FACIL_BUS_STOP));
+ 	SetWindowWidgetDisabledState(w, 12, !(st->facilities & FACIL_AIRPORT));
+ 	SetWindowWidgetDisabledState(w, 13, !(st->facilities & FACIL_DOCK));
++	if (st->facilities & FACIL_AIRPORT) {
++		SetWindowWidgetDisabledState(w, 14, st->owner != _local_player);
++		SetWindowWidgetLoweredState(w, 14, HASBITS(st->airport_flags, AIRPORT_CLOSED_block));
++	} else {
++		DisableWindowWidget(w, 14);
++		RaiseWindowWidget(w, 14);
++	}
+ 
+ 	SetDParam(0, st->index);
+ 	SetDParam(1, st->facilities);
+@@ -870,6 +879,12 @@
+ 					ShowVehicleListWindow(owner, VEH_SHIP, (StationID)w->window_number);
+ 					break;
+ 				}
++
++				case 14: { /* open/close airport */
++					const Station *st = GetStation(w->window_number);
++					DoCommandP(0, st->index, HASBITS(st->airport_flags, AIRPORT_CLOSED_block) ? 0 : 1, NULL, CMD_OPEN_CLOSE_AIRPORT | CMD_MSG(STR_CLOSE_AIRPORT_ERROR));
++					break;
++				}
+ 			}
+ 			break;
+ 
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	2007-09-15 00:27:40.000000000 +0200
++++ src/lang/english.txt	2007-09-24 23:46:16.000000000 +0200
+@@ -3137,6 +3137,10 @@
+ STR_SCHEDULED_AIRCRAFT_TIP                                      :{BLACK}Show all aircraft which have this station on their schedule
+ STR_SCHEDULED_SHIPS_TIP                                         :{BLACK}Show all ships which have this station on their schedule
+ 
++STR_CLOSE_AIRPORT                                               :{BLACK}Close airport
++STR_CLOSE_AIRPORT_TIP                                           :{BLACK}Prevent aircraft from landing on this airport
++STR_CLOSE_AIRPORT_ERROR                                         :{WHITE}Cannot open/close airport...
++
+ STR_VEH_WITH_SHARED_ORDERS_LIST                                 :{WHITE}Shared orders of {COMMA} Vehicle{P "" s}
+ STR_VEH_WITH_SHARED_ORDERS_LIST_TIP                             :{BLACK}Show all vehicles that share this schedule
+ 

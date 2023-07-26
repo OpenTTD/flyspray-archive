@@ -1,0 +1,157 @@
+Index: src/gfx_func.h
+===================================================================
+--- src/gfx_func.h	(revision 11781)
++++ src/gfx_func.h	(working copy)
+@@ -55,6 +55,7 @@
+ extern bool _right_button_clicked;
+ 
+ extern DrawPixelInfo _screen;
++extern bool _giant_screenshot;   ///< rendering giant screenshot? This disables palette animation (important for 32bpp-anim blitter), renders off-screen, etc.
+ 
+ extern int _pal_first_dirty;
+ extern int _pal_count_dirty;
+Index: src/blitter/32bpp_anim.cpp
+===================================================================
+--- src/blitter/32bpp_anim.cpp	(revision 11781)
++++ src/blitter/32bpp_anim.cpp	(working copy)
+@@ -13,7 +13,7 @@
+ 
+ void Blitter_32bppAnim::Draw(Blitter::BlitterParams *bp, BlitterMode mode, ZoomLevel zoom)
+ {
+-	if (bp->dst < _screen.dst_ptr || bp->dst > (uint32 *)_screen.dst_ptr + _screen.width * _screen.height) {
++	if (_giant_screenshot) {
+ 		/* This means our output is not to the screen, so we can't be doing any animation stuff, so use our parent Draw() */
+ 		Blitter_32bppOptimized::Draw(bp, mode, zoom);
+ 		return;
+@@ -98,6 +98,12 @@
+ 
+ void Blitter_32bppAnim::DrawColorMappingRect(void *dst, int width, int height, int pal)
+ {
++	if (_giant_screenshot) {
++		/* This means our output is not to the screen, so we can't be doing any animation stuff, so use our parent Draw() */
++		Blitter_32bppOptimized::DrawColorMappingRect(dst, width, height, pal);
++		return;
++	}
++
+ 	uint32 *udst = (uint32 *)dst;
+ 	uint8 *anim;
+ 
+@@ -136,7 +142,9 @@
+ void Blitter_32bppAnim::SetPixel(void *video, int x, int y, uint8 color)
+ {
+ 	*((uint32 *)video + x + y * _screen.pitch) = LookupColourInPalette(color);
+-	/* Set the color in the anim-buffer too */
++
++	/* Set the color in the anim-buffer too, if we are rendering to the screen */
++	if (_giant_screenshot) return;
+ 	this->anim_buf[((uint32 *)video - (uint32 *)_screen.dst_ptr) + x + y * this->anim_buf_width] = color;
+ }
+ 
+@@ -145,13 +153,20 @@
+ 	uint32 *dst = (uint32 *)video + x + y * _screen.pitch;
+ 	if (*dst == 0) {
+ 		*dst = LookupColourInPalette(color);
+-		/* Set the color in the anim-buffer too */
++		/* Set the color in the anim-buffer too, if we are rendering to the screen */
++		if (_giant_screenshot) return;
+ 		this->anim_buf[((uint32 *)video - (uint32 *)_screen.dst_ptr) + x + y * this->anim_buf_width] = color;
+ 	}
+ }
+ 
+ void Blitter_32bppAnim::DrawRect(void *video, int width, int height, uint8 color)
+ {
++	if (_giant_screenshot) {
++		/* This means our output is not to the screen, so we can't be doing any animation stuff, so use our parent Draw() */
++		Blitter_32bppOptimized::DrawRect(video, width, height, color);
++		return;
++	}
++
+ 	uint32 color32 = LookupColourInPalette(color);
+ 	uint8 *anim_line;
+ 
+@@ -175,6 +190,7 @@
+ 
+ void Blitter_32bppAnim::CopyFromBuffer(void *video, const void *src, int width, int height)
+ {
++	assert(!_giant_screenshot);
+ 	assert(video >= _screen.dst_ptr && video <= (uint32 *)_screen.dst_ptr + _screen.width + _screen.height * _screen.pitch);
+ 	uint32 *dst = (uint32 *)video;
+ 	uint32 *usrc = (uint32 *)src;
+@@ -198,6 +214,7 @@
+ 
+ void Blitter_32bppAnim::CopyToBuffer(const void *video, void *dst, int width, int height)
+ {
++	assert(!_giant_screenshot);
+ 	assert(video >= _screen.dst_ptr && video <= (uint32 *)_screen.dst_ptr + _screen.width + _screen.height * _screen.pitch);
+ 	uint32 *udst = (uint32 *)dst;
+ 	uint32 *src = (uint32 *)video;
+@@ -220,6 +237,8 @@
+ 
+ void Blitter_32bppAnim::ScrollBuffer(void *video, int &left, int &top, int &width, int &height, int scroll_x, int scroll_y)
+ {
++	assert(!_giant_screenshot);
++	assert(video >= _screen.dst_ptr && video <= (uint32 *)_screen.dst_ptr + _screen.width + _screen.height * _screen.pitch);
+ 	uint8 *dst, *src;
+ 
+ 	/* We need to scroll the anim-buffer too */
+Index: src/screenshot.cpp
+===================================================================
+--- src/screenshot.cpp	(revision 11781)
++++ src/screenshot.cpp	(working copy)
+@@ -487,13 +487,24 @@
+ 	blitter->CopyImageToBuffer(src, buf, _screen.width, n, pitch);
+ }
+ 
+-/* generate a large piece of the world */
++/** generate a large piece of the world
++ * @param userdata Viewport area to draw
++ * @param buf Videobuffer with same bitdepth as current blitter
++ * @param y First line to render
++ * @param pitch Pitch of the videobuffer
++ * @param n Number of lines to render
++ */
+ static void LargeWorldCallback(void *userdata, void *buf, uint y, uint pitch, uint n)
+ {
+ 	ViewPort *vp = (ViewPort *)userdata;
+ 	DrawPixelInfo dpi, *old_dpi;
+ 	int wx, left;
+ 
++	/* We are no longer rendering to the screen */
++	uint old_pitch = _screen.pitch;
++	_screen.pitch = pitch;
++	_giant_screenshot = true;
++
+ 	old_dpi = _cur_dpi;
+ 	_cur_dpi = &dpi;
+ 
+@@ -505,6 +516,7 @@
+ 	dpi.left = 0;
+ 	dpi.top = y;
+ 
++	/* Render viewport in blocks of 1600 pixels width */
+ 	left = 0;
+ 	while (vp->width - left != 0) {
+ 		wx = min(vp->width - left, 1600);
+@@ -519,6 +531,10 @@
+ 	}
+ 
+ 	_cur_dpi = old_dpi;
++
++	/* Switch back to rendering to the screen */
++	_giant_screenshot = false;
++	_screen.pitch = old_pitch;
+ }
+ 
+ static char *MakeScreenshotName(const char *ext)
+Index: src/gfx.cpp
+===================================================================
+--- src/gfx.cpp	(revision 11781)
++++ src/gfx.cpp	(working copy)
+@@ -31,6 +31,7 @@
+ bool _right_button_down;
+ bool _right_button_clicked;
+ DrawPixelInfo _screen;
++bool _giant_screenshot = false;   ///< rendering giant screenshot? This disables palette animation (important for 32bpp-anim blitter), renders off-screen, etc.
+ bool _exit_game;
+ bool _networking;         ///< are we in networking mode?
+ byte _game_mode;

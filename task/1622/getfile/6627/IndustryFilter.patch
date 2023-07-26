@@ -1,0 +1,249 @@
+Index: src/industry_gui.cpp
+===================================================================
+--- src/industry_gui.cpp	(revision 20842)
++++ src/industry_gui.cpp	(working copy)
+@@ -925,10 +925,44 @@
+ enum IndustryDirectoryWidgets {
+ 	IDW_DROPDOWN_ORDER,
+ 	IDW_DROPDOWN_CRITERIA,
++	IDW_NOCARGO,
++	IDW_CARGOALL,
+ 	IDW_INDUSTRY_LIST,
+ 	IDW_SCROLLBAR,
++	IDW_CARGOSTART,
+ };
+ 
++/**
++ *  * Make a horizontal row of cargo buttons, starting at widget #SLW_CARGOSTART.
++ *   * @param biggest_index Pointer to store biggest used widget number of the buttons.
++ *    * @return Horizontal row.
++ *     */
++static NWidgetBase *CargoWidgets(int *biggest_index)
++{
++        NWidgetHorizontal *container = new NWidgetHorizontal();
++
++        for (uint i = 0; i < NUM_CARGO; i++) {
++                const CargoSpec *cs = CargoSpec::Get(i);
++                if (cs->IsValid()) {
++                        NWidgetBackground *panel = new NWidgetBackground(WWT_PANEL, COLOUR_BROWN, IDW_CARGOSTART + i);
++                        panel->SetMinimalSize(14, 11);
++                        panel->SetResize(0, 0);
++                        panel->SetFill(0, 1);
++                        panel->SetDataTip(0, STR_STATION_LIST_USE_CTRL_TO_SELECT_MORE);
++                        container->Add(panel);
++                } else {
++                        NWidgetLeaf *nwi = new NWidgetLeaf(WWT_EMPTY, COLOUR_BROWN, IDW_CARGOSTART + i, 0x0, STR_NULL);
++                        nwi->SetMinimalSize(0, 11);
++                        nwi->SetResize(0, 0);
++                        nwi->SetFill(0, 1);
++                        container->Add(nwi);
++                }
++        }
++        *biggest_index = IDW_CARGOSTART + NUM_CARGO;
++        return container;
++}
++
++
+ /** Widget definition of the industry directory gui */
+ static const NWidgetPart _nested_industry_directory_widgets[] = {
+ 	NWidget(NWID_HORIZONTAL),
+@@ -942,6 +976,9 @@
+ 			NWidget(NWID_HORIZONTAL),
+ 				NWidget(WWT_TEXTBTN, COLOUR_BROWN, IDW_DROPDOWN_ORDER), SetDataTip(STR_BUTTON_SORT_BY, STR_TOOLTIP_SORT_ORDER),
+ 				NWidget(WWT_DROPDOWN, COLOUR_BROWN, IDW_DROPDOWN_CRITERIA), SetDataTip(STR_JUST_STRING, STR_TOOLTIP_SORT_CRITERIA),
++				NWidgetFunction(CargoWidgets),
++		                NWidget(WWT_PANEL, COLOUR_BROWN, IDW_NOCARGO), SetMinimalSize(14, 11), SetDataTip(0x0, STR_STATION_LIST_NO_WAITING_CARGO), SetFill(0, 1), EndContainer(),
++                		NWidget(WWT_PUSHBTN, COLOUR_BROWN, IDW_CARGOALL), SetMinimalSize(14, 11), SetDataTip(0x0, STR_STATION_LIST_SELECT_ALL_TYPES), SetFill(0, 1),
+ 				NWidget(WWT_PANEL, COLOUR_BROWN), SetResize(1, 0), EndContainer(),
+ 			EndContainer(),
+ 			NWidget(WWT_PANEL, COLOUR_BROWN, IDW_INDUSTRY_LIST), SetDataTip(0x0, STR_INDUSTRY_DIRECTORY_LIST_CAPTION), SetResize(1, 1), SetScrollbar(IDW_SCROLLBAR), EndContainer(),
+@@ -964,6 +1001,9 @@
+ 	/* Runtime saved values */
+ 	static Listing last_sorting;
+ 	static const Industry *last_industry;
++	static bool include_empty;            // whether we should include stations without waiting cargo
++        static const uint32 cargo_filter_max;
++        static uint32 cargo_filter;           // bitmap of cargo types to include
+ 
+ 	/* Constants for sorting stations */
+ 	static const StringID sorter_names[];
+@@ -980,8 +1020,21 @@
+ 
+ 			const Industry *i;
+ 			FOR_ALL_INDUSTRIES(i) {
+-				*this->industries.Append() = i;
+-			}
++                                 int num_waiting_cargo = 0;
++                                 for (CargoID j = 0; j < NUM_CARGO; j++) {
++                                          if ((i->produced_cargo[0] == j) || (i->produced_cargo[1]==j)) {
++                                                  num_waiting_cargo++; // count number of waiting cargo
++                                                  if (HasBit(this->cargo_filter, j)) {
++                                                          *this->industries.Append() = i;
++                                                          break;
++                                                  }
++                                          }
++                                 }
++                                 /* stations without waiting cargo */
++                                 if (num_waiting_cargo == 0 && this->include_empty) {
++                                        *this->industries.Append() = i;
++                                 }
++                        }
+ 
+ 			this->industries.Compact();
+ 			this->industries.RebuildDone();
+@@ -1120,6 +1173,15 @@
+ 		this->BuildSortIndustriesList();
+ 
+ 		this->FinishInitNested(desc, 0);
++
++		CargoID cid;
++                FOR_EACH_SET_CARGO_ID(cid, this->cargo_filter) {
++                        if (CargoSpec::Get(cid)->IsValid()) this->LowerWidget(IDW_CARGOSTART + cid);
++                }
++
++                if (this->cargo_filter == this->cargo_filter_max) this->cargo_filter = _cargo_mask;
++
++                this->SetWidgetLoweredState(IDW_NOCARGO, this->include_empty);
+ 	}
+ 
+ 	~IndustryDirectoryWindow()
+@@ -1134,6 +1196,7 @@
+ 
+ 	virtual void OnPaint()
+ 	{
++		this->BuildSortIndustriesList();
+ 		this->DrawWidgets();
+ 	}
+ 
+@@ -1159,6 +1222,29 @@
+ 				}
+ 				break;
+ 			}
++                        case IDW_NOCARGO: {
++                                int cg_ofst = this->IsWidgetLowered(widget) ? 2 : 1;
++                                DrawString(r.left + cg_ofst, r.right + cg_ofst, r.top + cg_ofst, STR_ABBREV_NONE, TC_BLACK, SA_HOR_CENTER);
++                                break;
++                        }
++
++                        case IDW_CARGOALL: {
++                                int cg_ofst = this->IsWidgetLowered(widget) ? 2 : 1;
++                                DrawString(r.left + cg_ofst, r.right + cg_ofst, r.top + cg_ofst, STR_ABBREV_ALL, TC_BLACK, SA_HOR_CENTER);
++                                break;
++                        }
++
++                       default:
++                                if (widget >= IDW_CARGOSTART) {
++                                        const CargoSpec *cs = CargoSpec::Get(widget - IDW_CARGOSTART);
++                                        if (cs->IsValid()) {
++                                                int cg_ofst = HasBit(this->cargo_filter, cs->Index()) ? 2 : 1;
++                                                GfxFillRect(r.left + cg_ofst, r.top + cg_ofst, r.right - 2 + cg_ofst, r.bottom - 2 + cg_ofst, cs->rating_colour);
++                                                DrawString(r.left + cg_ofst, r.right + cg_ofst, r.top + cg_ofst, cs->abbrev, TC_BLACK, SA_HOR_CENTER);
++                                        }
++                                }
++                                break;
++
+ 		}
+ 	}
+ 
+@@ -1196,6 +1282,26 @@
+ 				*size = maxdim(*size, d);
+ 				break;
+ 			}
++                        case IDW_CARGOALL:
++                        case IDW_NOCARGO: {
++                                Dimension d = GetStringBoundingBox(widget == IDW_NOCARGO ? STR_ABBREV_NONE : STR_ABBREV_ALL);
++                                d.width  += padding.width + 2;
++                                d.height += padding.height;
++                                *size = maxdim(*size, d);
++                                break;
++                        }
++
++                        default:
++                                if (widget >= IDW_CARGOSTART) {
++                                        const CargoSpec *cs = CargoSpec::Get(widget - IDW_CARGOSTART);
++                                        if (cs->IsValid()) {
++                                                Dimension d = GetStringBoundingBox(cs->abbrev);
++                                                d.width  += padding.width + 2;
++                                                d.height += padding.height;
++                                                *size = maxdim(*size, d);
++                                        }
++                                }
++                                break;
+ 		}
+ 	}
+ 
+@@ -1223,6 +1329,64 @@
+ 				}
+ 				break;
+ 			}
++                        case IDW_CARGOALL: {
++                                for (uint i = 0; i < NUM_CARGO; i++) {
++                                        const CargoSpec *cs = CargoSpec::Get(i);
++                                        if (cs->IsValid()) this->LowerWidget(IDW_CARGOSTART + i);
++                                }
++                                this->LowerWidget(IDW_NOCARGO);
++
++                                this->cargo_filter = _cargo_mask;
++                                this->include_empty = true;
++                                this->industries.ForceRebuild();
++                                this->SetDirty();
++                                break;
++                        }
++                        case IDW_NOCARGO:
++                                if (_ctrl_pressed) {
++                                        this->include_empty = !this->include_empty;
++                                        this->ToggleWidgetLoweredState(IDW_NOCARGO);
++                                } else {
++                                        for (uint i = 0; i < NUM_CARGO; i++) {
++                                                const CargoSpec *cs = CargoSpec::Get(i);
++                                                if (cs->IsValid()) this->RaiseWidget(IDW_CARGOSTART + i);
++                                        }
++
++                                        this->cargo_filter = 0;
++                                        this->include_empty = true;
++
++                                        this->LowerWidget(IDW_NOCARGO);
++                                }
++                                this->industries.ForceRebuild();
++                                this->SetDirty();
++                                break;
++
++                        default:
++                                if (widget >= IDW_CARGOSTART) { // change cargo_filter
++                                        /* Determine the selected cargo type */
++                                        const CargoSpec *cs = CargoSpec::Get(widget - IDW_CARGOSTART);
++                                        if (!cs->IsValid()) break;
++
++                                        if (_ctrl_pressed) {
++                                                ToggleBit(this->cargo_filter, cs->Index());
++                                                this->ToggleWidgetLoweredState(widget);
++                                        } else {
++                                                for (uint i = 0; i < NUM_CARGO; i++) {
++                                                        const CargoSpec *cs = CargoSpec::Get(i);
++                                                        if (cs->IsValid()) this->RaiseWidget(IDW_CARGOSTART + i);
++                                                }
++                                                this->RaiseWidget(IDW_NOCARGO);
++
++                                                this->cargo_filter = 0;
++                                                this->include_empty = false;
++
++                                               SetBit(this->cargo_filter, cs->Index());
++                                               this->LowerWidget(widget);
++                                        }
++                                        this->industries.ForceRebuild();
++                                        this->SetDirty();
++                                }
++                                break;
+ 		}
+ 	}
+ 
+@@ -1257,6 +1421,9 @@
+ };
+ 
+ Listing IndustryDirectoryWindow::last_sorting = {false, 0};
++bool IndustryDirectoryWindow::include_empty = true;
++const uint32 IndustryDirectoryWindow::cargo_filter_max = UINT32_MAX;
++uint32 IndustryDirectoryWindow::cargo_filter = UINT32_MAX;
+ const Industry *IndustryDirectoryWindow::last_industry = NULL;
+ 
+ /* Available station sorting functions. */

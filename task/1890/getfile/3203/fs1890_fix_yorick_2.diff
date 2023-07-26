@@ -1,0 +1,237 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 14036)
++++ src/lang/english.txt	(working copy)
+@@ -2890,6 +2890,9 @@
+ STR_8861_STOPPED                                                :{RED}Stopped
+ STR_8862_CAN_T_MAKE_TRAIN_PASS_SIGNAL                           :{WHITE}Can't make train pass signal at danger...
+ STR_8863_CRASHED                                                :{RED}Crashed!
++STR_CAN_T_COPY_ORDERLIST_INCOMPATIBLE                           :{WHITE}Order not compatible with vehicle
++STR_CAN_T_ADD_SHARED_ORDER_INCOMPATIBLE                         :{WHITE}Order not compatible with other vehicles that share the orders
++STR_CAN_T_ADD_ORDER_INCOMPATIBLE                                :{WHITE}The vehicle can't go to that station
+ 
+ STR_8865_NAME_TRAIN                                             :{WHITE}Name train
+ STR_8866_CAN_T_NAME_TRAIN                                       :{WHITE}Can't name train...
+Index: src/roadveh.h
+===================================================================
+--- src/roadveh.h	(revision 14036)
++++ src/roadveh.h	(working copy)
+@@ -5,10 +5,14 @@
+ #ifndef ROADVEH_H
+ #define ROADVEH_H
+ 
++#include "economy_func.h"
++#include "station_base.h"
++#include "engine_func.h"
++#include "station_type.h"
++#include "newgrf_cargo.h"
++#include "cargotype.h"
+ #include "vehicle_base.h"
+-#include "engine_func.h"
+ #include "engine_base.h"
+-#include "economy_func.h"
+ 
+ enum RoadVehicleSubType {
+ 	RVST_FRONT,
+@@ -45,7 +49,23 @@
+ 	return v->Next() != NULL && IsRoadVehArticPart(v->Next());
+ }
+ 
++/** Checks if a  roadvehicle can use the station in question
++ * @param Vehicle v The vehicle to test
++ * @param Station st The station
++ * @return true if the vehicle can use the station
++ */
++static inline bool CanRoadvehUseStation(Vehicle *v, const Station *st)
++{
++	bool ret = true;
++	if (IsCargoInClass(v->cargo_type, CC_PASSENGERS)) {
++		ret = (st->facilities & FACIL_BUS_STOP) != 0;
++	} else {
++		ret = (st->facilities & FACIL_TRUCK_STOP) != 0;
++	}
++	return ret;
++}
+ 
++
+ void CcBuildRoadVeh(bool success, TileIndex tile, uint32 p1, uint32 p2);
+ 
+ byte GetRoadVehLength(const Vehicle *v);
+Index: src/order_cmd.cpp
+===================================================================
+--- src/order_cmd.cpp	(revision 14036)
++++ src/order_cmd.cpp	(working copy)
+@@ -16,6 +16,7 @@
+ #include "vehicle_gui.h"
+ #include "cargotype.h"
+ #include "aircraft.h"
++#include "roadveh.h"
+ #include "strings_func.h"
+ #include "core/alloc_func.hpp"
+ #include "functions.h"
+@@ -339,6 +340,7 @@
+ 	switch (new_order.GetType()) {
+ 		case OT_GOTO_STATION: {
+ 			if (!IsValidStationID(new_order.GetDestination())) return CMD_ERROR;
++			Vehicle *u;
+ 
+ 			const Station *st = GetStation(new_order.GetDestination());
+ 
+@@ -352,10 +354,12 @@
+ 					break;
+ 
+ 				case VEH_ROAD:
+-					if (IsCargoInClass(v->cargo_type, CC_PASSENGERS)) {
+-						if (!(st->facilities & FACIL_BUS_STOP)) return CMD_ERROR;
+-					} else {
+-						if (!(st->facilities & FACIL_TRUCK_STOP)) return CMD_ERROR;
++					u = GetFirstVehicleFromSharedList(v);
++					if (!CanRoadvehUseStation(v, st))
++						return_cmd_error(STR_CAN_T_ADD_ORDER_INCOMPATIBLE);
++					for (; u != NULL; u = u->next_shared) {
++						if (!CanRoadvehUseStation(u, st))
++							return_cmd_error(STR_CAN_T_ADD_SHARED_ORDER_INCOMPATIBLE);
+ 					}
+ 					break;
+ 
+@@ -364,8 +368,14 @@
+ 					break;
+ 
+ 				case VEH_AIRCRAFT:
+-					if (!(st->facilities & FACIL_AIRPORT) || !CanAircraftUseStation(v->engine_type, st)) {
+-						return CMD_ERROR;
++
++					if (!(st->facilities & FACIL_AIRPORT) || !CanAircraftUseStation(v->engine_type, st))
++						return_cmd_error(STR_CAN_T_ADD_ORDER_INCOMPATIBLE);
++					
++					u = GetFirstVehicleFromSharedList(v);
++					for (; u != NULL; u = u->next_shared) {
++						if (!CanAircraftUseStation(u->engine_type, st))
++							return_cmd_error(STR_CAN_T_ADD_SHARED_ORDER_INCOMPATIBLE);
+ 					}
+ 					break;
+ 
+@@ -396,13 +406,22 @@
+ 					if (!IsValidStationID(new_order.GetDestination())) return CMD_ERROR;
+ 
+ 					const Station *st = GetStation(new_order.GetDestination());
++					Vehicle *u;
+ 
+ 					if (!CheckOwnership(st->owner) ||
+ 							!(st->facilities & FACIL_AIRPORT) ||
+-							st->Airport()->nof_depots == 0 ||
+-							!CanAircraftUseStation(v->engine_type, st)) {
++							st->Airport()->nof_depots == 0) {
+ 						return CMD_ERROR;
+ 					}
++					if (!CanAircraftUseStation(v->engine_type, st))
++						return_cmd_error(STR_CAN_T_ADD_ORDER_INCOMPATIBLE);
++					
++					u = GetFirstVehicleFromSharedList(v);
++					for (; u != NULL; u = u->next_shared) {
++						if (!CanAircraftUseStation(u->engine_type, st)) {
++							return_cmd_error(STR_CAN_T_ADD_SHARED_ORDER_INCOMPATIBLE);
++						}
++					}
+ 				} else {
+ 					if (!IsValidDepotID(new_order.GetDestination())) return CMD_ERROR;
+ 
+@@ -1051,6 +1070,50 @@
+ 	return CommandCost();
+ }
+ 
++/** Check if the vehicle's orders are stations it can go to
++ * Also used for copying/sharing orders
++ * @param v Vehicle to check the orders of
++ * @param dst Vehicle (optional) to this vehiclle's type, if left out, v is used for this param
++ */
++static bool CheckAircraftCanUseStationsInOrder(Vehicle *v, Vehicle *dst = NULL)
++{
++	/* Normal aircraft can't copy all the orders from helicopters (and visa versa) */
++	const Order *order;
++	const Station *st;
++	
++	if (dst == NULL) dst = v;
++
++	FOR_VEHICLE_ORDERS(v, order) {
++		st = GetStation(order->GetDestination());
++		if (!CanAircraftUseStation(dst->engine_type, st))
++			return false;
++	}
++	return true;
++}
++
++/** Check if the vehicle's orders are stations it can go to
++ * Also used for copying/sharing orders
++ * @param v Vehicle to check the orders of
++ * @param dst Vehicle (optional) to this vehicle's type, if left out, v is used for this param
++ */
++static bool CheckRoadvehCanUseStationsInOrder(Vehicle *v, Vehicle *dst = NULL)
++{
++	/* Normal aircraft can't copy all the orders from helicopters (and visa versa) */
++	const Order *order;
++	
++	if (dst == NULL) dst = v;
++
++	FOR_VEHICLE_ORDERS(v, order) {
++		if (order->IsType(OT_GOTO_STATION)) {
++			const Station *st = GetStation(order->GetDestination());
++			if (!CanRoadvehUseStation(dst, st))
++				return false;
++		}
++	}
++	return true;
++}
++
++
+ /** Clone/share/copy an order-list of an other vehicle.
+  * @param tile unused
+  * @param flags operation to perform
+@@ -1083,12 +1146,12 @@
+ 			if (!CheckOwnership(src->owner) || dst->type != src->type || dst == src)
+ 				return CMD_ERROR;
+ 
+-			/* Trucks can't share orders with busses (and visa versa) */
+-			if (src->type == VEH_ROAD) {
+-				if (src->cargo_type != dst->cargo_type && (IsCargoInClass(src->cargo_type, CC_PASSENGERS) || IsCargoInClass(dst->cargo_type, CC_PASSENGERS)))
+-					return CMD_ERROR;
+-			}
++			if (src->type == VEH_ROAD && !CheckRoadvehCanUseStationsInOrder(src, dst))
++				return_cmd_error(STR_CAN_T_COPY_ORDERLIST_INCOMPATIBLE);
+ 
++			if (src->type == VEH_AIRCRAFT && !CheckAircraftCanUseStationsInOrder(src, dst))
++				return_cmd_error(STR_CAN_T_COPY_ORDERLIST_INCOMPATIBLE);
++
+ 			/* Is the vehicle already in the shared list? */
+ 			{
+ 				const Vehicle* u;
+@@ -1130,25 +1193,11 @@
+ 			if (!CheckOwnership(src->owner) || dst->type != src->type || dst == src)
+ 				return CMD_ERROR;
+ 
+-			/* Trucks can't copy all the orders from busses (and visa versa) */
+-			if (src->type == VEH_ROAD) {
+-				const Order *order;
+-				TileIndex required_dst = INVALID_TILE;
++			if (src->type == VEH_ROAD && !CheckRoadvehCanUseStationsInOrder(src, dst))
++				return_cmd_error(STR_CAN_T_COPY_ORDERLIST_INCOMPATIBLE);
+ 
+-				FOR_VEHICLE_ORDERS(src, order) {
+-					if (order->IsType(OT_GOTO_STATION)) {
+-						const Station *st = GetStation(order->GetDestination());
+-						if (IsCargoInClass(dst->cargo_type, CC_PASSENGERS)) {
+-							if (st->bus_stops != NULL) required_dst = st->bus_stops->xy;
+-						} else {
+-							if (st->truck_stops != NULL) required_dst = st->truck_stops->xy;
+-						}
+-						/* This station has not the correct road-bay, so we can't copy! */
+-						if (required_dst == INVALID_TILE)
+-							return CMD_ERROR;
+-					}
+-				}
+-			}
++			if (src->type == VEH_AIRCRAFT && !CheckAircraftCanUseStationsInOrder(src, dst))
++				return_cmd_error(STR_CAN_T_COPY_ORDERLIST_INCOMPATIBLE);
+ 
+ 			/* make sure there are orders available */
+ 			delta = dst->IsOrderListShared() ? src->num_orders + 1 : src->num_orders - dst->num_orders;

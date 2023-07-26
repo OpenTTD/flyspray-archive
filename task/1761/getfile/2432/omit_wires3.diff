@@ -1,0 +1,145 @@
+Index: src/elrail.cpp
+===================================================================
+--- src/elrail.cpp	(Revision 12066)
++++ src/elrail.cpp	(Arbeitskopie)
+@@ -69,25 +69,47 @@
+ #include "table/sprites.h"
+ #include "table/elrail_data.h"
+ 
++#include "core/bitmath_func.hpp"
++
+ static inline TLG GetTLG(TileIndex t)
+ {
+ 	return (TLG)((HasBit(TileX(t), 0) << 1) + HasBit(TileY(t), 0));
+ }
+ 
+ /**
++ * Masks out TrackBits when neighbouring tiles are unelectrified
++ */
++static TrackBits MaskTrackBits(TileIndex t) {
++	TrackBits trackbits = GetTrackBits(t);
++	TrackBits neighbour_mask = TRACK_BIT_NONE;
++	for (DiagDirection d = DIAGDIR_BEGIN; d < DIAGDIR_END; d++) {
++		/* Get unelectrified neighbours, non-rail neighbours count as electrified */
++		if (GetTileType(TileAddByDiagDir(t, d)) == MP_RAILWAY && GetRailType(TileAddByDiagDir(t, d)) != RAILTYPE_ELECTRIC) {
++			neighbour_mask |= TrackdirBitsToTrackBits(DiagdirReachesTrackdirs(ReverseDiagDir(d)));
++		}
++	}
++	/* Mask out TrackBits where at least one neighbour is unelectrified
++	 * make sure, at least one TrackBit is left
++	 */
++	if ((trackbits & ~neighbour_mask) != TRACK_BIT_NONE) return trackbits & ~neighbour_mask;
++	return trackbits;
++}
++
++/**
+  * Finds which Electrified Rail Bits are present on a given tile.
+  * @param t tile to check
+  * @param override pointer to PCP override, can be NULL
+  * @return trackbits of tile if it is electrified
+  */
+-static TrackBits GetRailTrackBitsUniversal(TileIndex t, byte *override)
++static TrackBits GetRailTrackBitsUniversal(TileIndex t, byte *override, bool full)
+ {
+ 	switch (GetTileType(t)) {
+ 		case MP_RAILWAY:
+ 			if (GetRailType(t) != RAILTYPE_ELECTRIC) return TRACK_BIT_NONE;
+ 			switch (GetRailTileType(t)) {
+ 				case RAIL_TILE_NORMAL: case RAIL_TILE_SIGNALS:
+-					return GetTrackBits(t);
++					if (full) return GetTrackBits(t);
++					return MaskTrackBits(t);
+ 				case RAIL_TILE_WAYPOINT:
+ 					return GetRailWaypointBits(t);
+ 				default:
+@@ -203,6 +225,7 @@
+ 	 * the track configuration of 2 adjacent tiles. trackconfig[0] stores the
+ 	 * current tile (home tile) while [1] holds the neighbour */
+ 	TrackBits trackconfig[TS_END];
++	TrackBits wireconfig[TS_END];
+ 	bool isflat[TS_END];
+ 	/* Note that ti->tileh has already been adjusted for Foundations */
+ 	Slope tileh[TS_END] = { ti->tileh, SLOPE_FLAT };
+@@ -225,13 +248,14 @@
+ 	 * 2) on the "far" end of a bridge head (the one that connects to bridge middle),
+ 	 *    because that one is drawn on the bridge. Exception is for length 0 bridges
+ 	 *    which have no middle tiles */
+-	trackconfig[TS_HOME] = GetRailTrackBitsUniversal(ti->tile, &OverridePCP);
++	wireconfig[TS_HOME] = GetRailTrackBitsUniversal(ti->tile, &OverridePCP, false);
++	trackconfig[TS_HOME] = GetRailTrackBitsUniversal(ti->tile, &OverridePCP, true);
+ 	/* If a track bit is present that is not in the main direction, the track is level */
+ 	isflat[TS_HOME] = ((trackconfig[TS_HOME] & (TRACK_BIT_HORZ | TRACK_BIT_VERT)) != 0);
+ 
+ 	AdjustTileh(ti->tile, &tileh[TS_HOME]);
+ 
+-	for (i = DIAGDIR_NE; i < DIAGDIR_END; i++) {
++	for (i = DIAGDIR_BEGIN; i < DIAGDIR_END; i++) {
+ 		TileIndex neighbour = ti->tile + TileOffsByDiagDir(i);
+ 		Foundation foundation = FOUNDATION_NONE;
+ 		int k;
+@@ -239,12 +263,19 @@
+ 		/* Here's one of the main headaches. GetTileSlope does not correct for possibly
+ 		 * existing foundataions, so we do have to do that manually later on.*/
+ 		tileh[TS_NEIGHBOUR] = GetTileSlope(neighbour, NULL);
+-		trackconfig[TS_NEIGHBOUR] = GetRailTrackBitsUniversal(neighbour, NULL);
+-		if (IsTunnelTile(neighbour) && i != GetTunnelBridgeDirection(neighbour)) trackconfig[TS_NEIGHBOUR] = TRACK_BIT_NONE;
++		wireconfig[TS_NEIGHBOUR] = GetRailTrackBitsUniversal(neighbour, NULL, false);
++		trackconfig[TS_NEIGHBOUR] = GetRailTrackBitsUniversal(neighbour, NULL, true);
++		if (IsTunnelTile(neighbour) && i != GetTunnelBridgeDirection(neighbour)) {
++			trackconfig[TS_NEIGHBOUR] = TRACK_BIT_NONE;
++			wireconfig[TS_NEIGHBOUR] = TRACK_BIT_NONE;
++		}
+ 
+ 		/* If the neighboured tile does not smoothly connect to the current tile (because of a foundation),
+ 		 * we have to draw all pillars on the current tile. */
+-		if (GetPCPElevation(ti->tile, i) != GetPCPElevation(neighbour, ReverseDiagDir(i))) trackconfig[TS_NEIGHBOUR] = TRACK_BIT_NONE;
++		if (GetPCPElevation(ti->tile, i) != GetPCPElevation(neighbour, ReverseDiagDir(i))) {
++			trackconfig[TS_NEIGHBOUR] = TRACK_BIT_NONE;
++			wireconfig[TS_NEIGHBOUR] = TRACK_BIT_NONE;
++		}
+ 
+ 		isflat[TS_NEIGHBOUR] = ((trackconfig[TS_NEIGHBOUR] & (TRACK_BIT_HORZ | TRACK_BIT_VERT)) != 0);
+ 
+@@ -254,6 +285,7 @@
+ 		/* We cycle through all the existing tracks at a PCP and see what
+ 		 * PPPs we want to have, or may not have at all */
+ 		for (k = 0; k < NUM_TRACKS_AT_PCP; k++) {
++			DiagDirection PCPpos = i;
+ 			/* Next to us, we have a bridge head, don't worry about that one, if it shows away from us */
+ 			if (TrackSourceTile[i][k] == TS_NEIGHBOUR &&
+ 			    IsBridgeTile(neighbour) &&
+@@ -263,12 +295,14 @@
+ 
+ 			/* We check whether the track in question (k) is present in the tile
+ 			 * (TrackSourceTile) */
+-			if (HasBit(trackconfig[TrackSourceTile[i][k]], TracksAtPCP[i][k])) {
++			if (HasBit(wireconfig[TrackSourceTile[i][k]], TracksAtPCP[i][k])) {
+ 				/* track found, if track is in the neighbour tile, adjust the number
+ 				 * of the PCP for preferred/allowed determination*/
+-				DiagDirection PCPpos = (TrackSourceTile[i][k] == TS_HOME) ? i : ReverseDiagDir(i);
++				PCPpos = (TrackSourceTile[i][k] == TS_HOME) ? i : ReverseDiagDir(i);
+ 				SetBit(PCPstatus, i); // This PCP is in use
++			}
+ 
++			if (HasBit(trackconfig[TrackSourceTile[i][k]], TracksAtPCP[i][k])) {
+ 				PPPpreferred[i] &= PreferredPPPofTrackAtPCP[TracksAtPCP[i][k]][PCPpos];
+ 				PPPallowed[i] &= ~DisallowedPPPofTrackAtPCP[TracksAtPCP[i][k]][PCPpos];
+ 			}
+@@ -330,7 +364,7 @@
+ 					/* Don't build the pylon if it would be outside the tile */
+ 					if (!HasBit(OwnedPPPonPCP[i], temp)) {
+ 						/* We have a neighour that will draw it, bail out */
+-						if (trackconfig[TS_NEIGHBOUR] != 0) break;
++						if (trackconfig[TS_NEIGHBOUR] != TRACK_BIT_NONE) break;
+ 						continue; /* No neighbour, go looking for a better position */
+ 					}
+ 
+@@ -352,7 +386,7 @@
+ 
+ 	/* Drawing of pylons is finished, now draw the wires */
+ 	for (t = TRACK_BEGIN; t < TRACK_END; t++) {
+-		if (HasBit(trackconfig[TS_HOME], t)) {
++		if (HasBit(wireconfig[TS_HOME], t)) {
+ 			if (IsTunnelTile(ti->tile)) break; // drawn together with tunnel-roof (see DrawCatenaryOnTunnel())
+ 			byte PCPconfig = HasBit(PCPstatus, PCPpositions[t][0]) +
+ 				(HasBit(PCPstatus, PCPpositions[t][1]) << 1);

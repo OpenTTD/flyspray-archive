@@ -1,0 +1,260 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 16679)
++++ src/lang/english.txt	(working copy)
+@@ -765,6 +765,7 @@
+ STR_JUST_STRING                                                 :{STRING}
+ STR_JUST_RAW_STRING                                             :{RAW_STRING}
+ STR_JUST_INT                                                    :{NUM}
++STR_RED_INT                                                     :{RED}{NUM}
+ STR_ERROR_CAN_ONLY_BE_BUILT_IN_RAINFOREST                       :{WHITE}...can only be built in rainforest areas
+ STR_ERROR_CAN_ONLY_BE_BUILT_IN_DESERT                           :{WHITE}...can only be built in desert areas
+ STR_STATUSBAR_PAUSED                                            :{YELLOW}*  *  PAUSED  *  *
+@@ -3298,6 +3299,9 @@
+ STR_NUM_1                                                       :{BLACK}{SKIP}{NUM}
+ STR_NUM_2                                                       :{BLACK}{SKIP}{SKIP}{NUM}
+ STR_NUM_3                                                       :{BLACK}{SKIP}{SKIP}{SKIP}{NUM}
++STR_RED_NUM_1                                                   :{RED}{SKIP}{NUM}
++STR_RED_NUM_2                                                   :{RED}{SKIP}{SKIP}{NUM}
++STR_RED_NUM_3                                                   :{RED}{SKIP}{SKIP}{SKIP}{NUM}
+ 
+ ########### String for New Landscape Generator
+ 
+@@ -3325,6 +3329,7 @@
+ STR_START_DATE_QUERY_CAPT                                       :{WHITE}Change starting year
+ STR_HEIGHTMAP_SCALE_WARNING_CAPTION                             :{WHITE}Scale warning
+ STR_HEIGHTMAP_SCALE_WARNING_MESSAGE                             :{YELLOW}Resizing source map too much is not recommended. Continue with the generation?
++STR_MAP_TOO_MANY_TILES_MESSAGE                                  :{YELLOW}Too many tiles in map. Maximum number of tiles is {NUM}, you have selected {NUM}
+ STR_HEIGHTMAP_NAME                                              :{BLACK}Heightmap name:
+ STR_HEIGHTMAP_SIZE                                              :{BLACK}Size: {ORANGE}{NUM} x {NUM}
+ STR_GENERATION_WORLD                                            :{WHITE}Generating world...
+Index: src/genworld_gui.cpp
+===================================================================
+--- src/genworld_gui.cpp	(revision 16679)
++++ src/genworld_gui.cpp	(working copy)
+@@ -18,6 +18,7 @@
+ #include "fios.h"
+ #include "string_func.h"
+ #include "gfx_func.h"
++#include "map_type.h"
+ #include "settings_type.h"
+ #include "widgets/dropdown_type.h"
+ #include "widgets/dropdown_func.h"
+@@ -515,12 +516,37 @@
+ 	if (confirmed) StartGeneratingLandscape((glwp_modes)w->window_number);
+ }
+ 
+-static DropDownList *BuildMapsizeDropDown()
++/**
++ * Check if map size set lies in allowed boundaries.
++ * @param print_warning If set to true, messagebox with warning is printed out if size is outside limits.
++ * @return true if size is ok, false otherwise.
++ */
++static bool CheckMapSize(bool print_warning = true)
+ {
++	uint64 tiles = 1ULL << (_settings_newgame.game_creation.map_x + _settings_newgame.game_creation.map_y);
++
++	if (_settings_newgame.game_creation.map_x + _settings_newgame.game_creation.map_y > MAX_MAP_TILES_BITS) {
++		if (print_warning) {
++			SetDParam(0, MAX_MAP_TILES);
++			SetDParam(1, tiles);
++			ShowErrorMessage(INVALID_STRING_ID, STR_MAP_TOO_MANY_TILES_MESSAGE, 0, 0);
++		}
++		return false;
++	}
++	return true;
++}
++
++/**
++ * Build dropdown list with map sizes
++ * Dimension selected in the other dropdown is used to suggest which choices are 'valid'
++ * @param other_dimension Dimension specified by the second dropdown.
++ */
++static DropDownList *BuildMapsizeDropDown(int other_dimension)
++{
+ 	DropDownList *list = new DropDownList();
+ 
+ 	for (uint i = MIN_MAP_SIZE_BITS; i <= MAX_MAP_SIZE_BITS; i++) {
+-		DropDownListParamStringItem *item = new DropDownListParamStringItem(STR_JUST_INT, i, false);
++		DropDownListParamStringItem *item = new DropDownListParamStringItem((i + other_dimension > MAX_MAP_TILES_BITS) ? STR_RED_INT : STR_JUST_INT, i, false);
+ 		item->SetParam(0, 1 << i);
+ 		list->push_back(item);
+ 	}
+@@ -625,6 +651,11 @@
+ 			this->widget[GLAND_HEIGHTMAP_ROTATION_PULLDOWN].data = _rotation[_settings_newgame.game_creation.heightmap_rotation];
+ 		}
+ 
++		/* Draw sizes in mapsize selection dropdowns in red if too large size is selected */
++		bool mapsize_valid = CheckMapSize(false);
++		this->widget[GLAND_MAPSIZE_X_PULLDOWN].data = mapsize_valid ? STR_NUM_1 : STR_RED_NUM_1;
++		this->widget[GLAND_MAPSIZE_Y_PULLDOWN].data = mapsize_valid ? STR_NUM_2 : STR_RED_NUM_2;
++
+ 		/* Set parameters for widget text that requires them. */
+ 		SetDParam(0, ConvertYMDToDate(_settings_newgame.game_creation.starting_year, 0, 1)); // GLAND_START_DATE_TEXT
+ 		SetDParam(1, 1 << _settings_newgame.game_creation.map_x); // GLAND_MAPSIZE_X_PULLDOWN
+@@ -664,11 +695,11 @@
+ 				break;
+ 
+ 			case GLAND_MAPSIZE_X_PULLDOWN: // Mapsize X
+-				ShowDropDownList(this, BuildMapsizeDropDown(), _settings_newgame.game_creation.map_x, GLAND_MAPSIZE_X_PULLDOWN);
++				ShowDropDownList(this, BuildMapsizeDropDown(_settings_newgame.game_creation.map_y), _settings_newgame.game_creation.map_x, GLAND_MAPSIZE_X_PULLDOWN);
+ 				break;
+ 
+ 			case GLAND_MAPSIZE_Y_PULLDOWN: // Mapsize Y
+-				ShowDropDownList(this, BuildMapsizeDropDown(), _settings_newgame.game_creation.map_y, GLAND_MAPSIZE_Y_PULLDOWN);
++				ShowDropDownList(this, BuildMapsizeDropDown(_settings_newgame.game_creation.map_x), _settings_newgame.game_creation.map_y, GLAND_MAPSIZE_Y_PULLDOWN);
+ 				break;
+ 
+ 			case GLAND_TOWN_PULLDOWN: // Number of towns
+@@ -687,6 +718,7 @@
+ 				break;
+ 
+ 			case GLAND_GENERATE_BUTTON: // Generate
++				if (!CheckMapSize()) break;
+ 				MakeNewgameSettingsLive();
+ 
+ 				if (mode == GLWP_HEIGHTMAP &&
+@@ -998,6 +1030,11 @@
+ 		SetDParam(2, 1 << _settings_newgame.game_creation.map_y); // CSCEN_MAPSIZE_Y_PULLDOWN
+ 		SetDParam(3, _settings_newgame.game_creation.se_flat_world_height); // CSCEN_FLAT_LAND_HEIGHT_TEXT
+ 
++		/* Draw sizes in mapsize selection dropdowns in red if too large size is selected */
++		bool mapsize_valid = CheckMapSize(false);
++		this->widget[CSCEN_MAPSIZE_X_PULLDOWN].data = mapsize_valid ? STR_NUM_1 : STR_RED_NUM_1;
++		this->widget[CSCEN_MAPSIZE_Y_PULLDOWN].data = mapsize_valid ? STR_NUM_2 : STR_RED_NUM_2;
++
+ 		this->DrawWidgets();
+ 	}
+ 
+@@ -1013,18 +1050,20 @@
+ 				break;
+ 
+ 			case CSCEN_MAPSIZE_X_PULLDOWN: // Mapsize X
+-				ShowDropDownList(this, BuildMapsizeDropDown(), _settings_newgame.game_creation.map_x, CSCEN_MAPSIZE_X_PULLDOWN);
++				ShowDropDownList(this, BuildMapsizeDropDown(_settings_newgame.game_creation.map_y), _settings_newgame.game_creation.map_x, CSCEN_MAPSIZE_X_PULLDOWN);
+ 				break;
+ 
+ 			case CSCEN_MAPSIZE_Y_PULLDOWN: // Mapsize Y
+-				ShowDropDownList(this, BuildMapsizeDropDown(), _settings_newgame.game_creation.map_y, CSCEN_MAPSIZE_Y_PULLDOWN);
++				ShowDropDownList(this, BuildMapsizeDropDown(_settings_newgame.game_creation.map_x), _settings_newgame.game_creation.map_y, CSCEN_MAPSIZE_Y_PULLDOWN);
+ 				break;
+ 
+ 			case CSCEN_EMPTY_WORLD: // Empty world / flat world
++				if (!CheckMapSize()) break;
+ 				StartGeneratingLandscape(GLWP_SCENARIO);
+ 				break;
+ 
+ 			case CSCEN_RANDOM_WORLD: // Generate
++				if (!CheckMapSize()) break;
+ 				ShowGenerateLandscape();
+ 				break;
+ 
+Index: src/map_type.h
+===================================================================
+--- src/map_type.h	(revision 16679)
++++ src/map_type.h	(working copy)
+@@ -52,10 +52,12 @@
+ 
+ /** Minimal and maximal map width and height */
+ enum {
+-	MIN_MAP_SIZE_BITS = 6,                      ///< Minimal size of map is equal to 2 ^ MIN_MAP_SIZE_BITS
+-	MAX_MAP_SIZE_BITS = 11,                     ///< Maximal size of map is equal to 2 ^ MAX_MAP_SIZE_BITS
+-	MIN_MAP_SIZE      = 1 << MIN_MAP_SIZE_BITS, ///< Minimal map size = 64
+-	MAX_MAP_SIZE      = 1 << MAX_MAP_SIZE_BITS, ///< Maximal map size = 2048
++	MIN_MAP_SIZE_BITS  = 6,                       ///< Minimal size of map is equal to 2 ^ MIN_MAP_SIZE_BITS
++	MAX_MAP_SIZE_BITS  = 13,                      ///< Maximal size of map is equal to 2 ^ MAX_MAP_SIZE_BITS
++	MAX_MAP_TILES_BITS = 22,                      ///< Maximal number of tiles in a map is equal to 2 ^ MAX_MAP_TILES_BITS. */
++	MIN_MAP_SIZE       = 1 << MIN_MAP_SIZE_BITS,  ///< Minimal map size = 64
++	MAX_MAP_SIZE       = 1 << MAX_MAP_SIZE_BITS,  ///< Maximal map size = 8192
++	MAX_MAP_TILES      = 1 << MAX_MAP_TILES_BITS, ///< Maximal number of tiles in a map = 2048 * 2048
+ };
+ 
+ /**
+Index: src/map.cpp
+===================================================================
+--- src/map.cpp	(revision 16679)
++++ src/map.cpp	(working copy)
+@@ -33,16 +33,18 @@
+  */
+ void AllocateMap(uint size_x, uint size_y)
+ {
++	DEBUG(map, 2, "Min/max map size %d/%d, max map tiles %d", MIN_MAP_SIZE, MAX_MAP_SIZE, MAX_MAP_TILES);
++	DEBUG(map, 1, "Allocating map of size %dx%d", size_x, size_y);
++
+ 	/* Make sure that the map size is within the limits and that
+ 	 * size of both axes is a power of 2. */
+-	if (!IsInsideMM(size_x, MIN_MAP_SIZE, MAX_MAP_SIZE + 1) ||
+-			!IsInsideMM(size_y, MIN_MAP_SIZE, MAX_MAP_SIZE + 1) ||
++	if (size_x * size_y > MAX_MAP_TILES ||
++			size_x < MIN_MAP_SIZE ||
++			size_y < MIN_MAP_SIZE ||
+ 			(size_x & (size_x - 1)) != 0 ||
+ 			(size_y & (size_y - 1)) != 0)
+ 		error("Invalid map size");
+ 
+-	DEBUG(map, 1, "Allocating map of size %dx%d", size_x, size_y);
+-
+ 	_map_log_x = FindFirstBit(size_x);
+ 	_map_log_y = FindFirstBit(size_y);
+ 	_map_size_x = size_x;
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 16679)
++++ src/openttd.cpp	(working copy)
+@@ -793,6 +793,24 @@
+ 	MarkWholeScreenDirty();
+ }
+ 
++/*
++ * Too large size may be stored in settings (especially if switching between between OpenTTD
++ * versions with different map size limits), we have to check if it is valid before generating world.
++ * Simple separate checking of X and Y map sizes is not enough, as their sum is what counts for the limit.
++ * Check the size and decrease the larger of the sizes till the size is in limit.
++ */
++static void FixConfigMapSize()
++{
++	while (_settings_game.game_creation.map_x + _settings_game.game_creation.map_y > MAX_MAP_TILES_BITS) {
++		/* Repeat reducing larger of X/Y dimensions until the map size is within allowable limits */
++		if (_settings_game.game_creation.map_x > _settings_game.game_creation.map_y) {
++			_settings_game.game_creation.map_x--;
++		} else {
++			_settings_game.game_creation.map_y--;
++		}
++	}
++}
++
+ static void MakeNewGame(bool from_heightmap)
+ {
+ 	_game_mode = GM_NORMAL;
+@@ -804,6 +822,7 @@
+ 	_industry_mngr.ResetMapping();
+ 
+ 	GenerateWorldSetCallback(&MakeNewGameDone);
++	FixConfigMapSize();
+ 	GenerateWorld(from_heightmap ? GW_HEIGHTMAP : GW_NEWGAME, 1 << _settings_game.game_creation.map_x, 1 << _settings_game.game_creation.map_y);
+ }
+ 
+@@ -819,6 +838,7 @@
+ 	ResetGRFConfig(true);
+ 
+ 	GenerateWorldSetCallback(&MakeNewEditorWorldDone);
++	FixConfigMapSize();
+ 	GenerateWorld(GW_EMPTY, 1 << _settings_game.game_creation.map_x, 1 << _settings_game.game_creation.map_y);
+ }
+ 
+@@ -1003,6 +1023,7 @@
+ 		case SM_LOAD_HEIGHTMAP: // Load heightmap from scenario editor
+ 			SetLocalCompany(OWNER_NONE);
+ 
++			FixConfigMapSize();
+ 			GenerateWorld(GW_HEIGHTMAP, 1 << _settings_game.game_creation.map_x, 1 << _settings_game.game_creation.map_y);
+ 			MarkWholeScreenDirty();
+ 			break;
+@@ -1034,6 +1055,7 @@
+ 
+ 		case SM_GENRANDLAND: // Generate random land within scenario editor
+ 			SetLocalCompany(OWNER_NONE);
++			FixConfigMapSize();
+ 			GenerateWorld(GW_RANDOM, 1 << _settings_game.game_creation.map_x, 1 << _settings_game.game_creation.map_y);
+ 			/* XXX: set date */
+ 			MarkWholeScreenDirty();

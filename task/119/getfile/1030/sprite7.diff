@@ -1,0 +1,207 @@
+Index: src/tree_cmd.cpp
+===================================================================
+--- src/tree_cmd.cpp	(revision 10195)
++++ src/tree_cmd.cpp	(working copy)
+@@ -366,7 +366,8 @@
+ 		s = _tree_layout_sprite[index];
+ 	}
+ 
+-	StartSpriteCombine();
++//	combined trees cause problems with parent sprite ordering
++//	StartSpriteCombine();
+ 
+ 	if (!HASBIT(_transparent_opt, TO_TREES) || !_patches.invisible_trees) {
+ 		TreeListEnt te[4];
+@@ -406,12 +407,12 @@
+ 
+ 			if (tep == NULL) break;
+ 
+-			AddSortableSpriteToDraw(tep->image, tep->pal, ti->x + tep->x, ti->y + tep->y, 5, 5, 0x10, z);
++			AddSortableSpriteToDraw(tep->image, tep->pal, ti->x + tep->x, ti->y + tep->y, 5, 5, 0x14, z);
+ 			tep->image = 0;
+ 		}
+ 	}
+ 
+-	EndSpriteCombine();
++//	EndSpriteCombine();
+ }
+ 
+ 
+Index: src/landscape.cpp
+===================================================================
+--- src/landscape.cpp	(revision 10195)
++++ src/landscape.cpp	(working copy)
+@@ -253,7 +253,7 @@
+ 		if (f < 15) {
+ 			/* leveled foundation
+ 			 * Use the original slope sprites if NW and NE borders should be visible */
+-			if (sprite_base  == SPR_SLOPES_BASE - 15) sprite_base = SPR_FOUNDATION_BASE;
++			if (sprite_base == SPR_SLOPES_BASE - 15) sprite_base = SPR_FOUNDATION_BASE;
+ 
+ 			AddSortableSpriteToDraw(sprite_base + f, PAL_NONE, ti->x, ti->y, 16, 16, 7, ti->z);
+ 			ti->z += TILE_HEIGHT;
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 10195)
++++ src/viewport.cpp	(working copy)
+@@ -90,8 +90,8 @@
+ 	int32 ymin;
+ 	int32 xmax;
+ 	int32 ymax;
++	int32 sort;	/* cached guessed order */
+ 	ChildScreenSpriteToDraw *child;
+-	byte unk16;
+ 	byte zmin;
+ 	byte zmax;
+ };
+@@ -487,6 +487,12 @@
+ 
+ 	assert((image & SPRITE_MASK) < MAX_SPRITES);
+ 
++	/* dz == 0 is problematic for ViewportSortParentSprites(),
++	 * sprite whould be "above itself" or "above other sprite with dz == 0"
++	 * - those sprites would be above each other, causing deadlock
++	*/
++//	if ( dz == 0 ) dz = 1;   /* TODO: helipads have dz == 0, may cause problems */
++
+ 	if (vd->combine_sprites == 2) {
+ 		AddCombinedSprite(image, pal, x, y, z);
+ 		return;
+@@ -533,7 +539,14 @@
+ 	ps->zmin = z;
+ 	ps->zmax = z + dz - 1;
+ 
+-	ps->unk16 = 0;
++	/* Use X+Y as the sorting order, so sprites closer to the bottom of
++	 * the screen are drawn in front.
++	 * Here X,Y are the coordinates of the "center of bottom" of the sprite,
++	 * i.e. X=(left+right)/2, etc.
++	 * However, since we only care about order, don't actually divide / 2
++	 */
++	ps->sort =(ps->xmin + ps->xmax) + (ps->ymin + ps->ymax);  /* guessed order */
++
+ 	ps->child = NULL;
+ 	vd->last_child = &ps->child;
+ 
+@@ -1105,61 +1118,77 @@
+ 
+ static void ViewportSortParentSprites(ParentSpriteToDraw *psd[])
+ {
+-	while (*psd != NULL) {
+-		ParentSpriteToDraw* ps = *psd;
++	uint num=0;	/* number of parent sprites */
++	for ( ; psd[num] != NULL ; num++ );
+ 
+-		if (!(ps->unk16 & 1)) {
+-			ParentSpriteToDraw** psd2 = psd;
++	for ( uint i = 0 ; i < num ; i++ ) {
++		uint jmin = i;	/* index of the best match */
++		uint ct = 0;	/* counter of steps */
++		uint lvl = 0;	/* level of loops */
++		ParentSpriteToDraw *chk = psd[i]; /* loop detector helper */
++		ParentSpriteToDraw *ps = psd[i];
+ 
+-			ps->unk16 |= 1;
++		rest:
++		for ( uint k = i ; k < num ; k++ ) {
++			ParentSpriteToDraw* ps2 = psd[k];
++			if ( ps == ps2 ) continue;
+ 
+-			while (*++psd2 != NULL) {
+-				ParentSpriteToDraw* ps2 = *psd2;
+-				ParentSpriteToDraw** psd3;
++			/* do sprites overlay ? */
++			if ( ps->left <= ps2->right && ps->right >= ps2->left && ps->top <= ps2->bottom && ps->bottom >= ps2->top  ) {
++				/* cases when 'ps' can be drawn before 'ps2' */
+ 
+-				if (ps2->unk16 & 1) continue;
++				/* 'ps' whole under 'ps2' */
++				if ( ps->zmax < ps2->zmin ) continue;
+ 
+-				/* Decide which comparator to use, based on whether the bounding
+-				 * boxes overlap
+-				 */
+-				if (ps->xmax > ps2->xmin && ps->xmin < ps2->xmax && // overlap in X?
+-						ps->ymax > ps2->ymin && ps->ymin < ps2->ymax && // overlap in Y?
+-						ps->zmax > ps2->zmin && ps->zmin < ps2->zmax) { // overlap in Z?
+-					/* Use X+Y+Z as the sorting order, so sprites closer to the bottom of
+-					 * the screen and with higher Z elevation, are drawn in front.
+-					 * Here X,Y,Z are the coordinates of the "center of mass" of the sprite,
+-					 * i.e. X=(left+right)/2, etc.
+-					 * However, since we only care about order, don't actually divide / 2
+-					 */
+-					if (ps->xmin + ps->xmax + ps->ymin + ps->ymax + ps->zmin + ps->zmax <=
+-							ps2->xmin + ps2->xmax + ps2->ymin + ps2->ymax + ps2->zmin + ps2->zmax) {
+-						continue;
++				/* ( 'ps' starts under top of 'ps2' && ( further from bottom of viewport || whole behind in y/x ) ) */
++				/* TODO: 12,4 - constants to handle incorrectly set Vehicle sizes, eg. while entering depot/hangar, while riding at slopes */
++				if ( ps->zmin <= ps2->zmin && ( ps->sort < ps2->sort - 12  || ps->ymax < ps2->ymin - 4 || ps->xmax < ps2->xmin - 4 ) ) continue;
++
++				/* too many iterations -> in a loop -> use 'center of the mass' method */
++				if ( lvl > 0 ) {
++					/* maybe comparing vehicle and depot, for hangar diff == +-1 */
++					if ( abs(ps->zmin - ps2->zmin) <= 1 ) {
++						/* use comparison by center of the mass */
++						if ( ( ps->sort+ps->zmin+ps->zmax <= ps2->sort+ps2->zmin+ps2->zmax ) ) continue;
++					} else {
++						/* standard comparison - eg. for buildings */
++						if ( ( ps->sort <= ps2->sort ) ) continue;
+ 					}
+-				} else {
+-					if (ps->xmax < ps2->xmin ||
+-							ps->ymax < ps2->ymin ||
+-							ps->zmax < ps2->zmin || (
+-								ps->xmin < ps2->xmax &&
+-								ps->ymin < ps2->ymax &&
+-								ps->zmin < ps2->zmax
+-							)) {
+-						continue;
+-					}
+ 				}
++				/* again in a loop, use basic comparison (ordered by ps->sort, cannot end in a loop) */
++				if ( lvl > 1 ) {
++					if ( ( ps->sort <= ps2->sort ) ) continue;
++				}
++				if ( lvl > 2 ) {
++					NOT_REACHED();
++				}
+ 
+-				/* Swap the two sprites ps and ps2 using bubble-sort algorithm. */
+-				psd3 = psd;
+-				do {
+-					ParentSpriteToDraw* temp = *psd3;
+-					*psd3 = ps2;
+-					ps2 = temp;
++				/* loop - too many iterations or looped back to a known sprite */
++				if ( ++ct == num-i || chk == psd[k] ) {
++					ct = 0;
++					lvl++;
++				}
+ 
+-					psd3++;
+-				} while (psd3 <= psd2);
++				/* increased level or 8 sprites without loop detected */
++				/* if loop is longer than 8 sprites, it gets detected when ct==num-i */
++				if ( ct & 7 == 0 ) {
++					chk = psd[k];
++				}
++				ps = ps2;   /* restart searching from actual sprite */
++				jmin = k;
++				goto rest;
+ 			}
+-		} else {
+-			psd++;
+ 		}
++
++		if ( jmin != i ) {
++			/* 'bubble' value to its place -  more correct, can even be faster (in effect) that swapping */
++			ParentSpriteToDraw* swap = psd[jmin];
++			for ( uint j = jmin ; j > i ; j-- ) psd[j] = psd[j-1];
++			psd[i] = swap;
++/*			ParentSpriteToDraw* swap = psd[i];
++			psd[i] = psd[jmin];
++			psd[jmin] = swap;*/
++		}
+ 	}
+ }
+ 

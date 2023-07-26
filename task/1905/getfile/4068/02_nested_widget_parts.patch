@@ -1,0 +1,304 @@
+diff -r f534da65ff5e src/widget.cpp
+--- a/src/widget.cpp	Sat Mar 07 18:33:54 2009 +0100
++++ b/src/widget.cpp	Sat Mar 07 18:59:01 2009 +0100
+@@ -1385,3 +1385,137 @@
+ 	return widgets;
+ }
+ 
++/* == Conversion code from NWidgetPart array to NWidgetBase* tree == */
++
++/**
++ * Construct a single nested widget in \a *dest from its parts.
++ *
++ * Construct a NWidgetBase object from a #NWidget function, and apply all
++ * settings that follow it, until encountering a #EndContainer, another
++ * #NWidget, or the end of the parts array.
++ *
++ * @param parts Array with parts of the nested widget.
++ * @param count Length of the \a parts array.
++ * @param dest  Address of pointer to use for returning the composed widget.
++ * @return Number of widget part elements used to compose the widget.
++ */
++static int MakeNWidget(const NWidgetPart *parts, int count, NWidgetBase **dest)
++{
++	int num_used = 0;
++
++	*dest = NULL;
++
++	while (count > num_used) {
++		switch (parts->type) {
++			case NWID_SPACER:
++				if (*dest != NULL) return num_used;
++				*dest = new NWidgetSpacer(0, 0);
++				break;
++			case NWID_HORIZONTAL:
++				if (*dest != NULL) return num_used;
++				*dest = new NWidgetHorizontal();
++				break;
++			case WWT_PANEL:
++			case WWT_INSET:
++			case WWT_FRAME:
++				if (*dest != NULL) return num_used;
++				*dest = new NWidgetBackground(parts->type, parts->d.widget.colour, parts->d.widget.index);
++				break;
++			case NWID_VERTICAL:
++				if (*dest != NULL) return num_used;
++				*dest = new NWidgetVertical();
++				break;
++			case WPT_RESIZE: {
++				NWidgetResizeBase *nwrb = dynamic_cast<NWidgetResizeBase *>(*dest);
++				if (nwrb != NULL) nwrb->SetResize(parts->d.xy.x_pos, parts->d.xy.y_pos);
++				break;
++			}
++			case WPT_MINSIZE: {
++				NWidgetResizeBase *nwrb = dynamic_cast<NWidgetResizeBase *>(*dest);
++				if (nwrb != NULL) nwrb->SetMinimalSize(parts->d.xy.x_pos, parts->d.xy.y_pos);
++				break;
++			}
++			case WPT_FILL: {
++				NWidgetResizeBase *nwrb = dynamic_cast<NWidgetResizeBase *>(*dest);
++				if (nwrb != NULL) nwrb->SetFill(parts->d.xy.x_pos, parts->d.xy.y_pos);
++				break;
++			}
++			case WPT_DATATIP: {
++				NWidgetCore *nwc = dynamic_cast<NWidgetCore *>(*dest);
++				if (nwc != NULL) {
++					nwc->widget_data = parts->d.data_tip.data;
++					nwc->tool_tip = parts->d.data_tip.tooltip;
++				}
++				break;
++			}
++			case WPT_ENDCONTAINER:
++				return num_used;
++			default:
++				if (*dest != NULL) return num_used;
++				assert((parts->type & WWT_MASK) < NWID_HORIZONTAL);
++				*dest = new NWidgetLeaf(parts->type, parts->d.widget.colour, parts->d.widget.index, 0x0, STR_NULL);
++				break;
++		}
++		num_used++;
++		parts++;
++	}
++
++	return num_used;
++}
++
++/**
++ * Build a nested widget tree by recursively filling containers with nested widgets read from their parts.
++ * @param parts  Array with parts of the nested widgets.
++ * @param count  Length of the \a parts array.
++ * @param parent Container to use for storing the child widgets.
++ * @return Number of widget part elements used to fill the container.
++ */
++static int MakeWidgetTree(const NWidgetPart *parts, int count, NWidgetBase *parent)
++{
++	/* Given parent must be either a #NWidgetContainer or a #NWidgetBackground object. */
++	NWidgetContainer *nwid_cont = dynamic_cast<NWidgetContainer *>(parent);
++	NWidgetBackground *nwid_parent = dynamic_cast<NWidgetBackground *>(parent);
++	assert((nwid_cont != NULL && nwid_parent == NULL) || (nwid_cont == NULL && nwid_parent != NULL));
++
++	int total_used = 0;
++	while (true) {
++		NWidgetBase *sub_widget = NULL;
++		int num_used = MakeNWidget(parts, count - total_used, &sub_widget);
++		parts += num_used;
++		total_used += num_used;
++
++		/* Break out of loop when end reached */
++		if (sub_widget == NULL) break;
++
++		/* Add sub_widget to parent container. */
++		if (nwid_cont) nwid_cont->Add(sub_widget);
++		if (nwid_parent) nwid_parent->Add(sub_widget);
++
++		/* If sub-widget is a container, recursively fill that container. */
++		byte tp = sub_widget->type;
++		if (tp == NWID_HORIZONTAL || tp == NWID_VERTICAL || tp == WWT_PANEL || tp == WWT_FRAME || tp == WWT_INSET) {
++			int num_used = MakeWidgetTree(parts, count - total_used, sub_widget);
++			parts += num_used;
++			total_used += num_used;
++		}
++	}
++
++	if (count == total_used) return total_used; // Reached the end of the array of parts?
++
++	assert(total_used < count);
++	assert(parts->type == WPT_ENDCONTAINER);
++	return total_used + 1; // *parts is also 'used'
++}
++
++/**
++ * Construct a nested widget tree from an array of parts.
++ * @param parts Array with parts of the widgets.
++ * @param count Length of the \a parts array.
++ * @return Root of the nested widget tree, a vertical container containing the entire GUI.
++ */
++NWidgetContainer *MakeNWidgets(const NWidgetPart *parts, int count)
++{
++	NWidgetContainer *cont = new NWidgetVertical();
++	MakeWidgetTree(parts, count, cont);
++	return cont;
++}
+diff -r f534da65ff5e src/widget_type.h
+--- a/src/widget_type.h	Sat Mar 07 18:33:54 2009 +0100
++++ b/src/widget_type.h	Sat Mar 07 18:59:01 2009 +0100
+@@ -259,4 +259,159 @@
+ };
+ 
+ Widget *InitializeNWidgets(NWidgetBase *nwid, bool rtl = false);
++
++/* == Nested widget parts == */
++
++/** Widget part for storing a x/y size. */
++struct NWidgetPartDataXY {
++	int16 x_pos; ///< X size.
++	int16 y_pos; ///< Y size.
++};
++
++/** Widget part for storing data and tooltip information. */
++struct NWidgetPartDataTip {
++	uint16 data;      ///< Data value of the widget.
++	StringID tooltip; ///< Tooltip of the widget.
++};
++
++/** Widget part for storing basic widget information. */
++struct NWidgetPartWidget {
++	Colours colour; ///< Widget colour.
++	int16 index; ///< Widget index in the widget array.
++};
++
++/**
++ * Available part types.
++ * @todo Merge with NewWidgetType
++ */
++enum NWidgetPartType {
++	WPT_RESIZE = 0xf0, ///< Widget part for specifying resizing.
++	WPT_MINSIZE,       ///< Widget part for specifying minimal size.
++	WPT_FILL,          ///< Widget part for specifying fill.
++	WPT_DATATIP,       ///< Widget part for specifying data and tooltip.
++	WPT_ENDCONTAINER,  ///< Widget part to denote end of a container.
++};
++
++/**
++ * Partial widget specification to allow NWidgets to be written nested.
++ */
++struct NWidgetPart {
++	byte type; ///< Type of the part. @see NWidgetPartType.
++	union {
++		NWidgetPartDataXY xy; ///< Part with an x/y size.
++		NWidgetPartDataTip data_tip; ///< Part with a data/tooltip.
++		NWidgetPartWidget widget; ///< Part with a start of a widget.
++	} d;
++};
++
++/**
++ * Widget part function for setting the resize step.
++ * @param dx Horizontal resize step. 0 means no horizontal resizing.
++ * @param dy Vertical resize step. 0 means no horizontal resizing.
++ */
++static inline NWidgetPart SetResize(int16 dx, int16 dy)
++{
++	NWidgetPart part;
++
++	part.type = WPT_RESIZE;
++	part.d.xy.x_pos = dx;
++	part.d.xy.y_pos = dy;
++
++	return part;
++}
++
++/**
++ * Widget part function for setting the minimal size.
++ * @param dx Horizontal minimal size.
++ * @param dy Vertical minimal size.
++ */
++static inline NWidgetPart SetMinimalSize(int16 x, int16 y)
++{
++	NWidgetPart part;
++
++	part.type = WPT_MINSIZE;
++	part.d.xy.x_pos = x;
++	part.d.xy.y_pos = y;
++
++	return part;
++}
++
++/**
++ * Widget part function for setting filling.
++ * @param x_fill Allow horizontal filling from minimal size.
++ * @param y_fill Allow vertical filling from minimal size.
++ */
++static inline NWidgetPart SetFill(bool x_fill, bool y_fill)
++{
++	NWidgetPart part;
++
++	part.type = WPT_FILL;
++	part.d.xy.x_pos = x_fill;
++	part.d.xy.y_pos = y_fill;
++
++	return part;
++}
++
++/**
++ * Widget part function for denoting the end of a container
++ * (horizontal, vertical, WWT_FRAME, WWT_INSET, or WWT_PANEL).
++ */
++static inline NWidgetPart EndContainer()
++{
++	NWidgetPart part;
++
++	part.type = WPT_ENDCONTAINER;
++
++	return part;
++}
++
++/** Widget part function for setting the data and tooltip.
++ * @param data Data of the widget.
++ * @param tip  Tooltip of the widget.
++ */
++static inline NWidgetPart SetDataTip(uint16 data = 0, StringID tip = 0)
++{
++	NWidgetPart part;
++
++	part.type = WPT_DATATIP;
++	part.d.data_tip.data = data;
++	part.d.data_tip.tooltip = tip;
++
++	return part;
++}
++
++/**
++ * Widget part function for starting a new 'real' widget.
++ * @param tp  Type of the new nested widget.
++ * @param col Colour of the new widget.
++ * @param idx Index of the widget in the widget array.
++ * @note with #WWT_PANEL, #WWT_FRAME, #WWT_INSET, a new container is started.
++ *       Child widgets must have a index bigger than the parent index.
++ */
++static inline NWidgetPart NWidget(byte tp, Colours col, int16 idx)
++{
++	NWidgetPart part;
++
++	part.type = tp;
++	part.d.widget.colour = col;
++	part.d.widget.index = idx;
++
++	return part;
++}
++
++/**
++ * Widget part function for starting a new horizontal container, vertical container, or spacer widget.
++ * @param tp Type of the new nested widget, #NWID_HORIZONTAL, #NWID_VERTICAL, or #NWID_SPACER
++ */
++static inline NWidgetPart NWidget(byte tp)
++{
++	NWidgetPart part;
++
++	part.type = tp;
++
++	return part;
++}
++
++NWidgetContainer *MakeNWidgets(const NWidgetPart *parts, int count);
++
+ #endif /* WIDGET_TYPE_H */

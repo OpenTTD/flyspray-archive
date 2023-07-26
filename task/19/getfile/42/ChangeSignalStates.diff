@@ -1,0 +1,95 @@
+Index: rail.h
+===================================================================
+--- rail.h	(revision 3369)
++++ rail.h	(working copy)
+@@ -528,6 +528,27 @@
+ }
+ 
+ /**
++ * Sets the state of the signal along the given trackdir.
++ *
++ * Along meaning if you are currently driving on the given trackdir, this is
++ * the signal that is facing us (for which we stop when it's red).
++ */
++static inline void SetSignalState(TileIndex tile, Trackdir trackdir, SignalState state)
++{
++	assert(IsValidTrackdir(trackdir));
++	assert(HasSignalOnTrack(tile, TrackdirToTrack(trackdir)));
++	
++	switch(state) {
++		case SIGNAL_STATE_RED:
++			_m[tile].m2 &= ~SignalAlongTrackdir(trackdir);
++			break;
++		case SIGNAL_STATE_GREEN:
++			_m[tile].m2 |= SignalAlongTrackdir(trackdir);
++			break;
++	}
++}
++
++/**
+  * Gets the type of signal on a given track on a given rail tile with signals.
+  *
+  * Note that currently, the track argument is not used, since
+Index: rail_cmd.c
+===================================================================
+--- rail_cmd.c	(revision 3369)
++++ rail_cmd.c	(working copy)
+@@ -1802,37 +1802,32 @@
+ 	// then mark the signals in the segment accordingly
+ 	for (i = 0; i != ssd->cur; i++) {
+ 		TileIndex tile = ssd->tile[i];
+-		byte bit = SignalAgainstTrackdir(ssd->bit[i]);
+-		uint16 m2 = _m[tile].m2;
++		Trackdir signal = ReverseTrackdir(ssd->bit[i]);
++		SignalState state = GetSignalState(tile, signal);
++		SignalState newstate = ssd->stop ? SIGNAL_STATE_RED : SIGNAL_STATE_GREEN;
+ 
+ 		// presignals don't turn green if there is at least one presignal exit and none are free
+-		if (_m[tile].m4 & 1) {
++		if (GetSignalType(tile, TrackdirToTrack(signal)) == SIGTYPE_ENTRY ||
++			GetSignalType(tile, TrackdirToTrack(signal)) == SIGTYPE_COMBO) {
+ 			int ex = ssd->presignal_exits, exfree = ssd->presignal_exits_free;
+ 
+ 			// subtract for dual combo signals so they don't count themselves
+-			if (_m[tile].m4&2 && HasSignalOnTrackdir(tile, ssd->bit[i])) {
++			if (GetSignalType(tile, TrackdirToTrack(signal)) == SIGTYPE_COMBO && HasSignalOnTrackdir(tile, ssd->bit[i])) {
+ 				ex--;
+ 				if (GetSignalState(tile, ssd->bit[i]) != SIGNAL_STATE_RED) exfree--;
+ 			}
+ 
+ 			// if we have exits and none are free, make red.
+-			if (ex && !exfree) goto make_red;
++			if (ex && !exfree) newstate = SIGNAL_STATE_RED;
+ 		}
+ 
+ 		// check if the signal is unaffected.
+-		if (ssd->stop) {
+-make_red:
+-			// turn red
+-			if ( (bit&m2) == 0 )
+-				continue;
+-		} else {
+-			// turn green
+-			if ( (bit&m2) != 0 )
+-				continue;
+-		}
++		if(newstate == state)
++			continue;
+ 
+ 		/* Update signals on the other side of this exit-combo signal; it changed. */
+-		if (_m[tile].m4 & 2 ) {
++		if (GetSignalType(tile, TrackdirToTrack(signal)) == SIGTYPE_EXIT ||
++			GetSignalType(tile, TrackdirToTrack(signal)) == SIGTYPE_COMBO) {
+ 			if (ssd->cur_stack != NUM_SSD_STACK) {
+ 				ssd->next_tile[ssd->cur_stack] = tile;
+ 				ssd->next_dir[ssd->cur_stack] = _dir_from_track[ssd->bit[i]];
+@@ -1842,8 +1837,7 @@
+ 			}
+ 		}
+ 
+-		// it changed, so toggle it
+-		_m[tile].m2 = m2 ^ bit;
++		SetSignalState(tile, signal, newstate);
+ 		MarkTileDirtyByTile(tile);
+ 	}
+ }

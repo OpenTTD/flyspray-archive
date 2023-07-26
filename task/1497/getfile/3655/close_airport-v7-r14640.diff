@@ -1,0 +1,221 @@
+diff -r 50e315db0024 src/aircraft_cmd.cpp
+--- src/aircraft_cmd.cpp	Mon Nov 24 19:31:01 2008 +0000
++++ src/aircraft_cmd.cpp	Fri Nov 28 22:13:49 2008 +0100
+@@ -1664,6 +1664,7 @@
+ 
+ 	/* runway busy or not allowed to use this airstation, circle */
+ 	if (apc->flags & (v->subtype == AIR_HELICOPTER ? AirportFTAClass::HELICOPTERS : AirportFTAClass::AIRPLANES) &&
++			!HASBITS(st->airport_flags, AIRPORT_CLOSED_block) &&
+ 			st->airport_tile != 0 &&
+ 			(st->owner == OWNER_NONE || st->owner == v->owner)) {
+ 		// {32,FLYING,NOTHING_block,37}, {32,LANDING,N,33}, {32,HELILANDING,N,41},
+diff -r 50e315db0024 src/airport.h
+--- src/airport.h	Mon Nov 24 19:31:01 2008 +0000
++++ src/airport.h	Fri Nov 28 22:13:49 2008 +0100
+@@ -113,7 +113,9 @@
+ 	OUT_WAY_block2           = 1ULL << 31,
+ /* end of new blocks */
+ 
+-	NOTHING_block            = 1ULL << 30;
++	NOTHING_block            = 1ULL << 30,
++
++	AIRPORT_CLOSED_block     = 1ULL << 32;
+ 
+ struct AirportMovingData {
+ 	int16 x;
+diff -r 50e315db0024 src/command.cpp
+--- src/command.cpp	Mon Nov 24 19:31:01 2008 +0000
++++ src/command.cpp	Fri Nov 28 22:13:49 2008 +0100
+@@ -195,6 +195,8 @@
+ DEF_COMMAND(CmdChangeTimetable);
+ DEF_COMMAND(CmdSetVehicleOnTime);
+ DEF_COMMAND(CmdAutofillTimetable);
++
++DEF_COMMAND(CmdOpenCloseAirport);
+ #undef DEF_COMMAND
+ 
+ /**
+@@ -341,6 +343,8 @@
+ 	{CmdChangeTimetable,                     0}, /* CMD_CHANGE_TIMETABLE */
+ 	{CmdSetVehicleOnTime,                    0}, /* CMD_SET_VEHICLE_ON_TIME */
+ 	{CmdAutofillTimetable,                   0}, /* CMD_AUTOFILL_TIMETABLE */
++
++	{CmdOpenCloseAirport,                    0}, /* CMD_OPEN_CLOSE_AIRPORT */
+ };
+ 
+ /*!
+diff -r 50e315db0024 src/command_type.h
+--- src/command_type.h	Mon Nov 24 19:31:01 2008 +0000
++++ src/command_type.h	Fri Nov 28 22:13:49 2008 +0100
+@@ -288,6 +288,8 @@
+ 	CMD_CHANGE_TIMETABLE,             ///< change the timetable for a vehicle
+ 	CMD_SET_VEHICLE_ON_TIME,          ///< set the vehicle on time feature (timetable)
+ 	CMD_AUTOFILL_TIMETABLE,           ///< autofill the timetable
++
++	CMD_OPEN_CLOSE_AIRPORT,           ///< open/close an airport
+ };
+ 
+ /**
+diff -r 50e315db0024 src/lang/english.txt
+--- src/lang/english.txt	Mon Nov 24 19:31:01 2008 +0000
++++ src/lang/english.txt	Fri Nov 28 22:13:49 2008 +0100
+@@ -3305,6 +3305,10 @@
+ STR_SCHEDULED_AIRCRAFT_TIP                                      :{BLACK}Show all aircraft which have this station on their schedule
+ STR_SCHEDULED_SHIPS_TIP                                         :{BLACK}Show all ships which have this station on their schedule
+ 
++STR_CLOSE_AIRPORT                                               :{BLACK}Close airport
++STR_CLOSE_AIRPORT_TIP                                           :{BLACK}Prevent aircraft from landing on this airport
++STR_CLOSE_AIRPORT_ERROR                                         :{WHITE}Cannot open/close airport...
++
+ STR_VEH_WITH_SHARED_ORDERS_LIST                                 :{WHITE}Shared orders of {COMMA} Vehicle{P "" s}
+ STR_VEH_WITH_SHARED_ORDERS_LIST_TIP                             :{BLACK}Show all vehicles that share this schedule
+ 
+diff -r 50e315db0024 src/station_cmd.cpp
+--- src/station_cmd.cpp	Mon Nov 24 19:31:01 2008 +0000
++++ src/station_cmd.cpp	Fri Nov 28 22:13:49 2008 +0100
+@@ -1938,6 +1938,7 @@
+ 		UpdateStationAcceptance(st, false);
+ 		InvalidateWindowData(WC_STATION_LIST, st->owner, 0);
+ 		InvalidateWindowWidget(WC_STATION_VIEW, st->index, SVW_PLANES);
++		InvalidateWindowWidget(WC_STATION_VIEW, st->index, SVW_CLOSEAIRPORT);
+ 
+ 		if (_settings_game.economy.station_noise_level) {
+ 			InvalidateWindow(WC_TOWN_VIEW, st->town->index);
+@@ -1993,8 +1994,10 @@
+ 
+ 		st->airport_tile = 0;
+ 		st->facilities &= ~FACIL_AIRPORT;
++		st->airport_flags = 0;
+ 
+ 		InvalidateWindowWidget(WC_STATION_VIEW, st->index, SVW_PLANES);
++		InvalidateWindowWidget(WC_STATION_VIEW, st->index, SVW_CLOSEAIRPORT);
+ 
+ 		if (_settings_game.economy.station_noise_level) {
+ 			InvalidateWindow(WC_TOWN_VIEW, st->town->index);
+@@ -2005,6 +2008,32 @@
+ 	}
+ 
+ 	return cost;
++}
++
++/** Open/close an airport.
++ * @param tile unused
++ * @param flags type of operation
++ * @param p1 station ID of the airport
++ * @param p2 new status (0 open, 1 closed)
++ */
++CommandCost CmdOpenCloseAirport(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++{
++	if (!IsValidStationID(p1)) return CMD_ERROR;
++	Station *st = GetStation(p1);
++
++	if (!(st->facilities & FACIL_AIRPORT)) return CMD_ERROR;
++	if (!CheckOwnership(st->owner)) return CMD_ERROR;
++
++	if (flags & DC_EXEC) {
++		if (p2) {
++			SETBITS(st->airport_flags, AIRPORT_CLOSED_block);
++		} else {
++			CLRBITS(st->airport_flags, AIRPORT_CLOSED_block);
++		}
++		InvalidateWindowWidget(WC_STATION_VIEW, st->index, SVW_CLOSEAIRPORT);
++	}
++
++	return CommandCost();
+ }
+ 
+ /** Build a buoy.
+diff -r 50e315db0024 src/station_gui.cpp
+--- src/station_gui.cpp	Mon Nov 24 19:31:01 2008 +0000
++++ src/station_gui.cpp	Fri Nov 28 22:13:49 2008 +0100
+@@ -626,6 +626,25 @@
+ {   WIDGETS_END},
+ };
+ 
++static const Widget _airport_view_widgets[] = {
++	{   WWT_CLOSEBOX,   RESIZE_NONE,  COLOUR_GREY,     0,    10,     0,    13, STR_00C5,          STR_018B_CLOSE_WINDOW},                // SVW_CLOSEBOX
++	{    WWT_CAPTION,  RESIZE_RIGHT,  COLOUR_GREY,    11,   236,     0,    13, STR_300A_0,        STR_018C_WINDOW_TITLE_DRAG_THIS},
++	{  WWT_STICKYBOX,     RESIZE_LR,  COLOUR_GREY,   237,   248,     0,    13, 0x0,               STR_STICKY_BUTTON},
++	{      WWT_PANEL,     RESIZE_RB,  COLOUR_GREY,     0,   236,    14,    65, 0x0,               STR_NULL},                             // SVW_WAITING
++	{  WWT_SCROLLBAR,    RESIZE_LRB,  COLOUR_GREY,   237,   248,    14,    65, 0x0,               STR_0190_SCROLL_BAR_SCROLLS_LIST},
++	{      WWT_PANEL,    RESIZE_RTB,  COLOUR_GREY,     0,   248,    66,    97, 0x0,               STR_NULL},                             // SVW_ACCEPTLIST / SVW_RATINGLIST
++	{ WWT_PUSHTXTBTN,     RESIZE_TB,  COLOUR_GREY,     0,    59,   110,   121, STR_00E4_LOCATION, STR_3053_CENTER_MAIN_VIEW_ON_STATION}, // SVW_LOCATION
++	{ WWT_PUSHTXTBTN,     RESIZE_TB,  COLOUR_GREY,    60,   120,   110,   121, STR_3032_RATINGS,  STR_3054_SHOW_STATION_RATINGS},        // SVW_RATINGS / SVW_ACCEPTS
++	{ WWT_PUSHTXTBTN,    RESIZE_RTB,  COLOUR_GREY,   121,   180,   110,   121, STR_0130_RENAME,   STR_3055_CHANGE_NAME_OF_STATION},      // SVW_RENAME
++	{ WWT_PUSHTXTBTN,   RESIZE_LRTB,  COLOUR_GREY,   181,   194,   110,   121, STR_TRAIN,         STR_SCHEDULED_TRAINS_TIP },            // SVW_TRAINS
++	{ WWT_PUSHTXTBTN,   RESIZE_LRTB,  COLOUR_GREY,   195,   208,   110,   121, STR_LORRY,         STR_SCHEDULED_ROAD_VEHICLES_TIP },     // SVW_ROADVEHS
++	{ WWT_PUSHTXTBTN,   RESIZE_LRTB,  COLOUR_GREY,   209,   222,   110,   121, STR_PLANE,         STR_SCHEDULED_AIRCRAFT_TIP },          // SVW_PLANES
++	{ WWT_PUSHTXTBTN,   RESIZE_LRTB,  COLOUR_GREY,   223,   236,   110,   121, STR_SHIP,          STR_SCHEDULED_SHIPS_TIP },             // SVW_SHIPS
++	{  WWT_RESIZEBOX,   RESIZE_LRTB,  COLOUR_GREY,   237,   248,   110,   121, 0x0,               STR_RESIZE_BUTTON},
++	{ WWT_PUSHTXTBTN,    RESIZE_RTB,  COLOUR_GREY,     0,   248,    98,   109, STR_CLOSE_AIRPORT, STR_CLOSE_AIRPORT_TIP},                // SVW_CLOSEAIRPORT
++	{   WIDGETS_END},
++};
++
+ SpriteID GetCargoSprite(CargoID i)
+ {
+ 	const CargoSpec *cs = GetCargo(i);
+@@ -760,6 +779,10 @@
+ 		this->SetWidgetDisabledState(SVW_ROADVEHS, !(st->facilities & FACIL_TRUCK_STOP) && !(st->facilities & FACIL_BUS_STOP));
+ 		this->SetWidgetDisabledState(SVW_PLANES,   !(st->facilities & FACIL_AIRPORT));
+ 		this->SetWidgetDisabledState(SVW_SHIPS,    !(st->facilities & FACIL_DOCK));
++		if (st->facilities & FACIL_AIRPORT) {
++			this->SetWidgetDisabledState(SVW_CLOSEAIRPORT, st->owner != _local_company);
++			this->SetWidgetLoweredState(SVW_CLOSEAIRPORT, HASBITS(st->airport_flags, AIRPORT_CLOSED_block));
++		}
+ 
+ 		SetDParam(0, st->index);
+ 		SetDParam(1, st->facilities);
+@@ -942,6 +965,12 @@
+ 				ShowVehicleListWindow(owner, VEH_SHIP, (StationID)this->window_number);
+ 				break;
+ 			}
++
++			case SVW_CLOSEAIRPORT: { // Open/close airport
++				const Station *st = GetStation(this->window_number);
++				DoCommandP(0, st->index, HASBITS(st->airport_flags, AIRPORT_CLOSED_block) ? 0 : 1, NULL, CMD_OPEN_CLOSE_AIRPORT | CMD_MSG(STR_CLOSE_AIRPORT_ERROR));
++				break;
++			}
+ 		}
+ 	}
+ 
+@@ -968,12 +997,24 @@
+ 	_station_view_widgets,
+ };
+ 
++static const WindowDesc _airport_view_desc = {
++	WDP_AUTO, WDP_AUTO, 249, 122, 249, 122,
++	WC_STATION_VIEW, WC_NONE,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON | WDF_RESIZABLE,
++	_airport_view_widgets,
++};
++
+ /**
+  * Opens StationViewWindow for given station
+  *
+- * @param station station which window should be opened
++ * @param stationid StationID which window should be opened
+  */
+-void ShowStationViewWindow(StationID station)
++void ShowStationViewWindow(StationID stationid)
+ {
+-	AllocateWindowDescFront<StationViewWindow>(&_station_view_desc, station);
+-}
++	Station *st = GetStation(stationid);
++	if (st->facilities & FACIL_AIRPORT) {
++		AllocateWindowDescFront<StationViewWindow>(&_airport_view_desc, stationid);
++	} else {
++		AllocateWindowDescFront<StationViewWindow>(&_station_view_desc, stationid);
++	}
++}
+\ No newline at end of file
+diff -r 50e315db0024 src/station_gui.h
+--- src/station_gui.h	Mon Nov 24 19:31:01 2008 +0000
++++ src/station_gui.h	Fri Nov 28 22:13:49 2008 +0100
+@@ -46,6 +46,7 @@
+ 	SVW_PLANES,          ///< List of scheduled planes button
+ 	SVW_SHIPS,           ///< List of scheduled ships button
+ 	SVW_RESIZE,          ///< Resize button
++	SVW_CLOSEAIRPORT,    ///< Close airport button
+ };
+ 
+ enum StationCoverageType {

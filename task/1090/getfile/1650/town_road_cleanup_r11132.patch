@@ -1,0 +1,461 @@
+=== src/settings.cpp
+==================================================================
+--- src/settings.cpp	(/trunk)	(revision 456)
++++ src/settings.cpp	(/branch/town_cleanup)	(revision 456)
+@@ -1438,6 +1438,8 @@
+ 	SDT_CONDVAR(Patches, town_growth_rate,  SLE_UINT8, 54, SL_MAX_VERSION, 0, MS, 2, 0,   4, 0, STR_CONFIG_PATCHES_TOWN_GROWTH,          NULL),
+ 	SDT_CONDVAR(Patches, larger_towns,      SLE_UINT8, 54, SL_MAX_VERSION, 0, D0, 4, 0, 255, 1, STR_CONFIG_PATCHES_LARGER_TOWNS,         NULL),
+ 	SDT_CONDVAR(Patches, initial_city_size, SLE_UINT8, 56, SL_MAX_VERSION, 0, 0,  2, 1,  10, 1, STR_CONFIG_PATCHES_CITY_SIZE_MULTIPLIER, NULL),
++	SDT_CONDBOOL(Patches, cleaner_town_growth, 76, SL_MAX_VERSION, 0, 0, true,  STR_CONFIG_CLEANER_TOWN_GROWTH, NULL),
++	SDT_CONDBOOL(Patches, mod_road_rebuild,    76, SL_MAX_VERSION, 0, 0, false, STR_CONFIG_MODIFIED_ROAD_REBUILD, NULL),
+ 
+ 	/***************************************************************************/
+ 	/* AI section of the GUI-configure patches window */
+=== src/road.h
+==================================================================
+--- src/road.h	(/trunk)	(revision 456)
++++ src/road.h	(/branch/town_cleanup)	(revision 456)
+@@ -116,6 +116,36 @@
+ }
+ 
+ /**
++ * Calculate the mirrored RoadBits
++ *
++ * Simply move the bits to their new position.
++ *
++ * @param r The given RoadBits value
++ * @return the mirrored
++ */
++static inline RoadBits MirrorRoadBits(RoadBits r)
++{
++	return (RoadBits)(GB(r, 0, 2) << 2 | GB(r,2,2));
++}
++
++/**
++ * Calculate rotated RoadBits
++ *
++ * Move the Roadbits clockwise til they are in their final position.
++ *
++ * @param r The given RoadBits value
++ * @param rot The given Rotation angle
++ * @return the rotated
++ */
++static inline RoadBits RotateRoadBits(RoadBits r, DiagDirDiff rot)
++{
++	for (; rot > (DiagDirDiff)0; rot--){
++		r = (RoadBits)(GB(r,0,1) << 3 | GB(r,1,3));
++	}
++	return r;
++}
++
++/**
+  * Create the road-part which belongs to the given DiagDirection
+  *
+  * This function returns a RoadBits value which belongs to
+@@ -130,6 +160,16 @@
+ }
+ 
+ /**
++ * Return if the tile is a valid tile for a crossing.
++ *
++ * @note function is overloaded
++ * @param tile the curent tile
++ * @param ax the axis of the road over the rail
++ * @return true if it is a valid tile
++ */
++bool IsPossibleCrossing(const TileIndex tile, Axis ax);
++
++/**
+  * Checks whether the trackdir means that we are reversing.
+  * @param dir the trackdir to check
+  * @return true if it is a reversing road trackdir
+@@ -150,6 +190,14 @@
+ }
+ 
+ /**
++ * Clean up unneccesary RoadBits of a planed tile.
++ * @param tile current tile
++ * @param org_rb planed RoadBits
++ * @return optimised RoadBits
++ */
++RoadBits CleanUpRoadBits(const TileIndex tile, RoadBits org_rb);
++
++/**
+  * Is it allowed to remove the given road bits from the given tile?
+  * @param tile      the tile to remove the road from
+  * @param remove    the roadbits that are going to be removed
+=== src/lang/english.txt
+==================================================================
+--- src/lang/english.txt	(/trunk)	(revision 456)
++++ src/lang/english.txt	(/branch/town_cleanup)	(revision 456)
+@@ -1187,6 +1187,8 @@
+ STR_CONFIG_PATCHES_LARGER_TOWNS                                 :{LTBLUE}Proportion of towns that will become cities: {ORANGE}1 in {STRING1}
+ STR_CONFIG_PATCHES_LARGER_TOWNS_DISABLED                        :{LTBLUE}Proportion of towns that will become cities: {ORANGE}None
+ STR_CONFIG_PATCHES_CITY_SIZE_MULTIPLIER                         :{LTBLUE}Initial city size multiplier: {ORANGE}{STRING1}
++STR_CONFIG_CLEANER_TOWN_GROWTH                                  :{LTBLUE}More intelligent town road layouts
++STR_CONFIG_MODIFIED_ROAD_REBUILD                                :{LTBLUE}Remove absurd road-elements during the road construction
+ 
+ STR_CONFIG_PATCHES_GUI                                          :{BLACK}Interface
+ STR_CONFIG_PATCHES_CONSTRUCTION                                 :{BLACK}Construction
+=== src/settings_gui.cpp
+==================================================================
+--- src/settings_gui.cpp	(/trunk)	(revision 456)
++++ src/settings_gui.cpp	(/branch/town_cleanup)	(revision 456)
+@@ -672,7 +672,6 @@
+ 	"drag_signals_density",
+ 	"oil_refinery_limit",
+ 	"semaphore_build_before",
+-	"town_layout",
+ };
+ 
+ static const char *_patches_stations[] = {
+@@ -700,6 +699,9 @@
+ 	"ending_year",
+ 	"smooth_economy",
+ 	"allow_shares",
++	"town_layout",
++	"cleaner_town_growth",
++	"mod_road_rebuild",
+ 	"town_growth_rate",
+ 	"larger_towns",
+ 	"initial_city_size",
+=== src/saveload.cpp
+==================================================================
+--- src/saveload.cpp	(/trunk)	(revision 456)
++++ src/saveload.cpp	(/branch/town_cleanup)	(revision 456)
+@@ -29,7 +29,7 @@
+ #include "strings.h"
+ #include <list>
+ 
+-extern const uint16 SAVEGAME_VERSION = 75;
++extern const uint16 SAVEGAME_VERSION = 76;
+ uint16 _sl_version;       ///< the major savegame version identifier
+ byte   _sl_minor_version; ///< the minor savegame version, DO NOT USE!
+ 
+=== src/town_cmd.cpp
+==================================================================
+--- src/town_cmd.cpp	(/trunk)	(revision 456)
++++ src/town_cmd.cpp	(/branch/town_cleanup)	(revision 456)
+@@ -133,18 +133,6 @@
+ }
+ 
+ /**
+- * Move a TileIndex into a diagonal direction.
+- *
+- * @param tile The current tile
+- * @param dir The direction in which we want to step
+- * @return the moved tile
+- */
+-static inline TileIndex AddDiagDirToTileIndex(TileIndex tile, DiagDirection dir)
+-{
+-	return TILE_ADD(tile, TileOffsByDiagDir(dir));
+-}
+-
+-/**
+  * House Tile drawing handler.
+  * Part of the tile loop process
+  * @param ti TileInfo of the tile to draw
+@@ -865,8 +853,8 @@
+ 	}
+ 
+ 	/* Check the tiles E,N,W and S of the current tile. */
+-	for (DiagDirection i = DIAGDIR_BEGIN; i < DIAGDIR_END; i++) {
+-		if (IsTileType(AddDiagDirToTileIndex(tile, i), MP_HOUSE)) {
++	for (DiagDirection dir = DIAGDIR_BEGIN; dir < DIAGDIR_END; dir++) {
++		if (IsTileType(TileAddDiagDir(tile, dir), MP_HOUSE)) {
+ 			counter++;
+ 		}
+ 
+@@ -936,14 +924,14 @@
+ 					do target_dir = RandomDiagDir(); while (target_dir == source_dir);
+ 				}
+ 
+-				if (!IsRoadAllowedHere(AddDiagDirToTileIndex(tile, target_dir), target_dir)) {
++				if (!IsRoadAllowedHere(TileAddDiagDir(tile, target_dir), target_dir)) {
+ 					/* A road is not allowed to continue the randomized road,
+ 					 *  return if the road we're trying to build is curved. */
+ 					if (target_dir != ReverseDiagDir(source_dir)) return;
+ 
+ 					/* Return if neither side of the new road is a house */
+-					if (!IsTileType(AddDiagDirToTileIndex(tile, ChangeDiagDir(target_dir, DIAGDIRDIFF_90RIGHT)), MP_HOUSE) &&
+-							!IsTileType(AddDiagDirToTileIndex(tile, ChangeDiagDir(target_dir, DIAGDIRDIFF_90LEFT)), MP_HOUSE)) {
++					if (!IsTileType(TileAddDiagDir(tile, ChangeDiagDir(target_dir, DIAGDIRDIFF_90RIGHT)), MP_HOUSE) &&
++							!IsTileType(TileAddDiagDir(tile, ChangeDiagDir(target_dir, DIAGDIRDIFF_90LEFT)), MP_HOUSE)) {
+ 						return;
+ 					}
+ 
+@@ -997,7 +985,7 @@
+ 		if (cur_rb & DiagDirToRoadBits(target_dir)) return;
+ 
+ 		/* This is the tile we will reach if we extend to this direction. */
+-		tmptile = AddDiagDirToTileIndex(tile, target_dir);
++		tmptile = TileAddDiagDir(tile, target_dir);
+ 
+ 		/* Don't walk into water. */
+ 		if (IsClearWaterTile(tmptile)) return;
+@@ -1011,7 +999,7 @@
+ 
+ 			case TL_3X3_GRID: /* Use 2x2 grid afterwards! */
+ 				/* Fill gap if house has enougth neighbors */
+-				tmptile2 = AddDiagDirToTileIndex(tmptile, target_dir);
++				tmptile2 = TileAddDiagDir(tmptile, target_dir);
+ 				if (AreNeighborsHouseTiles(tmptile2) && BuildTownHouse(t1, tmptile2)) {
+ 					_grow_town_result = -1;
+ 				}
+@@ -1023,7 +1011,7 @@
+ 
+ 			case TL_BETTER_ROADS: /* Use original afterwards! */
+ 				/* Fill gap if house has enougth neighbors */
+-				tmptile2 = AddDiagDirToTileIndex(tmptile, target_dir);
++				tmptile2 = TileAddDiagDir(tmptile, target_dir);
+ 				if (AreNeighborsHouseTiles(tmptile2) && BuildTownHouse(t1, tmptile2)) {
+ 					_grow_town_result = -1;
+ 				}
+@@ -1057,6 +1045,12 @@
+ 	/* Return if a water tile */
+ 	if (IsClearWaterTile(tile)) return;
+ 
++	if (_patches.cleaner_town_growth) {
++		/* Make the roads look nicer */
++		rcmd = CleanUpRoadBits(tile, rcmd);
++		if (rcmd == ROAD_NONE) return;
++	}
++
+ 	DiagDirection bridge_dir; ///< The direction of a bridge we maybe want to build
+ 	/* Determine direction of slope,
+ 	 *  and build a road if not a special slope. */
+@@ -1074,8 +1068,8 @@
+ 			return;
+ 	}
+ 
+-	/* Check if the bridge is in the right direction */
+-	if (!(rcmd & DiagDirToRoadBits(bridge_dir))) goto build_road_and_exit;
++	/* Check if the bridge will be compatible to the RoadBits */
++	if (!(rcmd & DiagDirToRoadBits(ReverseDiagDir(bridge_dir)))) goto build_road_and_exit;
+ 
+ 	/* We are in the right direction */
+ 	uint32 bridge_length = 0; ///< This value stores the length of the possible bridge
+@@ -1151,7 +1145,7 @@
+ 		/* Select a random bit from the blockmask, walk a step
+ 		 * and continue the search from there. */
+ 		do target_dir = RandomDiagDir(); while (!(cur_rb & DiagDirToRoadBits(target_dir)));
+-		tile = AddDiagDirToTileIndex(tile, target_dir);
++		tile = TileAddDiagDir(tile, target_dir);
+ 
+ 		if (IsTileType(tile, MP_ROAD)) {
+ 			/* Don't allow building over roads of other cities */
+=== src/map.h
+==================================================================
+--- src/map.h	(/trunk)	(revision 456)
++++ src/map.h	(/branch/town_cleanup)	(revision 456)
+@@ -390,6 +390,18 @@
+ }
+ 
+ /**
++ * Adds a DiagDir to a tile.
++ *
++ * @param tile The current tile
++ * @param dir The direction in which we want to step
++ * @return the moved tile
++ */
++static inline TileIndex TileAddDiagDir(TileIndex tile, DiagDirection dir)
++{
++	return TILE_ADD(tile, TileOffsByDiagDir(dir));
++}
++
++/**
+  * A callback function type for searching tiles.
+  *
+  * @param tile The tile to test
+=== src/road.cpp
+==================================================================
+--- src/road.cpp	(/trunk)	(revision 456)
++++ src/road.cpp	(/branch/town_cleanup)	(revision 456)
+@@ -0,0 +1,69 @@
++#include "stdafx.h"
++#include "openttd.h"
++#include "functions.h"
++#include "rail_map.h"
++#include "road.h"
++#include "road_map.h"
++#include "water_map.h"
++#include "macros.h"
++
++bool IsPossibleCrossing(const TileIndex tile, Axis ax)
++{
++	return (IsTileType(tile, MP_RAILWAY) &&
++		!HasSignals(tile) &&
++		GetTrackBits(tile) == (ax == AXIS_X ?  TRACK_BIT_Y : TRACK_BIT_X) &&
++		GetTileSlope(tile, NULL) == SLOPE_FLAT);
++}
++
++RoadBits CleanUpRoadBits(const TileIndex tile, RoadBits org_rb)
++{
++	for (DiagDirection dir = DIAGDIR_BEGIN ; dir < DIAGDIR_END ; dir++) {
++		const TileIndex neighbor_tile = TileAddDiagDir(tile, dir);
++
++		/* Get the Roadbit pointing to the neighbor_tile */
++		const RoadBits target_rb = DiagDirToRoadBits(dir);
++
++		/* If the roadbit is in the current plan */
++		if (org_rb & target_rb) {
++			bool connective = false;
++			const RoadBits mirrored_rb = MirrorRoadBits(target_rb);
++
++			switch (GetTileType(neighbor_tile)) {
++				/* Allways connective ones */
++				case MP_CLEAR: case MP_TREES:
++					connective = true;
++					break;
++
++				/* The conditionaly connective ones */
++				case MP_TUNNELBRIDGE:
++				case MP_STATION:
++				case MP_ROAD: {
++					const RoadBits neighbor_rb = GetAnyRoadBits(neighbor_tile, ROADTYPE_ROAD) | GetAnyRoadBits(neighbor_tile, ROADTYPE_TRAM);
++
++					/* Accept only connective tiles */
++					connective = (neighbor_rb & mirrored_rb)        ///< Neighbor has got the fitting RoadBit
++							|| COUNTBITS(neighbor_rb) == 1; ///< Neighbor has got only one Roadbit
++
++				} break;
++
++				case MP_RAILWAY:
++					connective = IsPossibleCrossing(neighbor_tile, DiagDirToAxis(dir));
++					break;
++
++				case MP_WATER:
++					/* Check for real water tile */
++					connective = !IsWater(neighbor_tile);
++					break;
++
++				/* The defentetly not connective ones */
++				default: break;
++			}
++
++			/* If the neighbor tile is inconnective remove the planed road connection to it */
++			if (!connective) org_rb ^= target_rb;
++
++		}
++	}
++
++	return org_rb;
++}
+=== src/road_cmd.cpp
+==================================================================
+--- src/road_cmd.cpp	(/trunk)	(revision 456)
++++ src/road_cmd.cpp	(/branch/town_cleanup)	(revision 456)
+@@ -1182,8 +1182,8 @@
+ 
+ 	if (GetRoadTileType(tile) == ROAD_TILE_DEPOT) return;
+ 
++	const Town* t = ClosestTownFromTile(tile, (uint)-1);
+ 	if (!HasRoadWorks(tile)) {
+-		const Town* t = ClosestTownFromTile(tile, (uint)-1);
+ 		int grp = 0;
+ 
+ 		if (t != NULL) {
+@@ -1192,8 +1192,8 @@
+ 			/* Show an animation to indicate road work */
+ 			if (t->road_build_months != 0 &&
+ 					(DistanceManhattan(t->xy, tile) < 8 || grp != 0) &&
+-					GetRoadTileType(tile) == ROAD_TILE_NORMAL && (GetAllRoadBits(tile) == ROAD_X || GetAllRoadBits(tile) == ROAD_Y)) {
+-				if (GetTileSlope(tile, NULL) == SLOPE_FLAT && EnsureNoVehicleOnGround(tile) && CHANCE16(1, 20)) {
++					GetRoadTileType(tile) == ROAD_TILE_NORMAL && COUNTBITS(GetAllRoadBits(tile)) > 1 ) {
++				if (GetTileSlope(tile, NULL) == SLOPE_FLAT && EnsureNoVehicleOnGround(tile) && CHANCE16(1, 40)) {
+ 					StartRoadWorks(tile);
+ 
+ 					SndPlayTileFx(SND_21_JACKHAMMER, tile);
+@@ -1231,6 +1231,17 @@
+ 		}
+ 	} else if (IncreaseRoadWorksCounter(tile)) {
+ 		TerminateRoadWorks(tile);
++
++		if (_patches.mod_road_rebuild) {
++			/* Generate a nicer town surface */
++			const RoadBits old_rb = GetAnyRoadBits(tile, ROADTYPE_ROAD);
++			const RoadBits new_rb = CleanUpRoadBits(tile, old_rb);
++
++			if (old_rb != new_rb) {
++				DoCommand(tile, (old_rb ^ new_rb), t->index, DC_EXEC | DC_AUTO | DC_NO_WATER, CMD_REMOVE_ROAD);
++			}
++		}
++
+ 		MarkTileDirtyByTile(tile);
+ 	}
+ }
+=== src/variables.h
+==================================================================
+--- src/variables.h	(/trunk)	(revision 456)
++++ src/variables.h	(/branch/town_cleanup)	(revision 456)
+@@ -242,6 +242,9 @@
+ 	bool timetable_in_ticks; ///< Whether to show the timetable in ticks rather than days.
+ 
+ 	bool autoslope;          ///< Allow terraforming under things.
++
++	bool cleaner_town_growth; ///< Allow more checkups before construction of town roads
++	bool mod_road_rebuild;   ///< Roadworks remove unneccesary RoadBits
+ };
+ 
+ VARDEF Patches _patches;
+=== src/direction.h
+==================================================================
+--- src/direction.h	(/trunk)	(revision 456)
++++ src/direction.h	(/branch/town_cleanup)	(revision 456)
+@@ -165,6 +165,9 @@
+ 	DIAGDIRDIFF_90LEFT  = 3         ///< 90 degrees left
+ };
+ 
++/** Allow incrementing of DiagDirDiff variables */
++DECLARE_POSTFIX_INCREMENT(DiagDirDiff);
++
+ /**
+  * Applies a difference on a DiagDirection
+  *
+=== projects/openttd.vcproj
+==================================================================
+--- projects/openttd.vcproj	(/trunk)	(revision 456)
++++ projects/openttd.vcproj	(/branch/town_cleanup)	(revision 456)
+@@ -327,6 +327,9 @@
+ 				RelativePath=".\..\src\rev.cpp">
+ 			</File>
+ 			<File
++				RelativePath=".\..\src\road.cpp">
++			</File>
++			<File
+ 				RelativePath=".\..\src\saveload.cpp">
+ 			</File>
+ 			<File
+=== projects/openttd_vs80.vcproj
+==================================================================
+--- projects/openttd_vs80.vcproj	(/trunk)	(revision 456)
++++ projects/openttd_vs80.vcproj	(/branch/town_cleanup)	(revision 456)
+@@ -668,6 +668,10 @@
+ 				>
+ 			</File>
+ 			<File
++				RelativePath=".\..\src\road.cpp"
++				>
++			</File>
++			<File
+ 				RelativePath=".\..\src\saveload.cpp"
+ 				>
+ 			</File>
+=== source.list
+==================================================================
+--- source.list	(/trunk)	(revision 456)
++++ source.list	(/branch/town_cleanup)	(revision 456)
+@@ -58,6 +58,7 @@
+ queue.cpp
+ rail.cpp
+ rev.cpp
++road.cpp
+ saveload.cpp
+ screenshot.cpp
+ #if SDL
+
+Property changes on: 
+___________________________________________________________________
+Name: svk:merge
+ +6aa0318a-3be1-0310-93fa-89fd2396df07:/trunk:11132
+

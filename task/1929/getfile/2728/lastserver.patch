@@ -1,0 +1,140 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 12697)
++++ src/settings.cpp	(working copy)
+@@ -1339,6 +1339,8 @@
+ 	  SDTG_VAR("min_players",          SLE_UINT8, S, 0, _network_min_players,               0, 0, 10,   0, STR_NULL, NULL),
+ 	SDTG_OMANY("server_lang",          SLE_UINT8, S, 0, _network_game_info.server_lang,     0, 35, "ANY|ENGLISH|GERMAN|FRENCH|BRAZILIAN|BULGARIAN|CHINESE|CZECH|DANISH|DUTCH|ESPERANTO|FINNISH|HUNGARIAN|ICELANDIC|ITALIAN|JAPANESE|KOREAN|LITHUANIAN|NORWEGIAN|POLISH|PORTUGUESE|ROMANIAN|RUSSIAN|SLOVAK|SLOVENIAN|SPANISH|SWEDISH|TURKISH|UKRAINIAN|AFRIKAANS|CROATIAN|CATALAN|ESTONIAN|GALICIAN|GREEK|LATVIAN", STR_NULL, NULL),
+ 	 SDTG_BOOL("reload_cfg",                      S, 0, _network_reload_cfg,           false,              STR_NULL, NULL),
++	  SDTG_STR("last_host",             SLE_STRB, S, 0, _network_last_host,            "0.0.0.0",          STR_NULL, NULL),
++	  SDTG_VAR("last_port",           SLE_UINT16, S, 0, _network_last_port,            0, 0, UINT16_MAX, 0, STR_NULL ,NULL),
+ 	  SDTG_END()
+ };
+ #endif /* ENABLE_NETWORK */
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 12697)
++++ src/lang/english.txt	(working copy)
+@@ -1363,6 +1363,8 @@
+ STR_NETWORK_GAME_NAME_TIP                                       :{BLACK}Name of the game
+ STR_NETWORK_INFO_ICONS_TIP                                      :{BLACK}Language, server version, etc.
+ STR_NETWORK_CLICK_GAME_TO_SELECT                                :{BLACK}Click a game from the list to select it
++STR_NETWORK_LAST_JOINED_SERVER                                  :{BLACK}The server you've joined last time:
++STR_NETWORK_CLICK_TO_SELECT_LAST                                :{BLACK}Click to select the server you played last time
+ 
+ STR_NETWORK_FIND_SERVER                                         :{BLACK}Find server
+ STR_NETWORK_FIND_SERVER_TIP                                     :{BLACK}Search network for a server
+Index: src/network/network_gamelist.cpp
+===================================================================
+--- src/network/network_gamelist.cpp	(revision 12697)
++++ src/network/network_gamelist.cpp	(working copy)
+@@ -25,6 +25,8 @@
+  * @return a point to the newly added or already existing item */
+ NetworkGameList *NetworkGameListAddItem(uint32 ip, uint16 port)
+ {
++	if (ip == 0) return NULL;
++	
+ 	NetworkGameList *item, *prev_item;
+ 
+ 	prev_item = NULL;
+Index: src/network/network_gui.cpp
+===================================================================
+--- src/network/network_gui.cpp	(revision 12697)
++++ src/network/network_gui.cpp	(working copy)
+@@ -227,13 +227,16 @@
+ 	NGWW_INFO,          ///< Third button in the game list panel
+ 
+ 	NGWW_MATRIX   = 9,  ///< Panel with list of games
++	
++	NGWW_LASTJOINED_LABEL = 11,
++	NGWW_LASTJOINED = 12, ///< Info about the last joined server
+ 
+-	NGWW_DETAILS  = 11, ///< Panel with game details
+-	NGWW_JOIN     = 12, ///< 'Join game' button
+-	NGWW_REFRESH  = 13, ///< 'Refresh server' button
+-	NGWW_NEWGRF   = 14, ///< 'NewGRF Settings' button
++	NGWW_DETAILS  = 13, ///< Panel with game details
++	NGWW_JOIN     = 14, ///< 'Join game' button
++	NGWW_REFRESH  = 15, ///< 'Refresh server' button
++	NGWW_NEWGRF   = 16, ///< 'NewGRF Settings' button
+ 
+-	NGWW_FIND     = 15, ///< 'Find server' button
++	NGWW_FIND     = 17, ///< 'Find server' button
+ 	NGWW_ADD,           ///< 'Add server' button
+ 	NGWW_START,         ///< 'Start server' button
+ 	NGWW_CANCEL,        ///< 'Cancel' button
+@@ -256,7 +259,7 @@
+ 
+ 	switch (e->event) {
+ 		case WE_CREATE: // Focus input box
+-			w->vscroll.cap = 13;
++			w->vscroll.cap = 11;
+ 			w->resize.step_height = NET_PRC__SIZE_OF_ROW;
+ 
+ 			nd->field = NGWW_PLAYER;
+@@ -346,7 +349,37 @@
+ 				y += NET_PRC__SIZE_OF_ROW;
+ 				if (++n == w->vscroll.cap) break; // max number of games in the window
+ 			}
++			
++			const NetworkGameList *last_joined = NetworkGameListAddItem(inet_addr(_network_last_host), _network_last_port);
++			/* Draw the last joined server, if any */
++			if (last_joined != NULL) {
++				y = w->widget[NGWW_LASTJOINED].top + 3;
++				
++				/* show highlighted item with a different colour */
++				if (last_joined == sel) GfxFillRect(w->widget[NGWW_NAME].left + 1, y - 2, w->widget[NGWW_INFO].right - 1, y + 9, 10);
++				
++				SetDParamStr(0, last_joined->info.server_name);
++				DrawStringTruncated(w->widget[NGWW_LASTJOINED].left + 5, y, STR_02BD, TC_BLACK, max_name_width);
+ 
++				SetDParam(0, last_joined->info.clients_on);
++				SetDParam(1, last_joined->info.clients_max);
++				SetDParam(2, last_joined->info.companies_on);
++				SetDParam(3, last_joined->info.companies_max);
++				DrawStringCentered(w->widget[NGWW_CLIENTS].left + 39, y, STR_NETWORK_GENERAL_ONLINE, TC_GOLD);
++
++				/* only draw icons if the server is online */
++				if (last_joined->online) {
++					/* draw a lock if the server is password protected */
++					if (last_joined->info.use_password) DrawSprite(SPR_LOCK, PAL_NONE, w->widget[NGWW_INFO].left + 5, y - 1);
++
++					/* draw red or green icon, depending on compatibility with server */
++					DrawSprite(SPR_BLOT, (last_joined->info.compatible ? PALETTE_TO_GREEN : (last_joined->info.version_compatible ? PALETTE_TO_YELLOW : PALETTE_TO_RED)), w->widget[NGWW_INFO].left + 15, y);
++
++					/* draw flag according to server language */
++					DrawSprite(SPR_FLAGS_BASE + last_joined->info.server_lang, PAL_NONE, w->widget[NGWW_INFO].left + 25, y);
++				}
++			}
++
+ 			/* Draw the right menu */
+ 			GfxFillRect(w->widget[NGWW_DETAILS].left + 1, 43, w->widget[NGWW_DETAILS].right - 1, 92, 157);
+ 			if (sel == NULL) {
+@@ -461,6 +494,14 @@
+ 					nd->server = cur_item;
+ 					SetWindowDirty(w);
+ 				} break;
++				
++				case NGWW_LASTJOINED: {
++					NetworkGameList *last_joined = NetworkGameListAddItem(inet_addr(_network_last_host), _network_last_port);
++					if (last_joined != NULL) {
++						nd->server = last_joined;
++						SetWindowDirty(w);
++					}
++				} break;
+ 
+ 				case NGWW_FIND: // Find server automatically
+ 					switch (_network_lan_internet) {
+@@ -592,8 +633,10 @@
+ { WWT_PUSHTXTBTN,   RESIZE_LR,     BTC,    71,   150,    42,    53, STR_NETWORK_CLIENTS_CAPTION,      STR_NETWORK_CLIENTS_CAPTION_TIP},  // NGWW_CLIENTS
+ { WWT_PUSHTXTBTN,   RESIZE_LR,     BTC,   151,   190,    42,    53, STR_EMPTY,                        STR_NETWORK_INFO_ICONS_TIP},       // NGWW_INFO
+ 
+-{     WWT_MATRIX,   RESIZE_RB,     BGC,    10,   190,    54,   236, (13 << 8) + 1,                    STR_NETWORK_CLICK_GAME_TO_SELECT}, // NGWW_MATRIX
+-{  WWT_SCROLLBAR,   RESIZE_LRB,    BGC,   191,   202,    42,   236, 0x0,                              STR_0190_SCROLL_BAR_SCROLLS_LIST},
++{     WWT_MATRIX,   RESIZE_RB,     BGC,    10,   190,    54,   208, (11 << 8) + 1,                    STR_NETWORK_CLICK_GAME_TO_SELECT}, // NGWW_MATRIX
++{  WWT_SCROLLBAR,   RESIZE_LRB,    BGC,   191,   202,    42,   208, 0x0,                              STR_0190_SCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT,   RESIZE_RTB,    BGC,    10,   190,   211,   222, STR_NETWORK_LAST_JOINED_SERVER,   STR_NULL},                         // NGWW_LASTJOINED_LABEL
++{      WWT_PANEL,   RESIZE_RTB,    BGC,    10,   190,   223,   236, 0x0,                              STR_NETWORK_CLICK_TO_SELECT_LAST}, // NGWW_LASTJOINED
+ 
+ /* RIGHT SIDE */
+ {      WWT_PANEL,   RESIZE_LRB,    BGC,   210,   440,    42,   236, 0x0,                              STR_NULL},                         // NGWW_DETAILS

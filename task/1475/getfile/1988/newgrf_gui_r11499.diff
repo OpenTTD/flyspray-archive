@@ -1,0 +1,654 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 11499)
++++ src/lang/english.txt	(working copy)
+@@ -3082,9 +3082,9 @@
+ STR_NEWGRF_ERROR_AFTER_TRANSLATED_FILE                          :the GRF file it was designed to translate
+ STR_NEWGRF_ERROR_TOO_MANY_NEWGRFS_LOADED                        :Too many NewGRFs are loaded.
+ 
+-STR_NEWGRF_ADD                                                  :{BLACK}Add
++STR_NEWGRF_ADD                                                  :{BLACK}>>
+ STR_NEWGRF_ADD_TIP                                              :{BLACK}Add a NewGRF file to the list
+-STR_NEWGRF_REMOVE                                               :{BLACK}Remove
++STR_NEWGRF_REMOVE                                               :{BLACK}<<
+ STR_NEWGRF_REMOVE_TIP                                           :{BLACK}Remove the selected NewGRF file from the list
+ STR_NEWGRF_MOVEUP                                               :{BLACK}Move Up
+ STR_NEWGRF_MOVEUP_TIP                                           :{BLACK}Move the selected NewGRF file up the list
+Index: src/newgrf_gui.cpp
+===================================================================
+--- src/newgrf_gui.cpp	(revision 11499)
++++ src/newgrf_gui.cpp	(working copy)
+@@ -105,184 +105,69 @@
+ 	}
+ }
+ 
+-
+-/* Dialogue for adding NewGRF files to the selection */
+-struct newgrf_add_d {
+-	GRFConfig **list;
+-	const GRFConfig *sel;
+-};
+-
+-
+-static void NewGRFAddDlgWndProc(Window *w, WindowEvent *e)
+-{
+-	switch (e->event) {
+-		case WE_PAINT: {
+-			const GRFConfig *c;
+-			int y;
+-			int n = 0;
+-
+-			/* Count the number of GRFs */
+-			for (c = _all_grfs; c != NULL; c = c->next) n++;
+-
+-			w->vscroll.cap = (w->widget[3].bottom - w->widget[3].top) / 10;
+-			SetVScrollCount(w, n);
+-
+-			SetWindowWidgetDisabledState(w, 6, WP(w, newgrf_add_d).sel == NULL || WP(w, newgrf_add_d).sel->IsOpenTTDBaseGRF());
+-			DrawWindowWidgets(w);
+-
+-			GfxFillRect(w->widget[3].left + 1, w->widget[3].top + 1, w->widget[3].right, w->widget[3].bottom, 0xD7);
+-
+-			n = 0;
+-			y = w->widget[3].top + 1;
+-
+-			for (c = _all_grfs; c != NULL; c = c->next) {
+-				if (n >= w->vscroll.pos && n < w->vscroll.pos + w->vscroll.cap) {
+-					bool h = c == WP(w, newgrf_add_d).sel;
+-					const char *text = (c->name != NULL && !StrEmpty(c->name)) ? c->name : c->filename;
+-
+-					/* Draw selection background */
+-					if (h) GfxFillRect(3, y, w->width - 15, y + 9, 156);
+-					DoDrawStringTruncated(text, 4, y, h ? TC_WHITE : TC_ORANGE, w->width - 18);
+-					y += 10;
+-				}
+-				n++;
+-			}
+-
+-			if (WP(w, newgrf_add_d).sel != NULL) {
+-				const Widget *wi = &w->widget[5];
+-				ShowNewGRFInfo(WP(w, newgrf_add_d).sel, wi->left + 2, wi->top + 2, wi->right - wi->left - 2, wi->bottom, false);
+-			}
+-			break;
+-		}
+-
+-		case WE_DOUBLE_CLICK:
+-			if (e->we.click.widget != 3) break;
+-			e->we.click.widget = 6;
+-			/* Fall through */
+-
+-		case WE_CLICK:
+-			switch (e->we.click.widget) {
+-				case 3: {
+-					/* Get row... */
+-					const GRFConfig *c;
+-					uint i = (e->we.click.pt.y - w->widget[3].top) / 10 + w->vscroll.pos;
+-
+-					for (c = _all_grfs; c != NULL && i > 0; c = c->next, i--);
+-					WP(w, newgrf_add_d).sel = c;
+-					SetWindowDirty(w);
+-					break;
+-				}
+-
+-				case 6: // Add selection to list
+-					if (WP(w, newgrf_add_d).sel != NULL) {
+-						const GRFConfig *src = WP(w, newgrf_add_d).sel;
+-						GRFConfig **list;
+-
+-						/* Find last entry in the list, checking for duplicate grfid on the way */
+-						for (list = WP(w, newgrf_add_d).list; *list != NULL; list = &(*list)->next) {
+-							if ((*list)->grfid == src->grfid) {
+-								ShowErrorMessage(INVALID_STRING_ID, STR_NEWGRF_DUPLICATE_GRFID, 0, 0);
+-								return;
+-							}
+-						}
+-
+-						/* Copy GRF details from scanned list */
+-						GRFConfig *c = CallocT<GRFConfig>(1);
+-						*c = *src;
+-						c->filename = strdup(src->filename);
+-						if (src->name      != NULL) c->name      = strdup(src->name);
+-						if (src->info      != NULL) c->info      = strdup(src->info);
+-						c->next = NULL;
+-
+-						/* Append GRF config to configuration list */
+-						*list = c;
+-
+-						DeleteWindowByClass(WC_SAVELOAD);
+-						InvalidateWindowData(WC_GAME_OPTIONS, 0);
+-					}
+-					break;
+-
+-				case 7: // Rescan list
+-					WP(w, newgrf_add_d).sel = NULL;
+-					ScanNewGRFFiles();
+-					SetWindowDirty(w);
+-					break;
+-			}
+-			break;
+-	}
+-}
+-
+-
+-static const Widget _newgrf_add_dlg_widgets[] = {
+-{   WWT_CLOSEBOX,    RESIZE_NONE, 14,   0,  10,   0,  13, STR_00C5,                STR_018B_CLOSE_WINDOW },
+-{    WWT_CAPTION,   RESIZE_RIGHT, 14,  11, 306,   0,  13, STR_NEWGRF_ADD_CAPTION,  STR_018C_WINDOW_TITLE_DRAG_THIS },
+-
+-/* List of files */
+-{      WWT_PANEL,      RESIZE_RB, 14,   0, 294,  14, 121, 0x0,                     STR_NULL },
+-{      WWT_INSET,      RESIZE_RB, 14,   2, 292,  16, 119, 0x0,                     STR_NULL },
+-{  WWT_SCROLLBAR,     RESIZE_LRB, 14, 295, 306,  14, 121, 0x0,                     STR_NULL },
+-
+-/* NewGRF file info */
+-{      WWT_PANEL,     RESIZE_RTB, 14,   0, 306, 122, 224, 0x0,                     STR_NULL },
+-
+-{ WWT_PUSHTXTBTN,     RESIZE_RTB, 14,   0, 146, 225, 236, STR_NEWGRF_ADD_FILE,     STR_NEWGRF_ADD_FILE_TIP },
+-{ WWT_PUSHTXTBTN,    RESIZE_LRTB, 14, 147, 294, 225, 236, STR_NEWGRF_RESCAN_FILES, STR_NEWGRF_RESCAN_FILES_TIP },
+-{  WWT_RESIZEBOX,    RESIZE_LRTB, 14, 295, 306, 225, 236, 0x0,                     STR_RESIZE_BUTTON },
+-{   WIDGETS_END },
+-};
+-
+-
+-static const WindowDesc _newgrf_add_dlg_desc = {
+-	WDP_CENTER, WDP_CENTER, 307, 237, 307, 337,
+-	WC_SAVELOAD, WC_NONE,
+-	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET | WDF_STD_BTN | WDF_UNCLICK_BUTTONS | WDF_RESIZABLE,
+-	_newgrf_add_dlg_widgets,
+-	NewGRFAddDlgWndProc,
+-};
+-
+-
+ /* 'NewGRF Settings' dialogue */
+ struct newgrf_d {
+-	GRFConfig **orig_list; ///< grf list the window is shown with
+-	GRFConfig **list;      ///< temporary grf list to which changes are made
+-	GRFConfig *sel;        ///< selected grf item
+-	bool editable;         ///< is the window editable
+-	bool show_params;      ///< are the grf-parameters shown in the info-panel
+-	bool execute;          ///< on pressing 'apply changes' are grf changes applied immediately, or only list is updated
++	const GRFConfig *sel_l;
++	GRFConfig **orig_list;   ///< grf list the window is shown with
++	GRFConfig **list;        ///< temporary grf list to which changes are made
++	GRFConfig *sel_r;        ///< selected grf item
++	bool editable;           ///< is the window editable
++	bool show_params;        ///< are the grf-parameters shown in the info-panel
++	bool execute;            ///< on pressing 'apply changes' are grf changes applied immediately, or only list is updated
+ };
+ assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(newgrf_d));
+ 
+-
+-enum ShowNewGRFStateWidgets {
+-	SNGRFS_ADD = 3,
+-	SNGRFS_REMOVE,
+-	SNGRFS_MOVE_UP,
+-	SNGRFS_MOVE_DOWN,
+-	SNGRFS_FILE_LIST = 7,
+-	SNGRFS_NEWGRF_INFO = 9,
+-	SNGRFS_SET_PARAMETERS,
+-	SNGRFS_APPLY_CHANGES,
++enum NewGRFListWindowWidgets {
++	NLW_WIDGET_CLOSE = 0,
++	NLW_WIDGET_CAPTION,
++	NLW_WIDGET_EMPTY1,
++	NLW_WIDGET_AVAILABLE_GRF_CAPTION,
++	NLW_WIDGET_AVAILABLE_GRF_LIST,
++	NLW_WIDGET_AVAILABLE_GRF_LIST_SCROLLBAR,
++	NLW_WIDGET_NEWGRF_INFO_LEFT,
++	NLW_WIDGET_RESCAN_FILES,
++	NLW_WIDGET_EMPTY_BOTTOM_LEFT,
++	NLW_WIDGET_EMPTY_MIDDLE,
++	NLW_WIDGET_EMPTY_BOTTOM_MIDDLE,
++	NLW_WIDGET_EMPTY_TOP_RIGHT,
++	NLW_WIDGET_ADD_FILE,
++	NLW_WIDGET_REMOVE,
++	NLW_WIDGET_MOVE_UP,
++	NLW_WIDGET_MOVE_DOWN,
++	NLW_WIDGET_FILE_LIST,
++	NLW_WIDGET_FILE_LIST_SCROLLBAR,
++	NLW_WIDGET_NEWGRF_INFO_RIGHT,
++	NLW_WIDGET_SET_PARAMETERS,
++	NLW_WIDGET_APPLY_CHANGES,
+ };
+ 
+-
+ static void SetupNewGRFState(Window *w)
+ {
+-	bool disable_all = WP(w, newgrf_d).sel == NULL || !WP(w, newgrf_d).editable;
++	bool disable_all = WP(w, newgrf_d).sel_r == NULL || !WP(w, newgrf_d).editable;
+ 
+-	SetWindowWidgetDisabledState(w, 3, !WP(w, newgrf_d).editable);
+ 	SetWindowWidgetsDisabledState(w, disable_all,
+-		SNGRFS_REMOVE,
+-		SNGRFS_MOVE_UP,
+-		SNGRFS_MOVE_DOWN,
++		NLW_WIDGET_REMOVE,
++		NLW_WIDGET_MOVE_UP,
++		NLW_WIDGET_MOVE_DOWN,
+ 		WIDGET_LIST_END
+ 	);
+-	SetWindowWidgetDisabledState(w, SNGRFS_SET_PARAMETERS, !WP(w, newgrf_d).show_params || disable_all);
+ 
++	SetWindowWidgetsDisabledState(w, !WP(w, newgrf_d).editable,
++		NLW_WIDGET_RESCAN_FILES,
++		NLW_WIDGET_NEWGRF_INFO_LEFT,
++		NLW_WIDGET_AVAILABLE_GRF_LIST,
++		WIDGET_LIST_END
++	);
++
++	SetWindowWidgetDisabledState(w, NLW_WIDGET_ADD_FILE, !WP(w, newgrf_d).editable || WP(w, newgrf_d).sel_l == NULL || WP(w, newgrf_d).sel_l->IsOpenTTDBaseGRF());
++
++	SetWindowWidgetDisabledState(w, NLW_WIDGET_SET_PARAMETERS, !WP(w, newgrf_d).show_params || disable_all);
++
+ 	if (!disable_all) {
+ 		/* All widgets are now enabled, so disable widgets we can't use */
+-		if (WP(w, newgrf_d).sel == *WP(w, newgrf_d).list) DisableWindowWidget(w, SNGRFS_MOVE_UP);
+-		if (WP(w, newgrf_d).sel->next == NULL) DisableWindowWidget(w, SNGRFS_MOVE_DOWN);
+-		if (WP(w, newgrf_d).sel->IsOpenTTDBaseGRF()) DisableWindowWidget(w, SNGRFS_REMOVE);
++		if (WP(w, newgrf_d).sel_r == *WP(w, newgrf_d).list) DisableWindowWidget(w, NLW_WIDGET_MOVE_UP);
++		if (WP(w, newgrf_d).sel_r->next == NULL) DisableWindowWidget(w, NLW_WIDGET_MOVE_DOWN);
++		if (WP(w, newgrf_d).sel_r->IsOpenTTDBaseGRF()) DisableWindowWidget(w, NLW_WIDGET_REMOVE);
+ 	}
+ }
+ 
+@@ -290,13 +175,20 @@
+ static void SetupNewGRFWindow(Window *w)
+ {
+ 	const GRFConfig *c;
+-	int i;
++	uint8 n;
+ 
+-	for (c = *WP(w, newgrf_d).list, i = 0; c != NULL; c = c->next, i++);
++	for (c = *WP(w, newgrf_d).list, n = 0; c != NULL; c = c->next, n++);
+ 
+-	w->vscroll.cap = (w->widget[SNGRFS_FILE_LIST].bottom - w->widget[SNGRFS_FILE_LIST].top) / 14 + 1;
+-	SetVScrollCount(w, i);
+-	SetWindowWidgetDisabledState(w, SNGRFS_APPLY_CHANGES, !WP(w, newgrf_d).editable);
++	w->vscroll2.cap = (w->widget[NLW_WIDGET_FILE_LIST].bottom - w->widget[NLW_WIDGET_FILE_LIST].top) / 13;
++	w->widget[NLW_WIDGET_FILE_LIST].data = (w->vscroll2.cap << 8) + 1;
++	SetVScroll2Count(w, n);
++	SetWindowWidgetDisabledState(w, NLW_WIDGET_APPLY_CHANGES, !WP(w, newgrf_d).editable);
++
++	/* Count the number of GRFs */
++	for (c = _all_grfs, n = 0; c != NULL; c = c->next, n++);
++
++	w->vscroll.cap = (w->widget[NLW_WIDGET_AVAILABLE_GRF_LIST].bottom - w->widget[NLW_WIDGET_AVAILABLE_GRF_LIST].top) / 10;
++	SetVScrollCount(w, n);
+ }
+ 
+ 
+@@ -315,31 +207,84 @@
+ 		ReloadNewGRFData();
+ 
+ 		/* Show new, updated list */
+-		for (c = *nd->list; c != NULL && c != nd->sel; c = c->next, i++);
++		for (c = *nd->list; c != NULL && c != nd->sel_r; c = c->next, i++);
+ 		CopyGRFConfigList(nd->list, *nd->orig_list, false);
+ 		for (c = *nd->list; c != NULL && i > 0; c = c->next, i--);
+-		nd->sel = c;
++		nd->sel_r = c;
+ 
+ 		SetWindowDirty(w);
+ 	}
+ }
+ 
+ 
++static const Widget _newgrf_widgets[] = {
++{   WWT_CLOSEBOX,    RESIZE_NONE, 10,   0,  10,   0,  13, STR_00C5,                    STR_018B_CLOSE_WINDOW },
++{    WWT_CAPTION,    RESIZE_NONE, 10,  11, 606,   0,  13, STR_NEWGRF_SETTINGS_CAPTION, STR_018C_WINDOW_TITLE_DRAG_THIS },
++/* List of files */   
++{      WWT_PANEL,    RESIZE_NONE, 10,   0, 291,  14,  25, STR_NULL,                    STR_NULL },
++{      WWT_PANEL,  RESIZE_BOTTOM, 10,   0, 279,  26, 121, STR_NULL,                    STR_NULL },
++{      WWT_INSET,  RESIZE_BOTTOM, 10,   2, 277,  28, 119, STR_NULL,                    STR_NULL },
++{  WWT_SCROLLBAR,  RESIZE_BOTTOM, 10, 280, 291,  26, 121, STR_NULL,                    STR_NULL },
++/* NewGRF file info */  
++{      WWT_PANEL,      RESIZE_TB, 10,   0, 291, 122, 224, STR_NULL,                    STR_NULL },
++{ WWT_PUSHTXTBTN,      RESIZE_TB, 10,   0, 136, 225, 236, STR_NEWGRF_RESCAN_FILES,     STR_NEWGRF_RESCAN_FILES_TIP },
++{      WWT_PANEL,      RESIZE_TB, 10, 137, 291, 225, 236, STR_NULL,                    STR_NULL },
++/* Middle Panel */
++{      WWT_PANEL,  RESIZE_BOTTOM, 10, 292, 321,  14, 224, STR_NULL,                    STR_NULL },
++{      WWT_PANEL,      RESIZE_TB, 10, 292, 321, 225, 236, STR_NULL,                    STR_NULL },
++/* NewGRF file Add, Remove, Move up, Move down */
++{      WWT_PANEL,    RESIZE_NONE, 10, 322, 606,  14,  29, STR_NULL,                    STR_NULL },
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,  3, 297, 316,  50,  72, STR_NEWGRF_ADD,              STR_NEWGRF_ADD_TIP },
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,  3, 297, 316,  80, 102, STR_NEWGRF_REMOVE,           STR_NEWGRF_REMOVE_TIP },
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,  3, 373, 443,  16,  27, STR_NEWGRF_MOVEUP,           STR_NEWGRF_MOVEUP_TIP },
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,  3, 495, 565,  16,  27, STR_NEWGRF_MOVEDOWN,         STR_NEWGRF_MOVEDOWN_TIP },
++/* NewGRF file list */
++{     WWT_MATRIX,  RESIZE_BOTTOM, 10, 322, 594,  30, 121, 0x501,                       STR_NEWGRF_FILE_TIP },
++{ WWT_SCROLL2BAR,  RESIZE_BOTTOM, 10, 595, 606,  30, 121, STR_NULL,                    STR_0190_SCROLL_BAR_SCROLLS_LIST },
++/* NewGRF file info */
++{      WWT_PANEL,      RESIZE_TB, 10, 322, 606, 122, 224, STR_NULL,                    STR_NULL },
++/* Edit parameter and apply changes button... */
++{ WWT_PUSHTXTBTN,      RESIZE_TB, 10, 322, 458, 225, 236, STR_NEWGRF_SET_PARAMETERS,   STR_NULL },
++{ WWT_PUSHTXTBTN,      RESIZE_TB, 10, 459, 594, 225, 236, STR_NEWGRF_APPLY_CHANGES,    STR_NULL },
++{  WWT_RESIZEBOX,      RESIZE_TB, 10, 595, 606, 225, 236, STR_NULL,                    STR_RESIZE_BUTTON },
++{   WIDGETS_END },
++};
++
++
+ static void NewGRFWndProc(Window *w, WindowEvent *e)
+ {
+-	switch (e->event) {
++	switch (e->event) {		
+ 		case WE_PAINT: {
+ 			const GRFConfig *c;
+ 			int i, y;
++			int n = 0;
+ 
+ 			SetupNewGRFState(w);
+ 
+ 			DrawWindowWidgets(w);
+ 
++			DrawStringCentered((w->widget[NLW_WIDGET_AVAILABLE_GRF_CAPTION].right - w->widget[NLW_WIDGET_AVAILABLE_GRF_CAPTION].left) / 2, 16, STR_NEWGRF_ADD_CAPTION, TC_WHITE);
++			GfxFillRect(w->widget[NLW_WIDGET_AVAILABLE_GRF_LIST].left + 1, w->widget[NLW_WIDGET_AVAILABLE_GRF_LIST].top + 1, w->widget[NLW_WIDGET_AVAILABLE_GRF_LIST].right, w->widget[NLW_WIDGET_AVAILABLE_GRF_LIST].bottom, 0xD7);
++
++			n = 0;
++			y = w->widget[NLW_WIDGET_AVAILABLE_GRF_LIST].top + 2;
++			for (c = _all_grfs; c != NULL; c = c->next) {
++				if (n >= w->vscroll.pos && n < w->vscroll.pos + w->vscroll.cap) {
++					bool h = c == WP(w, newgrf_d).sel_l;
++					const char *text = (c->name != NULL && !StrEmpty(c->name)) ? c->name : c->filename;
++
++					/* Draw selection background */
++					if (h) GfxFillRect(3, y, w->widget[NLW_WIDGET_AVAILABLE_GRF_LIST].right - 4, y + 9, 156);
++					DoDrawStringTruncated(text, 4, y, h ? TC_WHITE : TC_ORANGE, w->widget[NLW_WIDGET_AVAILABLE_GRF_LIST].right - 7);
++					y += 10;
++				}
++				n++;
++			}
++
+ 			/* Draw NewGRF list */
+-			y = w->widget[SNGRFS_FILE_LIST].top;
++			y = w->widget[NLW_WIDGET_FILE_LIST].top;
+ 			for (c = *WP(w, newgrf_d).list, i = 0; c != NULL; c = c->next, i++) {
+-				if (i >= w->vscroll.pos && i < w->vscroll.pos + w->vscroll.cap) {
++				if (i >= w->vscroll2.pos && i < w->vscroll2.pos + w->vscroll2.cap) {
+ 					const char *text = (c->name != NULL && !StrEmpty(c->name)) ? c->name : c->filename;
+ 					SpriteID pal;
+ 					byte txtoffset;
+@@ -367,74 +312,117 @@
+ 						}
+ 					}
+ 
+-					DrawSprite(SPR_SQUARE, pal, 5, y + 2);
+-					if (c->error != NULL) DrawSprite(SPR_WARNING_SIGN, 0, 20, y + 2);
++					DrawSprite(SPR_SQUARE, pal, 326, y + 1);
++					if (c->error != NULL) DrawSprite(SPR_WARNING_SIGN, 321, 20, y + 1);
+ 					txtoffset = c->error != NULL ? 35 : 25;
+-					DoDrawStringTruncated(text, txtoffset, y + 3, WP(w, newgrf_d).sel == c ? TC_WHITE : TC_BLACK, w->width - txtoffset - 10);
+-					y += 14;
++					DoDrawStringTruncated(text, 321 + txtoffset, y + 2, WP(w, newgrf_d).sel_r == c ? TC_WHITE : TC_BLACK, w->widget[NLW_WIDGET_FILE_LIST].right - txtoffset - 10);
++					y += 13;
+ 				}
+ 			}
+ 
+-			if (WP(w, newgrf_d).sel != NULL) {
++			if (WP(w, newgrf_d).sel_r != NULL) {
+ 				/* Draw NewGRF file info */
+-				const Widget *wi = &w->widget[SNGRFS_NEWGRF_INFO];
+-				ShowNewGRFInfo(WP(w, newgrf_d).sel, wi->left + 2, wi->top + 2, wi->right - wi->left - 2, wi->bottom, WP(w, newgrf_d).show_params);
++				const Widget *wi = &w->widget[NLW_WIDGET_NEWGRF_INFO_RIGHT];
++				ShowNewGRFInfo(WP(w, newgrf_d).sel_r, wi->left + 2, wi->top + 2, wi->right - wi->left - 2, wi->bottom, WP(w, newgrf_d).show_params);
+ 			}
+ 
++			if (WP(w, newgrf_d).sel_l != NULL) {
++				const Widget *wi = &w->widget[NLW_WIDGET_NEWGRF_INFO_LEFT];
++				ShowNewGRFInfo(WP(w, newgrf_d).sel_l, wi->left + 2, wi->top + 2, wi->right - wi->left - 2, wi->bottom, false);
++			}
+ 			break;
+ 		}
+ 
+-		case WE_INVALIDATE_DATA:
++	   	case WE_INVALIDATE_DATA:
+ 			SetupNewGRFWindow(w);
+ 			break;
+ 
++		case WE_DOUBLE_CLICK:
++			if (e->we.click.widget != NLW_WIDGET_AVAILABLE_GRF_LIST) break;
++			e->we.click.widget = NLW_WIDGET_ADD_FILE;
++			/* Fall through */
++
+ 		case WE_CLICK:
+ 			switch (e->we.click.widget) {
+-				case SNGRFS_ADD: { // Add GRF
+-					GRFConfig **list = WP(w, newgrf_d).list;
+-					Window *w;
++				case NLW_WIDGET_AVAILABLE_GRF_LIST: {
++					/* Get row... */
++					const GRFConfig *c;
++					uint i = (e->we.click.pt.y - w->widget[NLW_WIDGET_AVAILABLE_GRF_LIST].top) / 10 + w->vscroll.pos;
+ 
+-					DeleteWindowByClass(WC_SAVELOAD);
+-					w = AllocateWindowDesc(&_newgrf_add_dlg_desc);
+-					w->resize.step_height = 10;
+-
+-					WP(w, newgrf_add_d).list = list;
++					for (c = _all_grfs; c != NULL && i > 0; c = c->next, i--);
++					WP(w, newgrf_d).sel_l = c;
++					SetWindowDirty(w);
+ 					break;
+ 				}
+ 
+-				case SNGRFS_REMOVE: { // Remove GRF
++				case NLW_WIDGET_ADD_FILE: // Add selection to list
++					if (WP(w, newgrf_d).sel_l != NULL && WP(w, newgrf_d).editable) {
++						const GRFConfig *src = WP(w, newgrf_d).sel_l;
++						GRFConfig **list;
++
++						/* Find last entry in the list, checking for duplicate grfid on the way */
++						for (list = WP(w, newgrf_d).list; *list != NULL; list = &(*list)->next) {
++							if ((*list)->grfid == src->grfid) {
++								ShowErrorMessage(INVALID_STRING_ID, STR_NEWGRF_DUPLICATE_GRFID, 0, 0);
++								return;
++							}
++						}
++
++						/* Copy GRF details from scanned list */
++						GRFConfig *c = CallocT<GRFConfig>(1);
++						*c = *src;
++						c->filename = strdup(src->filename);
++						if (src->name      != NULL) c->name      = strdup(src->name);
++						if (src->info      != NULL) c->info      = strdup(src->info);
++						c->next = NULL;
++
++						/* Append GRF config to configuration list */
++						*list = c;
++
++						SetupNewGRFWindow(w);
++					}
++					break;
++
++				case NLW_WIDGET_RESCAN_FILES: // Rescan list
++					WP(w, newgrf_d).sel_l = NULL;
++					ScanNewGRFFiles();
++					SetupNewGRFWindow(w);
++					SetWindowDirty(w);
++					break;
++
++				case NLW_WIDGET_REMOVE: { // Remove GRF
+ 					GRFConfig **pc, *c, *newsel;
+ 
+ 					/* Choose the next GRF file to be the selected file */
+-					newsel = WP(w, newgrf_d).sel->next;
++					newsel = WP(w, newgrf_d).sel_r->next;
+ 
+ 					for (pc = WP(w, newgrf_d).list; (c = *pc) != NULL; pc = &c->next) {
+ 						/* If the new selection is empty (i.e. we're deleting the last item
+ 						 * in the list, pick the file just before the selected file */
+-						if (newsel == NULL && c->next == WP(w, newgrf_d).sel) newsel = c;
++						if (newsel == NULL && c->next == WP(w, newgrf_d).sel_r) newsel = c;
+ 
+-						if (c == WP(w, newgrf_d).sel) {
++						if (c == WP(w, newgrf_d).sel_r) {
+ 							*pc = c->next;
+ 							free(c);
+ 							break;
+ 						}
+ 					}
+ 
+-					WP(w, newgrf_d).sel = newsel;
++					WP(w, newgrf_d).sel_r = newsel;
+ 					SetupNewGRFWindow(w);
+ 					SetWindowDirty(w);
+ 					break;
+ 				}
+ 
+-				case SNGRFS_MOVE_UP: { // Move GRF up
++				case NLW_WIDGET_MOVE_UP: { // Move GRF up
+ 					GRFConfig **pc, *c;
+-					if (WP(w, newgrf_d).sel == NULL) break;
++					if (WP(w, newgrf_d).sel_r == NULL) break;
+ 
+ 					for (pc = WP(w, newgrf_d).list; (c = *pc) != NULL; pc = &c->next) {
+-						if (c->next == WP(w, newgrf_d).sel) {
+-							c->next = WP(w, newgrf_d).sel->next;
+-							WP(w, newgrf_d).sel->next = c;
+-							*pc = WP(w, newgrf_d).sel;
++						if (c->next == WP(w, newgrf_d).sel_r) {
++							c->next = WP(w, newgrf_d).sel_r->next;
++							WP(w, newgrf_d).sel_r->next = c;
++							*pc = WP(w, newgrf_d).sel_r;
+ 							break;
+ 						}
+ 					}
+@@ -442,12 +430,12 @@
+ 					break;
+ 				}
+ 
+-				case SNGRFS_MOVE_DOWN: { // Move GRF down
++				case NLW_WIDGET_MOVE_DOWN: { // Move GRF down
+ 					GRFConfig **pc, *c;
+-					if (WP(w, newgrf_d).sel == NULL) break;
++					if (WP(w, newgrf_d).sel_r == NULL) break;
+ 
+ 					for (pc = WP(w, newgrf_d).list; (c = *pc) != NULL; pc = &c->next) {
+-						if (c == WP(w, newgrf_d).sel) {
++						if (c == WP(w, newgrf_d).sel_r) {
+ 							*pc = c->next;
+ 							c->next = c->next->next;
+ 							(*pc)->next = c;
+@@ -458,18 +446,18 @@
+ 					break;
+ 				}
+ 
+-				case SNGRFS_FILE_LIST: { // Select a GRF
++				case NLW_WIDGET_FILE_LIST: { // Select a GRF
+ 					GRFConfig *c;
+-					uint i = (e->we.click.pt.y - w->widget[SNGRFS_FILE_LIST].top) / 14 + w->vscroll.pos;
++					uint i = (e->we.click.pt.y - w->widget[NLW_WIDGET_FILE_LIST].top) / 13 + w->vscroll2.pos;
+ 
+ 					for (c = *WP(w, newgrf_d).list; c != NULL && i > 0; c = c->next, i--);
+-					WP(w, newgrf_d).sel = c;
++					WP(w, newgrf_d).sel_r = c;
+ 
+ 					SetWindowDirty(w);
+ 					break;
+ 				}
+ 
+-				case SNGRFS_APPLY_CHANGES: // Apply changes made to GRF list
++				case NLW_WIDGET_APPLY_CHANGES: // Apply changes made to GRF list
+ 					if (WP(w, newgrf_d).execute) {
+ 						ShowQuery(
+ 							STR_POPUP_CAUTION_CAPTION,
+@@ -484,11 +472,11 @@
+ 					}
+ 					break;
+ 
+-				case SNGRFS_SET_PARAMETERS: { // Edit parameters
++				case NLW_WIDGET_SET_PARAMETERS: { // Edit parameters
+ 					char buff[512];
+-					if (WP(w, newgrf_d).sel == NULL) break;
++					if (WP(w, newgrf_d).sel_r == NULL) break;
+ 
+-					GRFBuildParamList(buff, WP(w, newgrf_d).sel, lastof(buff));
++					GRFBuildParamList(buff, WP(w, newgrf_d).sel_r, lastof(buff));
+ 					ShowQueryString(BindCString(buff), STR_NEWGRF_PARAMETER_QUERY, 63, 250, w, CS_ALPHANUMERAL);
+ 					break;
+ 				}
+@@ -498,7 +486,7 @@
+ 		case WE_ON_EDIT_TEXT:
+ 			if (e->we.edittext.str != NULL) {
+ 				/* Parse our new "int list" */
+-				GRFConfig *c = WP(w, newgrf_d).sel;
++				GRFConfig *c = WP(w, newgrf_d).sel_r;
+ 				c->num_params = parse_intlist(e->we.edittext.str, (int*)c->param, lengthof(c->param));
+ 
+ 				/* parse_intlist returns -1 on error */
+@@ -518,51 +506,24 @@
+ 			break;
+ 
+ 		case WE_RESIZE:
+-			w->vscroll.cap += e->we.sizing.diff.y / 14;
+-			w->widget[SNGRFS_FILE_LIST].data = (w->vscroll.cap << 8) + 1;
++			w->vscroll2.cap += e->we.sizing.diff.y / 13;
++			w->widget[NLW_WIDGET_FILE_LIST].data = (w->vscroll2.cap << 8) + 1;
+ 			SetupNewGRFWindow(w);
+ 			break;
+ 	}
+ }
+ 
+ 
+-static const Widget _newgrf_widgets[] = {
+-{   WWT_CLOSEBOX,  RESIZE_NONE, 10,   0,  10,   0,  13, STR_00C5,                    STR_018B_CLOSE_WINDOW },
+-{    WWT_CAPTION, RESIZE_RIGHT, 10,  11, 299,   0,  13, STR_NEWGRF_SETTINGS_CAPTION, STR_018C_WINDOW_TITLE_DRAG_THIS },
+-
+-/* NewGRF file Add, Remove, Move up, Move down */
+-{      WWT_PANEL, RESIZE_RIGHT, 10,   0, 299,  14,  29, STR_NULL,                    STR_NULL },
+-{ WWT_PUSHTXTBTN,  RESIZE_NONE,  3,  10,  79,  16,  27, STR_NEWGRF_ADD,              STR_NEWGRF_ADD_TIP },
+-{ WWT_PUSHTXTBTN,  RESIZE_NONE,  3,  80, 149,  16,  27, STR_NEWGRF_REMOVE,           STR_NEWGRF_REMOVE_TIP },
+-{ WWT_PUSHTXTBTN,  RESIZE_NONE,  3, 150, 219,  16,  27, STR_NEWGRF_MOVEUP,           STR_NEWGRF_MOVEUP_TIP },
+-{ WWT_PUSHTXTBTN,  RESIZE_NONE,  3, 220, 289,  16,  27, STR_NEWGRF_MOVEDOWN,         STR_NEWGRF_MOVEDOWN_TIP },
+-
+-/* NewGRF file list */
+-{     WWT_MATRIX,    RESIZE_RB, 10,   0, 287,  30,  99, 0x501,                       STR_NEWGRF_FILE_TIP },
+-{  WWT_SCROLLBAR,   RESIZE_LRB, 10, 288, 299,  30,  99, 0x0,                         STR_0190_SCROLL_BAR_SCROLLS_LIST },
+-
+-/* NewGRF file info */
+-{      WWT_PANEL,   RESIZE_RTB, 10,   0, 299, 100, 212, STR_NULL,                    STR_NULL },
+-
+-/* Edit parameter and apply changes button... */
+-{ WWT_PUSHTXTBTN,    RESIZE_TB, 10,   0, 143, 213, 224, STR_NEWGRF_SET_PARAMETERS,   STR_NULL },
+-{ WWT_PUSHTXTBTN,   RESIZE_RTB, 10, 144, 287, 213, 224, STR_NEWGRF_APPLY_CHANGES,    STR_NULL },
+-
+-{  WWT_RESIZEBOX,  RESIZE_LRTB, 10, 288, 299, 213, 224, 0x0,                         STR_RESIZE_BUTTON },
+-
+-{ WIDGETS_END },
+-};
+-
+-
+ static const WindowDesc _newgrf_desc = {
+-	WDP_CENTER, WDP_CENTER, 300, 225, 300, 225,
++	WDP_CENTER, WDP_CENTER, 607, 237, 607, 237,
+ 	WC_GAME_OPTIONS, WC_NONE,
+-	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_RESIZABLE,
++	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET | WDF_STD_BTN | WDF_UNCLICK_BUTTONS | WDF_RESIZABLE,
+ 	_newgrf_widgets,
+ 	NewGRFWndProc,
+ };
+ 
+ 
++
+ /** Setup the NewGRF gui
+  * @param editable allow the user to make changes to the grfconfig in the window
+  * @param show_params show information about what parameters are set for the grf files
+@@ -578,11 +539,11 @@
+ 	w = AllocateWindowDesc(&_newgrf_desc);
+ 	if (w == NULL) return;
+ 
+-	w->resize.step_height = 14;
++	w->resize.step_height = 13;
+ 	CopyGRFConfigList(&local, *config, false);
+ 
+ 	/* Clear selections */
+-	WP(w, newgrf_d).sel         = NULL;
++	WP(w, newgrf_d).sel_r       = NULL;
+ 	WP(w, newgrf_d).list        = &local;
+ 	WP(w, newgrf_d).orig_list   = config;
+ 	WP(w, newgrf_d).editable    = editable;
+@@ -590,4 +551,4 @@
+ 	WP(w, newgrf_d).show_params = show_params;
+ 
+ 	SetupNewGRFWindow(w);
+-}
++}
+\ No newline at end of file

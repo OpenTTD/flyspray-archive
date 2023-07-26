@@ -1,0 +1,198 @@
+diff --git a/src/station.h b/src/station.h
+index 25f77e7..7f70422 100644
+--- a/src/station.h
++++ b/src/station.h
+@@ -17,6 +17,13 @@
+ 
+ static const byte INITIAL_STATION_RATING = 175;
+ 
++struct ottd_Rectangle {
++	uint min_x;
++	uint min_y;
++	uint max_x;
++	uint max_y;
++};
++
+ struct GoodsEntry {
+ 	GoodsEntry() :
+ 		acceptance(false),
+@@ -213,6 +220,8 @@ enum CatchmentArea {
+ 	CA_DOCK            =  5
+ };
+ 
++bool GetStationArea(Station* st, ottd_Rectangle *area);
++uint FindCatchmentRadius(const Station* st);
+ void ModifyStationRatingAround(TileIndex tile, PlayerID owner, int amount, uint radius);
+ 
+ void ShowStationViewWindow(StationID station);
+diff --git a/src/station_cmd.cpp b/src/station_cmd.cpp
+index c870d63..df2b36b 100644
+--- a/src/station_cmd.cpp
++++ b/src/station_cmd.cpp
+@@ -104,7 +104,7 @@ static uint GetNumRoadStopsInStation(const Station* st, RoadStop::Type type)
+ 
+ /* Calculate the radius of the station. Basicly it is the biggest
+  *  radius that is available within the station */
+-static uint FindCatchmentRadius(const Station* st)
++uint FindCatchmentRadius(const Station* st)
+ {
+ 	uint ret = CA_NONE;
+ 
+@@ -448,13 +448,6 @@ void GetAcceptanceAroundTiles(AcceptedCargo accepts, TileIndex tile,
+ 	}
+ }
+ 
+-struct ottd_Rectangle {
+-	uint min_x;
+-	uint min_y;
+-	uint max_x;
+-	uint max_y;
+-};
+-
+ static inline void MergePoint(ottd_Rectangle* rect, TileIndex tile)
+ {
+ 	uint x = TileX(tile);
+@@ -466,26 +459,21 @@ static inline void MergePoint(ottd_Rectangle* rect, TileIndex tile)
+ 	if (rect->max_y < y) rect->max_y = y;
+ }
+ 
+-// Update the acceptance for a station.
+-// show_msg controls whether to display a message that acceptance was changed.
+-static void UpdateStationAcceptance(Station *st, bool show_msg)
+-{
++// Return station acceptance area.
++bool GetStationArea(Station *st, ottd_Rectangle *area) {
++
+ 	// Don't update acceptance for a buoy
+-	if (st->IsBuoy()) return;
++	if (st->IsBuoy()) return false;
+ 
+-	ottd_Rectangle rect;
+-	rect.min_x = MapSizeX();
+-	rect.min_y = MapSizeY();
+-	rect.max_x = 0;
+-	rect.max_y = 0;
+-
+-	/* old accepted goods types */
+-	uint old_acc = GetAcceptanceMask(st);
++	area->min_x = MapSizeX();
++	area->min_y = MapSizeY();
++	area->max_x = 0;
++	area->max_y = 0;
+ 
+ 	// Put all the tiles that span an area in the table.
+ 	if (st->train_tile != 0) {
+-		MergePoint(&rect, st->train_tile);
+-		MergePoint(&rect,
++		MergePoint(area, st->train_tile);
++		MergePoint(area,
+ 			st->train_tile + TileDiffXY(st->trainst_w - 1, st->trainst_h - 1)
+ 		);
+ 	}
+@@ -493,30 +481,44 @@ static void UpdateStationAcceptance(Station *st, bool show_msg)
+ 	if (st->airport_tile != 0) {
+ 		const AirportFTAClass* afc = st->Airport();
+ 
+-		MergePoint(&rect, st->airport_tile);
+-		MergePoint(&rect,
++		MergePoint(area, st->airport_tile);
++		MergePoint(area,
+ 			st->airport_tile + TileDiffXY(afc->size_x - 1, afc->size_y - 1)
+ 		);
+ 	}
+ 
+-	if (st->dock_tile != 0) MergePoint(&rect, st->dock_tile);
++	if (st->dock_tile != 0) MergePoint(area, st->dock_tile);
+ 
+ 	for (const RoadStop *rs = st->bus_stops; rs != NULL; rs = rs->next) {
+-		MergePoint(&rect, rs->xy);
++		MergePoint(area, rs->xy);
+ 	}
+ 
+ 	for (const RoadStop *rs = st->truck_stops; rs != NULL; rs = rs->next) {
+-		MergePoint(&rect, rs->xy);
++		MergePoint(area, rs->xy);
+ 	}
++	return true;
++}
+ 
++// Update the acceptance for a station.
++// show_msg controls whether to display a message that acceptance was changed.
++static void UpdateStationAcceptance(Station *st, bool show_msg)
++{
+ 	// And retrieve the acceptance.
+ 	AcceptedCargo accepts;
+-	if (rect.max_x >= rect.min_x) {
++	ottd_Rectangle area;
++
++	if (!GetStationArea(st, &area))
++		return;
++
++	/* Get old accepted goods types */
++	uint old_acc = GetAcceptanceMask(st);
++
++	if (area.max_x >= area.min_x) {
+ 		GetAcceptanceAroundTiles(
+ 			accepts,
+-			TileXY(rect.min_x, rect.min_y),
+-			rect.max_x - rect.min_x + 1,
+-			rect.max_y - rect.min_y + 1,
++			TileXY(area.min_x, area.min_y),
++			area.max_x - area.min_x + 1,
++			area.max_y - area.min_y + 1,
+ 			_patches.modified_catchment ? FindCatchmentRadius(st) : 4
+ 		);
+ 	} else {
+diff --git a/src/window.cpp b/src/window.cpp
+index 325242b..0deec8a 100644
+--- a/src/window.cpp
++++ b/src/window.cpp
+@@ -14,6 +14,7 @@
+ #include "viewport.h"
+ #include "console.h"
+ #include "variables.h"
++#include "station_map.h"
+ #include "table/sprites.h"
+ #include "genworld.h"
+ #include "helpers.hpp"
+@@ -1397,10 +1398,40 @@ static bool HandleViewportScroll()
+ 	w = FindWindowFromPt(_cursor.pos.x, _cursor.pos.y);
+ 
+ 	if (!(_right_button_down || scrollwheel_scrolling) || w == NULL) {
++		ResetObjectToPlace();
+ 		_cursor.fix_at = false;
+ 		_scrolling_viewport = false;
+ 		return true;
+ 	}
++	
++	/* Show catchment radius with left click */
++	if ((_cursor.delta.x < 10) || (_cursor.delta.y < 10)) {
++		TileIndex t;
++		t = TileVirtXY(GetTileBelowCursor().x, GetTileBelowCursor().y);
++		if (t <= MapSize() && IsTileType (t, MP_STATION)) {
++			Station *station;
++			if ((station = GetStationByTile(t))) {
++				ottd_Rectangle area;
++				if (GetStationArea(station, &area)) {
++					int dx, dy, w, h, rad;
++
++					rad = (_patches.modified_catchment) ? FindCatchmentRadius(station) : 4;
++
++					w = area.max_x - area.min_x;
++					h = area.max_y - area.min_y;
++
++					dx = (area.max_x - TileX(t));
++					dy = (area.max_y - TileY(t));
++
++					/* Draw the radius */
++					_thd.place_mode = VHM_RECT;
++					SetTileSelectBigSize(dx - rad - w, dy - rad - h, 2 * rad + w, 2 * rad + h);
++				}
++			}
++		} else {
++			ResetObjectToPlace();
++		}
++	}
+ 
+ 	if (_patches.reverse_scroll) {
+ 		e.we.scroll.delta.x = -_cursor.delta.x;

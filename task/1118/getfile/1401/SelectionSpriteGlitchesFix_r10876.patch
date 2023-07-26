@@ -1,0 +1,237 @@
+Index: src/viewport.h
+===================================================================
+--- src/viewport.h	(revision 10876)
++++ src/viewport.h	(working copy)
+@@ -50,7 +50,7 @@
+ void DrawGroundSpriteAt(SpriteID image, SpriteID pal, int32 x, int32 y, byte z);
+ void AddSortableSpriteToDraw(SpriteID image, SpriteID pal, int x, int y, int w, int h, byte dz, byte z, bool transparent = false);
+ void *AddStringToDraw(int x, int y, StringID string, uint64 params_1, uint64 params_2);
+-void AddChildSpriteScreen(SpriteID image, SpriteID pal, int x, int y);
++void AddChildSpriteScreen(SpriteID image, SpriteID pal, int x, int y, bool add_to_foundation = false);
+ 
+ 
+ void StartSpriteCombine();
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 10876)
++++ src/viewport.cpp	(working copy)
+@@ -35,9 +35,6 @@
+ static uint32 _active_viewports;    ///< bitmasked variable where each bit signifies if a viewport is in use or not
+ assert_compile(lengthof(_viewports) < sizeof(_active_viewports) * 8);
+ 
+-static bool _added_tile_sprite;
+-static bool _offset_ground_sprites;
+-
+ /* The in-game coordiante system looks like this *
+  *                                               *
+  *                    ^ Z                        *
+@@ -103,20 +100,22 @@
+ struct ViewportDrawer {
+ 	DrawPixelInfo dpi;
+ 
+-	byte *spritelist_mem;
+-	const byte *eof_spritelist_mem;
++	byte *spritelist_mem;                               ///< buffer for all xxxSpriteToDraw structs.
++	const byte *eof_spritelist_mem;                     ///< points to end of buffer minus sizeof(LARGEST_SPRITELIST_STRUCT).
+ 
+-	StringSpriteToDraw **last_string, *first_string;
+-	TileSpriteToDraw **last_tile, *first_tile;
++	StringSpriteToDraw **last_string, *first_string;    ///< head and tail of StringSprite-list.
++	TileSpriteToDraw **last_tile, *first_tile;          ///< head and tail of TileSprite-list.
+ 
+-	ChildScreenSpriteToDraw **last_child;
++	ChildScreenSpriteToDraw **last_child;               ///< tail of ChildSprite-list of last ParentSprite.
+ 
+-	ParentSpriteToDraw **parent_list;
+-	ParentSpriteToDraw * const *eof_parent_list;
++	ParentSpriteToDraw **parent_list;                   ///< tail of ParentSprite-array.
++	ParentSpriteToDraw * const *eof_parent_list;        ///< end of ParentSprite-array.
+ 
+-	byte combine_sprites;
++	byte combine_sprites;                               ///< Combine several sprites in one bounding-box. @see StartSpriteCombine(), AddSortableSpriteToDraw(), EndSpriteCombine()
+ 
+-	int offs_x, offs_y; // used when drawing ground sprites relative
++	ParentSpriteToDraw *foundation_parent;              ///< "foundation"-ParentSprite of current tile. NULL if the tile sprite is drawn as TileSprite
++	ChildScreenSpriteToDraw **last_foundation_child;    ///< tail of ChildSprite-list of the current "foundation"-ParentSprite
++	int offs_x, offs_y;                                 ///< sprite offset of tile sprites relative to "foundation"-ParentSprite
+ };
+ 
+ static ViewportDrawer *_cur_vd;
+@@ -419,6 +418,18 @@
+ 	InvalidateWidget(w, widget_zoom_out);
+ }
+ 
++/**
++ * Draws a ground sprite at a specific world-coordinate.
++ *
++ * @param image the image to draw.
++ * @param pal the provided palette.
++ * @param x position x of the sprite.
++ * @param y position y of the sprite.
++ * @param z position z of the sprite.
++ *
++ * @bug Except of trivial cases this function is (outside of "viewport.cpp") currently only used to draw fences on clear land and pillars under low bridges.
++ * @bug In both cases the usage causes glitches with foundations on neighboured tiles. The usage of DrawGroundSpriteAt() should be removed and replaced by AddSortableSpriteToDraw().
++ */
+ void DrawGroundSpriteAt(SpriteID image, SpriteID pal, int32 x, int32 y, byte z)
+ {
+ 	ViewportDrawer *vd = _cur_vd;
+@@ -444,26 +455,53 @@
+ 	vd->last_tile = &ts->next;
+ }
+ 
++/**
++ * Draws a ground sprite for the current tile.
++ * If the current tile is drawn on top of a foundation the sprite is added as child sprite to the "foundation"-ParentSprite.
++ *
++ * @param image the image to draw.
++ * @param pal the provided palette.
++ */
+ void DrawGroundSprite(SpriteID image, SpriteID pal)
+ {
+-	if (_offset_ground_sprites) {
++	if (_cur_vd->foundation_parent != NULL) {
+ 		/* offset ground sprite because of foundation? */
+-		AddChildSpriteScreen(image, pal, _cur_vd->offs_x, _cur_vd->offs_y);
++		AddChildSpriteScreen(image, pal, _cur_vd->offs_x, _cur_vd->offs_y, true);
+ 	} else {
+-		_added_tile_sprite = true;
+ 		DrawGroundSpriteAt(image, pal, _cur_ti->x, _cur_ti->y, _cur_ti->z);
+ 	}
+ }
+ 
+ 
++/**
++ * Called when a foundation has been drawn for the current tile.
++ * Successive ground sprites for the current tile will be drawn as child sprites of the "foundation"-ParentSprite instead of simple TileSprites.
++ *
++ * @note The "foundation"-sprite must be the most recently drawn ParentSprite. (drawn through AddSortableSpriteToDraw())
++ *
++ * @param x sprite x-offset (screen coordinates) of ground sprites relative to the "foundation"-ParentSprite.
++ * @param y sprite y-offset (screen coordinates) of ground sprites relative to the "foundation"-ParentSprite.
++ */
+ void OffsetGroundSprite(int x, int y)
+ {
+ 	_cur_vd->offs_x = x;
+ 	_cur_vd->offs_y = y;
+-	_offset_ground_sprites = true;
++	_cur_vd->foundation_parent = _cur_vd->parent_list[-1];
++	_cur_vd->last_foundation_child = _cur_vd->last_child;
+ }
+ 
+-static void AddCombinedSprite(SpriteID image, SpriteID pal, int x, int y, byte z)
++/**
++ * Add a child sprite to a parent sprite.
++ * In contrast to "AddChildSpriteScreen()" the sprite position is in world coordinates
++ *
++ * @param image the image to draw.
++ * @param pal the provided palette.
++ * @param x position x of the sprite.
++ * @param y position y of the sprite.
++ * @param z position z of the sprite.
++ * @param add_to_foundation if true add the ChildSprite to the "foundation"-ParentSprite else add to the last ParentSprite.
++ */
++static void AddChildSpriteWorld(SpriteID image, SpriteID pal, int x, int y, byte z, bool add_to_foundation)
+ {
+ 	const ViewportDrawer *vd = _cur_vd;
+ 	Point pt = RemapCoords(x, y, z);
+@@ -475,7 +513,8 @@
+ 			pt.y + spr->y_offs + spr->height <= vd->dpi.top)
+ 		return;
+ 
+-	AddChildSpriteScreen(image, pal, pt.x - vd->parent_list[-1]->left, pt.y - vd->parent_list[-1]->top);
++	const ParentSpriteToDraw *parent = (add_to_foundation ? vd->foundation_parent : vd->parent_list[-1]);
++	AddChildSpriteScreen(image, pal, pt.x - parent->left, pt.y - parent->top, add_to_foundation);
+ }
+ 
+ /** Draw a (transparent) sprite at given coordinates
+@@ -505,7 +544,7 @@
+ 	}
+ 
+ 	if (vd->combine_sprites == 2) {
+-		AddCombinedSprite(image, pal, x, y, z);
++		AddChildSpriteWorld(image, pal, x, y, z, false);
+ 		return;
+ 	}
+ 
+@@ -569,7 +608,18 @@
+ 	_cur_vd->combine_sprites = 0;
+ }
+ 
+-void AddChildSpriteScreen(SpriteID image, SpriteID pal, int x, int y)
++/**
++ * Add a child sprite to a parent sprite.
++ *
++ * @param image the image to draw.
++ * @param pal the provided palette.
++ * @param x sprite x-offset (screen coordinates) relative to parent sprite.
++ * @param y sprite y-offset (screen coordinates) relative to parent sprite.
++ * @param add_to_foundation if true add the ChildSprite to the "foundation"-ParentSprite else add to the last ParentSprite.
++ *
++ * @note add_to_foundation is considered "private". Outside of "viewport.cpp" use #DrawGroundSprite() instead and leave add_to_foundation the default "false".
++ */
++void AddChildSpriteScreen(SpriteID image, SpriteID pal, int x, int y, bool add_to_foundation)
+ {
+ 	ViewportDrawer *vd = _cur_vd;
+ 	ChildScreenSpriteToDraw *cs;
+@@ -582,18 +632,21 @@
+ 	}
+ 	cs = (ChildScreenSpriteToDraw*)vd->spritelist_mem;
+ 
+-	if (vd->last_child == NULL) return;
++	ChildScreenSpriteToDraw ***child_list = (add_to_foundation ? &vd->last_foundation_child : &vd->last_child);
+ 
++	if (*child_list == NULL) return;
++
+ 	vd->spritelist_mem += sizeof(ChildScreenSpriteToDraw);
+ 
+-	*vd->last_child = cs;
+-	vd->last_child = &cs->next;
++	cs->next = **child_list;
++	**child_list = cs;
++	if (vd->last_child == *child_list) vd->last_child = &cs->next; // vd->last_child should point to the last ChildSprite of the last Parentsprite independent of add_to_foundation
++	*child_list = &cs->next;
+ 
+ 	cs->image = image;
+ 	cs->pal = pal;
+ 	cs->x = x;
+ 	cs->y = y;
+-	cs->next = NULL;
+ }
+ 
+ /* Returns a StringSpriteToDraw */
+@@ -627,10 +680,20 @@
+ 
+ static void DrawSelectionSprite(SpriteID image, SpriteID pal, const TileInfo *ti)
+ {
+-	if (_added_tile_sprite && !(_thd.drawstyle & HT_LINE)) { // draw on real ground
++	/* We want to draw selection sprites directly on top of the ground sprite.
++	 * Here we draw them like the ground sprite (i.e. as real GroundSprite or as ChildSprite of the foundation).
++	 *
++	 * As long as the selection sprite does not extend over the ground sprite there is no problem.
++	 * But some (auto)rail highlights extend over the NW or NE edge. This results in problems, if
++	 * the neighbour-tile has a foundation or building etc. that will overdraw parts of the selection sprite.
++	 * To fix that, the selection sprite must be drawn as separate SortableSprite. However in the
++	 * implementation before this patch the selection sprites were overdrawn by neighboured foundations
++	 * as well. I do not know a way to fix all cases with current sprite sorter. But this patch does not make it worse.
++	 */
++	if (_cur_vd->foundation_parent != NULL) { // draw on top of foundation
++		AddChildSpriteWorld(image, pal, ti->x, ti->y, ti->z + 7, true);
++	} else { // draw on real ground
+ 		DrawGroundSpriteAt(image, pal, ti->x, ti->y, ti->z + 7);
+-	} else { // draw on top of foundation
+-		AddSortableSpriteToDraw(image, pal, ti->x, ti->y, 0x10, 0x10, 1, ti->z + 7);
+ 	}
+ }
+ 
+@@ -806,8 +869,8 @@
+ 			y_cur += 0x10;
+ 			x_cur -= 0x10;
+ 
+-			_added_tile_sprite = false;
+-			_offset_ground_sprites = false;
++			vd->foundation_parent = NULL;
++			vd->last_foundation_child = NULL;
+ 
+ 			_tile_type_procs[tt]->draw_tile_proc(&ti);
+ 			DrawTileSelection(&ti);

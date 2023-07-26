@@ -1,0 +1,246 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 13305)
++++ src/settings.cpp	(working copy)
+@@ -1578,6 +1578,7 @@
+ 	    SDT_BOOL(Settings, construction.extra_dynamite,                                         0, 0, false,                    STR_CONFIG_PATCHES_EXTRADYNAMITE,          NULL),
+ 	    SDT_BOOL(Settings, construction.longbridges,                                            0,NN,  true,                    STR_CONFIG_PATCHES_LONGBRIDGES,            NULL),
+ 	    SDT_BOOL(Settings, construction.signal_side,                                            N,NN,  true,                    STR_CONFIG_PATCHES_SIGNALSIDE,             RedrawScreen),
++  
+ 	    SDT_BOOL(Settings, station.always_small_airport,                                        0,NN, false,                    STR_CONFIG_PATCHES_SMALL_AIRPORTS,         NULL),
+ 	 SDT_CONDVAR(Settings, economy.town_layout,                  SLE_UINT8, 59, SL_MAX_VERSION, 0,MS,TL_ORIGINAL,TL_NO_ROADS,NUM_TLS-1,1, STR_CONFIG_PATCHES_TOWN_LAYOUT,  CheckTownLayout),
+ 
+@@ -1758,6 +1759,8 @@
+ 	 SDT_VAR(Settings, game_creation.map_x,        SLE_UINT8, S, 0,     8,        6,       11, 0, STR_CONFIG_PATCHES_MAP_X,                       NULL),
+ 	 SDT_VAR(Settings, game_creation.map_y,        SLE_UINT8, S, 0,     8,        6,       11, 0, STR_CONFIG_PATCHES_MAP_Y,                       NULL),
+ 
++	SDT_CONDBOOL(Settings, gui.disable_tree_growth,			84, SL_MAX_VERSION, 0, 0, false,					STR_CONFIG_PATCHES_TREE_GROWTH,            NULL),
++
+ 	/*
+ 	 * Since the network code (CmdChangePatchSetting and friends) use the index in this array to decide
+ 	 * which patch the server is talking about all conditional compilation of this array must be at the
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 13305)
++++ src/lang/english.txt	(working copy)
+@@ -1179,6 +1179,8 @@
+ STR_CONFIG_PATCHES_TOWN_LAYOUT_3X3_GRID                         :3x3 grid
+ STR_CONFIG_PATCHES_TOWN_LAYOUT_RANDOM                           :random
+ 
++STR_CONFIG_PATCHES_TREE_GROWTH                                  :{LTBLUE}Disable Tree Growth: {ORANGE}{STRING1}
++
+ STR_CONFIG_PATCHES_TOOLBAR_POS                                  :{LTBLUE}Position of main toolbar: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_TOOLBAR_POS_LEFT                             :Left
+ STR_CONFIG_PATCHES_TOOLBAR_POS_CENTER                           :Centre
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 13305)
++++ src/settings_gui.cpp	(working copy)
+@@ -612,6 +612,7 @@
+ 	"gui.timetable_in_ticks",
+ 	"gui.default_rail_type",
+ 	"gui.always_build_infrastructure",
++	"gui.disable_tree_growth",
+ };
+ 
+ static const char *_patches_construction[] = {
+Index: src/tree_cmd.cpp
+===================================================================
+--- src/tree_cmd.cpp	(revision 13305)
++++ src/tree_cmd.cpp	(working copy)
+@@ -650,96 +650,101 @@
+ 	}
+ 	SetTreeCounter(tile, 0);
+ 
+-	switch (GetTreeGrowth(tile)) {
+-		case 3: /* regular sized tree */
+-			if (_settings.game_creation.landscape == LT_TROPIC &&
++	if (_settings.gui.disable_tree_growth == false)
++	{
++		switch (GetTreeGrowth(tile)) {
++			case 3: /* regular sized tree */
++				if (_settings.game_creation.landscape == LT_TROPIC &&
+ 					GetTreeType(tile) != TREE_CACTUS &&
+ 					GetTropicZone(tile) == TROPICZONE_DESERT) {
+-				AddTreeGrowth(tile, 1);
+-			} else {
+-				switch (GB(Random(), 0, 3)) {
+-					case 0: /* start destructing */
+-						AddTreeGrowth(tile, 1);
+-						break;
+-
+-					case 1: /* add a tree */
+-						if (GetTreeCount(tile) < 3) {
+-							AddTreeCount(tile, 1);
+-							SetTreeGrowth(tile, 0);
++					AddTreeGrowth(tile, 1);
++				} else {
++					switch (GB(Random(), 0, 3)) {
++						case 0: /* start destructing */
++							AddTreeGrowth(tile, 1);
+ 							break;
++							
++						case 1: /* add a tree */
++							if (GetTreeCount(tile) < 3) {
++								AddTreeCount(tile, 1);
++								SetTreeGrowth(tile, 0);
++								break;
++							}
++							/* FALL THROUGH */
++							
++						case 2: { /* add a neighbouring tree */
++							TreeType treetype = GetTreeType(tile);
++							
++							tile += TileOffsByDir((Direction)(Random() & 7));
++							
++							/* Cacti don't spread */
++							if (!CanPlantTreesOnTile(tile, false)) return;
++							
++							/* Don't plant trees, if ground was freshly cleared */
++							if (IsTileType(tile, MP_CLEAR) && GetClearGround(tile) == CLEAR_GRASS && GetClearDensity(tile) != 3) return;
++							
++							PlantTreesOnTile(tile, treetype, 0, 0);
++							
++							break;
+ 						}
+-						/* FALL THROUGH */
+-
+-					case 2: { /* add a neighbouring tree */
+-						TreeType treetype = GetTreeType(tile);
+-
+-						tile += TileOffsByDir((Direction)(Random() & 7));
+-
+-						/* Cacti don't spread */
+-						if (!CanPlantTreesOnTile(tile, false)) return;
+-
+-						/* Don't plant trees, if ground was freshly cleared */
+-						if (IsTileType(tile, MP_CLEAR) && GetClearGround(tile) == CLEAR_GRASS && GetClearDensity(tile) != 3) return;
+-
+-						PlantTreesOnTile(tile, treetype, 0, 0);
+-
+-						break;
++							
++						default:
++							return;
+ 					}
+-
+-					default:
+-						return;
+ 				}
+-			}
+-			break;
+-
+-		case 6: /* final stage of tree destruction */
+-			if (GetTreeCount(tile) > 0) {
+-				/* more than one tree, delete it */
+-				AddTreeCount(tile, -1);
+-				SetTreeGrowth(tile, 3);
+-			} else {
+-				/* just one tree, change type into MP_CLEAR */
+-				switch (GetTreeGround(tile)) {
+-					case TREE_GROUND_SHORE: MakeShore(tile); break;
+-					case TREE_GROUND_GRASS: MakeClear(tile, CLEAR_GRASS, GetTreeDensity(tile)); break;
+-					case TREE_GROUND_ROUGH: MakeClear(tile, CLEAR_ROUGH, 3); break;
+-					default: // snow or desert
+-						MakeClear(tile, _settings.game_creation.landscape == LT_TROPIC ? CLEAR_DESERT : CLEAR_SNOW, GetTreeDensity(tile));
+-						break;
++				break;
++				
++			case 6: /* final stage of tree destruction */
++				if (GetTreeCount(tile) > 0) {
++					/* more than one tree, delete it */
++					AddTreeCount(tile, -1);
++					SetTreeGrowth(tile, 3);
++				} else {
++					/* just one tree, change type into MP_CLEAR */
++					switch (GetTreeGround(tile)) {
++						case TREE_GROUND_SHORE: MakeShore(tile); break;
++						case TREE_GROUND_GRASS: MakeClear(tile, CLEAR_GRASS, GetTreeDensity(tile)); break;
++						case TREE_GROUND_ROUGH: MakeClear(tile, CLEAR_ROUGH, 3); break;
++						default: // snow or desert
++							MakeClear(tile, _settings.game_creation.landscape == LT_TROPIC ? CLEAR_DESERT : CLEAR_SNOW, GetTreeDensity(tile));
++							break;
++					}
+ 				}
+-			}
+-			break;
+-
+-		default:
+-			AddTreeGrowth(tile, 1);
+-			break;
++				break;
++					
++				default:
++					AddTreeGrowth(tile, 1);
++					break;
++		}
+ 	}
+-
+ 	MarkTileDirtyByTile(tile);
+ }
+ 
+ void OnTick_Trees()
+ {
+-	uint32 r;
+-	TileIndex tile;
+-	TreeType tree;
++	if (_settings.gui.disable_tree_growth == false)
++	{
++		uint32 r;
++		TileIndex tile;
++		TreeType tree;
+ 
+-	/* place a tree at a random rainforest spot */
+-	if (_settings.game_creation.landscape == LT_TROPIC &&
+-			(r = Random(), tile = RandomTileSeed(r), GetTropicZone(tile) == TROPICZONE_RAINFOREST) &&
+-			CanPlantTreesOnTile(tile, false) &&
+-			(tree = GetRandomTreeType(tile, GB(r, 24, 8))) != TREE_INVALID) {
+-		PlantTreesOnTile(tile, tree, 0, 0);
+-	}
++		/* place a tree at a random rainforest spot */
++		if (_settings.game_creation.landscape == LT_TROPIC &&
++				(r = Random(), tile = RandomTileSeed(r), GetTropicZone(tile) == TROPICZONE_RAINFOREST) &&
++				CanPlantTreesOnTile(tile, false) &&
++				(tree = GetRandomTreeType(tile, GB(r, 24, 8))) != TREE_INVALID) {
++			PlantTreesOnTile(tile, tree, 0, 0);
++		}
+ 
+-	/* byte underflow */
+-	if (--_trees_tick_ctr != 0) return;
++		/* byte underflow */
++		if (--_trees_tick_ctr != 0) return;
+ 
+-	/* place a tree at a random spot */
+-	r = Random();
+-	tile = TILE_MASK(r);
+-	if (CanPlantTreesOnTile(tile, false) && (tree = GetRandomTreeType(tile, GB(r, 24, 8))) != TREE_INVALID) {
+-		PlantTreesOnTile(tile, tree, 0, 0);
++		/* place a tree at a random spot */
++		r = Random();
++		tile = TILE_MASK(r);
++		if (CanPlantTreesOnTile(tile, false) && (tree = GetRandomTreeType(tile, GB(r, 24, 8))) != TREE_INVALID) {
++			PlantTreesOnTile(tile, tree, 0, 0);
++		}
+ 	}
+ }
+ 
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 13305)
++++ src/settings_type.h	(working copy)
+@@ -79,6 +79,7 @@
+ 	int32  autorenew_money;                  ///< how much money before autorenewing for new companies?
+ 	byte   currency;                         ///< currency we currently use
+ 	byte   units;                            ///< unit system we show everything
++	bool disable_tree_growth;           ///< If trees are allowed to grow
+ };
+ 
+ /** Settings related to the creation of games. */
+@@ -108,6 +109,7 @@
+ 	bool   extra_dynamite;                   ///< extra dynamite
+ 	bool   road_stop_on_town_road;           ///< allow building of drive-through road stops on town owned roads
+ 	uint8  raw_industry_construction;        ///< type of (raw) industry construction (none, "normal", prospecting)
++
+ };
+ 
+ /** Settings related to the AI. */

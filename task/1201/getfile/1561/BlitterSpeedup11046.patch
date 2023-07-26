@@ -1,0 +1,269 @@
+Index: src/blitter/32bpp_simple.cpp
+===================================================================
+--- src/blitter/32bpp_simple.cpp	(revision 11046)
++++ src/blitter/32bpp_simple.cpp	(working copy)
+@@ -12,8 +12,10 @@
+ 	const SpriteLoader::CommonPixel *src, *src_line;
+ 	uint32 *dst, *dst_line;
+ 
++	int src_zoom = ScaleByZoom(1, zoom);
++
+ 	/* Find where to start reading in the source sprite */
+-	src_line = (const SpriteLoader::CommonPixel *)bp->sprite + (bp->skip_top * bp->sprite_width + bp->skip_left) * ScaleByZoom(1, zoom);
++	src_line = (const SpriteLoader::CommonPixel *)bp->sprite + (bp->skip_top * bp->sprite_width + bp->skip_left) * src_zoom;
+ 	dst_line = (uint32 *)bp->dst + bp->top * bp->pitch + bp->left;
+ 
+ 	for (int y = 0; y < bp->height; y++) {
+@@ -21,14 +23,24 @@
+ 		dst_line += bp->pitch;
+ 
+ 		src = src_line;
+-		src_line += bp->sprite_width * ScaleByZoom(1, zoom);
++		src_line += bp->sprite_width * src_zoom;
+ 
+ 		for (int x = 0; x < bp->width; x++) {
++			if (src->a == 0) {
++				/* Skip src->r pixels. */
++				int skip = UnScaleByZoom(src->r, zoom);
++				if (skip == 0) skip = 1;
++				dst += skip;
++				x += skip - 1;
++				src += (src_zoom * skip);
++				continue;
++			}
++
+ 			switch (mode) {
+ 				case BM_COLOUR_REMAP:
+ 					/* In case the m-channel is zero, do not remap this pixel in any way */
+ 					if (src->m == 0) {
+-						if (src->a != 0) *dst = ComposeColourRGBA(src->r, src->g, src->b, src->a, *dst);
++						*dst = ComposeColourRGBA(src->r, src->g, src->b, src->a, *dst);
+ 					} else {
+ 						if (bp->remap[src->m] != 0) *dst = ComposeColourPA(this->LookupColourInPalette(bp->remap[src->m]), src->a, *dst);
+ 					}
+@@ -40,15 +52,14 @@
+ 					 *  we produce a result the newgrf maker didn't expect ;) */
+ 
+ 					/* Make the current color a bit more black, so it looks like this image is transparent */
+-					if (src->a != 0) *dst = MakeTransparent(*dst, 75);
++					*dst = MakeTransparent(*dst, 192);
+ 					break;
+-
+ 				default:
+-					if (src->a != 0) *dst = ComposeColourRGBA(src->r, src->g, src->b, src->a, *dst);
++					*dst = ComposeColourRGBA(src->r, src->g, src->b, src->a, *dst);
+ 					break;
+ 			}
+ 			dst++;
+-			src += ScaleByZoom(1, zoom);
++			src += src_zoom;
+ 		}
+ 	}
+ }
+@@ -60,7 +71,7 @@
+ 	if (pal == PALETTE_TO_TRANSPARENT) {
+ 		do {
+ 			for (int i = 0; i != width; i++) {
+-				*udst = MakeTransparent(*udst, 60);
++				*udst = MakeTransparent(*udst, 154);
+ 				udst++;
+ 			}
+ 			udst = udst - width + _screen.pitch;
+@@ -95,13 +106,27 @@
+ 	dst = (SpriteLoader::CommonPixel *)dest_sprite->data;
+ 
+ 	memcpy(dst, sprite->data, sprite->height * sprite->width * sizeof(SpriteLoader::CommonPixel));
+-	for (int i = 0; i < sprite->height * sprite->width; i++) {
+-		if (dst[i].m != 0) {
+-			/* Pre-convert the mapping channel to a RGB value */
+-			uint color = this->LookupColourInPalette(dst[i].m);
+-			dst[i].r = GB(color, 16, 8);
+-			dst[i].g = GB(color, 8,  8);
+-			dst[i].b = GB(color, 0,  8);
++
++	/* Initialize RGB values for mapped colors, and compute lengths of transparent blocks. */
++	int pos = sprite->height * sprite->width - 1;
++	for (int y = sprite->height - 1; y >= 0; y--) {
++		int transparent_count = 0;
++		/* Process sprite line backwards, to compute lengths of transparent blocks */
++		for (int x = sprite->width - 1; x >= 0; x--, pos--) {
++			if (dst[pos].a == 0) {
++				/* Save transparent block length in red channel */
++				if (transparent_count < 255) transparent_count++;
++				dst[pos].r = transparent_count;
++			} else {
++				transparent_count = 0;
++				if (dst[pos].m != 0) {
++					/* Pre-convert the mapping channel to a RGB value */
++					uint color = this->LookupColourInPalette(dst[pos].m);
++					dst[pos].r = GB(color, 16, 8);
++					dst[pos].g = GB(color, 8,  8);
++					dst[pos].b = GB(color, 0,  8);
++				}
++			}
+ 		}
+ 	}
+ 
+Index: src/blitter/32bpp_base.hpp
+===================================================================
+--- src/blitter/32bpp_base.hpp	(revision 11046)
++++ src/blitter/32bpp_base.hpp	(working copy)
+@@ -48,15 +48,19 @@
+ 	 */
+ 	static inline uint ComposeColourRGBA(uint r, uint g, uint b, uint a, uint current)
+ 	{
++		if (a == 0) return current;
++		if (a == 255) return ComposeColour(0xFF, r, g, b);
++
+ 		uint cr, cg, cb;
+ 		cr = GB(current, 16, 8);
+ 		cg = GB(current, 8,  8);
+ 		cb = GB(current, 0,  8);
+ 
++		/* Note: "256 - a" is not correct, but it makes ">> 8" possible. */
+ 		return ComposeColour(0xFF,
+-												(r * a + cr * (255 - a)) / 255,
+-												(g * a + cg * (255 - a)) / 255,
+-												(b * a + cb * (255 - a)) / 255);
++			(r * a + cr * (256 - a)) >> 8,
++			(g * a + cg * (256 - a)) >> 8,
++			(b * a + cb * (256 - a)) >> 8);
+ 	}
+ 
+ 	/**
+@@ -64,24 +68,19 @@
+ 	*/
+ 	static inline uint ComposeColourPA(uint colour, uint a, uint current)
+ 	{
+-		uint r, g, b, cr, cg, cb;
++		uint r, g, b;
++		if (a == 0) return current;
++		if (a == 255) return (colour | 0xFF000000);
+ 		r  = GB(colour,   16, 8);
+ 		g  = GB(colour,   8,  8);
+ 		b  = GB(colour,   0,  8);
+-		cr = GB(current, 16, 8);
+-		cg = GB(current, 8,  8);
+-		cb = GB(current, 0,  8);
+-
+-		return ComposeColour(0xFF,
+-												(r * a + cr * (255 - a)) / 255,
+-												(g * a + cg * (255 - a)) / 255,
+-												(b * a + cb * (255 - a)) / 255);
++		return ComposeColourRGBA(r, g, b, a, current);
+ 	}
+ 
+ 	/**
+ 	* Make a pixel looks like it is transparent.
+ 	* @param colour the colour already on the screen.
+-	* @param amount the amount of transparency, times 100.
++	* @param amount the amount of transparency, times 256.
+ 	* @return the new colour for the screen.
+ 	*/
+ 	static inline uint MakeTransparent(uint colour, uint amount)
+@@ -91,7 +90,7 @@
+ 		g = GB(colour, 8,  8);
+ 		b = GB(colour, 0,  8);
+ 
+-		return ComposeColour(0xFF, r * amount / 100, g * amount / 100, b * amount / 100);
++		return ComposeColour(0xFF, (r * amount) >> 8, (g * amount) >> 8, (b * amount) >> 8);
+ 	}
+ 
+ 	/**
+@@ -109,7 +108,7 @@
+ 		/* To avoid doubles and stuff, multiple it with a total of 65536 (16bits), then
+ 		*  divide by it to normalize the value to a byte again. See heightmap.cpp for
+ 		*  information about the formula. */
+-		colour = ((r * 19595) + (g * 38470) + (b * 7471)) / 65536;
++		colour = ((r * 19595) + (g * 38470) + (b * 7471)) >> 16;
+ 
+ 		return ComposeColour(0xFF, colour, colour, colour);
+ 	}
+Index: src/blitter/32bpp_anim.cpp
+===================================================================
+--- src/blitter/32bpp_anim.cpp	(revision 11046)
++++ src/blitter/32bpp_anim.cpp	(working copy)
+@@ -22,27 +22,38 @@
+ 		this->anim_buf_height = _screen.height;
+ 	}
+ 
++	int src_zoom = ScaleByZoom(1, zoom);
++
+ 	/* Find where to start reading in the source sprite */
+-	src_line = (const SpriteLoader::CommonPixel *)bp->sprite + (bp->skip_top * bp->sprite_width + bp->skip_left) * ScaleByZoom(1, zoom);
++	src_line = (const SpriteLoader::CommonPixel *)bp->sprite + (bp->skip_top * bp->sprite_width + bp->skip_left) * src_zoom;
+ 	dst_line = (uint32 *)bp->dst + bp->top * bp->pitch + bp->left;
+ 	anim_line = this->anim_buf + ((uint32 *)bp->dst - (uint32 *)_screen.dst_ptr) + bp->top * this->anim_buf_width + bp->left;
+-
+ 	for (int y = 0; y < bp->height; y++) {
+ 		dst = dst_line;
+ 		dst_line += bp->pitch;
+ 
+ 		src = src_line;
+-		src_line += bp->sprite_width * ScaleByZoom(1, zoom);
++		src_line += bp->sprite_width * src_zoom;
+ 
+ 		anim = anim_line;
+ 		anim_line += this->anim_buf_width;
+ 
+ 		for (int x = 0; x < bp->width; x++) {
++			if (src->a == 0) {
++				/* Skip src->r pixels. */
++				int skip = UnScaleByZoom(src->r, zoom);
++				if (skip == 0) skip = 1;
++				dst += skip;
++				x += skip - 1;
++				src += (src_zoom * skip);
++				continue;
++			}
++
+ 			switch (mode) {
+ 				case BM_COLOUR_REMAP:
+ 					/* In case the m-channel is zero, do not remap this pixel in any way */
+ 					if (src->m == 0) {
+-						if (src->a != 0) *dst = ComposeColourRGBA(src->r, src->g, src->b, src->a, *dst);
++						*dst = ComposeColourRGBA(src->r, src->g, src->b, src->a, *dst);
+ 						*anim = 0;
+ 					} else {
+ 						if (bp->remap[src->m] != 0) {
+@@ -58,24 +69,20 @@
+ 					 *  we produce a result the newgrf maker didn't expect ;) */
+ 
+ 					/* Make the current color a bit more black, so it looks like this image is transparent */
+-					if (src->a != 0) {
+-						*dst = MakeTransparent(*dst, 75);
+-						*anim = bp->remap[*anim];
+-					}
++					*dst = MakeTransparent(*dst, 192);
++					*anim = bp->remap[*anim];
+ 					break;
+ 
+ 				default:
+-					if (src->a != 0) {
+-						/* Above 217 is palette animation */
+-						if (src->m >= 217) *dst = ComposeColourPA(this->LookupColourInPalette(src->m), src->a, *dst);
+-						else               *dst = ComposeColourRGBA(src->r, src->g, src->b, src->a, *dst);
+-						*anim = src->m;
+-					}
++					/* Above 217 is palette animation */
++					if (src->m >= 217) *dst = ComposeColourPA(this->LookupColourInPalette(src->m), src->a, *dst);
++					else               *dst = ComposeColourRGBA(src->r, src->g, src->b, src->a, *dst);
++					*anim = src->m;
+ 					break;
+ 			}
+ 			dst++;
+ 			anim++;
+-			src += ScaleByZoom(1, zoom);
++			src += src_zoom;
+ 		}
+ 	}
+ }
+@@ -90,7 +97,7 @@
+ 	if (pal == PALETTE_TO_TRANSPARENT) {
+ 		do {
+ 			for (int i = 0; i != width; i++) {
+-				*udst = MakeTransparent(*udst, 60);
++				*udst = MakeTransparent(*udst, 154);
+ 				*anim = 0;
+ 				udst++;
+ 				anim++;

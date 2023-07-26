@@ -1,0 +1,276 @@
+Index: src/fileio.cpp
+===================================================================
+--- src/fileio.cpp	(revision 11729)
++++ src/fileio.cpp	(arbetskopia)
+@@ -40,6 +40,8 @@
+ };
+ 
+ static Fio _fio;
++char *_personal_dir;
++char *_user_file_dir;
+ 
+ /* Get current position in file */
+ uint32 FioGetPos()
+@@ -263,7 +265,13 @@
+ char *FioGetDirectory(char *buf, size_t buflen, Subdirectory subdir)
+ {
+ 	Searchpath sp;
+-
++#if !defined(__MORPHOS__) && !defined(__AMIGA__) && defined(WITH_PERSONAL_DIR)
++	if (subdir == SAVE_DIR || subdir == AUTOSAVE_DIR || subdir == SCENARIO_DIR || subdir == HEIGHTMAP_DIR) {
++		snprintf(buf, buflen, "%s%s", _user_file_dir, _subdirs[subdir]);
++		AppendPathSeparator(buf, buflen);
++		return buf;
++	}
++#endif
+ 	/* Find and return the first valid directory */
+ 	FOR_ALL_SEARCHPATHS(sp) {
+ 		char *ret = FioAppendDirectory(buf, buflen, sp, subdir);
+@@ -294,6 +302,12 @@
+ 	} else {
+ 		snprintf(buf, lengthof(buf), "%s%s%s", _searchpaths[sp], _subdirs[subdir], filename);
+ 	}
++#if !defined(__MORPHOS__) && !defined(__AMIGA__) && defined(WITH_PERSONAL_DIR)
++	if (subdir == SAVE_DIR || subdir == AUTOSAVE_DIR || subdir == SCENARIO_DIR || subdir == HEIGHTMAP_DIR) {
++		snprintf(buf, lengthof(buf), "%s%s%s", _user_file_dir, _subdirs[subdir], filename);
++		subdir = NO_DIRECTORY;
++	}
++#endif
+ 
+ #if defined(WIN32)
+ 	if (mode[0] == 'r' && GetFileAttributes(OTTD2FS(buf)) == INVALID_FILE_ATTRIBUTES) return NULL;
+@@ -631,22 +645,41 @@
+ void DetermineBasePaths(const char *exe)
+ {
+ 	char tmp[MAX_PATH];
+-#if defined(__MORPHOS__) || defined(__AMIGA__) || !defined(WITH_PERSONAL_DIR)
+-	_searchpaths[SP_PERSONAL_DIR] = NULL;
+-#else
++
++#if !defined(__MORPHOS__) && !defined(__AMIGA__) && (defined(WITH_PERSONAL_DIR) || defined(WITH_USER_FILE_DIR))
+ 	const char *homedir = getenv("HOME");
+ 
+ 	if (homedir == NULL) {
+ 		const struct passwd *pw = getpwuid(getuid());
+ 		homedir = (pw == NULL) ? "" : pw->pw_dir;
+ 	}
++#endif
+ 
++#if defined(__MORPHOS__) || defined(__AMIGA__) || !defined(WITH_PERSONAL_DIR)
++	_searchpaths[SP_PERSONAL_DIR] = NULL;
++#else
+ 	snprintf(tmp, MAX_PATH, "%s" PATHSEP "%s", homedir, PERSONAL_DIR);
+ 	AppendPathSeparator(tmp, MAX_PATH);
+ 
+ 	_searchpaths[SP_PERSONAL_DIR] = strdup(tmp);
+ #endif
++
++#if defined(__MORPHOS__) || defined(__AMIGA__) || !defined(WITH_USER_FILE_DIR)
++	_user_file_dir = NULL;
++#else
++	snprintf(tmp, MAX_PATH, "%s" PATHSEP "%s", homedir, USER_FILE_DIR);
++	AppendPathSeparator(tmp, MAX_PATH);
++
++	_user_file_dir = strdup(tmp);
++#endif
++
++#if defined(WITH_SHARED_DIR)
++	snprintf(tmp, MAX_PATH, "%s", SHARED_DIR);
++	AppendPathSeparator(tmp, MAX_PATH);
++	_searchpaths[SP_SHARED_DIR] = strdup(tmp);
++#else
+ 	_searchpaths[SP_SHARED_DIR] = NULL;
++#endif
+ 
+ #if defined(__MORPHOS__) || defined(__AMIGA__)
+ 	_searchpaths[SP_WORKING_DIR] = NULL;
+@@ -680,8 +713,6 @@
+ }
+ #endif /* defined(WIN32) || defined(WINCE) */
+ 
+-char *_personal_dir;
+-
+ /**
+  * Acquire the base paths (personal dir and game data dir),
+  * fill all other paths (save dir, autosave dir etc) and
+@@ -732,12 +763,23 @@
+ 	_highscore_file = str_fmt("%shs.dat", _personal_dir);
+ 	_log_file = str_fmt("%sopenttd.log",  _personal_dir);
+ 
+-	char *save_dir     = str_fmt("%s%s", _personal_dir, FioGetSubdirectory(SAVE_DIR));
+-	char *autosave_dir = str_fmt("%s%s", _personal_dir, FioGetSubdirectory(AUTOSAVE_DIR));
++	if (_user_file_dir == NULL) _user_file_dir = _personal_dir;
++	
++	char *save_dir     = str_fmt("%s%s", _user_file_dir, FioGetSubdirectory(SAVE_DIR));
++	char *autosave_dir = str_fmt("%s%s", _user_file_dir, FioGetSubdirectory(AUTOSAVE_DIR));
+ 
+ 	/* Make the necessary folders */
+-#if !defined(__MORPHOS__) && !defined(__AMIGA__) && defined(WITH_PERSONAL_DIR)
++#if !defined(__MORPHOS__) && !defined(__AMIGA__)
++# ifdef WITH_PERSONAL_DIR
+ 	FioCreateDirectory(_personal_dir);
++# endif
++# ifdef WITH_USER_FILE_DIR
++	FioCreateDirectory(_user_file_dir);
++	char *scenario_dir = str_fmt("%s%s", _user_file_dir, FioGetSubdirectory(SCENARIO_DIR));
++	char *heightmap_dir = str_fmt("%s%s", _user_file_dir, FioGetSubdirectory(HEIGHTMAP_DIR));
++	FioCreateDirectory(scenario_dir);
++	FioCreateDirectory(heightmap_dir);
++# endif
+ #endif
+ 
+ 	FioCreateDirectory(save_dir);
+Index: src/screenshot.cpp
+===================================================================
+--- src/screenshot.cpp	(revision 11729)
++++ src/screenshot.cpp	(arbetskopia)
+@@ -542,7 +542,7 @@
+ 	snprintf(&_screenshot_name[len], lengthof(_screenshot_name) - len, ".%s", ext);
+ 
+ 	for (serial = 1;; serial++) {
+-		snprintf(filename, lengthof(filename), "%s%s", _personal_dir, _screenshot_name);
++		snprintf(filename, lengthof(filename), "%s%s", _user_file_dir, _screenshot_name);
+ 		if (!FileExists(filename)) break;
+ 		/* If file exists try another one with same name, but just with a higher index */
+ 		snprintf(&_screenshot_name[len], lengthof(_screenshot_name) - len, "#%d.%s", serial, ext);
+Index: src/fileio.h
+===================================================================
+--- src/fileio.h	(revision 11729)
++++ src/fileio.h	(arbetskopia)
+@@ -115,6 +115,7 @@
+ void *ReadFileToMem(const char *filename, size_t *lenp, size_t maxsize);
+ bool FileExists(const char *filename);
+ 
+-extern char *_personal_dir; ///< custom directory for personal settings, saves, newgrf, etc.
++extern char *_personal_dir; ///< custom directory for personal settings, newgrf, etc.
++extern char *_user_file_dir; ///< custom directory for saves, scenarios and screenshots
+ 
+ #endif /* FILEIO_H */
+Index: config.lib
+===================================================================
+--- config.lib	(revision 11729)
++++ config.lib	(arbetskopia)
+@@ -30,6 +30,10 @@
+ 	data_dir="share/games/openttd"
+ 	icon_dir="share/pixmaps"
+ 	personal_dir="1"
++	# FIXME Can we test OS here already? If so, user_file_dir and
++	# shared_dir should really default to 0 on non-OSX platforms.
++	user_file_dir="1"
++	shared_dir="1"
+ 	install_dir="/"
+ 	enable_debug="0"
+ 	enable_desync_debug="0"
+@@ -65,7 +69,7 @@
+ 	with_psp_config="1"
+ 	with_threads="1"
+ 
+-	save_params_array="build host cc_build cc_host cxx_build cxx_host windres strip awk lipo os cpu_type revision endian config_log prefix_dir binary_dir data_dir icon_dir personal_dir install_dir enable_debug enable_desync_debug enable_profiling enable_dedicated enable_network enable_static enable_translator enable_assert enable_strip with_distcc with_osx_sysroot enable_universal enable_osx_g5 enable_unicode enable_cocoa_quartz enable_cocoa_quickdraw with_application_bundle with_sdl with_cocoa with_zlib with_png with_makedepend with_direct_music with_sort with_iconv with_midi with_midi_arg with_libtimidity with_freetype with_fontconfig with_psp_config with_threads CC CXX CFLAGS LDFLAGS"
++	save_params_array="build host cc_build cc_host cxx_build cxx_host windres strip awk lipo os cpu_type revision endian config_log prefix_dir binary_dir data_dir icon_dir personal_dir user_file_dir shared_dir install_dir enable_debug enable_desync_debug enable_profiling enable_dedicated enable_network enable_static enable_translator enable_assert enable_strip with_distcc with_osx_sysroot enable_universal enable_osx_g5 enable_unicode enable_cocoa_quartz enable_cocoa_quickdraw with_application_bundle with_sdl with_cocoa with_zlib with_png with_makedepend with_direct_music with_sort with_iconv with_midi with_midi_arg with_libtimidity with_freetype with_fontconfig with_psp_config with_threads CC CXX CFLAGS LDFLAGS"
+ }
+ 
+ detect_params() {
+@@ -138,6 +142,14 @@
+ 			--personal-dir=*)             personal_dir="$optarg";;
+ 			--without-personal-dir)       personal_dir="";;
+ 
++			--shared-dir)                 prevp_p="shared-dir";;
++			--shared-dir=*)               shared_dir="$optarg";;
++			--without-shared-dir)         shared_dir="";;
++
++			--user-data-dir)              prevp_p="user-data-dir";;
++			--user-data-dir=*)            user_data_dir="$optarg";;
++			--without-user-data-dir)      user_data_dir="";;
++
+ 			--install-dir)                prevp_p="install-dir";;
+ 			--install-dir=*)              install_dir="$optarg";;
+ 
+@@ -753,12 +765,30 @@
+ 		if [ "$os" = "MINGW" ] || [ "$os" = "CYGWIN" ] || [ "$os" = "WINCE" ]; then
+ 			personal_dir="OpenTTD"
+ 		elif [ "$os" = "OSX" ]; then
+-			personal_dir="Documents/OpenTTD"
++			personal_dir='Library/Application\\ Support/OpenTTD'
+ 		else
+ 			personal_dir=".openttd"
+ 		fi
+ 	fi
+ 
++	if [ "$user_file_dir" = "1" ]; then
++		if [ "$os" = "OSX" ]; then
++			user_file_dir="Documents/OpenTTD"
++		else
++			# FIXME for non-OSX platforms
++			user_file_dir="OpenTTD"
++		fi
++	fi
++
++	if [ "$shared_dir" = "1" ]; then
++		if [ "$os" = "OSX" ]; then
++			shared_dir='/Library/Application\\ Support/OpenTTD'
++		else
++			# FIXME for non-OSX platforms
++			shared_dir="/OpenTTD-Shared"
++		fi
++	fi
++
+ 	if [ -n "$personal_dir" ]
+ 	then
+ 		log 1 "personal home directory... $personal_dir"
+@@ -772,6 +802,20 @@
+ 	else
+ 		log 1 "installation directory... none"
+ 	fi
++
++	if [ -n "$user_file_dir" ]
++	then
++		log 1 "user file directory... $user_file_dir"
++	else
++		log 1 "user file directory... none"
++	fi
++
++	if [ -n "$shared_dir" ]
++	then
++		log 1 "shared directory... $shared_dir"
++	else
++		log 1 "shared directory... none"
++	fi
+ }
+ 
+ make_cflags_and_ldflags() {
+@@ -1126,8 +1170,16 @@
+ 		CFLAGS="$CFLAGS -DWITH_PERSONAL_DIR -DPERSONAL_DIR=\\\\\"$personal_dir\\\\\""
+ 	fi
+ 
+-	CFLAGS="$CFLAGS -DGLOBAL_DATA_DIR=\\\\\"$prefix_dir/$data_dir\\\\\""
++	if [ -n "$user_file_dir" ]; then
++		CFLAGS="$CFLAGS -DWITH_USER_FILE_DIR -DUSER_FILE_DIR=\\\\\"$user_file_dir\\\\\""
++	fi
+ 
++	if [ -n "$shared_dir" ]; then
++		CFLAGS="$CFLAGS -DWITH_SHARED_DIR -DSHARED_DIR=\\\\\"$shared_dir\\\\\""
++	fi
++
++	CFLAGS="$CFLAGS -DGLOBAL_DATA_DIR=\"\\\\\"$prefix_dir/$data_dir\\\\\"\""
++
+ 	log 1 "using CFLAGS... $CFLAGS $CC_CFLAGS"
+ 	log 1 "using LDFLAGS... $LIBS $LDFLAGS"
+ 
+@@ -2097,6 +2149,8 @@
+ 		s#!!ICON_DIR!!#$prefix_dir/$icon_dir#g;
+ 		s#!!PERSONAL_DIR!!#$personal_dir#g;
+ 		s#!!INSTALL_DIR!!#$install_dir#g;
++		s#!!SHARED_DIR!!#$shared_dir#g;
++		s#!!USER_DATA_DIR!!#$user_data_dir#g;
+ 		s#!!STRGEN!!#$STRGEN#g;
+ 		s#!!ENDIAN_CHECK!!#$ENDIAN_CHECK#g;
+ 		s#!!ENDIAN_FORCE!!#$endian#g;
+@@ -2239,6 +2293,8 @@
+ 	echo "  --personal-dir=dir             location of the personal directory [.openttd]"
+ 	echo "  --install-dir=dir              specifies the root to install to."
+ 	echo "                                 Useful to install into jails [/]"
++	echo "  --shared-dir=dir               Extra directory to look for data files in."
++	echo "  --user-data-dir=dir            Seperate directory to store savegames, screenshots and scenarios."
+ 	echo ""
+ 	echo "Features and packages:"
+ 	echo "  --enable-debug[=LVL]           enable debug-mode (LVL=[0123], 0 is release)"

@@ -1,0 +1,282 @@
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+index 158fd2c..091ee74 100644
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -1211,6 +1211,7 @@ STR_CONFIG_SETTING_DEFAULT_RAIL_TYPE_MOST_USED                  :Most used
+ STR_CONFIG_SETTING_SHOW_TRACK_RESERVATION                       :{LTBLUE}Show reserved tracks: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_PERSISTENT_BUILDINGTOOLS                     :{LTBLUE}Keep building tools active after usage: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_EXPENSES_LAYOUT                              :{LTBLUE}Group expenses in company finance window: {ORANGE}{STRING1}
++STR_CONFIG_SETTING_TIMETABLE_SEPARATION                         :{LTBLUE}Use timetable to ensure vehicles separation: {ORANGE}{STRING1}
+ 
+ STR_CONFIG_SETTING_ALWAYS_BUILD_INFRASTRUCTURE                  :{LTBLUE}Show building tools when no suitable vehicles are available: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_MAX_TRAINS                                   :{LTBLUE}Max trains per player: {ORANGE}{STRING1}
+diff --git a/src/settings_gui.cpp b/src/settings_gui.cpp
+index ac8846f..d62d2d0 100644
+--- a/src/settings_gui.cpp
++++ b/src/settings_gui.cpp
+@@ -1460,6 +1460,7 @@ static SettingEntry _settings_vehicles[] = {
+ 	SettingEntry("vehicle.plane_speed"),
+ 	SettingEntry("vehicle.plane_crashes"),
+ 	SettingEntry("order.timetabling"),
++	SettingEntry("order.timetable_separation"),
+ 	SettingEntry("vehicle.dynamic_engines"),
+ };
+ /** Vehicles sub-page */
+diff --git a/src/settings_type.h b/src/settings_type.h
+index 71b5116..80e55bb 100644
+--- a/src/settings_type.h
++++ b/src/settings_type.h
+@@ -302,6 +302,7 @@ struct OrderSettings {
+ 	bool   no_servicing_if_no_breakdowns;    ///< dont send vehicles to depot when breakdowns are disabled
+ 	bool   timetabling;                      ///< whether to allow timetabling
+ 	bool   serviceathelipad;                 ///< service helicopters at helipads automatically (no need to send to depot)
++	bool   timetable_separation;             ///< Whether to use automatic separation based on timetable.
+ };
+ 
+ /** Settings related to vehicles. */
+diff --git a/src/table/settings.h b/src/table/settings.h
+index 5fabeae..33b8b49 100644
+--- a/src/table/settings.h
++++ b/src/table/settings.h
+@@ -400,6 +401,7 @@ const SettingDesc _settings[] = {
+ 	SDT_CONDBOOL(GameSettings, vehicle.disable_elrails,                         38, SL_MAX_VERSION, 0,NN, false,                    STR_CONFIG_SETTING_DISABLE_ELRAILS,        SettingsDisableElrail),
+ 	 SDT_CONDVAR(GameSettings, vehicle.freight_trains,               SLE_UINT8, 39, SL_MAX_VERSION, 0,NN,     1,     1,     255, 1, STR_CONFIG_SETTING_FREIGHT_TRAINS,         NULL),
+ 	SDT_CONDBOOL(GameSettings, order.timetabling,                               67, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_SETTING_TIMETABLE_ALLOW,        NULL),
++	SDT_CONDBOOL(GameSettings, order.timetable_separation,                     139, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_SETTING_TIMETABLE_SEPARATION,   NULL),
+ 	 SDT_CONDVAR(GameSettings, vehicle.plane_speed,                  SLE_UINT8, 90, SL_MAX_VERSION, 0,NN,     4,     1,       4, 0, STR_CONFIG_SETTING_PLANE_SPEED,            NULL),
+ 	SDT_CONDBOOL(GameSettings, vehicle.dynamic_engines,                         95, SL_MAX_VERSION, 0,NN,  true,                    STR_CONFIG_SETTING_DYNAMIC_ENGINES,        ChangeDynamicEngines),
+ 	 SDT_CONDVAR(GameSettings, vehicle.plane_crashes,                SLE_UINT8,138, SL_MAX_VERSION, 0,MS,     2,     0,       2, 1, STR_CONFIG_SETTING_PLANE_CRASHES,          NULL),
+diff --git a/src/vehicle.cpp b/src/vehicle.cpp
+index 4cf0af4..e4773e3 100644
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -610,6 +610,147 @@ void Vehicle::PreDestructor()
+ 	ReleaseDisastersTargetingVehicle(this->index);
+ }
+ 
++/**
++ * Checks if the vehicle is part of the shared orders list
++ * @param *v The vehicle to check if member of the current vehicle shared orders list
++ * @return true if both vehicles share the same orders list
++ */
++bool Vehicle::IsVehicleInSharedOrdersList(Vehicle *v)
++{
++	for (Vehicle *v_shared = this->previous_shared; v_shared != NULL; v_shared = v_shared->previous_shared) {
++		if (v_shared == v) return true;
++	}
++
++	for (Vehicle *v_shared = this->next_shared; v_shared != NULL; v_shared = v_shared->next_shared) {
++		if (v_shared == v) return true;
++	}
++
++	return false;
++}
++
++/**
++ * Counts the vehicles that share it's orders list
++ * @return The count of vehicles that use this vehicle shared orders list
++ */
++int Vehicle::CountSharedOrderdList()
++{
++	int count = 1; // Count this vehicle first
++	for (Vehicle *v = this->previous_shared; v != NULL; v = v->previous_shared) count++;
++	for (Vehicle *v = this->next_shared; v != NULL; v = v->next_shared) count++;
++	return count;
++}
++
++/**
++ * Finds this vehicle's position in the shared order list chain
++ * @return The 0 based position in the vehicle's shared order list
++ */
++int Vehicle::GetPositionInSharedOrderList()
++{
++	int count = 0;
++	for (Vehicle *v = this->previous_shared; v != NULL; v = v->previous_shared) count++;
++	return count;
++}
++
++/**
++ * Gets the total timetable duration
++ * @return The sum of all orders durations (in ticks) in the vehicle's timetable
++ */
++int Vehicle::GetTimetableTotalDuration()
++{
++	int total = 0;
++	for (int i = 1; i <= this->GetNumOrders(); i++) {
++		Order *o = this->GetOrder(i-1);
++		total += o->wait_time + o->travel_time;
++	}
++	return total;
++}
++
++/**
++ * Get the current theorical separation with the first shared order vehicle.
++ * This includes its lateness_counter.
++ * The vehicle must be in the first order station for this function to work.
++ * @return The actual separation (in ticks) with the first vehicle
++ */
++int Vehicle::GetFirstSharedSeparation()
++{
++    /* If this is the first vehicle in the shared orders chain then separation is 0 */
++	if (this->previous_shared == NULL) return 0;
++
++	/* Else gets the first vehicle in chain... */
++	Vehicle *first;
++	for (first = this->previous_shared; first->previous_shared != NULL; first = first->previous_shared) ;
++    /* ... then returns the separation between this vehicle and first vehicle, plus the first vehicle lateness counter */
++	return this->GetVehicleSeparation(first, false, true) + first->lateness_counter;
++}
++
++/**
++ * Get the current separation with the given vehicle.
++ * @param *v The vehicle to compare
++ * @param add_this_current_order_time Indicates if we have to take into account this vehicle current order time
++ * @param add_other_current_order_time Indicates if we have to take into account the compared vehicle current order time
++ * @return Separation duration (in ticks) between both vehicles
++ */
++int Vehicle::GetVehicleSeparation(Vehicle *v, bool add_this_current_order_time, bool add_other_current_order_time)
++{
++    /* If the compared vehicle is this vehicle, then the separation is 0, whatever the current order time */
++	if (this == v) return 0;
++
++	int this_position = this->GetTimetablePosition(add_this_current_order_time);
++	int other_position = v->GetTimetablePosition(add_other_current_order_time);
++
++	if (this_position <= other_position) {
++		/* The other vehicle is in front of this one. It's really easy to compute. */
++		return other_position - this_position;
++	} else {
++		/* The other vehicle is behind this one. We must add the total timetable duration minus the current order wait_time as we may start immediately. */
++		int total_timetable = this->GetTimetableTotalDuration();
++		return total_timetable + other_position - this_position;
++	}
++}
++
++/**
++ * Get the theorical current vehicle position in the timetable. This position is not the position in the shared orders chain,
++ * but actually the theorical duration since the vehicle started the timetabled orders list based on the current order.
++ * @param add_current_order_time Indicates if we get the current order time into account.
++ * @return numbers of ticks from the begining of the timetable without lateness_counter.
++ */
++int Vehicle::GetTimetablePosition(bool add_current_order_time)
++{
++	int total = 0;
++
++	/* Add current order time */
++	if (add_current_order_time) total += current_order_time;
++
++	Order *o = this->GetFirstOrder();
++	for (int i = 0; i < cur_order_index%this->GetNumOrders(); i++) {
++		total += o->travel_time + o->wait_time;
++		o = o->next;
++	}
++
++	if (last_station_visited == o->GetDestination())
++	{
++		total += o->travel_time;
++	}
++
++	return total;
++}
++
++/**
++ * Gets the first order index where the vehicle stops at a station
++ * @return First order index vhere the vehicle stops at a station
++ */
++VehicleOrderID Vehicle::FirstStopStationOrderID()
++{
++	VehicleOrderID index = 0;
++	for (Order *first = this->GetFirstOrder(); first!= NULL; first = first->next) {
++		if (first->GetType() == OT_GOTO_STATION && first->wait_time > 0) {
++			return index;
++		}
++		index++;
++	}
++	return INVALID_VEH_ORDER_ID;
++}
++
+ Vehicle::~Vehicle()
+ {
+ 	free(this->name);
+@@ -1527,6 +1668,45 @@ void Vehicle::BeginLoading()
+ 		current_order.MakeLoading(true);
+ 		UpdateVehicleTimetable(this, true);
+ 
++		/* We ensure the vehicle is well positionned in the shared order list
++		 * This means the last vehicle from this shared order list that visited the
++		 * station must be its ->previous_shared */
++		if (_settings_game.order.timetabling && _settings_game.order.timetable_separation && this->previous_shared != NULL && this->IsOrderListShared() && this->FirstStopStationOrderID() == this->cur_order_index) {
++			/* Find the previous vehicle of the shared order that visited the station */
++			int min_separation = -1;
++			int tmp_separation = 0;
++			Vehicle *previous = NULL;
++			/* Check for previous vehicles */
++			for (Vehicle *v = this->previous_shared; v != NULL; v = v->previous_shared) {
++				tmp_separation = this->GetVehicleSeparation(v, false, true);
++				if ((min_separation > 0 && tmp_separation < min_separation) || min_separation == -1) {
++					min_separation = tmp_separation;
++					previous = v;
++				}
++			}
++			/* Check for next vehicles */
++			for (Vehicle *v = this->next_shared; v != NULL; v = v->next_shared) {
++				tmp_separation = this->GetVehicleSeparation(v, false, true);
++				if ((min_separation > 0 && tmp_separation < min_separation) || min_separation == -1) {
++					min_separation = tmp_separation;
++					previous = v;
++				}
++			}
++
++			/* Check if previous_shared vehicle is really the previous one and reorder the chain if needed */
++			if (this->previous_shared != previous && previous != NULL) {
++				/* Remove this vehicle from the list */
++				this->previous_shared->next_shared = this->next_shared;
++				if (this->next_shared != NULL) this->next_shared->previous_shared = this->previous_shared;
++				/* Insert in the list */
++				this->previous_shared = previous;
++				this->next_shared = previous->next_shared;
++				/* Update previous and next */
++				if (previous->next_shared != NULL) previous->next_shared->previous_shared = this;
++				previous->next_shared = this;
++			}
++		}
++
+ 		/* Furthermore add the Non Stop flag to mark that this station
+ 		 * is the actual destination of the vehicle, which is (for example)
+ 		 * necessary to be known for HandleTrainLoading to determine
+@@ -1538,6 +1718,15 @@ void Vehicle::BeginLoading()
+ 		current_order.MakeLoading(false);
+ 	}
+ 
++	/* For shared orders vehicles other than the first in chain arriving to the
++	 * first order station, we have to recompute the separation */
++	if (_settings_game.order.timetabling && _settings_game.order.timetable_separation && this->IsOrderListShared() && this->previous_shared != NULL && this->cur_order_index == this->FirstStopStationOrderID()) {
++		/* This vehicle have to ensure separation
++		 * Compute wait_time for auto-separation system
++		 * The vehicle can leave the station. Fill the lateness counter with separation informations, and override the actual waiting time. */
++		this->lateness_counter = -((GetTimetableTotalDuration() / CountSharedOrderdList()) - GetVehicleSeparation(this->previous_shared, false, true) - this->previous_shared->lateness_counter);
++	}
++
+ 	Station::Get(this->last_station_visited)->loading_vehicles.push_back(this);
+ 
+ 	PrepareUnload(this);
+diff --git a/src/vehicle_base.h b/src/vehicle_base.h
+index bea2485..bb7625f 100644
+--- a/src/vehicle_base.h
++++ b/src/vehicle_base.h
+@@ -454,6 +454,15 @@ public:
+ 	 */
+ 	inline bool IsOrderListShared() const { return this->orders.list != NULL && this->orders.list->IsShared(); }
+ 
++	bool IsVehicleInSharedOrdersList(Vehicle *v);
++	int CountSharedOrderdList();
++	int GetPositionInSharedOrderList();
++	int GetTimetableTotalDuration();
++	int GetFirstSharedSeparation();
++	int GetVehicleSeparation(Vehicle *v, bool add_this_current_order_time, bool add_other_current_order_time);
++	int GetTimetablePosition(bool add_current_order_time);
++	VehicleOrderID FirstStopStationOrderID();
++
+ 	/**
+ 	 * Get the number of orders this vehicle has.
+ 	 * @return the number of orders this vehicle has.

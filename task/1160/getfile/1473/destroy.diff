@@ -1,0 +1,376 @@
+Index: src/train.h
+===================================================================
+--- src/train.h	(revision 10980)
++++ src/train.h	(working copy)
+@@ -246,6 +246,7 @@
+ void CcBuildLoco(bool success, TileIndex tile, uint32 p1, uint32 p2);
+ void CcBuildWagon(bool success, TileIndex tile, uint32 p1, uint32 p2);
+ void CcCloneTrain(bool success, TileIndex tile, uint32 p1, uint32 p2);
++void SetVehicleCrashed(Vehicle *v);
+ 
+ byte FreightWagonMult(CargoID cargo);
+ 
+Index: src/vehicle.h
+===================================================================
+--- src/vehicle.h	(revision 10980)
++++ src/vehicle.h	(working copy)
+@@ -89,6 +89,7 @@
+ 	VS_TRAIN_SLOWING   = 0x10,
+ 	VS_SHADOW          = 0x20,
+ 	VS_AIRCRAFT_BROKEN = 0x40,
++	VS_DESTROYED       = VS_AIRCRAFT_BROKEN,  ///< Forced vehicle destruction by owner
+ 	VS_CRASHED         = 0x80,
+ };
+ 
+@@ -213,6 +214,7 @@
+ 
+ struct VehicleShip {
+ 	TrackBitsByte state;
++	uint16 crashed_ctr;
+ };
+ 
+ struct Vehicle;
+@@ -566,6 +568,8 @@
+ CommandCost MaybeReplaceVehicle(Vehicle *v, bool check, bool display_costs);
+ bool CanBuildVehicleInfrastructure(VehicleType type);
+ 
++CommandCost CmdDestroyVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2);
++
+ /* Flags to add to p2 for goto depot commands */
+ /* Note: bits 8-10 are used for VLW flags */
+ enum {
+Index: src/ship_cmd.cpp
+===================================================================
+--- src/ship_cmd.cpp	(revision 10980)
++++ src/ship_cmd.cpp	(working copy)
+@@ -789,8 +789,27 @@
+ 	v->cargo.AgeCargo();
+ }
+ 
++static void HandleCrashedShip(Vehicle *v)
++{
++	BeginVehicleMove(v);
++	EndVehicleMove(v);
++
++	DeleteWindowById(WC_VEHICLE_VIEW, v->index);
++	RebuildVehicleLists();
++	InvalidateWindow(WC_COMPANY, v->owner);
++	DeleteDepotHighlightOfVehicle(v);
++	InvalidateWindowClasses(WC_SHIPS_LIST);
++
++	delete v;
++}
++
+ void Ship::Tick()
+ {
++	if (this->vehstatus & VS_CRASHED) {
++		HandleCrashedShip(this);
++		return;
++	}
++
+ 	AgeShipCargo(this);
+ 	ShipController(this);
+ }
+Index: src/roadveh.h
+===================================================================
+--- src/roadveh.h	(revision 10980)
++++ src/roadveh.h	(working copy)
+@@ -57,8 +57,8 @@
+ 
+ void CcBuildRoadVeh(bool success, TileIndex tile, uint32 p1, uint32 p2);
+ void CcCloneRoadVeh(bool success, TileIndex tile, uint32 p1, uint32 p2);
++void RoadVehCrash(Vehicle *v);
+ 
+-
+ /**
+  * This class 'wraps' Vehicle; you do not actually instantiate this class.
+  * You create a Vehicle using AllocateVehicle, so it is added to the pool
+Index: src/aircraft_gui.cpp
+===================================================================
+--- src/aircraft_gui.cpp	(revision 10980)
++++ src/aircraft_gui.cpp	(working copy)
+@@ -320,11 +320,15 @@
+ 	} break;
+ 
+ 	case WE_CLICK: {
+-		const Vehicle *v = GetVehicle(w->window_number);
++		Vehicle *v = GetVehicle(w->window_number);
+ 
+ 		switch (e->we.click.widget) {
+ 		case 5: /* start stop */
+-			DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_AIRCRAFT | CMD_MSG(STR_A016_CAN_T_STOP_START_AIRCRAFT));
++			if ( /*_patches.destroy_vehicle && */ _ctrl_pressed ) {
++				AskDestroyVehicle(v, w);
++			} else {
++				DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_AIRCRAFT | CMD_MSG(STR_A016_CAN_T_STOP_START_AIRCRAFT));
++			}
+ 			break;
+ 		case 6: /* center main view */
+ 			ScrollMainWindowTo(v->x_pos, v->y_pos);
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 10980)
++++ src/train_cmd.cpp	(working copy)
+@@ -2676,8 +2676,7 @@
+ 	}
+ }
+ 
+-
+-static void SetVehicleCrashed(Vehicle *v)
++void SetVehicleCrashed(Vehicle *v)
+ {
+ 	if (v->u.rail.crash_anim_pos != 0) return;
+ 
+@@ -3122,7 +3121,7 @@
+ 
+ 	if (state <= 240 && !(v->tick_counter & 3)) ChangeTrainDirRandomly(v);
+ 
+-	if (state >= 4440 && !(v->tick_counter&0x1F)) {
++	if ((state >= 4440 || (v->vehstatus & VS_DESTROYED && state > 240)) && !(v->tick_counter&0x1F)) {
+ 		DeleteLastWagon(v);
+ 		InvalidateWindow(WC_REPLACE_VEHICLE, (v->group_id << 16) | VEH_TRAIN);
+ 	}
+Index: src/aircraft.h
+===================================================================
+--- src/aircraft.h	(revision 10980)
++++ src/aircraft.h	(working copy)
+@@ -115,6 +115,8 @@
+  */
+ void UpdateAircraftCache(Vehicle *v);
+ 
++void CrashAirplane(Vehicle *v);
++
+ /**
+  * This class 'wraps' Vehicle; you do not actually instantiate this class.
+  * You create a Vehicle using AllocateVehicle, so it is added to the pool
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revision 10980)
++++ src/command.cpp	(working copy)
+@@ -338,6 +338,8 @@
+ 	{CmdChangeTimetable,                     0}, /* 128 */
+ 	{CmdSetVehicleOnTime,                    0}, /* 129 */
+ 	{CmdAutofillTimetable,                   0}, /* 130 */
++
++	{CmdDestroyVehicle,                      0}, /* 131 */
+ };
+ 
+ /* This function range-checks a cmd, and checks if the cmd is not NULL */
+Index: src/ship_gui.cpp
+===================================================================
+--- src/ship_gui.cpp	(revision 10980)
++++ src/ship_gui.cpp	(working copy)
+@@ -257,11 +257,15 @@
+ 	} break;
+ 
+ 		case WE_CLICK: {
+-			const Vehicle *v = GetVehicle(w->window_number);
++			Vehicle *v = GetVehicle(w->window_number);
+ 
+ 			switch (e->we.click.widget) {
+ 				case 5: /* start stop */
+-					DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_SHIP | CMD_MSG(STR_9818_CAN_T_STOP_START_SHIP));
++					if ( /*_patches.destroy_vehicle && */ _ctrl_pressed ) {
++						AskDestroyVehicle(v, w);
++					} else {
++						DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_SHIP | CMD_MSG(STR_9818_CAN_T_STOP_START_SHIP));
++					}
+ 					break;
+ 				case 6: /* center main view */
+ 					ScrollMainWindowTo(v->x_pos, v->y_pos);
+Index: src/vehicle_gui.h
+===================================================================
+--- src/vehicle_gui.h	(revision 10980)
++++ src/vehicle_gui.h	(working copy)
+@@ -71,6 +71,8 @@
+ void DrawSmallOrderList(const Vehicle *v, int x, int y);
+ void ShowReplaceGroupVehicleWindow(GroupID group, VehicleType veh);
+ 
++void AskDestroyVehicle(Vehicle *v, Window *parent);
++
+ static inline void DrawVehicleImage(const Vehicle *v, int x, int y, int count, int skip, VehicleID selection)
+ {
+ 	switch (v->type) {
+Index: src/vehicle_gui.cpp
+===================================================================
+--- src/vehicle_gui.cpp	(revision 10980)
++++ src/vehicle_gui.cpp	(working copy)
+@@ -1285,3 +1285,13 @@
+ 	}
+ 	ShowVehicleListWindowLocal(player, VLW_DEPOT_LIST, vehicle_type, depot_airport_index);
+ }
++
++void AskDestroyVehicleCallback(Window *w, bool confirmed)
++{
++	if ( confirmed ) DoCommandP(GetVehicle(w->window_number)->tile, w->window_number, 0, NULL, CMD_DESTROY_VEHICLE | CMD_MSG(STR_9015_CAN_T_STOP_START_ROAD_VEHICLE));
++}
++
++void AskDestroyVehicle(Vehicle *v, Window *parent)
++{
++	ShowQuery(STR_00C7_QUIT, STR_00C7_QUIT, parent, AskDestroyVehicleCallback);
++}
+Index: src/train_gui.cpp
+===================================================================
+--- src/train_gui.cpp	(revision 10980)
++++ src/train_gui.cpp	(working copy)
+@@ -243,7 +243,11 @@
+ 
+ 		switch (wid) {
+ 		case 5: /* start/stop train */
+-			DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_TRAIN | CMD_MSG(STR_883B_CAN_T_STOP_START_TRAIN));
++			if ( /*_patches.destroy_vehicle && */ _ctrl_pressed ) {
++				AskDestroyVehicle(v, w);
++			} else {
++				DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_TRAIN | CMD_MSG(STR_883B_CAN_T_STOP_START_TRAIN));
++			}
+ 			break;
+ 		case 6: /* center main view */
+ 			ScrollMainWindowTo(v->x_pos, v->y_pos);
+Index: src/roadveh_cmd.cpp
+===================================================================
+--- src/roadveh_cmd.cpp	(revision 10980)
++++ src/roadveh_cmd.cpp	(working copy)
+@@ -656,7 +656,7 @@
+ 		CreateEffectVehicleRel(v, 4, 4, 8, EV_EXPLOSION_LARGE);
+ 	} else if (v->u.road.crashed_ctr <= 45) {
+ 		if ((v->tick_counter & 7) == 0) RoadVehSetRandomDirection(v);
+-	} else if (v->u.road.crashed_ctr >= 2220 && !(v->tick_counter & 0x1F)) {
++	} else if (((v->u.road.crashed_ctr >= 2220) || (v->vehstatus & VS_DESTROYED && v->u.road.crashed_ctr > 60)) && !(v->tick_counter & 0x1F)) {
+ 		DeleteLastRoadVeh(v);
+ 	}
+ }
+@@ -673,7 +673,7 @@
+ 			v : NULL;
+ }
+ 
+-static void RoadVehCrash(Vehicle *v)
++void RoadVehCrash(Vehicle *v)
+ {
+ 	uint16 pass = 1;
+ 
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 10980)
++++ src/vehicle.cpp	(working copy)
+@@ -3178,3 +3178,62 @@
+ 	this->sprite_height = 1;
+ 	this->z_height      = 1;
+ }
++
++
++CommandCost CmdDestroyVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++{
++	Vehicle *v;
++
++	if (!IsValidVehicleID(p1)) return CMD_ERROR;
++
++	v = GetVehicle(p1);
++
++	if (!CheckOwnership(v->owner) || v->vehstatus & VS_CRASHED || (v->type != VEH_ROAD && v->type != VEH_TRAIN && v->type != VEH_SHIP && v->type != VEH_AIRCRAFT )) return CMD_ERROR;
++
++	/* Check if this road veh can be started/stopped. The callback will fail or
++	 * return 0xFF if it can. --> is something similiar needed to test if it can be crashed ? */
++
++	switch (v->type) {
++		case VEH_ROAD:
++			if (!IsRoadVehFront(v) || IsRoadVehInDepotStopped(v)) return CMD_ERROR;
++			break;
++		case VEH_TRAIN:
++			if (!IsFrontEngine(v) || (CheckTrainStoppedInDepot(v) != -1)) return CMD_ERROR;
++			break;
++		case VEH_AIRCRAFT:
++			if (!IsNormalAircraft(v) || (v->u.air.state != FLYING)) return CMD_ERROR;
++			break;
++		default:
++		case VEH_SHIP:
++			if (IsShipInDepot(v)) return CMD_ERROR;
++			break;
++	}
++
++
++	if (flags & DC_EXEC) {
++		switch (v->type) {
++			case VEH_ROAD:
++				RoadVehCrash(v);
++				v->vehstatus |= VS_DESTROYED;
++				break;
++			case VEH_TRAIN:
++				SetVehicleCrashed(v);
++				BEGIN_ENUM_WAGONS(v)
++					v->vehstatus |= VS_DESTROYED;
++				END_ENUM_WAGONS(v)
++				break;
++			case VEH_AIRCRAFT:
++				CrashAirplane(v);
++				v->vehstatus |= VS_DESTROYED;
++				break;
++			default:
++			case VEH_SHIP:
++				v->vehstatus |= VS_CRASHED | VS_DESTROYED;
++				break;
++		}
++	}
++
++	return CommandCost();
++
++}
++
+Index: src/aircraft_cmd.cpp
+===================================================================
+--- src/aircraft_cmd.cpp	(revision 10980)
++++ src/aircraft_cmd.cpp	(working copy)
+@@ -74,7 +74,6 @@
+ static bool AirportHasBlock(Vehicle *v, const AirportFTA *current_pos, const AirportFTAClass *apc);
+ static bool AirportFindFreeTerminal(Vehicle *v, const AirportFTAClass *apc);
+ static bool AirportFindFreeHelipad(Vehicle *v, const AirportFTAClass *apc);
+-static void CrashAirplane(Vehicle *v);
+ 
+ static void AircraftNextAirportPos_and_Order(Vehicle *v);
+ static byte GetAircraftFlyingAltitude(const Vehicle *v);
+@@ -1415,9 +1414,10 @@
+ 		MarkAllViewportsDirty(this->left_coord, this->top_coord, this->right_coord + 1, this->bottom_coord + 1);
+ }
+ 
+-static void CrashAirplane(Vehicle *v)
++void CrashAirplane(Vehicle *v)
+ {
+ 	v->vehstatus |= VS_CRASHED;
++	v->vehstatus &= ~VS_AIRCRAFT_BROKEN;	/* clear VS_DESTROYED too ! */
+ 	v->u.air.crashed_counter = 0;
+ 
+ 	CreateEffectVehicleRel(v, 4, 4, 8, EV_EXPLOSION_LARGE);
+Index: src/command.h
+===================================================================
+--- src/command.h	(revision 10980)
++++ src/command.h	(working copy)
+@@ -156,6 +156,8 @@
+ 	CMD_CHANGE_TIMETABLE             = 128,
+ 	CMD_SET_VEHICLE_ON_TIME          = 129,
+ 	CMD_AUTOFILL_TIMETABLE           = 130,
++
++	CMD_DESTROY_VEHICLE              = 131,
+ };
+ 
+ enum {
+Index: src/roadveh_gui.cpp
+===================================================================
+--- src/roadveh_gui.cpp	(revision 10980)
++++ src/roadveh_gui.cpp	(working copy)
+@@ -335,11 +335,15 @@
+ 	} break;
+ 
+ 	case WE_CLICK: {
+-		const Vehicle *v = GetVehicle(w->window_number);
++		Vehicle *v = GetVehicle(w->window_number);
+ 
+ 		switch (e->we.click.widget) {
+ 		case 5: /* start stop */
+-			DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_ROADVEH | CMD_MSG(STR_9015_CAN_T_STOP_START_ROAD_VEHICLE));
++			if ( /*_patches.destroy_vehicle && */ _ctrl_pressed ) {
++				AskDestroyVehicle(v, w);
++			} else {
++				DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_ROADVEH | CMD_MSG(STR_9015_CAN_T_STOP_START_ROAD_VEHICLE));
++			}
+ 			break;
+ 		case 6: /* center main view */
+ 			ScrollMainWindowTo(v->x_pos, v->y_pos);

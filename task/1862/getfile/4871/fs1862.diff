@@ -1,0 +1,227 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 17786)
++++ src/lang/english.txt	(working copy)
+@@ -2556,28 +2556,28 @@
+ # Industry directory
+ STR_INDUSTRY_DIRECTORY_CAPTION                                  :{WHITE}Industries
+ STR_INDUSTRY_DIRECTORY_NONE                                     :{ORANGE}- None -
+-STR_INDUSTRY_DIRECTORY_ITEM                                     :{ORANGE}{INDUSTRY}{BLACK} ({CARGO}{STRING}){YELLOW} ({COMMA}% transported)
+-STR_INDUSTRY_DIRECTORY_ITEM_TWO                                 :{ORANGE}{INDUSTRY}{BLACK} ({CARGO}{STRING}/{CARGO}{STRING}){YELLOW} ({COMMA}%/{COMMA}% transported)
++STR_INDUSTRY_DIRECTORY_ITEM                                     :{ORANGE}{INDUSTRY}{BLACK} ({CARGO}{RAW_STRING}){YELLOW} ({COMMA}% transported)
++STR_INDUSTRY_DIRECTORY_ITEM_TWO                                 :{ORANGE}{INDUSTRY}{BLACK} ({CARGO}{RAW_STRING}/{CARGO}{RAW_STRING}){YELLOW} ({COMMA}%/{COMMA}% transported)
+ STR_INDUSTRY_DIRECTORY_ITEM_NOPROD                              :{ORANGE}{INDUSTRY}
+ STR_INDUSTRY_DIRECTORY_LIST_CAPTION                             :{BLACK}Industry names - click on name to centre view on industry. Ctrl+Click opens a new viewport on industry location
+ 
+ # Industry view
+ STR_INDUSTRY_VIEW_CAPTION                                       :{WHITE}{INDUSTRY}
+ STR_INDUSTRY_VIEW_PRODUCTION_LAST_MONTH_TITLE                   :{BLACK}Production last month:
+-STR_INDUSTRY_VIEW_TRANSPORTED                                   :{YELLOW}{CARGO}{STRING}{BLACK} ({COMMA}% transported)
++STR_INDUSTRY_VIEW_TRANSPORTED                                   :{YELLOW}{CARGO}{RAW_STRING}{BLACK} ({COMMA}% transported)
+ STR_INDUSTRY_VIEW_LOCATION_TOOLTIP                              :{BLACK}Centre the main view on industry location. Ctrl+Click opens a new viewport on industry location
+ 
+ ############ range for requires starts
+-STR_INDUSTRY_VIEW_REQUIRES_CARGO                                :{BLACK}Requires: {YELLOW}{STRING}{STRING}
+-STR_INDUSTRY_VIEW_REQUIRES_CARGO_CARGO                          :{BLACK}Requires: {YELLOW}{STRING}{STRING}, {STRING}{STRING}
+-STR_INDUSTRY_VIEW_REQUIRES_CARGO_CARGO_CARGO                    :{BLACK}Requires: {YELLOW}{STRING}{STRING}, {STRING}{STRING}, {STRING}{STRING}
++STR_INDUSTRY_VIEW_REQUIRES_CARGO                                :{BLACK}Requires: {YELLOW}{STRING}{RAW_STRING}
++STR_INDUSTRY_VIEW_REQUIRES_CARGO_CARGO                          :{BLACK}Requires: {YELLOW}{STRING}{RAW_STRING}, {STRING}{RAW_STRING}
++STR_INDUSTRY_VIEW_REQUIRES_CARGO_CARGO_CARGO                    :{BLACK}Requires: {YELLOW}{STRING}{RAW_STRING}, {STRING}{RAW_STRING}, {STRING}{RAW_STRING}
+ ############ range for requires ends
+ 
+ ############ range for produces starts
+ STR_INDUSTRY_VIEW_WAITING_FOR_PROCESSING                        :{BLACK}Cargo waiting to be processed:
+-STR_INDUSTRY_VIEW_WAITING_STOCKPILE_CARGO                       :{YELLOW}{CARGO}{STRING}{BLACK}
+-STR_INDUSTRY_VIEW_PRODUCES_CARGO                                :{BLACK}Produces: {YELLOW}{STRING}{STRING}
+-STR_INDUSTRY_VIEW_PRODUCES_CARGO_CARGO                          :{BLACK}Produces: {YELLOW}{STRING}{STRING}, {STRING}{STRING}
++STR_INDUSTRY_VIEW_WAITING_STOCKPILE_CARGO                       :{YELLOW}{CARGO}{RAW_STRING}{BLACK}
++STR_INDUSTRY_VIEW_PRODUCES_CARGO                                :{BLACK}Produces: {YELLOW}{STRING}{RAW_STRING}
++STR_INDUSTRY_VIEW_PRODUCES_CARGO_CARGO                          :{BLACK}Produces: {YELLOW}{STRING}{RAW_STRING}, {STRING}{RAW_STRING}
+ ############ range for produces ends
+ 
+ STR_CONFIG_GAME_PRODUCTION                                      :{WHITE}Change production (multiple of 8, up to 2040)
+Index: src/industry_gui.cpp
+===================================================================
+--- src/industry_gui.cpp	(revision 17786)
++++ src/industry_gui.cpp	(working copy)
+@@ -56,17 +56,41 @@
+  * @param ind the industry (NULL if in fund window)
+  * @param ind_type the industry type
+  * @param indspec the industry spec
+- * @return the string to display
++ * @return the string to display; NULL if none
+  */
+-static StringID GetCargoSuffix(uint cargo, CargoSuffixType cst, Industry *ind, IndustryType ind_type, const IndustrySpec *indspec)
++static char *GetCargoSuffix(uint cargo, CargoSuffixType cst, const Industry *ind, IndustryType ind_type, const IndustrySpec *indspec)
+ {
+ 	if (HasBit(indspec->callback_mask, CBM_IND_CARGO_SUFFIX)) {
+-		uint16 callback = GetIndustryCallback(CBID_INDUSTRY_CARGO_SUFFIX, 0, (cst << 8) | cargo, ind, ind_type, (cst != CST_FUND) ? ind->xy : INVALID_TILE);
+-		if (GB(callback, 0, 8) != 0xFF) return GetGRFStringID(indspec->grf_prop.grffile->grfid, 0xD000 + callback);
++		uint16 callback = GetIndustryCallback(CBID_INDUSTRY_CARGO_SUFFIX, 0, (cst << 8) | cargo, const_cast<Industry *>(ind), ind_type, (cst != CST_FUND) ? ind->xy : INVALID_TILE);
++		if (GB(callback, 0, 8) != 0xFF) {
++			char buffer[512];
++			PrepareTextRefStackUsage(6);
++			GetString(buffer, GetGRFStringID(indspec->grf_prop.grffile->grfid, 0xD000 + callback), lastof(buffer));
++			StopTextRefStackUsage();
++			return strdup(buffer);
++		}
+ 	}
+-	return STR_EMPTY;
++	return NULL;
+ }
+ 
++/**
++ * Gets all strings to display after the cargo of industies (using callback 37)
++ * @param cb_offset The offset for the cargo used in cb37, 0 for accepted cargos, 3 for produced cargos
++ * @param cst the cargo suffix type (for which window is it requested). @see CargoSuffixType
++ * @param ind the industry (NULL if in fund window)
++ * @param ind_type the industry type
++ * @param indspec the industry spec
++ * @param cargos array with cargotypes. for CT_INVALID no suffix will be determined
++ * @param num_cargos number of cargos in #cargos
++ * @param suffixes returns the strduped cargo suffixes resp. NULL if none.
++ */
++static void GetAllCargoSuffixes(uint cb_offset, CargoSuffixType cst, const Industry *ind, IndustryType ind_type, const IndustrySpec *indspec, const CargoID *cargos, uint num_cargos, char **suffixes)
++{
++	for (uint j = 0; j < num_cargos; j++) {
++		suffixes[j] = (cargos[j] == CT_INVALID) ? NULL : GetCargoSuffix(cb_offset + j, cst, ind, ind_type, indspec);
++	}
++}
++
+ /** Names of the widgets of the dynamic place industries gui */
+ enum DynamicPlaceIndustriesWidgets {
+ 	DPIW_CLOSEBOX = 0,
+@@ -260,29 +284,34 @@
+ 		}
+ 
+ 		/* Draw the accepted cargos, if any. Otherwhise, will print "Nothing" */
++		char *cargo_suffix[3];
++		assert_compile(lengthof(cargo_suffix) >= lengthof(indsp->accepts_cargo));
++		GetAllCargoSuffixes(0, CST_FUND, NULL, this->selected_type, indsp, indsp->accepts_cargo, lengthof(indsp->accepts_cargo), cargo_suffix);
+ 		StringID str = STR_INDUSTRY_VIEW_REQUIRES_CARGO;
+ 		byte p = 0;
+ 		SetDParam(0, STR_JUST_NOTHING);
+-		SetDParam(1, STR_EMPTY);
++		SetDParamStr(1, NULL);
+ 		for (byte j = 0; j < lengthof(indsp->accepts_cargo); j++) {
+ 			if (indsp->accepts_cargo[j] == CT_INVALID) continue;
+ 			if (p > 0) str++;
+ 			SetDParam(p++, CargoSpec::Get(indsp->accepts_cargo[j])->name);
+-			SetDParam(p++, GetCargoSuffix(j, CST_FUND, NULL, this->selected_type, indsp));
++			SetDParamStr(p++, cargo_suffix[j]);
+ 		}
+ 		DrawString(x_str, right, y_str, str);
+ 		y_str += 11;
+ 
+ 		/* Draw the produced cargos, if any. Otherwhise, will print "Nothing" */
++		assert_compile(lengthof(cargo_suffix) >= lengthof(indsp->produced_cargo));
++		GetAllCargoSuffixes(3, CST_FUND, NULL, this->selected_type, indsp, indsp->produced_cargo, lengthof(indsp->produced_cargo), cargo_suffix);
+ 		str = STR_INDUSTRY_VIEW_PRODUCES_CARGO;
+ 		p = 0;
+ 		SetDParam(0, STR_JUST_NOTHING);
+-		SetDParam(1, STR_EMPTY);
++		SetDParamStr(1, NULL);
+ 		for (byte j = 0; j < lengthof(indsp->produced_cargo); j++) {
+ 			if (indsp->produced_cargo[j] == CT_INVALID) continue;
+ 			if (p > 0) str++;
+ 			SetDParam(p++, CargoSpec::Get(indsp->produced_cargo[j])->name);
+-			SetDParam(p++, GetCargoSuffix(j + 3, CST_FUND, NULL, this->selected_type, indsp));
++			SetDParamStr(p++, cargo_suffix[j]);
+ 		}
+ 		DrawString(x_str, right, y_str, str);
+ 		y_str += 11;
+@@ -507,6 +536,8 @@
+ 		this->DrawWidgets();
+ 
+ 		if (HasBit(ind->callback_mask, CBM_IND_PRODUCTION_CARGO_ARRIVAL) || HasBit(ind->callback_mask, CBM_IND_PRODUCTION_256_TICKS)) {
++			char *cargo_suffix[lengthof(i->accepts_cargo)];
++			GetAllCargoSuffixes(0, CST_VIEW, i, i->type, ind, i->accepts_cargo, lengthof(i->accepts_cargo), cargo_suffix);
+ 			for (byte j = 0; j < lengthof(i->accepts_cargo); j++) {
+ 				if (i->accepts_cargo[j] == CT_INVALID) continue;
+ 				has_accept = true;
+@@ -517,11 +548,13 @@
+ 				}
+ 				SetDParam(0, i->accepts_cargo[j]);
+ 				SetDParam(1, i->incoming_cargo_waiting[j]);
+-				SetDParam(2, GetCargoSuffix(j, CST_VIEW, i, i->type, ind));
++				SetDParamStr(2, cargo_suffix[j]);
+ 				DrawString(4, this->widget[IVW_INFO].right, y, STR_INDUSTRY_VIEW_WAITING_STOCKPILE_CARGO);
+ 				y += 10;
+ 			}
+ 		} else {
++			char *cargo_suffix[lengthof(i->accepts_cargo)];
++			GetAllCargoSuffixes(0, CST_VIEW, i, i->type, ind, i->accepts_cargo, lengthof(i->accepts_cargo), cargo_suffix);
+ 			StringID str = STR_INDUSTRY_VIEW_REQUIRES_CARGO;
+ 			byte p = 0;
+ 			for (byte j = 0; j < lengthof(i->accepts_cargo); j++) {
+@@ -529,7 +562,7 @@
+ 				has_accept = true;
+ 				if (p > 0) str++;
+ 				SetDParam(p++, CargoSpec::Get(i->accepts_cargo[j])->name);
+-				SetDParam(p++, GetCargoSuffix(j, CST_VIEW, i, i->type, ind));
++				SetDParamStr(p++, cargo_suffix[j]);
+ 			}
+ 			if (has_accept) {
+ 				DrawString(2, this->widget[IVW_INFO].right, y, str);
+@@ -537,6 +570,8 @@
+ 			}
+ 		}
+ 
++		char *cargo_suffix[lengthof(i->produced_cargo)];
++		GetAllCargoSuffixes(3, CST_VIEW, i, i->type, ind, i->produced_cargo, lengthof(i->produced_cargo), cargo_suffix);
+ 		first = true;
+ 		for (byte j = 0; j < lengthof(i->produced_cargo); j++) {
+ 			if (i->produced_cargo[j] == CT_INVALID) continue;
+@@ -550,7 +585,7 @@
+ 
+ 			SetDParam(0, i->produced_cargo[j]);
+ 			SetDParam(1, i->last_month_production[j]);
+-			SetDParam(2, GetCargoSuffix(j + 3, CST_VIEW, i, i->type, ind));
++			SetDParamStr(2, cargo_suffix[j]);
+ 
+ 			SetDParam(3, ToPercent8(i->last_month_pct_transported[j]));
+ 			uint x = 4 + (IsProductionAlterable(i) ? 30 : 0);
+@@ -901,12 +936,15 @@
+ 		/* Industry name */
+ 		SetDParam(p++, i->index);
+ 
++		char *cargo_suffix[lengthof(i->produced_cargo)];
++		GetAllCargoSuffixes(3, CST_DIR, i, i->type, indsp, i->produced_cargo, lengthof(i->produced_cargo), cargo_suffix);
++
+ 		/* Industry productions */
+ 		for (byte j = 0; j < lengthof(i->produced_cargo); j++) {
+ 			if (i->produced_cargo[j] == CT_INVALID) continue;
+ 			SetDParam(p++, i->produced_cargo[j]);
+ 			SetDParam(p++, i->last_month_production[j]);
+-			SetDParam(p++, GetCargoSuffix(j + 3, CST_DIR, const_cast<Industry *>(i), i->type, indsp));
++			SetDParamStr(p++, cargo_suffix[j]);
+ 		}
+ 
+ 		/* Transported productions */
+Index: src/strings.cpp
+===================================================================
+--- src/strings.cpp	(revision 17786)
++++ src/strings.cpp	(working copy)
+@@ -582,8 +582,9 @@
+ 				break;
+ 
+ 			case SCC_RAW_STRING_POINTER: { // {RAW_STRING}
++				/* Treat NULL like STR_EMPTY */
+ 				const char *str = (const char*)(size_t)GetInt64(&argv);
+-				buff = FormatString(buff, str, argv, casei, last);
++				if (str != NULL) buff = FormatString(buff, str, argv, casei, last);
+ 				break;
+ 			}
+ 
+Index: src/newgrf_text.cpp
+===================================================================
+--- src/newgrf_text.cpp	(revision 17786)
++++ src/newgrf_text.cpp	(working copy)
+@@ -71,7 +71,6 @@
+ 
+ 	/* Same thing for industries */
+ 	TEXTID_TO_STRINGID(0x4802, 0x4826, STR_INDUSTRY_NAME_COAL_MINE);
+-	TEXTID_TO_STRINGID(0x4827, 0x4829, STR_INDUSTRY_VIEW_REQUIRES_CARGO);
+ 	TEXTID_TO_STRINGID(0x482D, 0x482E, STR_NEWS_INDUSTRY_CONSTRUCTION);
+ 	TEXTID_TO_STRINGID(0x4832, 0x4834, STR_NEWS_INDUSTRY_CLOSURE_GENERAL);
+ 	TEXTID_TO_STRINGID(0x4835, 0x4838, STR_NEWS_INDUSTRY_PRODUCTION_INCREASE_GENERAL);

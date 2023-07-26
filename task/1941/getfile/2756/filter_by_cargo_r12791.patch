@@ -1,0 +1,229 @@
+Index: src/build_vehicle_gui.cpp
+===================================================================
+--- src/build_vehicle_gui.cpp	(revision 12791)
++++ src/build_vehicle_gui.cpp	(working copy)
+@@ -53,6 +53,7 @@
+ 	BUILD_VEHICLE_WIDGET_CAPTION,
+ 	BUILD_VEHICLE_WIDGET_SORT_ASSENDING_DESCENDING,
+ 	BUILD_VEHICLE_WIDGET_SORT_DROPDOWN,
++	BUILD_VEHICLE_WIDGET_CARGO_DROPDOWN,
+ 	BUILD_VEHICLE_WIDGET_LIST,
+ 	BUILD_VEHICLE_WIDGET_SCROLLBAR,
+ 	BUILD_VEHICLE_WIDGET_PANEL,
+@@ -64,19 +65,31 @@
+ 
+ static const Widget _build_vehicle_widgets[] = {
+ 	{   WWT_CLOSEBOX,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,                STR_018B_CLOSE_WINDOW },
+-	{    WWT_CAPTION,  RESIZE_RIGHT,    14,    11,   239,     0,    13, 0x0,                     STR_018C_WINDOW_TITLE_DRAG_THIS },
+-	{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    80,    14,    25, STR_SORT_BY,             STR_SORT_ORDER_TIP},
+-	{   WWT_DROPDOWN,  RESIZE_RIGHT,    14,    81,   239,    14,    25, 0x0,                     STR_SORT_CRITERIA_TIP},
+-	{     WWT_MATRIX,     RESIZE_RB,    14,     0,   227,    26,    39, 0x101,                   STR_NULL },
+-	{  WWT_SCROLLBAR,    RESIZE_LRB,    14,   228,   239,    26,    39, 0x0,                     STR_0190_SCROLL_BAR_SCROLLS_LIST },
+-	{      WWT_PANEL,    RESIZE_RTB,    14,     0,   239,    40,   161, 0x0,                     STR_NULL },
++	{    WWT_CAPTION,  RESIZE_RIGHT,    14,    11,   293,     0,    13, 0x0,                     STR_018C_WINDOW_TITLE_DRAG_THIS },
++	{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    60,    14,    25, STR_SORT_BY,             STR_SORT_ORDER_TIP},
++	{   WWT_DROPDOWN,   RESIZE_NONE,    14,    61,   190,    14,    25, 0x0,                     STR_SORT_CRITERIA_TIP},
++	{   WWT_DROPDOWN,  RESIZE_RIGHT,    14,   191,   293,    14,    25, 0x0,                     STR_SORT_CRITERIA_TIP},
++	{     WWT_MATRIX,     RESIZE_RB,    14,     0,   281,    26,    39, 0x101,                   STR_NULL },
++	{  WWT_SCROLLBAR,    RESIZE_LRB,    14,   282,   293,    26,    39, 0x0,                     STR_0190_SCROLL_BAR_SCROLLS_LIST },
++	{      WWT_PANEL,    RESIZE_RTB,    14,     0,   293,    40,   161, 0x0,                     STR_NULL },
+ 
+-	{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,     0,   114,   162,   173, 0x0,                     STR_NULL },
+-	{ WWT_PUSHTXTBTN,    RESIZE_RTB,    14,   115,   227,   162,   173, 0x0,                     STR_NULL },
+-	{  WWT_RESIZEBOX,   RESIZE_LRTB,    14,   228,   239,   162,   173, 0x0,                     STR_RESIZE_BUTTON },
++	{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,     0,   114,   162,   173, 0x0,                         STR_NULL },
++	{ WWT_PUSHTXTBTN,    RESIZE_RTB,    14,   115,   281,   162,   173, 0x0,                         STR_NULL },
++	{  WWT_RESIZEBOX,   RESIZE_LRTB,    14,   282,   293,   162,   173, 0x0,                         STR_RESIZE_BUTTON },
+ 	{   WIDGETS_END},
+ };
+ 
++enum cargo_filter {
++	CF_SHOW_ALL = -1
++};
++
++static int _cargo_filter_train = CF_SHOW_ALL;
++static int _cargo_filter_road = CF_SHOW_ALL;
++static int _cargo_filter_ship = CF_SHOW_ALL;
++static int _cargo_filter_aircraft = CF_SHOW_ALL;
++static StringID _cargos_name_list[NUM_CARGO + 1];
++static int _cargos_dropdown_pos[NUM_CARGO + 1];
++
+ /* Setup widget strings to fit the different types of vehicles */
+ static void SetupWindowStrings(Window *w, VehicleType type)
+ {
+@@ -807,6 +820,9 @@
+ 		if (bv->filter.railtype != RAILTYPE_END && !HasPowerOnRail(rvi->railtype, bv->filter.railtype)) continue;
+ 		if (!IsEngineBuildable(eid, VEH_TRAIN, _local_player)) continue;
+ 
++		uint32 cmask = EngInfo(eid)->refit_mask;
++		if (!((_cargo_filter_train == rvi->cargo_type && rvi->capacity > 0) || (HasBit(cmask, _cargo_filter_train))) && (_cargo_filter_train > CF_SHOW_ALL )) continue;
++
+ 		EngList_Add(&bv->eng_list, eid);
+ 		if (rvi->railveh_type != RAILVEH_WAGON) {
+ 			num_engines++;
+@@ -841,8 +857,14 @@
+ 
+ 	EngineID eid;
+ 	FOR_ALL_ENGINEIDS_OF_TYPE(eid, VEH_ROAD) {
++		const RoadVehicleInfo *rvi = RoadVehInfo(eid);
++
+ 		if (!IsEngineBuildable(eid, VEH_ROAD, _local_player)) continue;
+ 		if (!HasBit(bv->filter.roadtypes, HasBit(EngInfo(eid)->misc_flags, EF_ROAD_TRAM) ? ROADTYPE_TRAM : ROADTYPE_ROAD)) continue;
++
++		uint32 cmask = EngInfo(eid)->refit_mask;
++		if (!((_cargo_filter_road == rvi->cargo_type && rvi->capacity > 0) || (HasBit(cmask, _cargo_filter_road))) && (_cargo_filter_road > CF_SHOW_ALL )) continue;
++
+ 		EngList_Add(&bv->eng_list, eid);
+ 
+ 		if (eid == bv->sel_engine) sel_id = eid;
+@@ -860,7 +882,13 @@
+ 
+ 	EngineID eid;
+ 	FOR_ALL_ENGINEIDS_OF_TYPE(eid, VEH_SHIP) {
++		const ShipVehicleInfo *svi = ShipVehInfo(eid);
++
+ 		if (!IsEngineBuildable(eid, VEH_SHIP, _local_player)) continue;
++
++		uint32 cmask = EngInfo(eid)->refit_mask;
++		if (!((_cargo_filter_ship == svi->cargo_type && svi->capacity > 0) || (HasBit(cmask, _cargo_filter_ship))) && (_cargo_filter_ship > CF_SHOW_ALL )) continue;
++
+ 		EngList_Add(&bv->eng_list, eid);
+ 
+ 		if (eid == bv->sel_engine) sel_id = eid;
+@@ -882,10 +910,15 @@
+ 	 * when planes become obsolete and are removed */
+ 	EngineID eid;
+ 	FOR_ALL_ENGINEIDS_OF_TYPE(eid, VEH_AIRCRAFT) {
++		const AircraftVehicleInfo *avi = AircraftVehInfo(eid);
++
+ 		if (!IsEngineBuildable(eid, VEH_AIRCRAFT, _local_player)) continue;
+ 		/* First VEH_END window_numbers are fake to allow a window open for all different types at once */
+ 		if (w->window_number > VEH_END && !CanAircraftUseStation(eid, w->window_number)) continue;
+ 
++		uint32 cmask = EngInfo(eid)->refit_mask;
++		if (!((_cargo_filter_aircraft == CT_PASSENGERS && avi->passenger_capacity > 0) || (_cargo_filter_aircraft == CT_MAIL && avi->mail_capacity > 0) || (HasBit(cmask, _cargo_filter_aircraft))) && (_cargo_filter_aircraft > CF_SHOW_ALL )) continue;
++
+ 		EngList_Add(&bv->eng_list, eid);
+ 		if (eid == bv->sel_engine) sel_id = eid;
+ 	}
+@@ -990,6 +1023,15 @@
+ 	const buildvehicle_d *bv = &WP(w, buildvehicle_d);
+ 	uint max = min(w->vscroll.pos + w->vscroll.cap, EngList_Count(&bv->eng_list));
+ 
++	int cargo_filter = CF_SHOW_ALL;
++	switch (bv->vehicle_type) {
++		default: NOT_REACHED();
++		case VEH_TRAIN:    cargo_filter = _cargo_filter_train;    break;
++		case VEH_ROAD:     cargo_filter = _cargo_filter_road;     break;
++		case VEH_SHIP:     cargo_filter = _cargo_filter_ship;     break;
++		case VEH_AIRCRAFT: cargo_filter = _cargo_filter_aircraft; break;
++	}
++
+ 	w->SetWidgetDisabledState(BUILD_VEHICLE_WIDGET_BUILD, w->window_number <= VEH_END);
+ 
+ 	SetVScrollCount(w, EngList_Count(&bv->eng_list));
+@@ -997,6 +1039,7 @@
+ 
+ 	/* Set text of sort by dropdown */
+ 	w->widget[BUILD_VEHICLE_WIDGET_SORT_DROPDOWN].data = _sort_listing[bv->vehicle_type][bv->sort_criteria];
++	w->widget[BUILD_VEHICLE_WIDGET_CARGO_DROPDOWN].data = _cargos_name_list[_cargos_dropdown_pos[cargo_filter]];
+ 
+ 	DrawWindowWidgets(w);
+ 
+@@ -1039,6 +1082,19 @@
+ 		case BUILD_VEHICLE_WIDGET_SORT_DROPDOWN: // Select sorting criteria dropdown menu
+ 			ShowDropDownMenu(w, _sort_listing[bv->vehicle_type], bv->sort_criteria, BUILD_VEHICLE_WIDGET_SORT_DROPDOWN, 0, 0);
+ 			break;
++		
++		case BUILD_VEHICLE_WIDGET_CARGO_DROPDOWN: {
++			int cargo_filter = CF_SHOW_ALL;
++			switch (bv->vehicle_type) {
++				default: NOT_REACHED();
++				case VEH_TRAIN:    cargo_filter = _cargo_filter_train;    break;
++				case VEH_ROAD:     cargo_filter = _cargo_filter_road;     break;
++				case VEH_SHIP:     cargo_filter = _cargo_filter_ship;     break;
++				case VEH_AIRCRAFT: cargo_filter = _cargo_filter_aircraft; break;
++			}
++			ShowDropDownMenu(w, _cargos_name_list, _cargos_dropdown_pos[cargo_filter], BUILD_VEHICLE_WIDGET_CARGO_DROPDOWN, 0, 0);
++			break;
++		}
+ 
+ 		case BUILD_VEHICLE_WIDGET_BUILD: {
+ 			EngineID sel_eng = bv->sel_engine;
+@@ -1148,11 +1204,40 @@
+ 		}
+ 
+ 		case WE_DROPDOWN_SELECT: // we have selected a dropdown item in the list
+-			if (bv->sort_criteria != e->we.dropdown.index) {
+-				bv->sort_criteria = e->we.dropdown.index;
+-				_last_sort_criteria[bv->vehicle_type] = bv->sort_criteria;
+-				bv->regenerate_list = true;
+-			}
++			switch (e->we.dropdown.button) {
++			case BUILD_VEHICLE_WIDGET_SORT_DROPDOWN:
++				if (bv->sort_criteria != e->we.dropdown.index) {
++					bv->sort_criteria = e->we.dropdown.index;
++					_last_sort_criteria[bv->vehicle_type] = bv->sort_criteria;
++				}				
++				break;			
++			case BUILD_VEHICLE_WIDGET_CARGO_DROPDOWN:
++				CargoID c;
++				int cargo_filter;
++				
++				if (e->we.dropdown.index > 0) {
++					int i = 1;
++					for (c = 0; c < NUM_CARGO; c++) {
++						if (!GetCargo(c)->IsValid()) continue;
++						if (e->we.dropdown.index == i) break;
++						i++;
++					}
++					cargo_filter = c;
++				}
++				else {
++					cargo_filter = CF_SHOW_ALL;
++				}
++
++				switch (bv->vehicle_type) {
++					default: NOT_REACHED();
++					case VEH_TRAIN:    _cargo_filter_train = cargo_filter;    break;
++					case VEH_ROAD:     _cargo_filter_road = cargo_filter;     break;
++					case VEH_SHIP:     _cargo_filter_ship = cargo_filter;     break;
++					case VEH_AIRCRAFT: _cargo_filter_aircraft = cargo_filter; break;
++				}				
++				break;
++			}	
++			bv->regenerate_list = true;
+ 			SetWindowDirty(w);
+ 			break;
+ 
+@@ -1167,7 +1252,7 @@
+ }
+ 
+ static const WindowDesc _build_vehicle_desc = {
+-	WDP_AUTO, WDP_AUTO, 240, 174, 240, 256,
++	WDP_AUTO, WDP_AUTO, 294, 174, 294, 256,
+ 	WC_BUILD_VEHICLE, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_RESIZABLE,
+ 	_build_vehicle_widgets,
+@@ -1192,6 +1277,21 @@
+ 
+ 	if (w == NULL) return;
+ 
++	/* Create cargo filter list  */
++	_cargos_name_list[0] = STR_PURCHASE_INFO_ALL_TYPES;
++	_cargos_dropdown_pos[CF_SHOW_ALL] = 0;
++
++	uint i = 1;
++	for (CargoID c = 0; c < NUM_CARGO; c++) {
++		if (!GetCargo(c)->IsValid()) continue;
++		
++		_cargos_name_list[i] = GetCargo(c)->name;
++		_cargos_dropdown_pos[c] = i;
++
++		i++;
++	}
++	_cargos_name_list[i] = INVALID_STRING_ID;
++
+ 	w->caption_color = (tile != 0) ? GetTileOwner(tile) : _local_player;
+ 
+ 	bv = &WP(w, buildvehicle_d);

@@ -1,0 +1,366 @@
+Index: src/npf.cpp
+===================================================================
+--- src/npf.cpp	(revision 2)
++++ src/npf.cpp	(revision 3)
+@@ -192,19 +192,22 @@
+ static uint NPFSlopeCost(AyStarNode* current)
+ {
+ 	TileIndex next = current->tile + TileOffsByDiagDir(TrackdirToExitdir((Trackdir)current->direction));
+-	int x,y;
+-	int8 z1,z2;
+ 
+-	x = TileX(current->tile) * TILE_SIZE;
+-	y = TileY(current->tile) * TILE_SIZE;
+-	/* get the height of the center of the current tile */
+-	z1 = GetSlopeZ(x + TILE_SIZE / 2, y + TILE_SIZE / 2);
++	/* Get center of tiles */
++	int x1 = TileX(current->tile) * TILE_SIZE + TILE_SIZE / 2;
++	int y1 = TileY(current->tile) * TILE_SIZE + TILE_SIZE / 2;
++	int x2 = TileX(next) * TILE_SIZE + TILE_SIZE / 2;
++	int y2 = TileY(next) * TILE_SIZE + TILE_SIZE / 2;
+ 
+-	x = TileX(next) * TILE_SIZE;
+-	y = TileY(next) * TILE_SIZE;
+-	/* get the height of the center of the next tile */
+-	z2 = GetSlopeZ(x + TILE_SIZE / 2, y + TILE_SIZE / 2);
++	int dx4 = (x2 - x1) / 4;
++	int dy4 = (y2 - y1) / 4;
+ 
++	/* Get the height on both sides of the tile edge.
++	 * Avoid testing the height on the tile-center. This will fail for halftile-foundations.
++	 */
++	int z1 = GetSlopeZ(x1 + dx4, y1 + dy4);
++	int z2 = GetSlopeZ(x2 - dx4, y2 - dy4);
++
+ 	if (z2 - z1 > 1) {
+ 		/* Slope up */
+ 		return _patches.npf_rail_slope_penalty;
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(revision 2)
++++ src/rail_cmd.cpp	(revision 3)
+@@ -1238,6 +1238,22 @@
+ 
+ #include "table/track_land.h"
+ 
++/**
++ * Get surface height in point (x,y)
++ * On tiles with halftile foundations move (x,y) to a save point wrt. track
++ */
++static uint GetSaveSlopeZ(uint x, uint y, Track track)
++{
++	switch (track) {
++		case TRACK_UPPER: x &= ~0xF; y &= ~0xF; break;
++		case TRACK_LOWER: x |=  0xF; y |=  0xF; break;
++		case TRACK_LEFT:  x |=  0xF; y &= ~0xF; break;
++		case TRACK_RIGHT: x &= ~0xF; y |=  0xF; break;
++		default: break;
++	}
++	return GetSlopeZ(x, y);
++}
++
+ static void DrawSingleSignal(TileIndex tile, Track track, byte condition, uint image, uint pos)
+ {
+ 	bool side = (_opt.road_side != 0) && _patches.signal_side;
+@@ -1281,7 +1297,7 @@
+ 		sprite = _signal_base + (GetSignalType(tile, track) - 1) * 16 + GetSignalVariant(tile, track) * 64 + image + condition;
+ 	}
+ 
+-	AddSortableSpriteToDraw(sprite, PAL_NONE, x, y, 1, 1, BB_HEIGHT_UNDER_BRIDGE, GetSlopeZ(x,y));
++	AddSortableSpriteToDraw(sprite, PAL_NONE, x, y, 1, 1, BB_HEIGHT_UNDER_BRIDGE, GetSaveSlopeZ(x, y, track));
+ }
+ 
+ static uint32 _drawtile_track_palette;
+@@ -1338,6 +1354,7 @@
+ {
+ 	int z = ti->z;
+ 	if (ti->tileh & SLOPE_W) z += TILE_HEIGHT;
++	if (IsSteepSlope(ti->tileh)) z += TILE_HEIGHT;
+ 	AddSortableSpriteToDraw(SPR_TRACK_FENCE_FLAT_VERT, _drawtile_track_palette,
+ 		ti->x + TILE_SIZE / 2, ti->y + TILE_SIZE / 2, 1, 1, 4, z);
+ }
+@@ -1349,6 +1366,7 @@
+ {
+ 	int z = ti->z;
+ 	if (ti->tileh & SLOPE_E) z += TILE_HEIGHT;
++	if (IsSteepSlope(ti->tileh)) z += TILE_HEIGHT;
+ 	AddSortableSpriteToDraw(SPR_TRACK_FENCE_FLAT_VERT, _drawtile_track_palette,
+ 		ti->x + TILE_SIZE / 2, ti->y + TILE_SIZE / 2, 1, 1, 4, z);
+ }
+@@ -1360,6 +1378,7 @@
+ {
+ 	int z = ti->z;
+ 	if (ti->tileh & SLOPE_N) z += TILE_HEIGHT;
++	if (IsSteepSlope(ti->tileh)) z += TILE_HEIGHT;
+ 	AddSortableSpriteToDraw(SPR_TRACK_FENCE_FLAT_HORZ, _drawtile_track_palette,
+ 		ti->x + TILE_SIZE / 2, ti->y + TILE_SIZE / 2, 1, 1, 4, z);
+ }
+@@ -1371,6 +1390,7 @@
+ {
+ 	int z = ti->z;
+ 	if (ti->tileh & SLOPE_S) z += TILE_HEIGHT;
++	if (IsSteepSlope(ti->tileh)) z += TILE_HEIGHT;
+ 	AddSortableSpriteToDraw(SPR_TRACK_FENCE_FLAT_HORZ, _drawtile_track_palette,
+ 		ti->x + TILE_SIZE / 2, ti->y + TILE_SIZE / 2, 1, 1, 4, z);
+ }
+Index: src/slope.h
+===================================================================
+--- src/slope.h	(revision 2)
++++ src/slope.h	(revision 3)
+@@ -37,7 +37,14 @@
+ 	SLOPE_STEEP_W  = SLOPE_STEEP | SLOPE_NWS,               ///< a steep slope falling to east (from west)
+ 	SLOPE_STEEP_S  = SLOPE_STEEP | SLOPE_WSE,               ///< a steep slope falling to north (from south)
+ 	SLOPE_STEEP_E  = SLOPE_STEEP | SLOPE_SEN,               ///< a steep slope falling to west (from east)
+-	SLOPE_STEEP_N  = SLOPE_STEEP | SLOPE_ENW                ///< a steep slope falling to south (from north)
++	SLOPE_STEEP_N  = SLOPE_STEEP | SLOPE_ENW,               ///< a steep slope falling to south (from north)
++
++	SLOPE_HALFTILE = 0x20,                                  ///< one halftile is leveled (non continuous slope)
++	SLOPE_HALFTILE_MASK = 0xE0,                             ///< three bits used for halftile slopes
++	SLOPE_HALFTILE_W = SLOPE_HALFTILE | 0x00,               ///< the west halftile is leveled (non continuous slope)
++	SLOPE_HALFTILE_S = SLOPE_HALFTILE | 0x40,               ///< the south halftile is leveled (non continuous slope)
++	SLOPE_HALFTILE_E = SLOPE_HALFTILE | 0x80,               ///< the east halftile is leveled (non continuous slope)
++	SLOPE_HALFTILE_N = SLOPE_HALFTILE | 0xC0,               ///< the north halftile is leveled (non continuous slope)
+ };
+ 
+ /**
+@@ -74,43 +81,57 @@
+ }
+ 
+ /**
++ * Checks for non-continuous slope on halftile foundations.
++ *
++ * @param s The given #Slope.
++ * @return True if the slope is non-continuous, else false.
++ */
++static inline bool IsHalftileSlope(Slope s)
++{
++	return (s & SLOPE_HALFTILE) != 0;
++}
++
++/**
+  * Return the complement of a slope.
+  *
+  * This method returns the complement of a slope. The complement of a
+  * slope is a slope with raised corner which aren't raised in the given
+  * slope.
+  *
+- * @pre The slope must not be steep.
++ * @pre The slope must neither be steep nor a halftile slope.
+  * @param s The #Slope to get the complement.
+  * @return a complement Slope of the given slope.
+  */
+ static inline Slope ComplementSlope(Slope s)
+ {
+-	assert(!IsSteepSlope(s));
++	assert(!IsSteepSlope(s) && !IsHalftileSlope(s));
+ 	return (Slope)(0xF ^ s);
+ }
+ 
+ /**
+  * Tests if a slope has a highest corner (i.e. one corner raised or a steep slope).
+  *
++ * Note: A halftile slope is ignored.
++ *
+  * @param s The #Slope.
+  * @return  true iff the slope has a highest corner.
+  */
+ static inline bool HasSlopeHighestCorner(Slope s)
+ {
++	s = (Slope)(s & ~SLOPE_HALFTILE_MASK);
+ 	return IsSteepSlope(s) || (s == SLOPE_W) || (s == SLOPE_S) || (s == SLOPE_E) || (s == SLOPE_N);
+ }
+ 
+ /**
+  * Returns the highest corner of a slope (one corner raised or a steep slope).
+  *
+- * @pre      The slope must be a slope with one corner raised or a steep slope.
++ * @pre      The slope must be a slope with one corner raised or a steep slope. A halftile slope is ignored.
+  * @param s  The #Slope.
+  * @return   Highest corner.
+  */
+ static inline Corner GetHighestSlopeCorner(Slope s)
+ {
+-	switch (s) {
++	switch (s & ~SLOPE_HALFTILE_MASK) {
+ 		case SLOPE_W:
+ 		case SLOPE_STEEP_W: return CORNER_W;
+ 		case SLOPE_S:
+@@ -124,6 +145,19 @@
+ }
+ 
+ /**
++ * Returns the leveled halftile of a halftile slope.
++ *
++ * @pre     The slope must be a halftile slope.
++ * @param s The #Slope.
++ * @return  The corner of the leveled halftile.
++ */
++static inline Corner GetHalftileSlopeCorner(Slope s)
++{
++	assert(IsHalftileSlope(s));
++	return (Corner)((s >> 6) & 3);
++}
++
++/**
+  * Returns the height of the highest corner of a slope relative to TileZ (= minimal height)
+  *
+  * @param s The #Slope.
+@@ -170,7 +204,20 @@
+ 	return ComplementSlope(SlopeWithOneCornerRaised(corner));
+ }
+ 
++/**
++ * Adds a halftile slope to a slope.
++ *
++ * @param s #Slope without a halftile slope.
++ * @param corner The #Corner of the halftile.
++ * @return The #Slope s with the halftile slope added.
++ */
++static inline Slope HalftileSlope(Slope s, Corner corner)
++{
++	assert(IsValidCorner(corner));
++	return (Slope)(s | SLOPE_HALFTILE | (corner << 6));
++}
+ 
++
+ /**
+  * Enumeration for Foundations.
+  */
+Index: src/landscape.cpp
+===================================================================
+--- src/landscape.cpp	(revision 2)
++++ src/landscape.cpp	(revision 3)
+@@ -104,9 +104,31 @@
+ 
+ uint GetPartialZ(int x, int y, Slope corners)
+ {
++	if (IsHalftileSlope(corners)) {
++		switch (GetHalftileSlopeCorner(corners)) {
++		case CORNER_W:
++			if (x - y >= 0) return GetSlopeMaxZ(corners);
++			break;
++
++		case CORNER_S:
++			if (x - (y ^ 0xF) >= 0) return GetSlopeMaxZ(corners);
++			break;
++
++		case CORNER_E:
++			if (y - x >= 0) return GetSlopeMaxZ(corners);
++			break;
++
++		case CORNER_N:
++			if ((y ^ 0xF) - x >= 0) return GetSlopeMaxZ(corners);
++			break;
++
++		default: NOT_REACHED();
++		}
++	}
++
+ 	int z = 0;
+ 
+-	switch (corners) {
++	switch (corners & ~SLOPE_HALFTILE_MASK) {
+ 	case SLOPE_W:
+ 		if (x - y >= 0)
+ 			z = (x - y) >> 1;
+@@ -209,6 +231,8 @@
+ /**
+  * Determine the Z height of the corners of a specific tile edge
+  *
++ * @note If a tile has a non-continuous halftile foundation, a corner can have different heights wrt. it's edges.
++ *
+  * @pre z1 and z2 must be initialized (typ. with TileZ). The corner heights just get added.
+  *
+  * @param tileh The slope of the tile.
+@@ -227,10 +251,14 @@
+ 		{SLOPE_W, SLOPE_N, SLOPE_STEEP_W, SLOPE_STEEP_N}, // DIAGDIR_NW, z1 = W, z2 = N
+ 	};
+ 
++	int halftile_test = (IsHalftileSlope(tileh) ? SlopeWithOneCornerRaised(GetHalftileSlopeCorner(tileh)) : 0);
++	if (halftile_test == corners[edge][0]) *z2 += TILE_HEIGHT; // The slope is non-continuous in z2. z2 is on the upper side.
++	if (halftile_test == corners[edge][1]) *z1 += TILE_HEIGHT; // The slope is non-continuous in z1. z1 is on the upper side.
++
+ 	if ((tileh & corners[edge][0]) != 0) *z1 += TILE_HEIGHT; // z1 is raised
+ 	if ((tileh & corners[edge][1]) != 0) *z2 += TILE_HEIGHT; // z2 is raised
+-	if (tileh == corners[edge][2]) *z1 += TILE_HEIGHT; // z1 is highest corner of a steep slope
+-	if (tileh == corners[edge][3]) *z2 += TILE_HEIGHT; // z2 is highest corner of a steep slope
++	if ((tileh & ~SLOPE_HALFTILE_MASK) == corners[edge][2]) *z1 += TILE_HEIGHT; // z1 is highest corner of a steep slope
++	if ((tileh & ~SLOPE_HALFTILE_MASK) == corners[edge][3]) *z2 += TILE_HEIGHT; // z2 is highest corner of a steep slope
+ }
+ 
+ static Slope GetFoundationSlope(TileIndex tile, uint* z)
+Index: src/bridge_map.cpp
+===================================================================
+--- src/bridge_map.cpp	(revision 2)
++++ src/bridge_map.cpp	(revision 3)
+@@ -7,8 +7,8 @@
+ #include "bridge_map.h"
+ #include "bridge.h"
+ #include "variables.h"
++#include "landscape.h"
+ 
+-
+ TileIndex GetBridgeEnd(TileIndex tile, DiagDirection dir)
+ {
+ 	TileIndexDiff delta = TileOffsByDiagDir(dir);
+@@ -46,9 +46,6 @@
+ 	Slope tileh = GetTileSlope(t, &h);
+ 	Foundation f = GetBridgeFoundation(tileh, DiagDirToAxis(GetBridgeRampDirection(t)));
+ 
+-	/* one height level extra if the ramp is on a flat foundation */
+-	return
+-		h + TILE_HEIGHT +
+-		(IsLeveledFoundation(f) ? TILE_HEIGHT : 0) +
+-		(IsSteepSlope(tileh) ? TILE_HEIGHT : 0);
++	/* one height level extra for the ramp */
++	return h + TILE_HEIGHT + ApplyFoundationToSlope(f, &tileh);
+ }
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 2)
++++ src/viewport.cpp	(revision 3)
+@@ -362,11 +362,17 @@
+ 	a = clamp(a, 0, (int)(MapMaxX() * TILE_SIZE) - 1);
+ 	b = clamp(b, 0, (int)(MapMaxY() * TILE_SIZE) - 1);
+ 
+-	z = GetSlopeZ(a,     b    ) / 2;
+-	z = GetSlopeZ(a + z, b + z) / 2;
+-	z = GetSlopeZ(a + z, b + z) / 2;
+-	z = GetSlopeZ(a + z, b + z) / 2;
+-	z = GetSlopeZ(a + z, b + z) / 2;
++	/* (a, b) is the X/Y-world coordinate that belongs to (x,y) if the landscape would be completely flat on height 0.
++	 * Now find the Z-world coordinate by fix point iteration.
++	 * This is a bit tricky because the tile height is non-continuous at foundations.
++	 * The clicked point should be approached from the back, otherwise there are regions that are not clickable.
++	 * (FOUNDATION_HALFTILE_LOWER on SLOPE_STEEP_S hides north halftile completely)
++	 * So give it a z-malus of 4 in the first iterations.
++	 */
++	z = 0;
++	for (int i = 0; i < 5; i++) z = GetSlopeZ(a + max(z, 4u) - 4, b + max(z, 4u) - 4) / 2;
++	for (uint malus = 3; malus > 0; malus--) z = GetSlopeZ(a + max(z, malus) - malus, b + max(z, malus) - malus) / 2;
++	for (int i = 0; i < 5; i++) z = GetSlopeZ(a + z, b + z) / 2;
+ 
+ 	pt.x = a + z;
+ 	pt.y = b + z;
+Index: src/elrail.cpp
+===================================================================
+--- src/elrail.cpp	(revision 2)
++++ src/elrail.cpp	(revision 3)
+@@ -213,6 +213,8 @@
+ 	/* Note that ti->tileh has already been adjusted for Foundations */
+ 	Slope tileh[TS_END] = { ti->tileh, SLOPE_FLAT };
+ 
++	if (IsHalftileSlope(tileh[TS_HOME])) tileh[TS_HOME] = SLOPE_FLAT; // fake slope for simplicity
++
+ 	TLG tlg = GetTLG(ti->tile);
+ 	byte PCPstatus = 0;
+ 	byte OverridePCP = 0;
+@@ -291,6 +293,8 @@
+ 
+ 		ApplyFoundationToSlope(foundation, &tileh[TS_NEIGHBOUR]);
+ 
++		if (IsHalftileSlope(tileh[TS_NEIGHBOUR])) tileh[TS_NEIGHBOUR] = SLOPE_FLAT; // fake slope for simplicity
++
+ 		AdjustTileh(neighbour, &tileh[TS_NEIGHBOUR]);
+ 
+ 		/* If we have a straight (and level) track, we want a pylon only every 2 tiles

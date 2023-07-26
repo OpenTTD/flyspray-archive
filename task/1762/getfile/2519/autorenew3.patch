@@ -1,0 +1,512 @@
+Index: src/vehicle_func.h
+===================================================================
+--- src/vehicle_func.h	(revision 12225)
++++ src/vehicle_func.h	(working copy)
+@@ -19,7 +19,7 @@
+ 
+ typedef void *VehicleFromPosProc(Vehicle *v, void *data);
+ 
+-void VehicleServiceInDepot(Vehicle *v);
++void VehicleMaintenanceInDepot(Vehicle *v);
+ void VehiclePositionChanged(Vehicle *v);
+ Vehicle *GetLastVehicleInChain(Vehicle *v);
+ uint CountVehiclesInChain(const Vehicle *v);
+@@ -68,7 +68,9 @@
+ Money GetTrainRunningCost(const Vehicle *v);
+ 
+ bool VehicleNeedsService(const Vehicle *v);
++bool VehicleNeedsUpdate(const Vehicle *v);
+ 
++
+ uint GenerateVehicleSortList(const Vehicle*** sort_list, uint16 *length_of_array, VehicleType type, PlayerID owner, uint32 index, uint16 window_type);
+ void BuildDepotVehicleList(VehicleType type, TileIndex tile, Vehicle ***engine_list, uint16 *engine_list_length, uint16 *engine_count, Vehicle ***wagon_list, uint16 *wagon_list_length, uint16 *wagon_count);
+ CommandCost SendAllVehiclesToDepot(VehicleType type, uint32 flags, bool service, PlayerID owner, uint16 vlw_flag, uint32 id);
+Index: src/train.h
+===================================================================
+--- src/train.h	(revision 12225)
++++ src/train.h	(working copy)
+@@ -307,4 +307,6 @@
+ 	void OnNewDay();
+ };
+ 
++Money EstimateTrainCost(EngineID engine);
++
+ #endif /* TRAIN_H */
+Index: src/ship_cmd.cpp
+===================================================================
+--- src/ship_cmd.cpp	(revision 12225)
++++ src/ship_cmd.cpp	(working copy)
+@@ -143,9 +143,9 @@
+ 
+ static void CheckIfShipNeedsService(Vehicle *v)
+ {
+-	if (_patches.servint_ships == 0 || !VehicleNeedsService(v)) return;
++	if (!VehicleNeedsService(v)) return;
+ 	if (v->IsInDepot()) {
+-		VehicleServiceInDepot(v);
++		VehicleMaintenanceInDepot(v);
+ 		return;
+ 	}
+ 
+@@ -367,7 +367,7 @@
+ 	RecalcShipStuff(v);
+ 
+ 	PlayShipSound(v);
+-	VehicleServiceInDepot(v);
++	VehicleMaintenanceInDepot(v);
+ 	InvalidateWindowData(WC_VEHICLE_DEPOT, v->tile);
+ 	InvalidateWindowClasses(WC_SHIPS_LIST);
+ }
+@@ -397,9 +397,13 @@
+ 	return (t < v->progress);
+ }
+ 
+-static CommandCost EstimateShipCost(EngineID engine_type)
++/**
++ * Return cost of building a new ship
++ * @param engine_type Type of ship to build
++ */
++Money EstimateShipCost(EngineID engine_type)
+ {
+-	return CommandCost(EXPENSES_NEW_VEHICLES, GetEngineProperty(engine_type, 0x0A, ShipVehInfo(engine_type)->base_cost) * (_price.ship_base >> 3) >> 5);
++	return GetEngineProperty(engine_type, 0x0A, ShipVehInfo(engine_type)->base_cost) * (_price.ship_base >> 3) >> 5;
+ }
+ 
+ static void ShipArrivesAt(const Vehicle* v, Station* st)
+@@ -813,7 +817,7 @@
+ 
+ 	if (!IsEngineBuildable(p1, VEH_SHIP, _current_player)) return_cmd_error(STR_SHIP_NOT_AVAILABLE);
+ 
+-	value = EstimateShipCost(p1);
++	value = CommandCost(EXPENSES_NEW_VEHICLES, EstimateShipCost(p1));
+ 	if (flags & DC_QUERY_COST) return value;
+ 
+ 	/* The ai_new queries the vehicle cost before building the route,
+Index: src/roadveh.h
+===================================================================
+--- src/roadveh.h	(revision 12225)
++++ src/roadveh.h	(working copy)
+@@ -82,4 +82,6 @@
+ 
+ void RoadVehUpdateCache(Vehicle *v);
+ 
++Money EstimateRoadVehCost(EngineID engine_type);
++
+ #endif /* ROADVEH_H */
+Index: src/aircraft.h
+===================================================================
+--- src/aircraft.h	(revision 12225)
++++ src/aircraft.h	(working copy)
+@@ -127,4 +127,6 @@
+ 	void OnNewDay();
+ };
+ 
++Money EstimateAircraftCost(EngineID engine);
++
+ #endif /* AIRCRAFT_H */
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 12225)
++++ src/train_cmd.cpp	(working copy)
+@@ -642,9 +642,14 @@
+ 	}
+ }
+ 
+-static CommandCost EstimateTrainCost(EngineID engine, const RailVehicleInfo* rvi)
++/**
++ * Compute cost to construct a new train
++ * @param engine: Train to build
++ */
++Money EstimateTrainCost(EngineID engine)
+ {
+-	return CommandCost(EXPENSES_NEW_VEHICLES, GetEngineProperty(engine, 0x17, rvi->base_cost) * (_price.build_railvehicle >> 3) >> 5);
++	const RailVehicleInfo *rvi = RailVehInfo(engine);
++	return GetEngineProperty(engine, 0x17, rvi->base_cost) * (_price.build_railvehicle >> 3) >> 5;
+ }
+ 
+ static void AddRearEngineToMultiheadedTrain(Vehicle* v, Vehicle* u, bool building)
+@@ -702,7 +707,7 @@
+ 
+ 	if (rvi->railveh_type == RAILVEH_WAGON) return CmdBuildRailWagon(p1, tile, flags);
+ 
+-	CommandCost value = EstimateTrainCost(p1, rvi);
++	CommandCost value = CommandCost(EXPENSES_NEW_VEHICLES, EstimateTrainCost(p1));
+ 
+ 	uint num_vehicles =
+ 		(rvi->railveh_type == RAILVEH_MULTIHEAD ? 2 : 1) +
+@@ -2254,7 +2259,7 @@
+ 		}
+ 	}
+ 
+-	VehicleServiceInDepot(v);
++	VehicleMaintenanceInDepot(v);
+ 	InvalidateWindowClasses(WC_TRAINS_LIST);
+ 	v->PlayLeaveStationSound();
+ 
+@@ -3609,9 +3614,9 @@
+ 
+ static void CheckIfTrainNeedsService(Vehicle *v)
+ {
+-	if (_patches.servint_trains == 0 || !VehicleNeedsService(v)) return;
++	if (!VehicleNeedsService(v)) return;
+ 	if (v->IsInDepot()) {
+-		VehicleServiceInDepot(v);
++		VehicleMaintenanceInDepot(v);
+ 		return;
+ 	}
+ 
+Index: src/ship.h
+===================================================================
+--- src/ship.h	(revision 12225)
++++ src/ship.h	(working copy)
+@@ -16,7 +16,7 @@
+ /**
+  * This class 'wraps' Vehicle; you do not actually instantiate this class.
+  * You create a Vehicle using AllocateVehicle, so it is added to the pool
+- * and you reinitialize that to a Train using:
++ * and you reinitialize that to a Ship using:
+  *   v = new (v) Ship();
+  *
+  * As side-effect the vehicle type is set correctly.
+@@ -44,4 +44,6 @@
+ 	void OnNewDay();
+ };
+ 
++Money EstimateShipCost(EngineID engine_type);
++
+ #endif /* SHIP_H */
+Index: src/roadveh_cmd.cpp
+===================================================================
+--- src/roadveh_cmd.cpp	(revision 12225)
++++ src/roadveh_cmd.cpp	(working copy)
+@@ -125,9 +125,13 @@
+ 	DrawSprite(6 + _roadveh_images[spritenum], pal, x, y);
+ }
+ 
+-static CommandCost EstimateRoadVehCost(EngineID engine_type)
++/**
++ * Compute cost for constructing a new road vehicle
++ * @param engine_type Road vehicle to build
++ */
++Money EstimateRoadVehCost(EngineID engine_type)
+ {
+-	return CommandCost(EXPENSES_NEW_VEHICLES, ((_price.roadveh_base >> 3) * GetEngineProperty(engine_type, 0x11, RoadVehInfo(engine_type)->base_cost)) >> 5);
++	return ((_price.roadveh_base >> 3) * GetEngineProperty(engine_type, 0x11, RoadVehInfo(engine_type)->base_cost)) >> 5;
+ }
+ 
+ byte GetRoadVehLength(const Vehicle *v)
+@@ -174,7 +178,7 @@
+ 
+ 	if (!IsEngineBuildable(p1, VEH_ROAD, _current_player)) return_cmd_error(STR_ROAD_VEHICLE_NOT_AVAILABLE);
+ 
+-	cost = EstimateRoadVehCost(p1);
++	cost = CommandCost(EXPENSES_NEW_VEHICLES, EstimateRoadVehCost(p1));
+ 	if (flags & DC_QUERY_COST) return cost;
+ 
+ 	/* The ai_new queries the vehicle cost before building the route,
+@@ -1379,7 +1383,7 @@
+ 	if (first) {
+ 		if (RoadVehFindCloseTo(v, x, y, v->direction) != NULL) return true;
+ 
+-		VehicleServiceInDepot(v);
++		VehicleMaintenanceInDepot(v);
+ 
+ 		StartRoadVehSound(v);
+ 
+@@ -1979,9 +1983,9 @@
+ static void CheckIfRoadVehNeedsService(Vehicle *v)
+ {
+ 	/* If we already got a slot at a stop, use that FIRST, and go to a depot later */
+-	if (v->u.road.slot != NULL || _patches.servint_roadveh == 0 || !VehicleNeedsService(v)) return;
++	if (v->u.road.slot != NULL || !VehicleNeedsService(v)) return;
+ 	if (v->IsInDepot()) {
+-		VehicleServiceInDepot(v);
++		VehicleMaintenanceInDepot(v);
+ 		return;
+ 	}
+ 
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 12225)
++++ src/vehicle.cpp	(working copy)
+@@ -93,7 +93,11 @@
+ /* Initialize the vehicle-pool */
+ DEFINE_OLD_POOL_GENERIC(Vehicle, Vehicle)
+ 
+-void VehicleServiceInDepot(Vehicle *v)
++/**
++ * Perform maintenance in a depot
++ * @param v Vehicle to perform maintenance on
++ */
++void VehicleMaintenanceInDepot(Vehicle *v)
+ {
+ 	v->date_of_last_service = _date;
+ 	v->breakdowns_since_last_service = 0;
+@@ -101,7 +105,12 @@
+ 	InvalidateWindow(WC_VEHICLE_DETAILS, v->index); // ensure that last service date and reliability are updated
+ }
+ 
+-bool VehicleNeedsService(const Vehicle *v)
++/**
++ * Does vehicle needs (periodic) maintenance?
++ * @param v Vehicle to check
++ * @return \c true if vehicle should go to the depot for maintenance
++ */
++static bool VehicleNeedsMaintenance(const Vehicle *v)
+ {
+ 	if (v->vehstatus & (VS_STOPPED | VS_CRASHED))       return false;
+ 	if (v->current_order.type != OT_GOTO_DEPOT || !(v->current_order.flags & OFB_PART_OF_ORDERS)) { // Don't interfere with a depot visit by the order list
+@@ -110,15 +119,107 @@
+ 		if (v->current_order.type == OT_GOTO_DEPOT && v->current_order.flags & OFB_HALT_IN_DEPOT) return false;
+ 	}
+ 
++	/* vehicles without break-down, and 'no servicing if not break-down' are never maintained */
+ 	if (_patches.no_servicing_if_no_breakdowns && _opt.diff.vehicle_breakdowns == 0) {
+-		return EngineHasReplacementForPlayer(GetPlayer(v->owner), v->engine_type, v->group_id);  /* Vehicles set for autoreplacing needs to go to a depot even if breakdowns are turned off */
++		return false;
+ 	}
+ 
+-	return _patches.servint_ispercent ?
+-		(v->reliability < GetEngine(v->engine_type)->reliability * (100 - v->service_interval) / 100) :
+-		(v->date_of_last_service + v->service_interval < _date);
++	/* Is the game global setting 'maintenance disabled'? */
++	switch (v->type) {
++		case VEH_TRAIN:    if (_patches.servint_trains == 0) return false;
++		case VEH_ROAD:     if (_patches.servint_roadveh == 0) return false;
++		case VEH_SHIP:     if (_patches.servint_ships == 0) return false;
++		case VEH_AIRCRAFT: if (_patches.servint_aircraft == 0) return false;
++		default: break; // Weird vehicle type, don't bother
++	}
++
++	if (v->service_interval == 0) // Vehicle needs no maintenance
++		return false;
++
++	/* Maintenance interval has passed */
++	if (_patches.servint_ispercent) {
++		return (v->reliability < GetEngine(v->engine_type)->reliability * (100 - v->service_interval) / 100);
++	} else {
++		return (v->date_of_last_service + v->service_interval < _date);
++	}
+ }
+ 
++/**
++ * Does vehicle needs an update (renewal or replacement)?
++ *
++ * @param v Vehicle to check
++ * @return \c true if the vehicle should be renewed or (auto)replaced
++ */
++bool VehicleNeedsUpdate(const Vehicle *v)
++{
++	EngineID replace_engine;
++	Player *p = GetPlayer(v->owner);
++
++	if (VehicleHasDepotOrders(v)) return false; // The vehicle will end up in the hangar eventually on it's own
++
++	/* Does an engine replacement exist for this vehicle? */
++	replace_engine = EngineReplacementForPlayer(p, v->engine_type, v->group_id);
++	if (replace_engine == INVALID_ENGINE) {
++		if (!p->engine_renew) return false; // autorenewal switched off
++		if ((v->age - v->max_age) < p->engine_renew_months * 30) {
++			/* Player has autorenewal switched off, or the vehicle is not old enough => No need to replace it */
++			return false;
++		}
++		/* autorenew means replacing the engine with one of the same type */
++		replace_engine = v->engine_type;
++	}
++
++	/* Either the engine should be replaced, or renewed.
++	 * Next question, is it useful to do now?
++	 */
++	if (!IsEngineBuildable(replace_engine, v->type, v->owner)) {
++		/* Engine is not buildable anymore */
++		return false;
++	}
++
++	/* Since p may be different from _current_player, the DoCommand and the
++	 * CmdBuild*vehicle*() functions cannot be used here
++	 */
++	Money money_needed;
++	switch (v->type) {
++		case VEH_TRAIN:    money_needed = EstimateTrainCost(replace_engine); break;
++		case VEH_ROAD:     money_needed = EstimateRoadVehCost(replace_engine); break;
++		case VEH_SHIP:     money_needed = EstimateShipCost(replace_engine); break;
++		case VEH_AIRCRAFT: money_needed = EstimateAircraftCost(replace_engine); break;
++		default: return false; // Weird vehicle type, don't bother replacing/renewing it
++	}
++
++	if (p->player_money < (p->engine_renew_money + (2 * money_needed))) {
++		/* We lack enough money to request the replacement right away.
++		 * We want 2*(the price of the new vehicle) and not looking at
++		 * the value of the vehicle we are going to sell.
++		 * The reason is that we don't want to send a whole lot of
++		 * vehicles to depots when we only have enough money to replace
++		 * a few.
++		 * Remember this happens in the background so the user can't stop this.
++		 */
++		return false;
++	}
++
++	/* We found no reason NOT to replace/renew the vehicle so we will send it there at once */
++	return true;
++}
++
++/**
++ * Decide whether vehicle needs service (needs to go to a depot).
++ * A vehicle may need service either for maintenance or for an update (a renewal or replacement).
++ * @param v Vehicle to check.
++ * @return \c true if service is needed, \c false otherwise.
++ */
++bool VehicleNeedsService(const Vehicle *v)
++{
++	return VehicleNeedsMaintenance(v) || VehicleNeedsUpdate(v);
++}
++
++
++
++
++
+ StringID VehicleInTheWayErrMsg(const Vehicle* v)
+ {
+ 	switch (v->type) {
+@@ -2211,7 +2312,7 @@
+ 	v->vehstatus |= VS_HIDDEN;
+ 	v->cur_speed = 0;
+ 
+-	VehicleServiceInDepot(v);
++	VehicleMaintenanceInDepot(v);
+ 
+ 	TriggerVehicle(v, VEHICLE_TRIGGER_DEPOT);
+ 
+Index: src/aircraft_cmd.cpp
+===================================================================
+--- src/aircraft_cmd.cpp	(revision 12225)
++++ src/aircraft_cmd.cpp	(working copy)
+@@ -234,9 +234,14 @@
+ 	height = spr->height;
+ }
+ 
+-static CommandCost EstimateAircraftCost(EngineID engine, const AircraftVehicleInfo *avi)
++/**
++ * Compute cost of constructing a new aircraft
++ * @param engine Aircraft to build
++ */
++Money EstimateAircraftCost(EngineID engine)
+ {
+-	return CommandCost(EXPENSES_NEW_VEHICLES, GetEngineProperty(engine, 0x0B, avi->base_cost) * (_price.aircraft_base >> 3) >> 5);
++	const AircraftVehicleInfo *avi = AircraftVehInfo(engine);
++	return GetEngineProperty(engine, 0x0B, avi->base_cost) * (_price.aircraft_base >> 3) >> 5;
+ }
+ 
+ 
+@@ -276,8 +281,7 @@
+ {
+ 	if (!IsEngineBuildable(p1, VEH_AIRCRAFT, _current_player)) return_cmd_error(STR_AIRCRAFT_NOT_AVAILABLE);
+ 
+-	const AircraftVehicleInfo *avi = AircraftVehInfo(p1);
+-	CommandCost value = EstimateAircraftCost(p1, avi);
++	CommandCost value = CommandCost(EXPENSES_NEW_VEHICLES, EstimateAircraftCost(p1));
+ 
+ 	/* to just query the cost, it is not neccessary to have a valid tile (automation/AI) */
+ 	if (flags & DC_QUERY_COST) return value;
+@@ -287,6 +291,8 @@
+ 	/* Prevent building aircraft types at places which can't handle them */
+ 	if (!CanAircraftUseStation(p1, tile)) return CMD_ERROR;
+ 
++	const AircraftVehicleInfo *avi = AircraftVehInfo(p1);
++
+ 	/* Allocate 2 or 3 vehicle structs, depending on type
+ 	 * vl[0] = aircraft, vl[1] = shadow, [vl[2] = rotor] */
+ 	Vehicle *vl[3];
+@@ -704,9 +710,9 @@
+ 
+ static void CheckIfAircraftNeedsService(Vehicle *v)
+ {
+-	if (_patches.servint_aircraft == 0 || !VehicleNeedsService(v)) return;
++	if (!VehicleNeedsService(v)) return;
+ 	if (v->IsInDepot()) {
+-		VehicleServiceInDepot(v);
++		VehicleMaintenanceInDepot(v);
+ 		return;
+ 	}
+ 
+@@ -715,6 +721,8 @@
+ 	if (st->IsValid() && st->airport_tile != 0 && st->Airport()->terminals != NULL) {
+ //		printf("targetairport = %d, st->index = %d\n", v->u.air.targetairport, st->index);
+ //		v->u.air.targetairport = st->index;
++		if (v->current_order.type == OT_LOADING)
++			v->LeaveStation(); // Remove v from st data structures
+ 		v->current_order.type = OT_GOTO_DEPOT;
+ 		v->current_order.flags = OFB_NON_STOP;
+ 		InvalidateWindowWidget(WC_VEHICLE_VIEW, v->index, VVW_WIDGET_START_STOP_VEH);
+@@ -1551,52 +1559,13 @@
+ 		}
+ 	}
+ 
+-	VehicleServiceInDepot(v);
++	VehicleMaintenanceInDepot(v);
+ 	SetAircraftPosition(v, v->x_pos, v->y_pos, v->z_pos);
+ 	InvalidateWindowData(WC_VEHICLE_DEPOT, v->tile);
+ 	InvalidateWindowClasses(WC_AIRCRAFT_LIST);
+ }
+ 
+-/** Checks if an aircraft should head towards a hangar because it needs replacement
+- * @param *v the vehicle to test
+- * @return true if the aircraft should head towards a hangar
+- */
+-static inline bool CheckSendAircraftToHangarForReplacement(const Vehicle *v)
+-{
+-	EngineID new_engine;
+-	Player *p = GetPlayer(v->owner);
+ 
+-	if (VehicleHasDepotOrders(v)) return false; // The aircraft will end up in the hangar eventually on it's own
+-
+-	new_engine = EngineReplacementForPlayer(p, v->engine_type, v->group_id);
+-
+-	if (new_engine == INVALID_ENGINE) {
+-		/* There is no autoreplace assigned to this EngineID so we will set it to renew to the same type if needed */
+-		new_engine = v->engine_type;
+-
+-		if(!p->engine_renew || (v->age - v->max_age) < p->engine_renew_months * 30) {
+-			/* No need to replace the aircraft */
+-			return false;
+-		}
+-	}
+-
+-	if (!HasBit(GetEngine(new_engine)->player_avail, v->owner)) {
+-		/* Engine is not buildable anymore */
+-		return false;
+-	}
+-
+-	if (p->player_money < (p->engine_renew_money + (2 * DoCommand(0, new_engine, 0, DC_QUERY_COST, CMD_BUILD_AIRCRAFT).GetCost()))) {
+-		/* We lack enough money to request the replacement right away.
+-		 * We want 2*(the price of the new vehicle) and not looking at the value of the vehicle we are going to sell.
+-		 * The reason is that we don't want to send a whole lot of vehicles to the hangars when we only have enough money to replace a single one.
+-		 * Remember this happens in the background so the user can't stop this. */
+-		return false;
+-	}
+-
+-	/* We found no reason NOT to send the aircraft to a hangar so we will send it there at once */
+-	return true;
+-}
+-
+ ////////////////////////////////////////////////////////////////////////////////
+ ///////////////////   AIRCRAFT MOVEMENT SCHEME  ////////////////////////////////
+ ////////////////////////////////////////////////////////////////////////////////
+@@ -1731,7 +1700,7 @@
+ 	AircraftNextAirportPos_and_Order(v);
+ 
+ 	/* Send the helicopter to a hangar if needed for replacement */
+-	if (CheckSendAircraftToHangarForReplacement(v)) {
++	if (VehicleNeedsUpdate(v)) {
+ 		_current_player = v->owner;
+ 		DoCommand(v->tile, v->index, DEPOT_SERVICE | DEPOT_LOCATE_HANGAR, DC_EXEC, CMD_SEND_AIRCRAFT_TO_HANGAR);
+ 		_current_player = OWNER_NONE;
+@@ -1783,7 +1752,7 @@
+ 	AircraftLandAirplane(v);  // maybe crash airplane
+ 
+ 	/* check if the aircraft needs to be replaced or renewed and send it to a hangar if needed */
+-	if (CheckSendAircraftToHangarForReplacement(v)) {
++	if (VehicleNeedsUpdate(v)) {
+ 		_current_player = v->owner;
+ 		DoCommand(v->tile, v->index, DEPOT_SERVICE, DC_EXEC, CMD_SEND_AIRCRAFT_TO_HANGAR);
+ 		_current_player = OWNER_NONE;

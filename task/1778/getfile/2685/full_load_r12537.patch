@@ -1,0 +1,308 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 12537)
++++ src/settings.cpp	(working copy)
+@@ -1451,6 +1451,7 @@
+ 	/***************************************************************************/
+ 	/* Station section of the GUI-configure patches window */
+ 	SDT_BOOL(Patches, join_stations,           0, 0,  true,        STR_CONFIG_PATCHES_JOINSTATIONS,       NULL),
++	/* This is now order-based and only controls the default when enabling full load */
+ 	SDT_BOOL(Patches, full_load_any,           0,NN,  true,        STR_CONFIG_PATCHES_FULLLOADANY,        NULL),
+ 	SDT_BOOL(Patches, improved_load,           0,NN, false,        STR_CONFIG_PATCHES_IMPROVEDLOAD,       NULL),
+ 	SDT_BOOL(Patches, selectgoods,             0, 0,  true,        STR_CONFIG_PATCHES_SELECTGOODS,        NULL),
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 12537)
++++ src/lang/english.txt	(working copy)
+@@ -1026,7 +1026,7 @@
+ STR_CONFIG_PATCHES_REALISTICACCEL                               :{LTBLUE}Enable realistic acceleration for trains: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_FORBID_90_DEG                                :{LTBLUE}Forbid trains and ships to make 90 deg turns: {ORANGE}{STRING1} {LTBLUE} (requires NPF)
+ STR_CONFIG_PATCHES_JOINSTATIONS                                 :{LTBLUE}Join train stations built next to each other: {ORANGE}{STRING1}
+-STR_CONFIG_PATCHES_FULLLOADANY                                  :{LTBLUE}Leave station when any cargo is full, if 'full load': {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_FULLLOADANY                                  :{LTBLUE}Default for 'full load': Leave station when any cargo is full: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_IMPROVEDLOAD                                 :{LTBLUE}Use improved loading algorithm: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_GRADUAL_LOADING                              :{LTBLUE}Load vehicles gradually: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_INFLATION                                    :{LTBLUE}Inflation: {ORANGE}{STRING1}
+@@ -2659,14 +2659,19 @@
+ STR_GO_TO_TRANSFER                                              :Go to {STATION} (Transfer and take cargo)
+ STR_8807_GO_TO_UNLOAD                                           :Go to {STATION} (Unload)
+ STR_GO_TO_TRANSFER_UNLOAD                                       :Go to {STATION} (Transfer and leave empty)
+-STR_8808_GO_TO_LOAD                                             :Go to {STATION} (Load)
+-STR_GO_TO_TRANSFER_LOAD                                         :Go to {STATION} (Transfer and wait for full load)
++STR_8808_GO_TO_LOAD                                             :Go to {STATION} (Load any cargo)
++STR_GO_TO_TRANSFER_LOAD                                         :Go to {STATION} (Transfer and wait for full load any)
+ STR_880A_GO_NON_STOP_TO                                         :Go non-stop to {STATION}
+ STR_GO_TO_NON_STOP_TRANSFER                                     :Go non-stop to {STATION} (Transfer and take cargo)
+ STR_880B_GO_NON_STOP_TO_UNLOAD                                  :Go non-stop to {STATION} (Unload)
+ STR_GO_TO_NON_STOP_TRANSFER_UNLOAD                              :Go non-stop to {STATION} (Transfer and leave empty)
+-STR_880C_GO_NON_STOP_TO_LOAD                                    :Go non-stop to {STATION} (Load)
+-STR_GO_TO_NON_STOP_TRANSFER_LOAD                                :Go non-stop to {STATION} (Transfer and wait for full load)
++STR_880C_GO_NON_STOP_TO_LOAD                                    :Go non-stop to {STATION} (Load any cargo)
++STR_GO_TO_NON_STOP_TRANSFER_LOAD                                :Go non-stop to {STATION} (Transfer and wait for full load any)
++STR_GO_TO_LOAD_ALL                                              :Go to {STATION} (Load all cargo)
++STR_GO_TO_TRANSFER_LOAD_ALL                                     :Go to {STATION} (Transfer and wait for full load all)
++STR_GO_NON_STOP_LOAD_ALL                                        :Go non-stop to {STATION} (Load all cargo)
++STR_GO_NON_STOP_TRANSFER_LOAD_ALL                               :Go non-stop to {STATION} (Transfer and wait for full load all)
++
+ STR_GO_TO_TRAIN_DEPOT                                           :Go to {TOWN} Train Depot
+ STR_SERVICE_AT_TRAIN_DEPOT                                      :Service at {TOWN} Train Depot
+ STR_880F_GO_NON_STOP_TO_TRAIN_DEPOT                             :Go non-stop to {TOWN} Train Depot
+Index: src/saveload.cpp
+===================================================================
+--- src/saveload.cpp	(revision 12537)
++++ src/saveload.cpp	(working copy)
+@@ -34,7 +34,7 @@
+ 
+ #include "table/strings.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 92;
++extern const uint16 SAVEGAME_VERSION = 93;
+ uint16 _sl_version;       ///< the major savegame version identifier
+ byte   _sl_minor_version; ///< the minor savegame version, DO NOT USE!
+ 
+Index: src/order_type.h
+===================================================================
+--- src/order_type.h	(revision 12537)
++++ src/order_type.h	(working copy)
+@@ -46,9 +46,10 @@
+ 	/** If OFB_TRANSFER is not set, drop any cargo loaded. If accepted, deliver, otherwise cargo remains at the station.
+       * No new cargo is loaded onto the vehicle whatsoever */
+ 	OFB_UNLOAD             = 0x2,
+-	/** Wait for full load of all vehicles, or of at least one cargo type, depending on patch setting
+-	  * @todo make this two different flags */
++	/** Wait for full load of all vehicles, or of at least one cargo type, depending on further flags */
+ 	OFB_FULL_LOAD          = 0x4,
++	/** Wait for full load of all vehicles (if not set: of at least one cargo type) */
++	OFB_FULL_LOAD_ALL      = 0x10,
+ 
+ 	//Flags for depots:
+ 	/** The current depot-order was initiated because it was in the vehicle's order list */
+@@ -72,6 +73,7 @@
+ 	OF_TRANSFER          = 0,
+ 	OF_UNLOAD            = 1,
+ 	OF_FULL_LOAD         = 2,
++	OF_FULL_LOAD_ALL     = 4,
+ 	OF_PART_OF_ORDERS    = 1,
+ 	OF_HALT_IN_DEPOT     = 2,
+ 	OF_SERVICE_IF_NEEDED = 2,
+Index: src/order_cmd.cpp
+===================================================================
+--- src/order_cmd.cpp	(revision 12537)
++++ src/order_cmd.cpp	(working copy)
+@@ -228,7 +228,9 @@
+ 			switch (new_order.flags) {
+ 				case 0:
+ 				case OFB_FULL_LOAD:
++				case OFB_FULL_LOAD | OFB_FULL_LOAD_ALL:
+ 				case OFB_FULL_LOAD | OFB_TRANSFER:
++				case OFB_FULL_LOAD | OFB_TRANSFER | OFB_FULL_LOAD_ALL:
+ 				case OFB_UNLOAD:
+ 				case OFB_UNLOAD | OFB_TRANSFER:
+ 				case OFB_TRANSFER:
+@@ -236,7 +238,9 @@
+ 
+ 				case OFB_NON_STOP:
+ 				case OFB_NON_STOP | OFB_FULL_LOAD:
++				case OFB_NON_STOP | OFB_FULL_LOAD | OFB_FULL_LOAD_ALL:
+ 				case OFB_NON_STOP | OFB_FULL_LOAD | OFB_TRANSFER:
++				case OFB_NON_STOP | OFB_FULL_LOAD | OFB_TRANSFER | OFB_FULL_LOAD_ALL:
+ 				case OFB_NON_STOP | OFB_UNLOAD:
+ 				case OFB_NON_STOP | OFB_UNLOAD | OFB_TRANSFER:
+ 				case OFB_NON_STOP | OFB_TRANSFER:
+@@ -679,7 +683,7 @@
+ 	VehicleID veh   = GB(p1,  0, 16);
+ 
+ 	if (!IsValidVehicleID(veh)) return CMD_ERROR;
+-	if (p2 != OF_FULL_LOAD && p2 != OF_UNLOAD && p2 != OF_NON_STOP && p2 != OF_TRANSFER) return CMD_ERROR;
++	if (p2 != OF_FULL_LOAD && p2 != OF_FULL_LOAD_ALL && p2 != OF_UNLOAD && p2 != OF_NON_STOP && p2 != OF_TRANSFER) return CMD_ERROR;
+ 
+ 	v = GetVehicle(veh);
+ 
+@@ -700,10 +704,22 @@
+ 		case OF_FULL_LOAD:
+ 			ToggleBit(order->flags, OF_FULL_LOAD);
+ 			if (order->type != OT_GOTO_DEPOT) ClrBit(order->flags, OF_UNLOAD);
++			if (HasBit(order->flags, OF_FULL_LOAD) && !_patches.full_load_any) {
++				SetBit(order->flags, OF_FULL_LOAD_ALL);
++			} else {
++				ClrBit(order->flags, OF_FULL_LOAD_ALL);
++			}
+ 			break;
++		case OF_FULL_LOAD_ALL:
++			if (HasBit(order->flags, OF_FULL_LOAD)) {
++				ToggleBit(order->flags, OF_FULL_LOAD_ALL);
++				if (order->type != OT_GOTO_DEPOT) ClrBit(order->flags, OF_UNLOAD);
++			}
++			break;
+ 		case OF_UNLOAD:
+ 			ToggleBit(order->flags, OF_UNLOAD);
+ 			ClrBit(order->flags, OF_FULL_LOAD);
++			ClrBit(order->flags, OF_FULL_LOAD_ALL);
+ 			break;
+ 		case OF_NON_STOP:
+ 			ToggleBit(order->flags, OF_NON_STOP);
+@@ -721,7 +737,7 @@
+ 			u = GetFirstVehicleFromSharedList(v);
+ 			DeleteOrderWarnings(u);
+ 			for (; u != NULL; u = u->next_shared) {
+-				/* Toggle u->current_order "Full load" flag if it changed.
++				/* Toggle u->current_order "Full load" flags if they changed.
+ 				 * However, as the same flag is used for depot orders, check
+ 				 * whether we are not going to a depot as there are three
+ 				 * cases where the full load flag can be active and only
+@@ -731,9 +747,13 @@
+ 				 * when this function is called.
+ 				 */
+ 				if (sel_ord == u->cur_order_index &&
+-						u->current_order.type != OT_GOTO_DEPOT &&
+-						HasBit(u->current_order.flags, OF_FULL_LOAD) != HasBit(order->flags, OF_FULL_LOAD)) {
+-					ToggleBit(u->current_order.flags, OF_FULL_LOAD);
++						u->current_order.type != OT_GOTO_DEPOT) {
++					if (HasBit(u->current_order.flags, OF_FULL_LOAD) != HasBit(order->flags, OF_FULL_LOAD)) {
++						ToggleBit(u->current_order.flags, OF_FULL_LOAD);
++					}
++					if (HasBit(u->current_order.flags, OF_FULL_LOAD_ALL) != HasBit(order->flags, OF_FULL_LOAD_ALL)) {
++						ToggleBit(u->current_order.flags, OF_FULL_LOAD_ALL);
++					}
+ 				}
+ 				InvalidateVehicleOrder(u);
+ 			}
+Index: src/timetable_gui.cpp
+===================================================================
+--- src/timetable_gui.cpp	(revision 12537)
++++ src/timetable_gui.cpp	(working copy)
+@@ -146,7 +146,7 @@
+ 						}
+ 					}
+ 
+-					if (order->flags & OFB_FULL_LOAD) string++; // Service at orders
++					if (order->flags & OFB_SERVICE_IF_NEEDED) string++; // Service at orders
+ 
+ 					SetDParam(0, string);
+ 				} break;
+Index: src/order_gui.cpp
+===================================================================
+--- src/order_gui.cpp	(revision 12537)
++++ src/order_gui.cpp	(working copy)
+@@ -92,21 +92,36 @@
+ }
+ 
+ static StringID StationOrderStrings[] = {
+-	STR_8806_GO_TO,
+-	STR_GO_TO_TRANSFER,
+-	STR_8807_GO_TO_UNLOAD,
+-	STR_GO_TO_TRANSFER_UNLOAD,
+-	STR_8808_GO_TO_LOAD,
+-	STR_GO_TO_TRANSFER_LOAD,
++	STR_8806_GO_TO,                     // none
++	STR_GO_TO_TRANSFER,                 // OFB_TRANSFER
++	STR_8807_GO_TO_UNLOAD,              // OFB_UNLOAD
++	STR_GO_TO_TRANSFER_UNLOAD,          // OFB_UNLOAD | OFB_TRANSFER
++	STR_8808_GO_TO_LOAD,                // OFB_FULL_LOAD
++	STR_GO_TO_TRANSFER_LOAD,            // OFB_FULL_LOAD | OFB_TRANSFER
+ 	STR_NULL,
+ 	STR_NULL,
+-	STR_880A_GO_NON_STOP_TO,
+-	STR_GO_TO_NON_STOP_TRANSFER,
+-	STR_880B_GO_NON_STOP_TO_UNLOAD,
+-	STR_GO_TO_NON_STOP_TRANSFER_UNLOAD,
+-	STR_880C_GO_NON_STOP_TO_LOAD,
+-	STR_GO_TO_NON_STOP_TRANSFER_LOAD,
+-	STR_NULL
++	STR_880A_GO_NON_STOP_TO,            // OFB_NON_STOP
++	STR_GO_TO_NON_STOP_TRANSFER,        // OFB_NON_STOP | OFB_TRANSFER
++	STR_880B_GO_NON_STOP_TO_UNLOAD,     // OFB_NON_STOP | OFB_UNLOAD
++	STR_GO_TO_NON_STOP_TRANSFER_UNLOAD, // OFB_NON_STOP | OFB_UNLOAD | OFB_TRANSFER
++	STR_880C_GO_NON_STOP_TO_LOAD,       // OFB_NON_STOP | OFB_FULL_LOAD
++	STR_GO_TO_NON_STOP_TRANSFER_LOAD,   // OFB_NON_STOP | OFB_FULL_LOAD | OFB_TRANSFER
++	STR_NULL,
++	STR_NULL,
++	STR_NULL,
++	STR_NULL,
++	STR_NULL,
++	STR_NULL,
++	STR_GO_TO_LOAD_ALL,                 // OFB_FULL_LOAD_ALL | OFB_FULL_LOAD
++	STR_GO_TO_TRANSFER_LOAD_ALL,        // OFB_FULL_LOAD_ALL | OFB_FULL_LOAD | OFB_TRANSFER
++	STR_NULL,
++	STR_NULL,
++	STR_NULL,
++	STR_NULL,
++	STR_NULL,
++	STR_NULL,
++	STR_GO_NON_STOP_LOAD_ALL,           // OFB_FULL_LOAD_ALL | OFB_NON_STOP | OFB_FULL_LOAD
++	STR_GO_NON_STOP_TRANSFER_LOAD_ALL,  // OFB_FULL_LOAD_ALL | OFB_NON_STOP | OFB_FULL_LOAD | OFB_TRANSFER
+ };
+ 
+ static void DrawOrdersWindow(Window *w)
+@@ -222,7 +237,7 @@
+ 						}
+ 					}
+ 
+-					if (order->flags & OFB_FULL_LOAD) s++; /* service at */
++					if (order->flags & OFB_SERVICE_IF_NEEDED) s++; /* service at */
+ 
+ 					SetDParam(1, s);
+ 					if (order->refit_cargo < NUM_CARGO) {
+@@ -419,7 +434,9 @@
+  */
+ static void OrderClick_FullLoad(Window *w, const Vehicle *v)
+ {
+-	DoCommandP(v->tile, v->index + (OrderGetSel(w) << 16), OF_FULL_LOAD, NULL, CMD_MODIFY_ORDER | CMD_MSG(STR_8835_CAN_T_MODIFY_THIS_ORDER));
++	uint32 p2 = _ctrl_pressed ? OF_FULL_LOAD_ALL : OF_FULL_LOAD;
++
++	DoCommandP(v->tile, v->index + (OrderGetSel(w) << 16), p2, NULL, CMD_MODIFY_ORDER | CMD_MSG(STR_8835_CAN_T_MODIFY_THIS_ORDER));
+ }
+ 
+ /**
+Index: src/economy.cpp
+===================================================================
+--- src/economy.cpp	(revision 12537)
++++ src/economy.cpp	(working copy)
+@@ -1730,7 +1730,7 @@
+ 	} else {
+ 		bool finished_loading = true;
+ 		if (HasBit(v->current_order.flags, OF_FULL_LOAD)) {
+-			if (_patches.full_load_any) {
++			if (!HasBit(v->current_order.flags, OF_FULL_LOAD_ALL)) {
+ 				/* if the aircraft carries passengers and is NOT full, then
+ 				 * continue loading, no matter how much mail is in */
+ 				if ((v->type == VEH_AIRCRAFT && IsCargoInClass(v->cargo_type, CC_PASSENGERS) && v->cargo_cap != v->cargo.Count()) ||
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 12537)
++++ src/vehicle.cpp	(working copy)
+@@ -3135,7 +3135,7 @@
+ 			this->current_order.dest == this->last_station_visited) {
+ 		/* Arriving at the ordered station.
+ 		 * Keep the load/unload flags, as we (obviously) still need them. */
+-		this->current_order.flags &= OFB_FULL_LOAD | OFB_UNLOAD | OFB_TRANSFER;
++		this->current_order.flags &= OFB_FULL_LOAD | OFB_FULL_LOAD_ALL | OFB_UNLOAD | OFB_TRANSFER;
+ 
+ 		/* Furthermore add the Non Stop flag to mark that this station
+ 		 * is the actual destination of the vehicle, which is (for example)
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 12537)
++++ src/openttd.cpp	(working copy)
+@@ -2441,6 +2441,21 @@
+ 		}
+ 	}
+ 
++	if (CheckSavegameVersion(93) && !_patches.full_load_any) {
++		/* Selection of full-load-any or full-load-all is now selected by an
++		 * additional order flag OFB_FULL_LOAD_ALL instead of by a global patch
++		 * setting (the patch setting is still there, but only selects the default
++		 * when enabling 'full load' on an order). If _patches.full_load_any was
++		 * not set in loaded old savegame we have to set this flag on any order
++		 * with OFB_FULL_LOAD */
++		Order *order;
++		FOR_ALL_ORDERS(order) {
++			if (order->type == OT_GOTO_STATION && (order->flags & OFB_FULL_LOAD)) {
++				order->flags |= OFB_FULL_LOAD_ALL;
++			}
++		}
++	}
++
+ 	return InitializeWindowsAndCaches();
+ }
+ 

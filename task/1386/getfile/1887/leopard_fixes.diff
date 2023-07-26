@@ -1,0 +1,209 @@
+Index: src/sound/cocoa_s.cpp
+===================================================================
+--- src/sound/cocoa_s.cpp	(revision 11386)
++++ src/sound/cocoa_s.cpp	(working copy)
+@@ -31,9 +31,9 @@
+ static AudioUnit _outputAudioUnit;
+ 
+ /* The CoreAudio callback */
+-static OSStatus audioCallback(void *inRefCon, AudioUnitRenderActionFlags inActionFlags, const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber, AudioBuffer *ioData)
++static OSStatus audioCallback(void *inRefCon, AudioUnitRenderActionFlags *inActionFlags, const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber, UInt32 inNumberFrames, AudioBufferList * ioData)
+ {
+-	MxMixSamples(ioData->mData, ioData->mDataByteSize / 4);
++	MxMixSamples(ioData->mBuffers[0].mData, ioData->mBuffers[0].mDataByteSize / 4);
+ 
+ 	return noErr;
+ }
+@@ -43,7 +43,7 @@
+ {
+ 	Component comp;
+ 	ComponentDescription desc;
+-	struct AudioUnitInputCallback callback;
++	struct AURenderCallbackStruct callback;
+ 	AudioStreamBasicDescription requestedDesc;
+ 
+ 	/* Setup a AudioStreamBasicDescription with the requested format */
+@@ -65,9 +65,9 @@
+ 
+ 
+ 	/* Locate the default output audio unit */
+-	desc.componentType = kAudioUnitComponentType;
+-	desc.componentSubType = kAudioUnitSubType_Output;
+-	desc.componentManufacturer = kAudioUnitID_DefaultOutput;
++	desc.componentType = kAudioUnitType_Output;
++	desc.componentSubType = kAudioUnitSubType_HALOutput;
++	desc.componentManufacturer = kAudioUnitManufacturer_Apple;
+ 	desc.componentFlags = 0;
+ 	desc.componentFlagsMask = 0;
+ 
+@@ -93,8 +93,8 @@
+ 	/* Set the audio callback */
+ 	callback.inputProc = audioCallback;
+ 	callback.inputProcRefCon = NULL;
+-	if (AudioUnitSetProperty(_outputAudioUnit, kAudioUnitProperty_SetInputCallback, kAudioUnitScope_Input, 0, &callback, sizeof(callback)) != noErr) {
+-		return "cocoa_s: Failed to start CoreAudio: AudioUnitSetProperty (kAudioUnitProperty_SetInputCallback)";
++	if (AudioUnitSetProperty(_outputAudioUnit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &callback, sizeof(callback)) != noErr) {
++		return "cocoa_s: Failed to start CoreAudio: AudioUnitSetProperty (kAudioUnitProperty_SetRenderCallback)";
+ 	}
+ 
+ 	/* Finally, start processing of the audio unit */
+@@ -109,7 +109,7 @@
+ 
+ void SoundDriver_Cocoa::Stop()
+ {
+-	struct AudioUnitInputCallback callback;
++	struct AURenderCallbackStruct callback;
+ 
+ 	/* stop processing the audio unit */
+ 	if (AudioOutputUnitStop(_outputAudioUnit) != noErr) {
+@@ -120,8 +120,8 @@
+ 	/* Remove the input callback */
+ 	callback.inputProc = 0;
+ 	callback.inputProcRefCon = 0;
+-	if (AudioUnitSetProperty(_outputAudioUnit, kAudioUnitProperty_SetInputCallback, kAudioUnitScope_Input, 0, &callback, sizeof(callback)) != noErr) {
+-		DEBUG(driver, 0, "cocoa_s: Core_CloseAudio: AudioUnitSetProperty (kAudioUnitProperty_SetInputCallback) failed");
++	if (AudioUnitSetProperty(_outputAudioUnit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &callback, sizeof(callback)) != noErr) {
++		DEBUG(driver, 0, "cocoa_s: Core_CloseAudio: AudioUnitSetProperty (kAudioUnitProperty_SetRenderCallback) failed");
+ 		return;
+ 	}
+ 
+Index: src/music/qtmidi.cpp
+===================================================================
+--- src/music/qtmidi.cpp	(revision 11386)
++++ src/music/qtmidi.cpp	(working copy)
+@@ -55,48 +55,24 @@
+ 
+ 
+ /**
+- * Converts a Unix-like pathname to a @c FSSpec structure which may be
+- * used with functions from several MacOS X frameworks (Carbon, QuickTime,
+- * etc). The pointed file or directory must exist.
+- *
+- * @param *path A string containing a Unix-like path.
+- * @param *spec Pointer to a @c FSSpec structure where the result will be
+- *              stored.
+- * @return Wether the conversion was successful.
+- */
+-static bool PathToFSSpec(const char *path, FSSpec *spec)
+-{
+-	FSRef ref;
+-	assert(spec != NULL);
+-	assert(path != NULL);
+-
+-	return
+-		FSPathMakeRef((UInt8*)path, &ref, NULL) == noErr &&
+-		FSGetCatalogInfo(&ref, kFSCatInfoNone, NULL, NULL, spec, NULL) == noErr;
+-}
+-
+-
+-/**
+  * Sets the @c OSType of a given file to @c 'Midi', but only if it's not
+  * already set.
+  *
+  * @param *spec A @c FSSpec structure referencing a file.
+  */
+-static void SetMIDITypeIfNeeded(const FSSpec *spec)
++static void SetMIDITypeIfNeeded(const FSRef *ref)
+ {
+-	FSRef ref;
+ 	FSCatalogInfo catalogInfo;
+ 
+-	assert(spec);
++	assert(ref);
+ 
+-	if (noErr != FSpMakeFSRef(spec, &ref)) return;
+-	if (noErr != FSGetCatalogInfo(&ref, kFSCatInfoNodeFlags | kFSCatInfoFinderInfo, &catalogInfo, NULL, NULL, NULL)) return;
++	if (noErr != FSGetCatalogInfo(ref, kFSCatInfoNodeFlags | kFSCatInfoFinderInfo, &catalogInfo, NULL, NULL, NULL)) return;
+ 	if (!(catalogInfo.nodeFlags & kFSNodeIsDirectoryMask)) {
+ 		FileInfo * const info = (FileInfo *) catalogInfo.finderInfo;
+ 		if (info->fileType != midiType && !(info->finderFlags & kIsAlias)) {
+ 			OSErr e;
+ 			info->fileType = midiType;
+-			e = FSSetCatalogInfo(&ref, kFSCatInfoFinderInfo, &catalogInfo);
++			e = FSSetCatalogInfo(ref, kFSCatInfoFinderInfo, &catalogInfo);
+ 			if (e == noErr) {
+ 				DEBUG(driver, 3, "qtmidi: changed filetype to 'Midi'");
+ 			} else {
+@@ -119,6 +95,7 @@
+ 	int fd;
+ 	int ret;
+ 	char magic[4];
++	FSRef fsref;
+ 	FSSpec fsspec;
+ 	short refnum = 0;
+ 	short resid  = 0;
+@@ -144,9 +121,10 @@
+ 	if (magic[0] != 'M' || magic[1] != 'T' || magic[2] != 'h' || magic[3] != 'd')
+ 		return false;
+ 
+-	if (!PathToFSSpec(path, &fsspec)) return false;
+-	SetMIDITypeIfNeeded(&fsspec);
++	if (noErr != FSPathMakeRef((const UInt8 *) path, &fsref, NULL)) return false;
++	SetMIDITypeIfNeeded(&fsref);
+ 
++	if (noErr != FSGetCatalogInfo(&fsref, kFSCatInfoNone, NULL, NULL, &fsspec, NULL)) return false;
+ 	if (OpenMovieFile(&fsspec, &refnum, fsRdPerm) != noErr) return false;
+ 	DEBUG(driver, 3, "qtmidi: '%s' successfully opened", path);
+ 
+Index: src/unix.cpp
+===================================================================
+--- src/unix.cpp	(revision 11386)
++++ src/unix.cpp	(working copy)
+@@ -230,7 +230,7 @@
+ 	/* Work around buggy iconv implementation where inbuf is wrongly typed as
+ 	 * non-const. Correct implementation is at
+ 	 * http://www.opengroup.org/onlinepubs/007908799/xsh/iconv.html */
+-#if defined (__GLIBC__) || defined (__GNU_LIBRARY__)
++#ifdef HAVE_BROKEN_ICONV
+ 	char *inbuf = (char*)name;
+ #else
+ 	const char *inbuf = name;
+Index: config.lib
+===================================================================
+--- config.lib	(revision 11386)
++++ config.lib	(working copy)
+@@ -1008,6 +1008,10 @@
+ 			CFLAGS="$CFLAGS -I$with_iconv/include"
+ 			LIBS="$LIBS -L$with_iconv/lib"
+ 		fi
++		
++		if [ "$have_broken_iconv" != "no" ]; then
++			CFLAGS="$CFLAGS -DHAVE_BROKEN_ICONV"
++		fi
+ 	fi
+ 
+ 	if [ -n "$with_midi" ]; then
+@@ -1854,7 +1858,33 @@
+ 	log 2 "found iconv in $iconv"
+ 
+ 	log 1 "checking iconv... found"
++	
++	# Check if we need to work around buggy iconv implementation where inbuf
++	# is wrongly typed as non-const. Correct implementation is at
++	# http://www.opengroup.org/onlinepubs/007908799/xsh/iconv.html
++	 
++	cat > tmp.iconv.cpp << EOF
++#include "src/stdafx.h"
++#include <iconv.h>
++int main() {
++	static char buf[1024];
++	iconv_t convd = 0;
++	const char *inbuf = "";
++	char *outbuf  = buf;
++	size_t outlen = 1023;
++	size_t inlen  = 0;
++	return iconv(convd, &inbuf, &inlen, &outbuf, &outlen);
+ }
++EOF
++	execute="$cxx_host $CFLAGS -c tmp.iconv.cpp -o tmp.iconv -DTESTING 2>&1"
++	eval $execute >&/dev/null
++	ret=$?  
++	log 2 "executing $execute"
++	log 2 "  exit code $ret"
++	if [ "$ret" = "0" ]; then have_broken_iconv="no"; else have_broken_iconv="yes"; fi
++	log 1 "checking if iconv has non-const inbuf... $have_broken_iconv"
++	rm -f tmp.iconv tmp.iconv.cpp
++}
+ 
+ _detect_sort() {
+ 	sort_test_in="d

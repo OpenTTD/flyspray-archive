@@ -1,0 +1,482 @@
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(revision 11004)
++++ src/rail_cmd.cpp	(working copy)
+@@ -2175,7 +2175,74 @@
+ 	return VETSB_CONTINUE;
+ }
+ 
++static CommandCost TerraformTile_Track(TileIndex tile, uint32 flags, uint z_new, Slope tileh_new)
++{
++	if (IsPlainRailTile(tile)) {
++		uint z_old;
++		Slope tileh_old = GetTileSlope(tile, &z_old);
++		TrackBits rail_bits = GetTrackBits(tile);
+ 
++		_error_message = STR_1008_MUST_REMOVE_RAILROAD_TRACK;
++
++		/* When there is only a single horizontal/vertical track, one corner can be terraformed. */
++		Slope allowed_corner;
++		switch (rail_bits) {
++			case TRACK_BIT_RIGHT: allowed_corner = SLOPE_W; break;
++			case TRACK_BIT_UPPER: allowed_corner = SLOPE_S; break;
++			case TRACK_BIT_LEFT:  allowed_corner = SLOPE_E; break;
++			case TRACK_BIT_LOWER: allowed_corner = SLOPE_N; break;
++			default: return CMD_ERROR;
++		}
++
++		Slope track_corners = ComplementSlope(allowed_corner);
++
++		Foundation f_old = GetRailFoundation(tileh_old, rail_bits);
++		switch (f_old) {
++			case FOUNDATION_NONE:
++				/* Everything is valid, which only changes allowed_corner */
++
++				/* Compute height of track */
++				if (tileh_old == track_corners) z_old += TILE_HEIGHT;
++				if (tileh_new == track_corners) {
++					z_new += TILE_HEIGHT;
++				} else {
++					/* do not build a foundation */
++					if ((tileh_new != SLOPE_FLAT) && (tileh_new != allowed_corner)) return CMD_ERROR;
++				}
++
++				/* Track height must remain unchanged */
++				if (z_old != z_new) return CMD_ERROR;
++				break;
++
++			case FOUNDATION_LEVELED:
++				/* Is allowed_corner covered by the foundation? */
++				if ((tileh_old & allowed_corner) == 0) return CMD_ERROR;
++
++				/* allowed_corner may only be raised -> steep slope */
++				if ((z_old != z_new) || (tileh_new != (tileh_old | SLOPE_STEEP))) return CMD_ERROR;
++				break;
++
++			case FOUNDATION_STEEP_LOWER:
++				/* Only allow to lower highest corner */
++				if ((z_old != z_new) || (tileh_new != (tileh_old & ~SLOPE_STEEP))) return CMD_ERROR;
++				break;
++
++			case FOUNDATION_STEEP_HIGHER:
++				return CMD_ERROR;
++
++			default: NOT_REACHED();
++		}
++
++		/* Make the ground dirty */
++		if ((flags & DC_EXEC) != 0) SetRailGroundType(tile, RAIL_GROUND_BARREN);
++
++		/* allow terraforming, no extra costs */
++		return CommandCost();
++	}
++	return DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++}
++
++
+ extern const TileTypeProcs _tile_type_rail_procs = {
+ 	DrawTile_Track,           /* draw_tile_proc */
+ 	GetSlopeZ_Track,          /* get_slope_z_proc */
+@@ -2190,4 +2257,5 @@
+ 	NULL,                     /* get_produced_cargo_proc */
+ 	VehicleEnter_Track,       /* vehicle_enter_tile_proc */
+ 	GetFoundation_Track,      /* get_foundation_proc */
++	TerraformTile_Track,      /* terraform_tile_proc */
+ };
+Index: src/station_cmd.cpp
+===================================================================
+--- src/station_cmd.cpp	(revision 11004)
++++ src/station_cmd.cpp	(working copy)
+@@ -2878,7 +2878,12 @@
+ 	}
+ }
+ 
++static CommandCost TerraformTile_Station(TileIndex tile, uint32 flags, uint z_new, Slope tileh_new)
++{
++	return DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++}
+ 
++
+ extern const TileTypeProcs _tile_type_station_procs = {
+ 	DrawTile_Station,           /* draw_tile_proc */
+ 	GetSlopeZ_Station,          /* get_slope_z_proc */
+@@ -2893,6 +2898,7 @@
+ 	NULL,                       /* get_produced_cargo_proc */
+ 	VehicleEnter_Station,       /* vehicle_enter_tile_proc */
+ 	GetFoundation_Station,      /* get_foundation_proc */
++	TerraformTile_Station,      /* terraform_tile_proc */
+ };
+ 
+ static const SaveLoad _roadstop_desc[] = {
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revision 11004)
++++ src/town_cmd.cpp	(working copy)
+@@ -2303,6 +2303,11 @@
+ 	_town_sort_dirty = true;
+ }
+ 
++static CommandCost TerraformTile_Town(TileIndex tile, uint32 flags, uint z_new, Slope tileh_new)
++{
++	return DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++}
++
+ extern const TileTypeProcs _tile_type_town_procs = {
+ 	DrawTile_Town,           /* draw_tile_proc */
+ 	GetSlopeZ_Town,          /* get_slope_z_proc */
+@@ -2317,6 +2322,7 @@
+ 	NULL,                    /* get_produced_cargo_proc */
+ 	NULL,                    /* vehicle_enter_tile_proc */
+ 	GetFoundation_Town,      /* get_foundation_proc */
++	TerraformTile_Town,      /* terraform_tile_proc */
+ };
+ 
+ 
+Index: src/road_cmd.cpp
+===================================================================
+--- src/road_cmd.cpp	(revision 11004)
++++ src/road_cmd.cpp	(working copy)
+@@ -1388,7 +1388,12 @@
+ 	}
+ }
+ 
++static CommandCost TerraformTile_Road(TileIndex tile, uint32 flags, uint z_new, Slope tileh_new)
++{
++	return DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++}
+ 
++
+ extern const TileTypeProcs _tile_type_road_procs = {
+ 	DrawTile_Road,           /* draw_tile_proc */
+ 	GetSlopeZ_Road,          /* get_slope_z_proc */
+@@ -1403,4 +1408,5 @@
+ 	NULL,                    /* get_produced_cargo_proc */
+ 	VehicleEnter_Road,       /* vehicle_enter_tile_proc */
+ 	GetFoundation_Road,      /* get_foundation_proc */
++	TerraformTile_Road,      /* terraform_tile_proc */
+ };
+Index: src/tree_cmd.cpp
+===================================================================
+--- src/tree_cmd.cpp	(revision 11004)
++++ src/tree_cmd.cpp	(working copy)
+@@ -656,7 +656,12 @@
+ 	_trees_tick_ctr = 0;
+ }
+ 
++static CommandCost TerraformTile_Trees(TileIndex tile, uint32 flags, uint z_new, Slope tileh_new)
++{
++	return DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++}
+ 
++
+ extern const TileTypeProcs _tile_type_trees_procs = {
+ 	DrawTile_Trees,           /* draw_tile_proc */
+ 	GetSlopeZ_Trees,          /* get_slope_z_proc */
+@@ -671,4 +676,5 @@
+ 	NULL,                     /* get_produced_cargo_proc */
+ 	NULL,                     /* vehicle_enter_tile_proc */
+ 	GetFoundation_Trees,      /* get_foundation_proc */
++	TerraformTile_Trees,      /* terraform_tile_proc */
+ };
+Index: src/dummy_land.cpp
+===================================================================
+--- src/dummy_land.cpp	(revision 11004)
++++ src/dummy_land.cpp	(working copy)
+@@ -68,6 +68,11 @@
+ 	return 0;
+ }
+ 
++static CommandCost TerraformTile_Dummy(TileIndex tile, uint32 flags, uint z_new, Slope tileh_new)
++{
++	return_cmd_error(STR_0001_OFF_EDGE_OF_MAP);
++}
++
+ extern const TileTypeProcs _tile_type_dummy_procs = {
+ 	DrawTile_Dummy,           /* draw_tile_proc */
+ 	GetSlopeZ_Dummy,          /* get_slope_z_proc */
+@@ -82,4 +87,5 @@
+ 	NULL,                     /* get_produced_cargo_proc */
+ 	NULL,                     /* vehicle_enter_tile_proc */
+ 	GetFoundation_Dummy,      /* get_foundation_proc */
++	TerraformTile_Dummy,      /* terraform_tile_proc */
+ };
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 11004)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -1415,6 +1415,11 @@
+ 	return VETSB_CONTINUE;
+ }
+ 
++static CommandCost TerraformTile_TunnelBridge(TileIndex tile, uint32 flags, uint z_new, Slope tileh_new)
++{
++	return DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++}
++
+ extern const TileTypeProcs _tile_type_tunnelbridge_procs = {
+ 	DrawTile_TunnelBridge,           /* draw_tile_proc */
+ 	GetSlopeZ_TunnelBridge,          /* get_slope_z_proc */
+@@ -1429,4 +1434,5 @@
+ 	NULL,                            /* get_produced_cargo_proc */
+ 	VehicleEnter_TunnelBridge,       /* vehicle_enter_tile_proc */
+ 	GetFoundation_TunnelBridge,      /* get_foundation_proc */
++	TerraformTile_TunnelBridge,      /* terraform_tile_proc */
+ };
+Index: src/clear_cmd.cpp
+===================================================================
+--- src/clear_cmd.cpp	(revision 11004)
++++ src/clear_cmd.cpp	(working copy)
+@@ -33,9 +33,6 @@
+ };
+ 
+ struct TerraformerState {
+-	uint32 flags;
+-
+-	int direction;
+ 	int modheight_count;                                         ///< amount of entries in "modheight".
+ 	int tile_table_count;                                        ///< amount of entries in "tile_table".
+ 
+@@ -102,54 +99,6 @@
+ }
+ 
+ /**
+- * Checks if a tile can be terraformed, perform tiletype specific things (like clearing the tile) and compute their extra-cost.
+- *
+- * @param ts TerraformerState.
+- * @param tile Tile.
+- * @param mode Affected corner: 0 = north, 1 = east, 2 = south, 3 = west.
+- * @return Error message or extra-cost.
+- */
+-static CommandCost TerraformProc(TerraformerState *ts, TileIndex tile, int mode)
+-{
+-	/* Check if a tile can be terraformed. */
+-	if (IsTileType(tile, MP_RAILWAY)) {
+-		static const TrackBits safe_track[] = { TRACK_BIT_LOWER, TRACK_BIT_LEFT, TRACK_BIT_UPPER, TRACK_BIT_RIGHT };
+-		static const Slope unsafe_slope[] = { SLOPE_S, SLOPE_W, SLOPE_N, SLOPE_E };
+-
+-		Slope tileh;
+-		uint z;
+-
+-		/* Nothing could be built at the steep slope - this avoids a bug
+-		 * when you have a single diagonal track in one corner on a
+-		 * basement and then you raise/lower the other corner. */
+-		tileh = GetTileSlope(tile, &z);
+-		if (tileh == unsafe_slope[mode] ||
+-				tileh == (SLOPE_STEEP | ComplementSlope(unsafe_slope[mode]))) {
+-			_terraform_err_tile = tile;
+-			_error_message = STR_1008_MUST_REMOVE_RAILROAD_TRACK;
+-			return CMD_ERROR;
+-		}
+-
+-		/* If we have a single diagonal track there, the other side of
+-		 * tile can be terraformed. */
+-		if (IsPlainRailTile(tile) && GetTrackBits(tile) == safe_track[mode]) {
+-			/* Allow terraforming. */
+-			return CommandCost();
+-		}
+-	}
+-
+-	/* Canals can't be terraformed */
+-	if (IsClearWaterTile(tile) && IsCanal(tile)) {
+-		_terraform_err_tile = tile;
+-		_error_message = STR_MUST_DEMOLISH_CANAL_FIRST;
+-		return CMD_ERROR;
+-	}
+-
+-	/* Try to clear the tile. If the tile can be cleared, add the cost to the terraforming cost, else the terraforming fails. */
+-	return DoCommand(tile, 0, 0, ts->flags, CMD_LANDSCAPE_CLEAR);
+-}
+-
+-/**
+  * Terraform the north corner of a tile to a specific height.
+  *
+  * @param ts TerraformerState.
+@@ -269,8 +218,7 @@
+ 
+ 	_terraform_err_tile = 0;
+ 
+-	ts.direction = direction = p2 ? 1 : -1;
+-	ts.flags = flags;
++	direction = p2 ? 1 : -1;
+ 	ts.modheight_count = ts.tile_table_count = 0;
+ 	ts.cost = CommandCost();
+ 
+@@ -324,6 +272,13 @@
+ 			uint z_min = min(min(z_N, z_W), min(z_S, z_E));
+ 			uint z_max = max(max(z_N, z_W), max(z_S, z_E));
+ 
++			/* Compute tile slope */
++			uint tileh = (z_max > z_min + 1 ? SLOPE_STEEP : SLOPE_FLAT);
++			if (z_W > z_min) tileh += SLOPE_W;
++			if (z_S > z_min) tileh += SLOPE_S;
++			if (z_E > z_min) tileh += SLOPE_E;
++			if (z_N > z_min) tileh += SLOPE_N;
++
+ 			/* Check if bridge would take damage */
+ 			if (direction == 1 && MayHaveBridgeAbove(tile) && IsBridgeAbove(tile) &&
+ 					GetBridgeHeight(GetSouthernBridgeEnd(tile)) <= z_max * TILE_HEIGHT) {
+@@ -336,34 +291,12 @@
+ 				return_cmd_error(STR_1002_EXCAVATION_WOULD_DAMAGE);
+ 			}
+ 			/* Check tiletype-specific things, and add extra-cost */
+-			/* Start of temporary solution until TerraformProc() gets replaced with a TileTypeProc */
+-			_terraform_err_tile = tile;
+-			CommandCost cost_N = CommandCost();
+-			CommandCost cost_W = CommandCost();
+-			CommandCost cost_S = CommandCost();
+-			CommandCost cost_E = CommandCost();
+-
+-			if (z_N != TileHeight(tile)) cost_N = TerraformProc(&ts, tile, 0);
+-			if (CmdFailed(cost_N)) return cost_N;
+-
+-			if (z_E != TileHeight(tile + TileDiffXY(0, 1))) cost_E = TerraformProc(&ts, tile, 1);
+-			if (CmdFailed(cost_E)) return cost_E;
+-
+-			if (z_S != TileHeight(tile + TileDiffXY(1, 1))) cost_S = TerraformProc(&ts, tile, 2);
+-			if (CmdFailed(cost_S)) return cost_S;
+-
+-			if (z_W != TileHeight(tile + TileDiffXY(1, 0))) cost_W = TerraformProc(&ts, tile, 3);
+-			if (CmdFailed(cost_W)) return cost_W;
+-
+-			_terraform_err_tile = 0; // no error, reset error tile.
+-			/* Add extra cost. Currently this may only be for clearing the tile. And we only want to clear it once. */
+-			CommandCost cost = CommandCost();
+-			cost.AddCost(cost_N);
+-			if (cost.GetCost() == 0) cost.AddCost(cost_W);
+-			if (cost.GetCost() == 0) cost.AddCost(cost_S);
+-			if (cost.GetCost() == 0) cost.AddCost(cost_E);
++			CommandCost cost = _tile_type_procs[GetTileType(tile)]->terraform_tile_proc(tile, flags, z_min * TILE_HEIGHT, (Slope) tileh);
++			if (CmdFailed(cost)) {
++				_terraform_err_tile = tile;
++				return cost;
++			}
+ 			ts.cost.AddCost(cost);
+-			/* End of temporary solution */
+ 		}
+ 	}
+ 
+@@ -842,6 +775,11 @@
+ 	_opt.snow_line = _patches.snow_line_height * TILE_HEIGHT;
+ }
+ 
++static CommandCost TerraformTile_Clear(TileIndex tile, uint32 flags, uint z_new, Slope tileh_new)
++{
++	return DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++}
++
+ extern const TileTypeProcs _tile_type_clear_procs = {
+ 	DrawTile_Clear,           ///< draw_tile_proc
+ 	GetSlopeZ_Clear,          ///< get_slope_z_proc
+@@ -856,4 +794,5 @@
+ 	NULL,                     ///< get_produced_cargo_proc
+ 	NULL,                     ///< vehicle_enter_tile_proc
+ 	GetFoundation_Clear,      ///< get_foundation_proc
++	TerraformTile_Clear,      ///< terraform_tile_proc
+ };
+Index: src/unmovable_cmd.cpp
+===================================================================
+--- src/unmovable_cmd.cpp	(revision 11004)
++++ src/unmovable_cmd.cpp	(working copy)
+@@ -398,6 +398,14 @@
+ 	}
+ }
+ 
++static CommandCost TerraformTile_Unmovable(TileIndex tile, uint32 flags, uint z_new, Slope tileh_new)
++{
++	/* Owned land ramains unsold */
++	if (IsOwnedLand(tile) && CheckTileOwnership(tile)) return CommandCost();
++
++	return DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++}
++
+ extern const TileTypeProcs _tile_type_unmovable_procs = {
+ 	DrawTile_Unmovable,             /* draw_tile_proc */
+ 	GetSlopeZ_Unmovable,            /* get_slope_z_proc */
+@@ -412,4 +420,5 @@
+ 	NULL,                           /* get_produced_cargo_proc */
+ 	NULL,                           /* vehicle_enter_tile_proc */
+ 	GetFoundation_Unmovable,        /* get_foundation_proc */
++	TerraformTile_Unmovable,        /* terraform_tile_proc */
+ };
+Index: src/water_cmd.cpp
+===================================================================
+--- src/water_cmd.cpp	(revision 11004)
++++ src/water_cmd.cpp	(working copy)
+@@ -802,7 +802,15 @@
+ 	return VETSB_CONTINUE;
+ }
+ 
++static CommandCost TerraformTile_Water(TileIndex tile, uint32 flags, uint z_new, Slope tileh_new)
++{
++	/* Canals can't be terraformed */
++	if (IsClearWaterTile(tile) && IsCanal(tile)) return_cmd_error(STR_MUST_DEMOLISH_CANAL_FIRST);
+ 
++	return DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++}
++
++
+ extern const TileTypeProcs _tile_type_water_procs = {
+ 	DrawTile_Water,           /* draw_tile_proc */
+ 	GetSlopeZ_Water,          /* get_slope_z_proc */
+@@ -817,4 +825,5 @@
+ 	NULL,                     /* get_produced_cargo_proc */
+ 	VehicleEnter_Water,       /* vehicle_enter_tile_proc */
+ 	GetFoundation_Water,      /* get_foundation_proc */
++	TerraformTile_Water,      /* terraform_tile_proc */
+ };
+Index: src/openttd.h
+===================================================================
+--- src/openttd.h	(revision 11004)
++++ src/openttd.h	(working copy)
+@@ -473,6 +473,20 @@
+ /** @see VehicleEnterTileStatus to see what the return values mean */
+ typedef uint32 VehicleEnterTileProc(Vehicle *v, TileIndex tile, int x, int y);
+ typedef Foundation GetFoundationProc(TileIndex tile, Slope tileh);
++/**
++ * Called when a tile is affected by a terraforming operation.
++ * The function has to check if terraforming of the tile is allowed and return extra terraform-cost that depend on the tiletype.
++ * With DC_EXEC in flags it has to perform tiletype-specific actions (like clearing land etc., but not the terraforming itself).
++ *
++ * @note The terraforming has not yet take place. So GetTileZ() and GetTileSlope() refer to the landscape before the terraforming operation.
++ *
++ * @param tile      The involved tile.
++ * @param flags     Command flags passed to the terraform command (DC_EXEC, DC_QUERY_COST, etc.).
++ * @param z_new     TileZ after terraforming.
++ * @param tileh_new Slope after terraforming.
++ * @return Error code or extra cost for terraforming (like clearing land, building foundations, etc., but not the terraforming itself.)
++ */
++typedef CommandCost TerraformTileProc(TileIndex tile, uint32 flags, uint z_new, Slope tileh_new);
+ 
+ struct TileTypeProcs {
+ 	DrawTileProc *draw_tile_proc;
+@@ -488,6 +502,7 @@
+ 	GetProducedCargoProc *get_produced_cargo_proc;
+ 	VehicleEnterTileProc *vehicle_enter_tile_proc;
+ 	GetFoundationProc *get_foundation_proc;
++	TerraformTileProc *terraform_tile_proc;
+ };
+ 
+ 
+Index: src/industry_cmd.cpp
+===================================================================
+--- src/industry_cmd.cpp	(revision 11004)
++++ src/industry_cmd.cpp	(working copy)
+@@ -1971,6 +1971,10 @@
+ 			)) >> 8;
+ }
+ 
++static CommandCost TerraformTile_Industry(TileIndex tile, uint32 flags, uint z_new, Slope tileh_new)
++{
++	return DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR); // funny magic bulldozer
++}
+ 
+ extern const TileTypeProcs _tile_type_industry_procs = {
+ 	DrawTile_Industry,           /* draw_tile_proc */
+@@ -1986,6 +1990,7 @@
+ 	GetProducedCargo_Industry,   /* get_produced_cargo_proc */
+ 	NULL,                        /* vehicle_enter_tile_proc */
+ 	GetFoundation_Industry,      /* get_foundation_proc */
++	TerraformTile_Industry,      /* terraform_tile_proc */
+ };
+ 
+ static const SaveLoad _industry_desc[] = {

@@ -1,0 +1,1069 @@
+Index: src/sound_type.h
+===================================================================
+--- src/sound_type.h	(revision 11943)
++++ src/sound_type.h	(working copy)
+@@ -7,6 +7,9 @@
+ 
+ #include "core/enum_type.hpp"
+ 
++// Number of levels of panning per side
++#define PANNING_LEVELS 16
++
+ struct MusicFileSettings {
+ 	byte playlist;
+ 	byte music_vol;
+Index: src/sound.cpp
+===================================================================
+--- src/sound.cpp	(revision 11943)
++++ src/sound.cpp	(working copy)
+@@ -14,15 +14,18 @@
+ #include "core/alloc_func.hpp"
+ #include "map_func.h"
+ #include "vehicle_base.h"
++#include "sound/sound_driver.hpp"
+ 
+ static uint _file_count;
+ static FileEntry *_files;
+ MusicFileSettings msf;
+ 
+-// Number of levels of panning per side
+-#define PANNING_LEVELS 16
+-
+-
++/** Reads a sample catalog and copies information about the sound samples
++ *  to FileEntrys. The sound samples should be in WAVE file format.
++ *  This function is only really used to parse sample.cat.
++ *
++ * @param filename Name of the sound sample file
++ */
+ static void OpenBankFile(const char *filename)
+ {
+ 	uint count;
+@@ -104,57 +107,12 @@
+ 	return _file_count;
+ }
+ 
+-static bool SetBankSource(MixerChannel *mc, uint bank)
+-{
+-	const FileEntry *fe;
+-	uint i;
+-
+-	if (bank >= GetNumSounds()) return false;
+-	fe = GetSound(bank);
+-
+-	if (fe->file_size == 0) return false;
+-
+-	int8 *mem = MallocT<int8>(fe->file_size);
+-	if (mem == NULL) return false;
+-
+-	FioSeekToFile(fe->file_slot, fe->file_offset);
+-	FioReadBlock(mem, fe->file_size);
+-
+-	for (i = 0; i != fe->file_size; i++)
+-		mem[i] += -128; // Convert unsigned sound data to signed
+-
+-	assert(fe->bits_per_sample == 8 && fe->channels == 1 && fe->file_size != 0 && fe->rate != 0);
+-
+-	MxSetChannelRawSrc(mc, mem, fe->file_size, fe->rate, MX_AUTOFREE);
+-
+-	return true;
+-}
+-
+ bool SoundInitialize(const char *filename)
+ {
+ 	OpenBankFile(filename);
+ 	return true;
+ }
+ 
+-/* Low level sound player */
+-static void StartSound(uint sound, int panning, uint volume)
+-{
+-	MixerChannel *mc;
+-	uint left_vol, right_vol;
+-
+-	if (volume == 0) return;
+-	mc = MxAllocateChannel();
+-	if (mc == NULL) return;
+-	if (!SetBankSource(mc, sound)) return;
+-
+-	panning = Clamp(panning, -PANNING_LEVELS, PANNING_LEVELS);
+-	left_vol = (volume * PANNING_LEVELS) - (volume * panning);
+-	right_vol = (volume * PANNING_LEVELS) + (volume * panning);
+-	MxSetChannelVolume(mc, left_vol * 128 / PANNING_LEVELS, right_vol * 128 / PANNING_LEVELS);
+-	MxActivateChannel(mc);
+-}
+-
+-
+ static const byte _vol_factor_by_zoom[] = {255, 190, 134, 87};
+ assert_compile(lengthof(_vol_factor_by_zoom) == ZOOM_LVL_END - ZOOM_LVL_BEGIN);
+ 
+@@ -212,7 +170,7 @@
+ 				IsInsideBS(y, vp->virtual_top, vp->virtual_height)) {
+ 			int left = (x - vp->virtual_left);
+ 
+-			StartSound(
++			_sound_driver->StartSound(
+ 				sound,
+ 				left / max(1, vp->virtual_width / ((PANNING_LEVELS << 1) + 1)) - PANNING_LEVELS,
+ 				(GetSound(sound)->volume * msf.effect_vol * _vol_factor_by_zoom[vp->zoom - ZOOM_LVL_BEGIN]) >> 15
+@@ -220,7 +178,6 @@
+ 			return;
+ 		}
+ 	}
+-
+ }
+ 
+ void SndPlayTileFx(SoundFx sound, TileIndex tile)
+@@ -242,7 +199,7 @@
+ 
+ void SndPlayFx(SoundFx sound)
+ {
+-	StartSound(
++	_sound_driver->StartSound(
+ 		sound,
+ 		0,
+ 		(GetSound(sound)->volume * msf.effect_vol) >> 7
+Index: src/mixer.h
+===================================================================
+--- src/mixer.h	(revision 11943)
++++ src/mixer.h	(working copy)
+@@ -1,25 +0,0 @@
+-/* $Id$ */
+-
+-/** @file mixer.h */
+-
+-#ifndef MIXER_H
+-#define MIXER_H
+-
+-struct MixerChannel;
+-
+-enum {
+-	MX_AUTOFREE = 1,
+-//	MX_8BIT = 2,
+-//	MX_STEREO = 4,
+-//	MX_UNSIGNED = 8,
+-};
+-
+-bool MxInitialize(uint rate);
+-void MxMixSamples(void *buffer, uint samples);
+-
+-MixerChannel *MxAllocateChannel();
+-void MxSetChannelRawSrc(MixerChannel *mc, int8 *mem, uint size, uint rate, uint flags);
+-void MxSetChannelVolume(MixerChannel *mc, uint left, uint right);
+-void MxActivateChannel(MixerChannel*);
+-
+-#endif /* MIXER_H */
+Index: src/sound/sdlmixer_s.hpp
+===================================================================
+--- src/sound/sdlmixer_s.hpp	(revision 0)
++++ src/sound/sdlmixer_s.hpp	(revision 0)
+@@ -0,0 +1,27 @@
++/* $Id$ */
++
++#ifndef SOUND_SDLMIXER_H
++#define SOUND_SDLMIXER_H
++
++#include "sound_driver.hpp"
++
++class SoundDriver_SDLMixer: public SoundDriver {
++public:
++	/* virtual */ bool CanProbe() { return true; }
++
++	/* virtual */ const char *Start(const char * const *param);
++
++	/* virtual */ void Stop();
++
++	/* virtual */ void StartSound(uint sound, int panning, uint volume);
++};
++
++class FSoundDriver_SDLMixer: public SoundDriverFactory<FSoundDriver_SDLMixer> {
++public:
++	static const int priority = 5;
++	/* virtual */ const char *GetName() { return "sdlmixer"; }
++	/* virtual */ const char *GetDescription() { return "SDLMixer Sound Driver"; }
++	/* virtual */ Driver *CreateInstance() { return new SoundDriver_SDLMixer(); }
++};
++
++#endif /* SOUND_SDLMIXER_HPP */
+Index: src/sound/null_s.h
+===================================================================
+--- src/sound/null_s.h	(revision 11943)
++++ src/sound/null_s.h	(working copy)
+@@ -10,6 +10,8 @@
+ 	/* virtual */ const char *Start(const char * const *param) { return NULL; }
+ 
+ 	/* virtual */ void Stop() { }
++
++	/* virtual */ void StartSound(uint sound, int panning, uint volume) { }
+ };
+ 
+ class FSoundDriver_Null: public SoundDriverFactory<FSoundDriver_Null> {
+Index: src/sound/mixer_sw.hpp
+===================================================================
+--- src/sound/mixer_sw.hpp	(revision 0)
++++ src/sound/mixer_sw.hpp	(revision 0)
+@@ -0,0 +1,55 @@
++/* $Id$ */
++
++#ifndef SOUND_MIXER_SW_H
++#define SOUND_MIXER_SW_H
++
++#include "sound_driver.hpp"
++
++class SoundDriver_MixerSW: public SoundDriver {
++private:
++	class Channel {
++	public:
++		enum Flags {
++			MX_AUTOFREE = 1,
++		};
++
++		bool active;
++
++		/* Pointer to allocated buffer memory */
++		int8 *memory;
++
++		/* Current position in memory */
++		uint32 pos;
++		uint32 frac_pos;
++		uint32 frac_speed;
++		uint32 samples_left;
++
++		/* Mixing volume */
++		uint volume_left;
++		uint volume_right;
++
++		Flags flags;
++
++		Channel();
++
++		void Close();
++		void SetRawSource(int8 *mem, uint size, uint rate, Flags flags, uint play_rate);
++		void SetVolume(uint left, uint right);
++		void Activate();
++		bool SetBankSource(uint bank, uint play_rate);
++	};
++
++	Channel channels[8];
++	uint32 play_rate;
++
++	void mix_int8_to_int16(Channel *sc, int16 *buffer, uint samples);
++//	void MixSamples(void *buffer, uint samples);
++	Channel *AllocateChannel();
++
++public:
++	/* virtual */ void StartSound(uint sound, int panning, uint volume);
++
++	void MixSamples(void *buffer, uint samples);
++};
++
++#endif /* SOUND_MIXER_SW_H */
+Index: src/sound/sdl_s.cpp
+===================================================================
+--- src/sound/sdl_s.cpp	(revision 11943)
++++ src/sound/sdl_s.cpp	(working copy)
+@@ -5,7 +5,6 @@
+ #include "../stdafx.h"
+ 
+ #include "../driver.h"
+-#include "../mixer.h"
+ #include "../sdl.h"
+ #include "sdl_s.h"
+ #include <SDL.h>
+@@ -14,7 +13,8 @@
+ 
+ static void CDECL fill_sound_buffer(void *userdata, Uint8 *stream, int len)
+ {
+-	MxMixSamples(stream, len / 4);
++	SoundDriver_SDL *driver = (SoundDriver_SDL *)userdata;
++	driver->MixSamples(stream, len / 4);
+ }
+ 
+ const char *SoundDriver_SDL::Start(const char * const *parm)
+@@ -29,6 +29,7 @@
+ 	spec.channels = 2;
+ 	spec.samples = 512;
+ 	spec.callback = fill_sound_buffer;
++	spec.userdata = this;
+ 	SDL_CALL SDL_OpenAudio(&spec, &spec);
+ 	SDL_CALL SDL_PauseAudio(0);
+ 	return NULL;
+Index: src/sound/win32_s.cpp
+===================================================================
+--- src/sound/win32_s.cpp	(revision 11943)
++++ src/sound/win32_s.cpp	(working copy)
+@@ -3,7 +3,6 @@
+ #include "../stdafx.h"
+ #include "../openttd.h"
+ #include "../driver.h"
+-#include "../mixer.h"
+ #include "../core/alloc_func.hpp"
+ #include "win32_s.h"
+ #include <windows.h>
+Index: src/sound/cocoa_s.cpp
+===================================================================
+--- src/sound/cocoa_s.cpp	(revision 11943)
++++ src/sound/cocoa_s.cpp	(working copy)
+@@ -21,7 +21,6 @@
+ #include "../stdafx.h"
+ #include "../debug.h"
+ #include "../driver.h"
+-#include "../mixer.h"
+ #include "../core/endian_func.hpp"
+ 
+ #include "cocoa_s.h"
+Index: src/sound/sound_driver.hpp
+===================================================================
+--- src/sound/sound_driver.hpp	(revision 11943)
++++ src/sound/sound_driver.hpp	(working copy)
+@@ -6,6 +6,8 @@
+ #include "../driver.h"
+ 
+ class SoundDriver: public Driver {
++public:
++	virtual void StartSound(uint sound, int panning, uint volume) = 0;
+ };
+ 
+ class SoundDriverFactoryBase: public DriverFactoryBase {
+Index: src/sound/sdl_s.h
+===================================================================
+--- src/sound/sdl_s.h	(revision 11943)
++++ src/sound/sdl_s.h	(working copy)
+@@ -4,8 +4,9 @@
+ #define SOUND_SDL_H
+ 
+ #include "sound_driver.hpp"
++#include "mixer_sw.hpp"
+ 
+-class SoundDriver_SDL: public SoundDriver {
++class SoundDriver_SDL: public SoundDriver_MixerSW {
+ public:
+ 	/* virtual */ const char *Start(const char * const *param);
+ 
+Index: src/sound/win32_s.h
+===================================================================
+--- src/sound/win32_s.h	(revision 11943)
++++ src/sound/win32_s.h	(working copy)
+@@ -4,8 +4,9 @@
+ #define SOUND_WIN32_H
+ 
+ #include "sound_driver.hpp"
++#include "mixer_sw.hpp"
+ 
+-class SoundDriver_Win32: public SoundDriver {
++class SoundDriver_Win32: public SoundDriver_MixerSW {
+ public:
+ 	/* virtual */ const char *Start(const char * const *param);
+ 
+Index: src/sound/sdlmixer_s.cpp
+===================================================================
+--- src/sound/sdlmixer_s.cpp	(revision 0)
++++ src/sound/sdlmixer_s.cpp	(revision 0)
+@@ -0,0 +1,132 @@
++/* $Id$ */
++
++#include "../stdafx.h"
++#include "../openttd.h"
++#include "../sdl.h"
++#include "../sdlmixer.h"
++#include "../core/math_func.hpp"
++#include "../core/alloc_func.hpp"
++#include "../vehicle_base.h"
++#include "../newgrf_sound.h"
++#include "../fileio.h"
++
++#include <SDL.h>
++#include <SDL_mixer.h>
++
++#include "sdlmixer_s.hpp"
++	
++static FSoundDriver_SDLMixer iFSoundDriver_SDLMixer;
++
++const char *SoundDriver_SDLMixer::Start(const char * const *parm)
++{
++	return StartSdlMixer(parm);
++}
++
++void SoundDriver_SDLMixer::Stop()
++{
++	StopSdlMixer();
++}
++
++struct WaveHeader {
++	uint32 ChunkID;       //    Contains the letters "RIFF" in ASCII form (0x52494646 big-endian form)
++	uint32 ChunkSize;     //    36 + SubChunk2Size
++	uint32 Format;        //    Contains the letters "WAVE" (0x57415645 big-endian form).
++
++	uint32 Subchunk1ID;   //    Contains the letters "fmt " (0x666d7420 big-endian form).
++	uint32 Subchunk1Size; //    16 for PCM.  This is the size of the rest of the Subchunk which follows this number.
++	uint16 AudioFormat;   //    PCM = 1 (i.e. Linear quantization)
++	uint16 NumChannels;   //    Mono = 1, Stereo = 2, etc.
++	uint32 SampleRate;    //    8000, 44100, etc.
++	uint32 ByteRate;      //    == SampleRate * NumChannels * BitsPerSample/8
++	uint16 BlockAlign;    //    == NumChannels * BitsPerSample/8
++	uint16 BitsPerSample; //    8 bits = 8, 16 bits = 16, etc.
++	
++	uint32 Subchunk2ID;   //    Contains the letters "data" (0x64617461 big-endian form).
++	uint32 Subchunk2Size; //    == NumSamples * NumChannels * BitsPerSample/8
++                        //     This is the number of bytes in the data.
++};
++
++#include "../core/endian_func.hpp"
++
++void writeHeader(WaveHeader* header, const FileEntry* fe)
++{
++	header->ChunkID = 		TO_BE32('RIFF'); // 0x52494646;
++	header->ChunkSize = 	TO_LE32(fe->file_size + sizeof(struct WaveHeader));
++	header->Format = 			TO_BE32('WAVE'); // 0x57415645
++
++	header->Subchunk1ID =	TO_BE32('fmt '); // 0x666d7420
++	header->Subchunk1Size=TO_LE32(16);
++	header->AudioFormat =	TO_LE16(1); // PCM
++	header->NumChannels = TO_LE16(fe->channels);
++	header->SampleRate =	TO_LE32(fe->rate);
++	header->ByteRate =		TO_LE32(fe->rate*fe->channels*fe->bits_per_sample/8);
++	header->BlockAlign =	TO_LE16(fe->channels*fe->bits_per_sample/8);
++	header->BitsPerSample=TO_LE16(fe->bits_per_sample);
++
++	header->Subchunk2ID =	TO_BE32('data'); // 0x64617461
++	header->Subchunk2Size=TO_LE32(fe->file_size);
++}
++
++Mix_Chunk* GetMixChunk(uint sound)
++{
++	const FileEntry *fe;
++	int hsize = sizeof(struct WaveHeader);
++
++	if (sound >= GetNumSounds()) return false;
++	fe = GetSound(sound);
++
++	if (fe->file_size == 0) return false;
++
++	// allocate memory for sound data + wav header
++	int8 *mem = MallocT<int8>(fe->file_size + hsize);
++	if (mem == NULL) return false;
++
++	// write wave header to memory
++	writeHeader((WaveHeader*) mem, fe);
++
++	// copy sound data
++	int8 *data = &mem[hsize];
++	FioSeekToFile(fe->file_slot, fe->file_offset);
++	FioReadBlock(data, fe->file_size);
++
++	assert(fe->bits_per_sample == 8 && fe->channels == 1 && fe->file_size != 0 && fe->rate != 0);
++
++	// read wave from memory
++	SDL_RWops *rw = SDL_RWFromMem(mem, fe->file_size + hsize);
++	Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1);
++
++	if (chunk == NULL)
++		DEBUG(driver, 2, "SoundDriver_SDLMixer::Mix_LoadWAV_RW: %s", SDL_CALL Mix_GetError());
++
++ 	free(mem);
++	return chunk;
++}
++
++void SoundDriver_SDLMixer::StartSound(uint sound, int panning, uint volume)
++{
++	Mix_Chunk *sample;
++	int channel;
++	uint left_vol;
++	uint right_vol;
++
++	/* Prepare the sample */
++	sample = (Mix_Chunk*) GetMixChunk(sound);
++
++	channel = SDL_CALL Mix_PlayChannel(-1, sample, 0);
++
++	/* Check if the sound could be played */
++	if (channel == -1) {
++		DEBUG(driver, 2, "SoundDriver_SDLMixer::StartSound: %s", SDL_CALL Mix_GetError());
++		return;
++	}
++
++	/* calculate left and right volume */
++	panning = Clamp(panning, -PANNING_LEVELS, PANNING_LEVELS);
++	left_vol = (panning * (-128 / PANNING_LEVELS) + 128) * volume/100;
++	right_vol = 256-left_vol;
++
++	SDL_CALL Mix_SetPanning(channel, left_vol, right_vol);
++
++	// TODO implement alternatively pseudo 3D with
++	// Mix_SetPosition(int channel, Sint16 angle, Uint8 distance)
++}
+Index: src/sound/cocoa_s.h
+===================================================================
+--- src/sound/cocoa_s.h	(revision 11943)
++++ src/sound/cocoa_s.h	(working copy)
+@@ -4,8 +4,9 @@
+ #define SOUND_COCOA_H
+ 
+ #include "sound_driver.hpp"
++#include "mixer_sw.hpp"
+ 
+-class SoundDriver_Cocoa: public SoundDriver {
++class SoundDriver_Cocoa: public SoundDriver_MixerSW {
+ public:
+ 	/* virtual */ const char *Start(const char * const *param);
+ 
+Index: src/sound/mixer_sw.cpp
+===================================================================
+--- src/sound/mixer_sw.cpp	(revision 0)
++++ src/sound/mixer_sw.cpp	(revision 0)
+@@ -0,0 +1,163 @@
++/* $Id$ */
++
++#include "../stdafx.h"
++#include "../openttd.h"
++#include "../sound_func.h"
++#include "../fileio.h"
++#include "../newgrf_sound.h"
++#include "../core/alloc_func.hpp"
++#include "../core/math_func.hpp"
++#include "mixer_sw.hpp"
++
++SoundDriver_MixerSW::Channel::Channel()
++{
++	this->memory = NULL;
++	this->active = false;
++}
++
++void SoundDriver_MixerSW::Channel::Close()
++{
++	if (this->flags & MX_AUTOFREE) free(this->memory);
++
++	this->active = false;
++	this->memory = NULL;
++}
++
++void SoundDriver_MixerSW::Channel::SetRawSource(int8 *mem, uint size, uint rate, Flags flags, uint play_rate)
++{
++	this->memory = mem;
++	this->flags = flags;
++	this->frac_pos = 0;
++	this->pos = 0;
++
++	this->frac_speed = (rate << 16) / play_rate;
++
++	/* adjust the magnitude to prevent overflow */
++	while (size & 0xFFFF0000) {
++		size >>= 1;
++		rate = (rate >> 1) + 1;
++	}
++
++	this->samples_left = size * play_rate / rate;
++}
++
++void SoundDriver_MixerSW::Channel::SetVolume(uint left, uint right)
++{
++	this->volume_left = left;
++	this->volume_right = right;
++}
++
++void SoundDriver_MixerSW::Channel::Activate()
++{
++	this->active = true;
++}
++
++bool SoundDriver_MixerSW::Channel::SetBankSource(uint bank, uint play_rate)
++{
++	if (bank >= GetNumSounds()) return false;
++
++	const FileEntry *fe = GetSound(bank);
++
++	if (fe->file_size == 0) return false;
++
++	int8 *mem = MallocT<int8>(fe->file_size);
++	if (mem == NULL) return false;
++
++	FioSeekToFile(fe->file_slot, fe->file_offset);
++	FioReadBlock(mem, fe->file_size);
++
++	for (uint i = 0; i != fe->file_size; i++) {
++		mem[i] += -128; // Convert unsigned sound data to signed
++	}
++
++	assert(fe->bits_per_sample == 8 && fe->channels == 1 && fe->file_size != 0 && fe->rate != 0);
++
++	this->SetRawSource(mem, fe->file_size, fe->rate, MX_AUTOFREE, play_rate);
++
++	return true;
++}
++
++void SoundDriver_MixerSW::mix_int8_to_int16(Channel *sc, int16 *buffer, uint samples)
++{
++	int8 *b;
++	uint32 frac_pos;
++	uint32 frac_speed;
++	uint volume_left;
++	uint volume_right;
++
++	if (samples > sc->samples_left) samples = sc->samples_left;
++	sc->samples_left -= samples;
++	assert(samples > 0);
++
++	b = sc->memory + sc->pos;
++	frac_pos = sc->frac_pos;
++	frac_speed = sc->frac_speed;
++	volume_left = sc->volume_left;
++	volume_right = sc->volume_right;
++
++	if (frac_speed == 0x10000) {
++		/* Special case when frac_speed is 0x10000 */
++		do {
++			buffer[0] += *b * volume_left >> 8;
++			buffer[1] += *b * volume_right >> 8;
++			b++;
++			buffer += 2;
++		} while (--samples > 0);
++	} else {
++		do {
++			buffer[0] += *b * volume_left >> 8;
++			buffer[1] += *b * volume_right >> 8;
++			buffer += 2;
++			frac_pos += frac_speed;
++			b += frac_pos >> 16;
++			frac_pos &= 0xffff;
++		} while (--samples > 0);
++	}
++
++	sc->frac_pos = frac_pos;
++	sc->pos = b - sc->memory;
++}
++
++void SoundDriver_MixerSW::MixSamples(void *buffer, uint samples)
++{
++	/* Clear the buffer */
++	memset(buffer, 0, sizeof(int16) * 2 * samples);
++
++	/* Mix each channel */
++	for (Channel *mc = this->channels; mc != endof(this->channels); mc++) {
++		if (mc->active) {
++			this->mix_int8_to_int16(mc, (int16*)buffer, samples);
++			if (mc->samples_left == 0) mc->Close();
++		}
++	}
++}
++
++SoundDriver_MixerSW::Channel *SoundDriver_MixerSW::AllocateChannel()
++{
++	for (Channel *mc = this->channels; mc != endof(this->channels); mc++) {
++		if (mc->memory == NULL) {
++			mc->active = false;
++			return mc;
++		}
++	}
++
++	return NULL;
++}
++
++void SoundDriver_MixerSW::StartSound(uint sound, int panning, uint volume)
++{
++	if (volume == 0) return;
++
++	Channel *mc = this->AllocateChannel();
++	if (mc == NULL) return;
++
++	if (!mc->SetBankSource(sound, 11025)) return;
++
++	panning = Clamp(panning, -PANNING_LEVELS, PANNING_LEVELS);
++
++	uint left_vol = (volume * PANNING_LEVELS) - (volume * panning);
++	uint right_vol = (volume * PANNING_LEVELS) + (volume * panning);
++
++	mc->SetVolume(left_vol * 128 / PANNING_LEVELS, right_vol * 128 / PANNING_LEVELS);
++	mc->Activate();
++}
+Index: src/music/sdlmixer_m.cpp
+===================================================================
+--- src/music/sdlmixer_m.cpp	(revision 0)
++++ src/music/sdlmixer_m.cpp	(revision 0)
+@@ -0,0 +1,63 @@
++/* $Id$ */
++
++#include "../stdafx.h"
++#include "../sdl.h"
++#include "../sdlmixer.h"
++
++#include <SDL.h>
++#include <SDL_mixer.h>
++
++#include "sdlmixer_m.hpp"
++
++static FMusicDriver_SDLMixer iFMusicDriver_SDLMixer;
++
++const char *MusicDriver_SDLMixer::Start(const char * const *parm)
++{
++	this->music = NULL;
++	return StartSdlMixer(parm);
++}
++
++void MusicDriver_SDLMixer::Stop()
++{
++	if (this->music != NULL) {
++		SDL_CALL Mix_FreeMusic(this->music);
++		this->music = NULL;
++	}
++
++	StopSdlMixer();
++}
++
++void MusicDriver_SDLMixer::PlaySong(const char *filename)
++{
++	// for some reason this is != NULL after first startup
++ 	if (this->music != NULL) {
++ 		SDL_CALL Mix_HaltMusic();
++ 		SDL_CALL Mix_FreeMusic(this->music);
++ 	}
++
++	this->music = SDL_CALL Mix_LoadMUS(filename);
++
++	if (this->music == NULL) {
++		DEBUG(driver, 1, "MusicDriver_SDLMixer::PlaySong: Mix_LoadMUS: %s", SDL_CALL Mix_GetError());
++		return;
++	}
++
++	if (SDL_CALL Mix_PlayMusic(this->music, 0) == -1) {
++		DEBUG(driver, 1, "MusicDriver_SDLMixer::PlaySong: Mix_PlayMusic: %s", SDL_CALL Mix_GetError());
++	}
++}
++
++void MusicDriver_SDLMixer::StopSong()
++{
++	SDL_CALL Mix_HaltMusic();
++}
++
++bool MusicDriver_SDLMixer::IsSongPlaying()
++{
++	return SDL_CALL Mix_PlayingMusic();
++}
++
++void MusicDriver_SDLMixer::SetVolume(byte vol)
++{
++	SDL_CALL Mix_VolumeMusic(vol);
++}
+Index: src/music/sdlmixer_m.hpp
+===================================================================
+--- src/music/sdlmixer_m.hpp	(revision 0)
++++ src/music/sdlmixer_m.hpp	(revision 0)
+@@ -0,0 +1,36 @@
++/* $Id$ */
++
++#ifndef MUSIC_SDLMIXER_HPP
++#define MUSIC_SDLMIXER_HPP
++
++#include "music_driver.hpp"
++
++class MusicDriver_SDLMixer: public MusicDriver {
++private:
++	Mix_Music *music;
++
++public:
++	/* virtual */ bool CanProbe() { return true; }
++
++	/* virtual */ const char *Start(const char * const *param);
++
++	/* virtual */ void Stop();
++
++	/* virtual */ void PlaySong(const char *filename);
++
++	/* virtual */ void StopSong();
++
++	/* virtual */ bool IsSongPlaying();
++
++	/* virtual */ void SetVolume(byte vol);
++};
++
++class FMusicDriver_SDLMixer: public MusicDriverFactory<FMusicDriver_SDLMixer> {
++public:
++	static const int priority = 5;
++	/* virtual */ const char *GetName() { return "sdlmixer"; }
++	/* virtual */ const char *GetDescription() { return "SDLMixer MIDI Driver"; }
++	/* virtual */ Driver *CreateInstance() { return new MusicDriver_SDLMixer(); }
++};
++
++#endif /* MUSIC_SDLMIXER_HPP */
+Index: src/sdlmixer.cpp
+===================================================================
+--- src/sdlmixer.cpp	(revision 0)
++++ src/sdlmixer.cpp	(revision 0)
+@@ -0,0 +1,50 @@
++/* $Id$ */
++
++#include "stdafx.h"
++#include "openttd.h"
++#include "debug.h"
++#include "sdl.h"
++#include "driver.h"
++
++#include <SDL.h>
++#include <SDL_mixer.h>
++
++/* Count of the number of times SDL_mixer has been started */
++static uint _sdlmixer_open = 0;
++
++const char *StartSdlMixer(const char * const *parm)
++{
++	if (_sdlmixer_open == 0) {
++		int rate = GetDriverParamInt(parm, "hz", 44100);
++		uint16 format = AUDIO_S16SYS;
++		int channels = 4;
++
++		const char *s = SDL_CALL SdlOpen(SDL_INIT_AUDIO);
++		if (s != NULL) return s;
++
++		if (SDL_CALL Mix_OpenAudio(rate, format, channels, 512) < 0) {
++			return SDL_CALL SDL_GetError();
++		}
++
++		SDL_CALL Mix_QuerySpec(&rate, &format, &channels);
++		DEBUG(driver, 1, "StartSdlMixer: opened audio at %d Hz, %d bit %s",
++			rate, GB(format, 0, 8),
++			(channels > 2) ? "surround" : (channels > 1) ? "stereo" : "mono");
++
++		SDL_CALL Mix_AllocateChannels(GetDriverParamInt(parm, "channels", 16));
++	}
++
++	_sdlmixer_open++;
++	DEBUG(driver, 2, "StartSdlMixer: opened %d time(s)", _sdlmixer_open);
++	return NULL;
++}
++
++void StopSdlMixer(void)
++{
++	_sdlmixer_open--;
++	DEBUG(driver, 2, "StopSdlMixer: opened %d time(s)", _sdlmixer_open);
++	if (_sdlmixer_open > 0) return;
++
++	SDL_CALL Mix_CloseAudio();
++	SDL_CALL SdlClose(SDL_INIT_AUDIO);
++}
+Index: src/mixer.cpp
+===================================================================
+--- src/mixer.cpp	(revision 11943)
++++ src/mixer.cpp	(working copy)
+@@ -1,142 +0,0 @@
+-/* $Id$ */
+-
+-/** @file mixer.cpp*/
+-
+-#include "stdafx.h"
+-#include "openttd.h"
+-#include "mixer.h"
+-
+-struct MixerChannel {
+-	bool active;
+-
+-	/* pointer to allocated buffer memory */
+-	int8 *memory;
+-
+-	/* current position in memory */
+-	uint32 pos;
+-	uint32 frac_pos;
+-	uint32 frac_speed;
+-	uint32 samples_left;
+-
+-	/* Mixing volume */
+-	uint volume_left;
+-	uint volume_right;
+-
+-	uint flags;
+-};
+-
+-static MixerChannel _channels[8];
+-static uint32 _play_rate;
+-
+-
+-static void mix_int8_to_int16(MixerChannel *sc, int16 *buffer, uint samples)
+-{
+-	int8 *b;
+-	uint32 frac_pos;
+-	uint32 frac_speed;
+-	uint volume_left;
+-	uint volume_right;
+-
+-	if (samples > sc->samples_left) samples = sc->samples_left;
+-	sc->samples_left -= samples;
+-	assert(samples > 0);
+-
+-	b = sc->memory + sc->pos;
+-	frac_pos = sc->frac_pos;
+-	frac_speed = sc->frac_speed;
+-	volume_left = sc->volume_left;
+-	volume_right = sc->volume_right;
+-
+-	if (frac_speed == 0x10000) {
+-		/* Special case when frac_speed is 0x10000 */
+-		do {
+-			buffer[0] += *b * volume_left >> 8;
+-			buffer[1] += *b * volume_right >> 8;
+-			b++;
+-			buffer += 2;
+-		} while (--samples > 0);
+-	} else {
+-		do {
+-			buffer[0] += *b * volume_left >> 8;
+-			buffer[1] += *b * volume_right >> 8;
+-			buffer += 2;
+-			frac_pos += frac_speed;
+-			b += frac_pos >> 16;
+-			frac_pos &= 0xffff;
+-		} while (--samples > 0);
+-	}
+-
+-	sc->frac_pos = frac_pos;
+-	sc->pos = b - sc->memory;
+-}
+-
+-static void MxCloseChannel(MixerChannel *mc)
+-{
+-	if (mc->flags & MX_AUTOFREE) free(mc->memory);
+-	mc->active = false;
+-	mc->memory = NULL;
+-}
+-
+-void MxMixSamples(void *buffer, uint samples)
+-{
+-	MixerChannel *mc;
+-
+-	/* Clear the buffer */
+-	memset(buffer, 0, sizeof(int16) * 2 * samples);
+-
+-	/* Mix each channel */
+-	for (mc = _channels; mc != endof(_channels); mc++) {
+-		if (mc->active) {
+-			mix_int8_to_int16(mc, (int16*)buffer, samples);
+-			if (mc->samples_left == 0) MxCloseChannel(mc);
+-		}
+-	}
+-}
+-
+-MixerChannel *MxAllocateChannel()
+-{
+-	MixerChannel *mc;
+-	for (mc = _channels; mc != endof(_channels); mc++)
+-		if (mc->memory == NULL) {
+-			mc->active = false;
+-			return mc;
+-		}
+-	return NULL;
+-}
+-
+-void MxSetChannelRawSrc(MixerChannel *mc, int8 *mem, uint size, uint rate, uint flags)
+-{
+-	mc->memory = mem;
+-	mc->flags = flags;
+-	mc->frac_pos = 0;
+-	mc->pos = 0;
+-
+-	mc->frac_speed = (rate << 16) / _play_rate;
+-
+-	/* adjust the magnitude to prevent overflow */
+-	while (size & 0xFFFF0000) {
+-		size >>= 1;
+-		rate = (rate >> 1) + 1;
+-	}
+-
+-	mc->samples_left = size * _play_rate / rate;
+-}
+-
+-void MxSetChannelVolume(MixerChannel *mc, uint left, uint right)
+-{
+-	mc->volume_left = left;
+-	mc->volume_right = right;
+-}
+-
+-
+-void MxActivateChannel(MixerChannel* mc)
+-{
+-	mc->active = true;
+-}
+-
+-
+-bool MxInitialize(uint rate)
+-{
+-	_play_rate = rate;
+-	return true;
+-}
+Index: src/sdlmixer.h
+===================================================================
+--- src/sdlmixer.h	(revision 0)
++++ src/sdlmixer.h	(revision 0)
+@@ -0,0 +1,14 @@
++/* $Id$ */
++
++/** @file sdlmixer.h */
++
++#ifndef SDLMIXER_H
++#define SDLMIXER_H
++
++/* Helper functions for SDL mixer to keep track of multiple openings/closings
++ * of SDL mixer. */
++
++const char *StartSdlMixer(const char * const *parm);
++void StopSdlMixer();
++
++#endif /* SDLMIXER_H */
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 11943)
++++ src/openttd.cpp	(working copy)
+@@ -10,7 +10,6 @@
+ 
+ #include "openttd.h"
+ #include "bridge_map.h"
+-#include "mixer.h"
+ #include "spritecache.h"
+ #include "gfxinit.h"
+ #include "gui.h"
+@@ -482,7 +481,6 @@
+ 
+ 	/* Sample catalogue */
+ 	DEBUG(misc, 1, "Loading sound effects...");
+-	MxInitialize(11025);
+ 	SoundInitialize("sample.cat");
+ 
+ 	/* Initialize FreeType */
+Index: source.list
+===================================================================
+--- source.list	(revision 11943)
++++ source.list	(working copy)
+@@ -34,7 +34,6 @@
+ md5.cpp
+ minilzo.cpp
+ misc.cpp
+-mixer.cpp
+ music.cpp
+ namegen.cpp
+ network/network.cpp
+@@ -64,6 +63,7 @@
+ screenshot.cpp
+ #if SDL
+ 	sdl.cpp
++	sdlmixer.cpp
+ #end
+ settings.cpp
+ signal.cpp
+@@ -139,7 +139,6 @@
+ livery.h
+ map.h
+ md5.h
+-mixer.h
+ music.h
+ network/network.h
+ network/network_client.h
+@@ -334,7 +333,13 @@
+ blitter/null.hpp
+ 
+ # Drivers
++music/sdlmixer_m.cpp
++music/sdlmixer_m.hpp
+ music/music_driver.hpp
++sound/mixer_sw.cpp
++sound/mixer_sw.hpp
++sound/sdlmixer_s.cpp
++sound/sdlmixer_s.hpp
+ sound/sound_driver.hpp
+ video/video_driver.hpp
+ 

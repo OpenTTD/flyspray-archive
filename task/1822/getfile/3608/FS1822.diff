@@ -1,0 +1,121 @@
+diff -r 25e120e63390 src/newgrf_text.cpp
+--- a/src/newgrf_text.cpp	Mon Nov 17 18:47:18 2008 +0000
++++ b/src/newgrf_text.cpp	Mon Nov 17 22:49:27 2008 +0100
+@@ -580,6 +580,11 @@
+ /** The stack that is used for TTDP compatible string code parsing */
+ static TextRefStack *_newgrf_textrefstack = &_newgrf_normal_textrefstack;
+ 
++void TextRefStackPushWord(uint16 word)
++{
++	_newgrf_textrefstack->PushWord(word);
++}
++
+ /**
+  * Prepare the TTDP compatible string code parsing
+  * @param numEntries number of entries to copy from the registers
+diff -r 25e120e63390 src/newgrf_text.h
+--- a/src/newgrf_text.h	Mon Nov 17 18:47:18 2008 +0000
++++ b/src/newgrf_text.h	Mon Nov 17 22:49:27 2008 +0100
+@@ -16,6 +16,7 @@
+ bool CheckGrfLangID(byte lang_id, byte grf_version);
+ 
+ void PrepareTextRefStackUsage(byte numEntries);
++void TextRefStackPushWord(uint16 word);
+ void StopTextRefStackUsage();
+ void SwitchToNormalRefStack();
+ void SwitchToErrorRefStack();
+diff -r 25e120e63390 src/station_cmd.cpp
+--- a/src/station_cmd.cpp	Mon Nov 17 18:47:18 2008 +0000
++++ b/src/station_cmd.cpp	Mon Nov 17 22:49:27 2008 +0100
+@@ -24,6 +24,7 @@
+ #include "industry_map.h"
+ #include "newgrf_callbacks.h"
+ #include "newgrf_station.h"
++#include "newgrf_text.h"
+ #include "yapf/yapf.h"
+ #include "road_type.h"
+ #include "road_internal.h" /* For drawing catenary/checking road removal */
+@@ -211,6 +212,20 @@
+ 	return false;
+ }
+ 
++static bool IsUniqueStationName(const char *name)
++{
++	const Station *st;
++	char buf[512];
++
++	FOR_ALL_STATIONS(st) {
++		SetDParam(0, st->index);
++		GetString(buf, STR_STATION, lastof(buf));
++		if (strcmp(buf, name) == 0) return false;
++	}
++
++	return true;
++}
++
+ #define M(x) ((x) - STR_SV_STNAME)
+ 
+ enum StationNaming {
+@@ -237,6 +252,41 @@
+ 	const Town *t = st->town;
+ 	uint32 free_names = UINT32_MAX;
+ 
++	int min_x = max<int>(1, TileX(st->xy) - 3);
++	int max_x = min<int>(MapSizeX() - 2, TileX(st->xy) + 3);
++	int min_y = max<int>(1, TileY(st->xy) - 3);
++	int max_y = min<int>(MapSizeY() - 2, TileY(st->xy) + 3);
++	uint min_d = UINT32_MAX;
++	TileIndex closest_tile;
++	BEGIN_TILE_LOOP(tile, max_x - min_x + 1, max_y - min_y + 1, TileXY(min_x, min_y))
++		if (IsTileType(tile, MP_INDUSTRY) && DistanceManhattan(st->xy, tile) < min_d) {
++			min_d = DistanceManhattan(st->xy, tile);
++			closest_tile = tile;
++		}
++	END_TILE_LOOP(tile, max_x - min_x + 1, max_y - min_y + 1, GetTileIndex(min_x, min_y))
++
++	if (min_d != UINT32_MAX) {
++		Industry *i = GetIndustryByTile(closest_tile);
++		assert(i->IsValid());
++		const IndustrySpec *ind = GetIndustrySpec(i->type);
++		if (ind->station_name != STR_UNDEFINED) {
++			ClrBit(free_names, M(STR_SV_STNAME_WOODS));
++			ClrBit(free_names, M(STR_SV_STNAME_MINES));
++			if (ind->station_name != STR_NULL) {
++				char buf[MAX_LENGTH_STATION_NAME_BYTES];
++				PrepareTextRefStackUsage(0);
++				TextRefStackPushWord(STR_TOWN);
++				SetDParam(1, t->index);
++				GetString(buf, ind->station_name, lastof(buf));
++				StopTextRefStackUsage();
++				if (IsUniqueStationName(buf)) {
++					st->name = strdup(buf);
++					return STR_SV_STNAME_FALLBACK;
++				}
++			}
++		}
++	}
++	
+ 	const Station *s;
+ 	FOR_ALL_STATIONS(s) {
+ 		if (s != st && s->town == t) {
+@@ -2797,20 +2847,6 @@
+ 	st->MarkTilesDirty(true);
+ }
+ 
+-static bool IsUniqueStationName(const char *name)
+-{
+-	const Station *st;
+-	char buf[512];
+-
+-	FOR_ALL_STATIONS(st) {
+-		SetDParam(0, st->index);
+-		GetString(buf, STR_STATION, lastof(buf));
+-		if (strcmp(buf, name) == 0) return false;
+-	}
+-
+-	return true;
+-}
+-
+ /** Rename a station
+  * @param tile unused
+  * @param flags operation to perform

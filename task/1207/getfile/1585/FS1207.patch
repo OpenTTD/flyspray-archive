@@ -1,0 +1,136 @@
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(Revision 11051)
++++ src/town_cmd.cpp	(Arbeitskopie)
+@@ -755,72 +755,56 @@
+  *
+  * @param t current town
+  * @param tile tile in reference to the town
++ * @param dir The direction to which we are growing ATM
+  * @return the RoadBit of the current tile regarding
+  *  the selected town layout
+  */
+-static RoadBits GetTownRoadGridElement(Town* t, TileIndex tile)
++static RoadBits GetTownRoadGridElement(Town* t, TileIndex tile, int dir)
+ {
+ 	/* align the grid to the downtown */
+ 	TileIndexDiffC grid_pos = TileIndexToTileIndexDiffC(t->xy, tile); ///< Vector from downtown to the tile
++	RoadBits rcmd = ROAD_NONE; ///< The target RoadBits
+ 
+-	/* lx, ly description:
+-	 * @li lx and ly are true  if the tile is a crossing tile.
+-	 * @li lx xor ly are true  if the tile is a straight road tile.
+-	 * @li lx and ly are false if the tile is a house tile.
+-	 */
+-	bool lx, ly;
+-
+ 	switch (_patches.town_layout) {
+ 		default: NOT_REACHED();
+ 
+ 		case TL_2X2_GRID:
+-			lx = ((grid_pos.x % 3) == 0);
+-			ly = ((grid_pos.y % 3) == 0);
++			if ((grid_pos.x % 3) == 0) rcmd |= ROAD_Y;
++			if ((grid_pos.y % 3) == 0) rcmd |= ROAD_X;
+ 			break;
+ 
+ 		case TL_3X3_GRID:
+-			lx = ((grid_pos.x % 4) == 0);
+-			ly = ((grid_pos.y % 4) == 0);
++			if ((grid_pos.x % 4) == 0) rcmd |= ROAD_Y;
++			if ((grid_pos.y % 4) == 0) rcmd |= ROAD_X;
+ 			break;
+ 	}
+ 
+-	/* generate the basic grid structure */
+-	if (!lx && !ly) {         ///< It is a house tile
+-		return ROAD_NONE;
+-	} else if (lx && !ly) {   ///< It is a Y-dir road tile
+-		return ROAD_Y;
+-	} else if (!lx && ly) {   ///< It is a X-dir road tile
+-		return ROAD_X;
+-	} else {                  ///< It is a crossing tile
+-		/* Presets for junctions on slopes
+-		 * not nice :( */
+-		switch (GetTileSlope(tile, NULL)) {
+-			case SLOPE_W:
+-				return ROAD_NW | ROAD_SW;
+-			case SLOPE_S:
+-				return ROAD_SE | ROAD_SW;
+-			case SLOPE_SW:
+-				return ROAD_Y | ROAD_SW;
+-			case SLOPE_E:
+-				return ROAD_NE | ROAD_SE;
+-			case SLOPE_SE:
+-				return ROAD_X | ROAD_SE;
+-			case SLOPE_N:
+-				return ROAD_NW | ROAD_NE;
+-			case SLOPE_NW:
+-				return ROAD_X | ROAD_NW;
+-			case SLOPE_NE:
+-				return ROAD_Y | ROAD_NE;
+-			case SLOPE_STEEP_W:
+-			case SLOPE_STEEP_N:
+-				return ROAD_X;
+-			case SLOPE_STEEP_S:
+-			case SLOPE_STEEP_E:
+-				return ROAD_Y;
+-			default:
+-				return ROAD_ALL;
+-		}
++	/* Skip slope optimisations */
++	if (rcmd == ROAD_NONE) return rcmd;
++
++	RoadBits rb_template; ///< template for this slope
++	switch (GetTileSlope(tile, NULL)) {
++		default:       rb_template = ROAD_ALL; break;
++		case SLOPE_W:  rb_template = ROAD_NW | ROAD_SW; break;
++		case SLOPE_SW: rb_template = ROAD_Y | ROAD_SW;  break;
++		case SLOPE_S:  rb_template = ROAD_SE | ROAD_SW; break;
++		case SLOPE_SE: rb_template = ROAD_X | ROAD_SE;  break;
++		case SLOPE_E:  rb_template = ROAD_NE | ROAD_SE; break;
++		case SLOPE_NE: rb_template = ROAD_Y | ROAD_NE;  break;
++		case SLOPE_N:  rb_template = ROAD_NW | ROAD_NE; break;
++		case SLOPE_NW: rb_template = ROAD_X | ROAD_NW;  break;
++		case SLOPE_STEEP_W:
++		case SLOPE_STEEP_S:
++		case SLOPE_STEEP_E:
++		case SLOPE_STEEP_N:
++			rb_template = (RoadBits)(ROAD_NW << (dir ^ 2) | ROAD_NW << dir);
++			break;
+ 	}
++
++	/* Check for the connective RoadBit */
++	if ((RoadBits)(ROAD_NW << (dir ^ 2)) & (rcmd & rb_template)) return rb_template & rcmd;
++
++	return (RoadBits)(ROAD_NW << (dir ^ 2) | ROAD_NW << dir);
+ }
+ 
+ /**
+@@ -901,7 +885,7 @@
+ 
+ 			case TL_3X3_GRID:
+ 			case TL_2X2_GRID:
+-				rcmd = GetTownRoadGridElement(t1, tile);
++				rcmd = GetTownRoadGridElement(t1, tile, block);
+ 				if (rcmd == ROAD_NONE) {
+ 					return;
+ 				}
+@@ -956,7 +940,7 @@
+ 
+ 			case TL_3X3_GRID:
+ 			case TL_2X2_GRID:
+-			 	rcmd = GetTownRoadGridElement(t1, tile);
++			 	rcmd = GetTownRoadGridElement(t1, tile, block);
+ 				break;
+ 
+ 			case TL_BETTER_ROADS:
+@@ -1005,7 +989,7 @@
+ 				}
+ 
+ 			case TL_2X2_GRID:
+-				rcmd = GetTownRoadGridElement(t1, tmptile);
++				rcmd = GetTownRoadGridElement(t1, tmptile, i);
+ 				allow_house = (rcmd == ROAD_NONE);
+ 				break;
+ 

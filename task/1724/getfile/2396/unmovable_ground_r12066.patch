@@ -1,0 +1,149 @@
+Index: src/table/unmovable_land.h
+===================================================================
+--- src/table/unmovable_land.h	(revision 12066)
++++ src/table/unmovable_land.h	(working copy)
+@@ -1,23 +1,7 @@
+ /* $Id$ */
+ 
+-struct DrawTileUnmovableStruct {
+-	uint16 image;
+-	byte subcoord_x;
+-	byte subcoord_y;
+-	byte width;
+-	byte height;
+-	byte z_size;
+-	byte unused;
+-};
+-
+ #define TILE_SEQ_END() { (byte)0x80, 0, 0, 0, 0, 0, 0, 0 }
+ 
+-static const DrawTileUnmovableStruct _draw_tile_unmovable_data[] = {
+-	{0xA29, 7, 7, 2, 2, 70, 0},
+-	{0xA2A, 4, 4, 7, 7, 61, 0},
+-};
+-
+-
+ static const DrawTileSeqStruct _unmovable_display_nothing[] = {
+ 	TILE_SEQ_END()
+ };
+Index: src/unmovable_cmd.cpp
+===================================================================
+--- src/unmovable_cmd.cpp	(revision 12066)
++++ src/unmovable_cmd.cpp	(working copy)
+@@ -111,6 +111,47 @@
+ 	return cost;
+ }
+ 
++/**
++ * Get the ground sprite to draw under the unmovable.
++ * @param tile the tileindex of the unmovable.
++ * @return the ground sprite.
++ */
++static SpriteID GetUnmovableGround(TileIndex tile)
++{
++	switch (_opt.landscape) {
++
++		case LT_ARCTIC: {
++			if ((int)(GetTileZ(tile) - GetSnowLine()) < -8) return SPR_FLAT_GRASS_TILE;
++			else {
++				switch(GetTileZ(tile) - GetSnowLine()) {
++					case -8: return SPR_FLAT_1_QUART_SNOWY_TILE; break;
++					case 0: return SPR_FLAT_2_QUART_SNOWY_TILE; break;
++					case 8: return SPR_FLAT_3_QUART_SNOWY_TILE; break;
++					default: return SPR_FLAT_SNOWY_TILE; break;
++				}
++			}
++		}
++
++		case LT_TROPIC: {
++			if (GetTropicZone(tile) == TROPICZONE_DESERT) {
++				return SPR_FLAT_SNOWY_TILE;
++			} else {
++				if (GetTropicZone(TILE_ADDXY(tile, -1, 0)) == TROPICZONE_DESERT ||
++					GetTropicZone(TILE_ADDXY(tile, 0, -1)) == TROPICZONE_DESERT ||
++					GetTropicZone(TILE_ADDXY(tile, 1, 0)) == TROPICZONE_DESERT ||
++					GetTropicZone(TILE_ADDXY(tile, 0, 1)) == TROPICZONE_DESERT)
++				{
++					return SPR_FLAT_2_QUART_SNOWY_TILE;
++				} else {
++					return SPR_FLAT_GRASS_TILE;
++				}
++			}
++		}
++
++		default: return SPR_FLAT_GRASS_TILE;
++	}
++}
++
+ /** Purchase a land area. Actually you only purchase one tile, so
+  * the name is a bit confusing ;p
+  * @param tile the tile the player is purchasing
+@@ -163,43 +204,48 @@
+ 
+ static void DrawTile_Unmovable(TileInfo *ti)
+ {
+-
+ 	switch (GetUnmovableType(ti->tile)) {
+-		case UNMOVABLE_TRANSMITTER:
+-		case UNMOVABLE_LIGHTHOUSE: {
+-			const DrawTileUnmovableStruct* dtus;
+ 
++		case UNMOVABLE_TRANSMITTER: {
+ 			if (ti->tileh != SLOPE_FLAT) DrawFoundation(ti, FOUNDATION_LEVELED);
+-			DrawClearLandTile(ti, 2);
++			DrawGroundSprite(GetUnmovableGround(ti->tile), PAL_NONE);
++			AddSortableSpriteToDraw(
++				SPR_UNMOVABLE_TRANSMITTER, PAL_NONE,
++				ti->x | 7, ti->y | 7, 2, 2, 70, ti->z, IsTransparencySet(TO_STRUCTURES)
++			);
++			break;
++		}
+ 
+-			dtus = &_draw_tile_unmovable_data[GetUnmovableType(ti->tile)];
+-
++		case UNMOVABLE_LIGHTHOUSE: {
++			if (ti->tileh != SLOPE_FLAT) DrawFoundation(ti, FOUNDATION_LEVELED);
++			DrawGroundSprite(GetUnmovableGround(ti->tile), PAL_NONE);
+ 			AddSortableSpriteToDraw(
+-				dtus->image, PAL_NONE, ti->x | dtus->subcoord_x, ti->y | dtus->subcoord_y,
+-				dtus->width, dtus->height, dtus->z_size, ti->z,
+-				IsTransparencySet(TO_STRUCTURES)
++				SPR_UNMOVABLE_LIGHTHOUSE, PAL_NONE,
++				ti->x | 4, ti->y | 4, 7, 7, 61, ti->z, IsTransparencySet(TO_STRUCTURES)
+ 			);
+ 			break;
+ 		}
+ 
+-		case UNMOVABLE_STATUE:
+-			/* This should prevent statues from sinking into the ground when on a slope. */
+-			if (ti->tileh != SLOPE_FLAT) DrawFoundation(ti, GetFoundation_Unmovable(ti->tile, ti->tileh));
+-
++		case UNMOVABLE_STATUE: {
++			if (ti->tileh != SLOPE_FLAT) DrawFoundation(ti, FOUNDATION_LEVELED);
+ 			DrawGroundSprite(SPR_CONCRETE_GROUND, PAL_NONE);
+-
+-			AddSortableSpriteToDraw(SPR_STATUE_COMPANY, PLAYER_SPRITE_COLOR(GetTileOwner(ti->tile)), ti->x, ti->y, 16, 16, 25, ti->z, IsTransparencySet(TO_STRUCTURES));
++			AddSortableSpriteToDraw(
++				SPR_STATUE_COMPANY, PLAYER_SPRITE_COLOR(GetTileOwner(ti->tile)),
++				ti->x, ti->y, 16, 16, 25, ti->z, IsTransparencySet(TO_STRUCTURES)
++			);
+ 			break;
++		}
+ 
+-		case UNMOVABLE_OWNED_LAND:
+-			DrawClearLandTile(ti, 0);
+-
++		case UNMOVABLE_OWNED_LAND: {
++			DrawGroundSprite(GetUnmovableGround(ti->tile) + _tileh_to_sprite[ti->tileh], PAL_NONE);
+ 			AddSortableSpriteToDraw(
+ 				SPR_BOUGHT_LAND, PLAYER_SPRITE_COLOR(GetTileOwner(ti->tile)),
+-				ti->x + TILE_SIZE / 2, ti->y + TILE_SIZE / 2, 1, 1, BB_HEIGHT_UNDER_BRIDGE, GetSlopeZ(ti->x + TILE_SIZE / 2, ti->y + TILE_SIZE / 2)
++				ti->x + TILE_SIZE / 2, ti->y + TILE_SIZE / 2, 1, 1, BB_HEIGHT_UNDER_BRIDGE,
++				GetSlopeZ(ti->x + TILE_SIZE / 2, ti->y + TILE_SIZE / 2), IsTransparencySet(TO_SIGNS)
+ 			);
+ 			DrawBridgeMiddle(ti);
+ 			break;
++		}
+ 
+ 		default: {
+ 			const DrawTileSeqStruct* dtss;

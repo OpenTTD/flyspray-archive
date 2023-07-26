@@ -1,0 +1,381 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 12106)
++++ src/lang/english.txt	(working copy)
+@@ -1049,7 +1049,6 @@
+ STR_CONFIG_PATCHES_ALLOW_EXCLUSIVE                              :{LTBLUE}Allow buying exclusive transport rights: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_ALLOW_GIVE_MONEY                             :{LTBLUE}Allow sending money to other companies: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_NONUNIFORM_STATIONS                          :{LTBLUE}Nonuniform stations: {ORANGE}{STRING1}
+-STR_CONFIG_PATCHES_NEW_PATHFINDING_ALL                          :{LTBLUE}New global pathfinding (NPF, overrides NTP): {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_FREIGHT_TRAINS                               :{LTBLUE}Weight multiplier for freight to simulate heavy trains: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_STOP_ON_TOWN_ROAD                            :{LTBLUE}Allow drive-through road stops on town owned roads: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_ADJACENT_STATIONS                            :{LTBLUE}Allow building adjacent stations: {ORANGE}{STRING}
+@@ -1204,10 +1203,20 @@
+ 
+ STR_CONFIG_PATCHES_QUERY_CAPT                                   :{WHITE}Change setting value
+ STR_CONFIG_PATCHES_SERVICE_INTERVAL_INCOMPATIBLE                :{WHITE}Some or all of the default service interval(s) below are incompatible with the chosen setting! 5-90% and 30-800 days are valid
+-STR_CONFIG_PATCHES_YAPF_SHIPS                                   :{LTBLUE}Use YAPF for ships: {ORANGE}{STRING1}
+-STR_CONFIG_PATCHES_YAPF_ROAD                                    :{LTBLUE}Use YAPF for roadvehs: {ORANGE}{STRING1}
+-STR_CONFIG_PATCHES_YAPF_RAIL                                    :{LTBLUE}Use YAPF for trains: {ORANGE}{STRING1}
+ 
++STR_CONFIG_PATCHES_PATHFINDER_FOR_TRAINS                        :{LTBLUE}Pathfinder to use for trains: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_PATHFINDER_FOR_TRAINS_NTP                    :NTP {RED}(Not reccommended)
++STR_CONFIG_PATCHES_PATHFINDER_FOR_TRAINS_NPF                    :NPF
++STR_CONFIG_PATCHES_PATHFINDER_FOR_TRAINS_YAPF                   :YAPF {BLUE}(Recommended)
++STR_CONFIG_PATCHES_PATHFINDER_FOR_ROADVEH                       :{LTBLUE}Pathfinder to use for roadvehicles: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_PATHFINDER_FOR_ROADVEH_OPF                   :Original {RED}(Not recommended)
++STR_CONFIG_PATCHES_PATHFINDER_FOR_ROADVEH_NPF                   :NPF
++STR_CONFIG_PATCHES_PATHFINDER_FOR_ROADVEH_YAPF                  :YAPF {BLUE}(Recommended)
++STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS                         :{LTBLUE}Pathfinder to use for ships: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS_OPF                     :Original {BLUE}(Recommended)
++STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS_NPF                     :NPF
++STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS_YAPF                    :YAPF {RED}(Not recommended)
++
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :Sub-tropical landscape
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 12106)
++++ src/openttd.cpp	(working copy)
+@@ -62,6 +62,7 @@
+ #include "strings_func.h"
+ #include "zoom_func.h"
+ #include "date_func.h"
++#include "vehicle_base.h"
+ #include "vehicle_func.h"
+ #include "sound_func.h"
+ #include "variables.h"
+@@ -2398,6 +2399,12 @@
+ 				}
+ 			}
+ 		}
++		if (_patches.yapf.rail_use_yapf) _patches.pathfinder_for_trains = VPF_YAPF;
++		else _patches.pathfinder_for_trains = _patches.new_pathfinding_all ? VPF_NPF : VPF_ORIG;
++		if (_patches.yapf.road_use_yapf) _patches.pathfinder_for_roadveh = VPF_YAPF;
++		else _patches.pathfinder_for_roadveh = _patches.new_pathfinding_all ? VPF_NPF : VPF_ORIG;
++		if (_patches.yapf.ship_use_yapf) _patches.pathfinder_for_ships = VPF_YAPF;
++		else _patches.pathfinder_for_ships = _patches.new_pathfinding_all ? VPF_NPF : VPF_ORIG;
+ 	}
+ 
+ 	return InitializeWindowsAndCaches();
+Index: src/order_cmd.cpp
+===================================================================
+--- src/order_cmd.cpp	(revision 12106)
++++ src/order_cmd.cpp	(working copy)
+@@ -329,8 +329,7 @@
+ 	if (!HasOrderPoolFree(1)) return_cmd_error(STR_8831_NO_MORE_SPACE_FOR_ORDERS);
+ 
+ 	if (v->type == VEH_SHIP &&
+-			IsHumanPlayer(v->owner) &&
+-			!_patches.new_pathfinding_all) {
++		IsHumanPlayer(v->owner) && _patches.pathfinder_for_ships != VPF_NPF) {
+ 		// Make sure the new destination is not too far away from the previous
+ 		const Order *prev = NULL;
+ 		uint n = 0;
+Index: src/roadveh_cmd.cpp
+===================================================================
+--- src/roadveh_cmd.cpp	(revision 12106)
++++ src/roadveh_cmd.cpp	(working copy)
+@@ -36,6 +36,7 @@
+ #include "functions.h"
+ #include "window_func.h"
+ #include "date_func.h"
++#include "vehicle_base.h"
+ #include "vehicle_func.h"
+ #include "sound_func.h"
+ #include "variables.h"
+@@ -416,10 +417,10 @@
+ {
+ 	TileIndex tile = v->tile;
+ 
+-	if (_patches.yapf.road_use_yapf) {
++	if (_patches.pathfinder_for_roadveh == VPF_YAPF) { /* YAPF is being used */
+ 		Depot* ret = YapfFindNearestRoadDepot(v);
+ 		return ret;
+-	} else if (_patches.new_pathfinding_all) {
++	} else if (_patches.pathfinder_for_roadveh == VPF_NPF) { /* NPF is being used */
+ 		NPFFoundTargetData ftd;
+ 		/* See where we are now */
+ 		Trackdir trackdir = GetVehicleTrackdir(v);
+@@ -431,7 +432,7 @@
+ 			return NULL; /* Target not found */
+ 		}
+ 		/* We do not search in two directions here, why should we? We can't reverse right now can we? */
+-	} else {
++	} else { /* OPF is being used */
+ 		RoadFindDepotData rfdd;
+ 
+ 		rfdd.owner = v->owner;
+@@ -1217,11 +1218,11 @@
+ 		return_track(FindFirstBit2x64(trackdirs));
+ 	}
+ 
+-	if (_patches.yapf.road_use_yapf) {
++	if (_patches.pathfinder_for_roadveh == VPF_YAPF) { /* YAPF */
+ 		Trackdir trackdir = YapfChooseRoadTrack(v, tile, enterdir);
+ 		if (trackdir != INVALID_TRACKDIR) return_track(trackdir);
+ 		return_track(PickRandomBit(trackdirs));
+-	} else if (_patches.new_pathfinding_all) {
++	} else if (_patches.pathfinder_for_roadveh == VPF_NPF) { /* NPF */
+ 		NPFFindStationOrTileData fstd;
+ 		NPFFoundTargetData ftd;
+ 		Trackdir trackdir;
+@@ -1243,7 +1244,7 @@
+ 			to the tile closest to our target. */
+ 			return_track(ftd.best_trackdir);
+ 		}
+-	} else {
++	} else { /* OPF */
+ 		DiagDirection dir;
+ 
+ 		if (IsTileType(desttile, MP_ROAD)) {
+@@ -1300,7 +1301,7 @@
+ static uint RoadFindPathToStop(const Vehicle *v, TileIndex tile)
+ {
+ 	uint dist;
+-	if (_patches.yapf.road_use_yapf) {
++	if (_patches.pathfinder_for_roadveh == VPF_YAPF) {
+ 		/* use YAPF */
+ 		dist = YapfRoadVehDistanceToTile(v, tile);
+ 	} else {
+Index: src/saveload.cpp
+===================================================================
+--- src/saveload.cpp	(revision 12106)
++++ src/saveload.cpp	(working copy)
+@@ -34,7 +34,7 @@
+ 
+ #include "table/strings.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 86;
++extern const uint16 SAVEGAME_VERSION = 87;
+ uint16 _sl_version;       ///< the major savegame version identifier
+ byte   _sl_minor_version; ///< the minor savegame version, DO NOT USE!
+ 
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 12106)
++++ src/settings.cpp	(working copy)
+@@ -1400,12 +1400,16 @@
+ 	SDT_BOOL(Patches, mammoth_trains,                0,NN,  true,                    STR_CONFIG_PATCHES_MAMMOTHTRAINS,        NULL),
+ 	SDT_BOOL(Patches, gotodepot,                     0, 0,  true,                    STR_CONFIG_PATCHES_GOTODEPOT,            NULL),
+ 	SDT_BOOL(Patches, roadveh_queue,                 0, 0,  true,                    STR_CONFIG_PATCHES_ROADVEH_QUEUE,        NULL),
+-	SDT_BOOL(Patches, new_pathfinding_all,           0, 0, false,                    STR_CONFIG_PATCHES_NEW_PATHFINDING_ALL,  NULL),
+ 
+-	SDT_CONDBOOL(Patches, yapf.ship_use_yapf,      28, SL_MAX_VERSION, 0, 0, false,  STR_CONFIG_PATCHES_YAPF_SHIPS,      NULL),
+-	SDT_CONDBOOL(Patches, yapf.road_use_yapf,      28, SL_MAX_VERSION, 0, 0,  true,  STR_CONFIG_PATCHES_YAPF_ROAD,       NULL),
+-	SDT_CONDBOOL(Patches, yapf.rail_use_yapf,      28, SL_MAX_VERSION, 0, 0,  true,  STR_CONFIG_PATCHES_YAPF_RAIL,       NULL),
++	SDT_CONDBOOL(Patches, new_pathfinding_all,      0, 86, 0, 0, false,  STR_NULL,       NULL),
++	SDT_CONDBOOL(Patches, yapf.ship_use_yapf,      28, 86, 0, 0, false,  STR_NULL,       NULL),
++	SDT_CONDBOOL(Patches, yapf.road_use_yapf,      28, 86, 0, 0,  true,  STR_NULL,       NULL),
++	SDT_CONDBOOL(Patches, yapf.rail_use_yapf,      28, 86, 0, 0,  true,  STR_NULL,       NULL),
+ 
++	SDT_CONDVAR(Patches, pathfinder_for_trains,  SLE_UINT8, 87, SL_MAX_VERSION, 0, MS, 2, 0, 2, 0, STR_CONFIG_PATCHES_PATHFINDER_FOR_TRAINS,  NULL),
++	SDT_CONDVAR(Patches, pathfinder_for_roadveh, SLE_UINT8, 87, SL_MAX_VERSION, 0, MS, 2, 0, 2, 0, STR_CONFIG_PATCHES_PATHFINDER_FOR_ROADVEH, NULL),
++	SDT_CONDVAR(Patches, pathfinder_for_ships,   SLE_UINT8, 87, SL_MAX_VERSION, 0, MS, 0, 0, 2, 0, STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS,   NULL),
++
+ 	SDT_BOOL(Patches, train_income_warn,             S, 0,  true,                    STR_CONFIG_PATCHES_WARN_INCOME_LESS,     NULL),
+ 	 SDT_VAR(Patches, order_review_system,SLE_UINT8, S,MS,     2,     0,       2, 0, STR_CONFIG_PATCHES_ORDER_REVIEW,         NULL),
+ 	SDT_BOOL(Patches, never_expire_vehicles,         0,NN, false,                    STR_CONFIG_PATCHES_NEVER_EXPIRE_VEHICLES,NULL),
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 12106)
++++ src/settings_gui.cpp	(working copy)
+@@ -795,10 +795,9 @@
+ 	"mammoth_trains",
+ 	"gotodepot",
+ 	"roadveh_queue",
+-	"new_pathfinding_all",
+-	"yapf.ship_use_yapf",
+-	"yapf.road_use_yapf",
+-	"yapf.rail_use_yapf",
++	"pathfinder_for_trains",
++	"pathfinder_for_roadveh",
++	"pathfinder_for_ships",
+ 	"train_income_warn",
+ 	"order_review_system",
+ 	"never_expire_vehicles",
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 12106)
++++ src/settings_type.h	(working copy)
+@@ -125,6 +125,10 @@
+ 	uint16 servint_roadveh;             ///< service interval for road vehicles
+ 	uint16 servint_aircraft;            ///< service interval for aircraft
+ 	uint16 servint_ships;               ///< service interval for ships
++  
++	uint8 pathfinder_for_trains;        ///< the pathfinder to use for trains
++	uint8 pathfinder_for_roadveh;       ///< the pathfinder to use for roadvehicles
++	uint8 pathfinder_for_ships;         ///< the pathfinder to use for ships
+ 
+ 	bool autorenew;
+ 	int16 autorenew_months;
+Index: src/ship_cmd.cpp
+===================================================================
+--- src/ship_cmd.cpp	(revision 12106)
++++ src/ship_cmd.cpp	(working copy)
+@@ -19,6 +19,7 @@
+ #include "npf.h"
+ #include "depot.h"
+ #include "vehicle_gui.h"
++#include "vehicle_base.h"
+ #include "newgrf_engine.h"
+ #include "water_map.h"
+ #include "yapf/yapf.h"
+@@ -120,7 +121,7 @@
+ 	TileIndex tile;
+ 	TileIndex tile2 = v->tile;
+ 
+-	if (_patches.new_pathfinding_all) {
++	if (_patches.pathfinder_for_ships == VPF_NPF) { /* NPF is used */
+ 		NPFFoundTargetData ftd;
+ 		Trackdir trackdir = GetVehicleTrackdir(v);
+ 		ftd = NPFRouteToDepotTrialError(v->tile, trackdir, false, TRANSPORT_WATER, 0, v->owner, INVALID_RAILTYPES);
+@@ -129,7 +130,7 @@
+ 		} else {
+ 			best_depot = NULL; /* Did not find target */
+ 		}
+-	} else {
++	} else { /* OPF or YAPF(?) */
+ 		FOR_ALL_DEPOTS(depot) {
+ 			tile = depot->xy;
+ 			if (IsTileDepotType(tile, TRANSPORT_WATER) && IsTileOwner(tile, v->owner)) {
+@@ -527,10 +528,10 @@
+ {
+ 	assert(enterdir >= 0 && enterdir <= 3);
+ 
+-	if (_patches.yapf.ship_use_yapf) {
++	if (_patches.pathfinder_for_ships == VPF_YAPF) { /* YAPF */
+ 		Trackdir trackdir = YapfChooseShipTrack(v, tile, enterdir, tracks);
+ 		return (trackdir != INVALID_TRACKDIR) ? TrackdirToTrack(trackdir) : INVALID_TRACK;
+-	} else if (_patches.new_pathfinding_all) {
++	} else if (_patches.pathfinder_for_ships == VPF_NPF) { /* NPF */
+ 		NPFFindStationOrTileData fstd;
+ 		NPFFoundTargetData ftd;
+ 		Trackdir trackdir = GetVehicleTrackdir(v);
+@@ -549,7 +550,7 @@
+ 		} else {
+ 			return INVALID_TRACK; /* Already at target, reverse? */
+ 		}
+-	} else {
++	} else { /* OPF */
+ 		uint tot_dist, dist;
+ 		Track track;
+ 		TileIndex tile2;
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 12106)
++++ src/train_cmd.cpp	(working copy)
+@@ -24,6 +24,7 @@
+ #include "depot.h"
+ #include "waypoint.h"
+ #include "vehicle_gui.h"
++#include "vehicle_base.h"
+ #include "train.h"
+ #include "bridge.h"
+ #include "newgrf_callbacks.h"
+@@ -2010,10 +2011,10 @@
+ 		return tfdd;
+ 	}
+ 
+-	if (_patches.yapf.rail_use_yapf) {
++	if (_patches.pathfinder_for_trains == VPF_YAPF) { /* YAPF is selected */
+ 		bool found = YapfFindNearestRailDepotTwoWay(v, max_distance, NPF_INFINITE_PENALTY, &tfdd.tile, &tfdd.reverse);
+ 		tfdd.best_length = found ? max_distance / 2 : -1; // some fake distance or NOT_FOUND
+-	} else if (_patches.new_pathfinding_all) {
++	} else if (_patches.pathfinder_for_trains == VPF_NPF) { /* NPF is selected */
+ 		Vehicle* last = GetLastVehicleInChain(v);
+ 		Trackdir trackdir = GetVehicleTrackdir(v);
+ 		Trackdir trackdir_rev = ReverseTrackdir(GetVehicleTrackdir(last));
+@@ -2030,7 +2031,7 @@
+ 			tfdd.best_length = ftd.best_path_dist / NPF_TILE_LENGTH;
+ 			if (NPFGetFlag(&ftd.node, NPF_FLAG_REVERSE)) tfdd.reverse = true;
+ 		}
+-	} else {
++	} else { /* NTP */
+ 		/* search in the forward direction first. */
+ 		DiagDirection i = TrainExitDir(v->direction, v->u.rail.track);
+ 		NewTrainPathfind(tile, 0, v->u.rail.compatible_railtypes, i, (NTPEnumProc*)NtpCallbFindDepot, &tfdd);
+@@ -2363,14 +2364,14 @@
+ 	/* quick return in case only one possible track is available */
+ 	if (KillFirstBit(tracks) == TRACK_BIT_NONE) return FindFirstTrack(tracks);
+ 
+-	if (_patches.yapf.rail_use_yapf) {
++	if (_patches.pathfinder_for_trains == VPF_YAPF) { /* YAPF is selected */
+ 		Trackdir trackdir = YapfChooseRailTrack(v, tile, enterdir, tracks, &path_not_found);
+ 		if (trackdir != INVALID_TRACKDIR) {
+ 			best_track = TrackdirToTrack(trackdir);
+ 		} else {
+ 			best_track = FindFirstTrack(tracks);
+ 		}
+-	} else if (_patches.new_pathfinding_all) { /* Use a new pathfinding for everything */
++	} else if (_patches.pathfinder_for_trains == VPF_NPF) { /* NPF is selected */
+ 		void* perf = NpfBeginInterval();
+ 
+ 		NPFFindStationOrTileData fstd;
+@@ -2398,7 +2399,7 @@
+ 
+ 		int time = NpfEndInterval(perf);
+ 		DEBUG(yapf, 4, "[NPFT] %d us - %d rounds - %d open - %d closed -- ", time, 0, _aystar_stats_open_size, _aystar_stats_closed_size);
+-	} else {
++	} else { /* NTP is selected */
+ 		void* perf = NpfBeginInterval();
+ 
+ 		TrainTrackFollowerData fd;
+@@ -2474,9 +2475,9 @@
+ 
+ 	int i = _search_directions[FIND_FIRST_BIT(v->u.rail.track)][DirToDiagDir(v->direction)];
+ 
+-	if (_patches.yapf.rail_use_yapf) {
++	if (_patches.pathfinder_for_trains == VPF_YAPF) { /*YAPF is selected*/
+ 		reverse_best = YapfCheckReverseTrain(v);
+-	} else if (_patches.new_pathfinding_all) { /* Use a new pathfinding for everything */
++	} else if (_patches.pathfinder_for_trains == VPF_NPF) { /* NPF if selected for trains*/
+ 		NPFFindStationOrTileData fstd;
+ 		NPFFoundTargetData ftd;
+ 		Trackdir trackdir, trackdir_rev;
+@@ -2493,7 +2494,7 @@
+ 		if (ftd.best_bird_dist != 0) {
+ 			/* We didn't find anything, just keep on going straight ahead */
+ 			reverse_best = false;
+-		} else {
++		} else { /*NTP is selected*/
+ 			if (NPFGetFlag(&ftd.node, NPF_FLAG_REVERSE)) {
+ 				reverse_best = true;
+ 			} else {
+@@ -3030,7 +3031,7 @@
+ 				 * the signal status. */
+ 				uint32 tracks = ts | (ts >> 8);
+ 				TrackBits bits = (TrackBits)(tracks & TRACK_BIT_MASK);
+-				if ((_patches.new_pathfinding_all || _patches.yapf.rail_use_yapf) && _patches.forbid_90_deg && prev == NULL) {
++				if ((_patches.pathfinder_for_trains > 0) && _patches.forbid_90_deg && prev == NULL) {
+ 					/* We allow wagons to make 90 deg turns, because forbid_90_deg
+ 					 * can be switched on halfway a turn */
+ 					bits &= ~TrackCrossesTracks(FindFirstTrack(v->u.rail.track));
+@@ -3464,7 +3465,7 @@
+ 
+ 	/* mask unreachable track bits if we are forbidden to do 90deg turns */
+ 	TrackBits bits = (TrackBits)((ts | (ts >> 8)) & TRACK_BIT_MASK);
+-	if ((_patches.new_pathfinding_all || _patches.yapf.rail_use_yapf) && _patches.forbid_90_deg) {
++	if ((_patches.pathfinder_for_trains > 0) && _patches.forbid_90_deg) {
+ 		bits &= ~TrackCrossesTracks(FindFirstTrack(v->u.rail.track));
+ 	}
+ 
+Index: src/vehicle_base.h
+===================================================================
+--- src/vehicle_base.h	(revision 12106)
++++ src/vehicle_base.h	(working copy)
+@@ -138,6 +138,13 @@
+ 	VRF_EL_ENGINE_ALLOWED_NORMAL_RAIL = 6,
+ };
+ 
++/* pathfinding selection patch option states */
++enum {
++	VPF_ORIG,
++	VPF_NPF,
++	VPF_YAPF
++};
++
+ struct VehicleAir {
+ 	uint16 crashed_counter;
+ 	uint16 cached_max_speed;

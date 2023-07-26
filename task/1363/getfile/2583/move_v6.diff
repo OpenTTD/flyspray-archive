@@ -1,0 +1,335 @@
+Index: src/console_cmds.cpp
+===================================================================
+--- src/console_cmds.cpp	(revision 12350)
++++ src/console_cmds.cpp	(working copy)
+@@ -22,6 +22,7 @@
+ #include "screenshot.h"
+ #include "genworld.h"
+ #include "network/network.h"
++#include "network/core/config.h"
+ #include "strings_func.h"
+ #include "viewport_func.h"
+ #include "window_func.h"
+@@ -1229,6 +1230,64 @@
+ 	return true;
+ }
+ 
++DEF_CONSOLE_CMD(ConMoveClient)
++{
++	const Player *p;
++	NetworkClientInfo *ci;
++	uint16 client_index;
++	PlayerID player_index;
++	
++	if (argc < 2) {
++		IConsoleHelp("Move a player to another company. Usage: move <client-id> [<company-id>]");
++		IConsoleHelp("For client-id see 'clients', company-id must be between 1 and 8, ommit if moving to spectators");
++		IConsoleHelp("Warning: only patched clients(with the move patch) should be patched, and they shouldn't build anything between the time the move command is given, and the moving itself. Moving unpatched clients results in a disconnect");
++		return true;
++	}
++	
++	client_index = (uint16)atoi(argv[1]);
++	player_index = (argc == 3) ? (PlayerID)(atoi(argv[2]) - 1) : PLAYER_SPECTATOR; 
++	
++	if (client_index == NETWORK_SERVER_INDEX) {
++		IConsoleError("Silly boy, you can not move the server!");
++		return true;
++	}
++	
++	if (client_index == 0) {
++		IConsoleError("Invalid client");
++		return true;
++	}
++	
++	ci = NetworkFindClientInfoFromIndex(client_index);
++	
++	if (!IsValidPlayer(player_index) && player_index != PLAYER_SPECTATOR) {
++		IConsolePrintF(_icolour_err, "Company does not exist. Company-id must be between 1 and %d.", ActivePlayerCount());
++		return true;
++	}
++	
++	if (player_index != PLAYER_SPECTATOR) {
++		p = GetPlayer(player_index);
++		if (!p->is_active && player_index) {
++			IConsoleError("Company does not exist, see command 'players'.");
++			return true;
++		}
++	}
++	
++	if (ci != NULL) {
++		/* Save the company */
++		ci->being_moved_to = player_index;
++		ci->being_moved = true;
++		ci->move_timeout_framecount = _frame_counter + NetworkCalculateLag(NetworkFindClientStateFromIndex(client_index)) * 3;
++		/* Send the request to the client */
++		SEND_COMMAND(PACKET_SERVER_MOVE_REQ)(NetworkFindClientStateFromIndex(client_index), client_index, player_index);
++		/* Give a confirmation on the console */
++		IConsolePrintF(_icolour_err, "[move] client %d to company %d.", client_index, min(player_index+1, PLAYER_SPECTATOR));
++	} else {
++		IConsoleError("Client not found");
++	}
++	
++	return true;
++}
++
+ DEF_CONSOLE_CMD(ConPlayers)
+ {
+ 	Player *p;
+@@ -1559,6 +1618,8 @@
+ 	IConsoleCmdHookAdd("say_player",       ICONSOLE_HOOK_ACCESS, ConHookNeedNetwork);
+ 	IConsoleCmdRegister("say_client",      ConSayClient);
+ 	IConsoleCmdHookAdd("say_client",       ICONSOLE_HOOK_ACCESS, ConHookNeedNetwork);
++	IConsoleCmdRegister("move",                   ConMoveClient);
++	IConsoleCmdHookAdd("move",                  ICONSOLE_HOOK_ACCESS, ConHookServerOnly);
+ 
+ 	IConsoleCmdRegister("connect",         ConNetworkConnect);
+ 	IConsoleCmdHookAdd("connect",          ICONSOLE_HOOK_ACCESS, ConHookClientOnly);
+Index: src/network/core/tcp.h
+===================================================================
+--- src/network/core/tcp.h	(revision 12350)
++++ src/network/core/tcp.h	(working copy)
+@@ -55,6 +55,8 @@
+ 	PACKET_CLIENT_RCON,
+ 	PACKET_SERVER_CHECK_NEWGRFS,
+ 	PACKET_CLIENT_NEWGRFS_CHECKED,
++	PACKET_SERVER_MOVE_REQ,
++	PACKET_CLIENT_MOVE_OK,
+ 	PACKET_END                   ///< Must ALWAYS be on the end of this list!! (period)
+ };
+ 
+Index: src/network/network_server.cpp
+===================================================================
+--- src/network/network_server.cpp	(revision 12350)
++++ src/network/network_server.cpp	(working copy)
+@@ -597,6 +597,23 @@
+ 	cs->Send_Packet(p);
+ }
+ 
++DEF_SERVER_SEND_COMMAND_PARAM(PACKET_SERVER_MOVE_REQ)(NetworkTCPSocketHandler *cs, uint16 client_index, uint8 player_index)
++{
++	//
++	// Packet: PACKET_SERVER_MOVE_REQ
++	// Function: Inform the client that its about to be moved.
++	// Data:
++	//		uint16:	Client-index
++	//		uint8:	PlayerID
++	//
++	Packet *p = NetworkSend_Init(PACKET_SERVER_MOVE_REQ);
++	p->Send_uint16(client_index);
++	p->Send_uint8(player_index);
++	cs->Send_Packet(p);
++
++
++}
++
+ // **********
+ // Receiving functions
+ //   DEF_SERVER_RECEIVE_COMMAND has parameter: NetworkTCPSocketHandler *cs, Packet *p
+@@ -687,6 +704,7 @@
+ 	ttd_strlcpy(ci->unique_id, unique_id, sizeof(ci->unique_id));
+ 	ci->client_playas = playas;
+ 	ci->client_lang = client_lang;
++	ci->being_moved_to = PLAYER_SPECTATOR;
+ 
+ 	/* Make sure companies to which people try to join are not autocleaned */
+ 	if (IsValidPlayer(playas)) _network_player_info[playas].months_empty = 0;
+@@ -1036,6 +1054,23 @@
+ 	cs->last_frame_server = _frame_counter;
+ }
+ 
++DEF_SERVER_RECEIVE_COMMAND(PACKET_CLIENT_MOVE_OK)
++{
++	NetworkClientInfo *ci;
++	char client_msg[21 + NETWORK_CLIENT_NAME_LENGTH];
++	ci = DEREF_CLIENT_INFO(cs);
++	if (!ci->being_moved) return; /* The client was never about to be moved;client is a cheetah; so ignore him */
++	/* make the change */
++	ci->client_playas = ci->being_moved_to;
++	/* Now spread the word to everyone else. */
++	NetworkUpdateClientInfo(ci->client_index);
++	/* Notify all clients using a generic action chat message */
++	if (ci->being_moved_to == PLAYER_SPECTATOR) sprintf(client_msg, "%s is now a spectator", ci->client_name);
++	else sprintf(client_msg, "%s is now in company #%d", ci->client_name, min(ci->being_moved_to+1, PLAYER_SPECTATOR));
++	NetworkServer_HandleChat(NETWORK_ACTION_SERVER_MESSAGE, DESTTYPE_BROADCAST, 0, client_msg,NETWORK_SERVER_INDEX);
++	/* The client is no longer being moved */
++	ci->being_moved = false;
++}
+ 
+ 
+ void NetworkServer_HandleChat(NetworkAction action, DestType desttype, int dest, const char *msg, uint16 from_index)
+@@ -1246,6 +1281,8 @@
+ 	RECEIVE_COMMAND(PACKET_CLIENT_RCON),
+ 	NULL, /*PACKET_CLIENT_CHECK_NEWGRFS,*/
+ 	RECEIVE_COMMAND(PACKET_CLIENT_NEWGRFS_CHECKED),
++	NULL, /*PACKET_SERVER_MOVE_REQ,*/
++	RECEIVE_COMMAND(PACKET_CLIENT_MOVE_OK),
+ };
+ 
+ // If this fails, check the array above with network_data.h
+@@ -1517,6 +1554,7 @@
+ 	// Now we are done with the frame, inform the clients that they can
+ 	//  do their frame!
+ 	FOR_ALL_CLIENTS(cs) {
++		NetworkClientInfo *ci = DEREF_CLIENT_INFO(cs);
+ 		// Check if the speed of the client is what we can expect from a client
+ 		if (cs->status == STATUS_ACTIVE) {
+ 			// 1 lag-point per day
+@@ -1564,6 +1602,11 @@
+ 			if (send_sync) SEND_COMMAND(PACKET_SERVER_SYNC)(cs);
+ #endif
+ 		}
++		if (ci->being_moved && _frame_counter > ci->move_timeout_framecount) {
++			/* The waiting for the client has timed out now */
++			NetworkServer_HandleChat(NETWORK_ACTION_SERVER_MESSAGE, DESTTYPE_BROADCAST, 0, "Waiting for move confirmation timed out, executing move anyway",NETWORK_SERVER_INDEX);
++			RECEIVE_COMMAND(PACKET_CLIENT_MOVE_OK)(cs, NULL);
++		}
+ 	}
+ 
+ 	/* See if we need to advertise */
+Index: src/network/network_server.h
+===================================================================
+--- src/network/network_server.h	(revision 12350)
++++ src/network/network_server.h	(working copy)
+@@ -11,6 +11,7 @@
+ DEF_SERVER_SEND_COMMAND(PACKET_SERVER_SHUTDOWN);
+ DEF_SERVER_SEND_COMMAND(PACKET_SERVER_NEWGAME);
+ DEF_SERVER_SEND_COMMAND_PARAM(PACKET_SERVER_RCON)(NetworkTCPSocketHandler *cs, uint16 color, const char *command);
++DEF_SERVER_SEND_COMMAND_PARAM(PACKET_SERVER_MOVE_REQ)(NetworkTCPSocketHandler *cs, uint16 client_index, uint8 player_index);
+ 
+ bool NetworkFindName(char new_name[NETWORK_CLIENT_NAME_LENGTH]);
+ void NetworkServer_HandleChat(NetworkAction action, DestType type, int dest, const char *msg, uint16 from_index);
+Index: src/network/network_client.cpp
+===================================================================
+--- src/network/network_client.cpp	(revision 12350)
++++ src/network/network_client.cpp	(working copy)
+@@ -18,6 +18,7 @@
+ #include "../core/alloc_func.hpp"
+ #include "../fileio.h"
+ #include "../md5.h"
++#include "../gfx_func.h"
+ #include "../strings_func.h"
+ #include "../window_func.h"
+ #include "../string_func.h"
+@@ -321,7 +322,20 @@
+ 	MY_CLIENT->Send_Packet(p);
+ }
+ 
++DEF_CLIENT_SEND_COMMAND(PACKET_CLIENT_MOVE_OK)
++{
++	//
++	// Packet: CLIENT_ACK
++	// Function: Tell the server we are done with this frame
++	// Data:
++	//    nothing
++	//
+ 
++	Packet *p = NetworkSend_Init(PACKET_CLIENT_MOVE_OK);
++
++	MY_CLIENT->Send_Packet(p);
++}
++
+ // **********
+ // Receiving functions
+ //   DEF_CLIENT_RECEIVE_COMMAND has parameter: Packet *p
+@@ -413,8 +427,10 @@
+ 			// Client name changed, display the change
+ 			NetworkTextMessage(NETWORK_ACTION_NAME_CHANGE, 1, false, ci->client_name, "%s", name);
+ 		} else if (playas != ci->client_playas) {
+-			// The player changed from client-player..
+-			// Do not display that for now
++			/* if not valid player, force spectator, else check player exists */
++				if (!IsValidPlayer(playas)) {
++					playas = PLAYER_SPECTATOR;
++				}
+ 		}
+ 
+ 		ci->client_playas = playas;
+@@ -854,6 +870,52 @@
+ 	return NETWORK_RECV_STATUS_OKAY;
+ }
+ 
++DEF_CLIENT_RECEIVE_COMMAND(PACKET_SERVER_MOVE_REQ)
++{
++	const Player *player;
++	uint16 client_index;
++	PlayerID player_index;
++	
++	/* Nothing more in this packet... */
++	client_index = p->Recv_uint16();
++	player_index = (Owner)p->Recv_uint8();
++	
++	if (client_index == 0) {
++		/* deffinately an invalide client id, debug message and do nothing. */
++		DEBUG(net, 0, "[move] received client index = 0");
++		return NETWORK_RECV_STATUS_OKAY;
++	}
++	
++	const NetworkClientInfo *ci = NetworkFindClientInfoFromIndex(client_index);
++	/* Just make sure we do not try to use a client_index that does not exist */
++	if (ci != NULL) {
++		/* if not valid player, force spectator, else check player exists */
++		if (!IsValidPlayer(player_index)) {
++			player_index = PLAYER_SPECTATOR;
++		} else {
++			/* only if it's a valid player, actually get the player and check it */
++			player = GetPlayer(player_index);
++			if (!player->is_active) {
++				player_index = PLAYER_SPECTATOR;
++			}
++		}
++		
++		if (client_index == _network_own_client_index) {
++			/* this packet is actually for this client... apply the new player_index */
++			DEBUG(net, 0, "[move] client %d to player %d", client_index, min(player_index+1, PLAYER_SPECTATOR));
++			
++			_network_playas = player_index;
++			SetLocalPlayer(player_index);
++			
++			/* Disable any buttons in any windows the client is now not supposed to get to, and do it fast. */
++			MarkWholeScreenDirty();
++			/* Send the server a confirmation */
++			SEND_COMMAND(PACKET_CLIENT_MOVE_OK)();
++		}
++	}
++	
++	return NETWORK_RECV_STATUS_OKAY;
++}
+ 
+ 
+ // The layout for the receive-functions by the client
+@@ -898,6 +960,8 @@
+ 	NULL, /*PACKET_CLIENT_RCON,*/
+ 	RECEIVE_COMMAND(PACKET_SERVER_CHECK_NEWGRFS),
+ 	NULL, /*PACKET_CLIENT_NEWGRFS_CHECKED,*/
++	RECEIVE_COMMAND(PACKET_SERVER_MOVE_REQ),
++	NULL, /*PACKET_CLIENT_MOVE_OK,*/
+ };
+ 
+ // If this fails, check the array above with network_data.h
+Index: src/network/network_internal.h
+===================================================================
+--- src/network/network_internal.h	(revision 12350)
++++ src/network/network_internal.h	(working copy)
+@@ -61,6 +61,10 @@
+ 	PlayerID client_playas;                         // As which player is this client playing (PlayerID)
+ 	uint32 client_ip;                               // IP-address of the client (so he can be banned)
+ 	Date join_date;                                 // Gamedate the player has joined
++	PlayerID being_moved_to;                  // If the client is being moved, contains the id where it is going to be moved to
++	bool being_moved;                            // If the client is being moved
++	uint32 move_timeout_framecount;      // The framecount the moving will time out and the client move will be executed without client confirmation
++	
+ 	char unique_id[NETWORK_UNIQUE_ID_LENGTH];       // Every play sends an unique id so we can indentify him
+ };
+ 
+Index: src/network/network_client.h
+===================================================================
+--- src/network/network_client.h	(revision 12350)
++++ src/network/network_client.h	(working copy)
+@@ -16,6 +16,7 @@
+ DEF_CLIENT_SEND_COMMAND_PARAM(PACKET_CLIENT_SET_NAME)(const char *name);
+ DEF_CLIENT_SEND_COMMAND(PACKET_CLIENT_ACK);
+ DEF_CLIENT_SEND_COMMAND_PARAM(PACKET_CLIENT_RCON)(const char *pass, const char *command);
++DEF_CLIENT_SEND_COMMAND(PACKET_CLIENT_MOVE_OK);
+ 
+ NetworkRecvStatus NetworkClient_ReadPackets(NetworkTCPSocketHandler *cs);
+ void NetworkClient_Connected();

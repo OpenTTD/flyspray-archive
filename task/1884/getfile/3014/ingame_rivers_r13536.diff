@@ -1,0 +1,157 @@
+Index: src/water_cmd.cpp
+===================================================================
+--- src/water_cmd.cpp	(revision 13536)
++++ src/water_cmd.cpp	(working copy)
+@@ -344,7 +344,7 @@
+  * @param tile end tile of stretch-dragging
+  * @param flags type of operation
+  * @param p1 start tile of stretch-dragging
+- * @param p2 specifies canal (0), water (1) or river (2); last two can only be built in scenario editor
++ * @param p2 specifies canal (0), water (1) or river (2); water can only be built in scenario editor
+  */
+ CommandCost CmdBuildCanal(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+@@ -356,8 +356,8 @@
+ 
+ 	if (p1 >= MapSize()) return CMD_ERROR;
+ 
+-	/* Outside of the editor you can only build canals, not oceans */
+-	if (p2 != 0 && _game_mode != GM_EDITOR) return CMD_ERROR;
++	/* Outside of the editor you may not build oceans */
++	if (p2 == 1 && _game_mode != GM_EDITOR) return CMD_ERROR;
+ 
+ 	x = TileX(tile);
+ 	y = TileY(tile);
+@@ -380,8 +380,8 @@
+ 			return_cmd_error(STR_0007_FLAT_LAND_REQUIRED);
+ 		}
+ 
+-		/* can't make water of water! */
+-		if (IsTileType(tile, MP_WATER) && (!IsTileOwner(tile, OWNER_WATER) || p2 == 1)) continue;
++		/* skip tile if it already has the right type */
++		if (IsTileType(tile, MP_WATER) && (p2 == 1 && IsSea(tile) || (p2 == 0 && IsCanal(tile)) || (p2 == 2 && IsRiver(tile)))) continue;
+ 
+ 		ret = DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
+ 		if (CmdFailed(ret)) return ret;
+@@ -400,6 +400,7 @@
+ 		}
+ 
+ 		cost.AddCost(_price.clear_water);
++		if (p2 == 2) cost.AddCost(_price.clear_water * 3);
+ 	} END_TILE_LOOP(tile, size_x, size_y, 0);
+ 
+ 	if (cost.GetCost() == 0) {
+Index: src/dock_gui.cpp
+===================================================================
+--- src/dock_gui.cpp	(revision 13536)
++++ src/dock_gui.cpp	(working copy)
+@@ -64,6 +64,11 @@
+ 	VpStartPlaceSizing(tile, VPM_X_OR_Y, DDSP_CREATE_WATER);
+ }
+ 
++static void PlaceDocks_BuildRiver(TileIndex tile)
++{
++	VpStartPlaceSizing(tile, VPM_X_OR_Y, DDSP_CREATE_RIVER);
++}
++
+ static void PlaceDocks_BuildLock(TileIndex tile)
+ {
+ 	DoCommandP(tile, 0, 0, CcBuildDocks, CMD_BUILD_LOCK | CMD_MSG(STR_CANT_BUILD_LOCKS));
+@@ -82,7 +87,8 @@
+ 	DTW_CAPTION,                   ///< Window caption
+ 	DTW_STICKY,                    ///< Sticky window button
+ 	DTW_BUTTONS_BEGIN,             ///< Begin of clickable buttons (except seperating panel)
+-	DTW_CANAL = DTW_BUTTONS_BEGIN, ///< Build canal button
++	DTW_CANAL = DTW_BUTTONS_BEGIN, ///< Build canal button	
++ 	DTW_RIVER,					   ///< Build river button	
+ 	DTW_LOCK,                      ///< Build lock button
+ 	DTW_SEPERATOR,                 ///< Seperating panel between lock and demolish
+ 	DTW_DEMOLISH,                  ///< Demolish aka dynamite button
+@@ -99,6 +105,11 @@
+ 	HandlePlacePushButton(w, DTW_CANAL, SPR_CURSOR_CANAL, VHM_RECT, PlaceDocks_BuildCanal);
+ }
+ 
++static void BuildDocksClick_River(Window *w)
++{
++	HandlePlacePushButton(w, DTW_RIVER, SPR_CURSOR_RIVER, VHM_RECT, PlaceDocks_BuildRiver);
++}
++
+ static void BuildDocksClick_Lock(Window *w)
+ {
+ 	HandlePlacePushButton(w, DTW_LOCK, SPR_CURSOR_LOCK, VHM_RECT, PlaceDocks_BuildLock);
+@@ -136,6 +147,7 @@
+ typedef void OnButtonClick(Window *w);
+ static OnButtonClick * const _build_docks_button_proc[] = {
+ 	BuildDocksClick_Canal,
++	BuildDocksClick_River,
+ 	BuildDocksClick_Lock,
+ 	NULL,
+ 	BuildDocksClick_Demolish,
+@@ -172,13 +184,14 @@
+ 	{
+ 		switch (keycode) {
+ 			case '1': BuildDocksClick_Canal(this); break;
+-			case '2': BuildDocksClick_Lock(this); break;
+-			case '3': BuildDocksClick_Demolish(this); break;
+-			case '4': BuildDocksClick_Depot(this); break;
+-			case '5': BuildDocksClick_Dock(this); break;
+-			case '6': BuildDocksClick_Buoy(this); break;
++  			case '2': BuildDocksClick_River(this); break;
++			case '3': BuildDocksClick_Lock(this); break;
++			case '4': BuildDocksClick_Demolish(this); break;
++			case '5': BuildDocksClick_Depot(this); break;
++			case '6': BuildDocksClick_Dock(this); break;
++			case '7': BuildDocksClick_Buoy(this); break;
+ 			case 'B':
+-			case '7': BuildDocksClick_Aqueduct(this); break;
++			case '8': BuildDocksClick_Aqueduct(this); break;
+ 			default:  return ES_NOT_HANDLED;
+ 		}
+ 		return ES_HANDLED;
+@@ -209,7 +222,9 @@
+ 				case DDSP_CREATE_WATER:
+ 					DoCommandP(end_tile, start_tile, 0, CcBuildCanal, CMD_BUILD_CANAL | CMD_MSG(STR_CANT_BUILD_CANALS));
+ 					break;
+-
++				case DDSP_CREATE_RIVER:
++					GUIPlaceProcDragXY(select_proc, start_tile, end_tile);
++					break;
+ 				default: break;
+ 			}
+ 		}
+@@ -234,23 +249,24 @@
+ 
+ static const Widget _build_docks_toolb_widgets[] = {
+ {   WWT_CLOSEBOX,   RESIZE_NONE,     7,     0,    10,     0,    13, STR_00C5,                   STR_018B_CLOSE_WINDOW},                   // DTW_CLOSEBOX
+-{    WWT_CAPTION,   RESIZE_NONE,     7,    11,   145,     0,    13, STR_9801_DOCK_CONSTRUCTION, STR_018C_WINDOW_TITLE_DRAG_THIS},         // DTW_CAPTION
+-{  WWT_STICKYBOX,   RESIZE_NONE,     7,   146,   157,     0,    13, 0x0,                        STR_STICKY_BUTTON},                       // DTW_STICKY
+-{     WWT_IMGBTN,   RESIZE_NONE,     7,     0,    21,    14,    35, SPR_IMG_BUILD_CANAL,        STR_BUILD_CANALS_TIP},                    // DTW_CANAL
+-{     WWT_IMGBTN,   RESIZE_NONE,     7,    22,    43,    14,    35, SPR_IMG_BUILD_LOCK,         STR_BUILD_LOCKS_TIP},                     // DTW_LOCK
++{    WWT_CAPTION,   RESIZE_NONE,     7,    11,   167,     0,    13, STR_9801_DOCK_CONSTRUCTION, STR_018C_WINDOW_TITLE_DRAG_THIS},         // DTW_CAPTION
++{  WWT_STICKYBOX,   RESIZE_NONE,     7,   168,   179,     0,    13, 0x0,                        STR_STICKY_BUTTON},                       // DTW_STICKY
++{     WWT_IMGBTN,   RESIZE_NONE,     7,     0,    21,    14,    35, SPR_IMG_BUILD_CANAL,        STR_BUILD_CANALS_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,     7,    22,    43,    14,    35, SPR_IMG_BUILD_RIVER,        STR_CREATE_RIVER},                          // DTW_CANAL
++{     WWT_IMGBTN,   RESIZE_NONE,     7,    44,    65,    14,    35, SPR_IMG_BUILD_LOCK,         STR_BUILD_LOCKS_TIP},                     // DTW_LOCK
+ 
+-{      WWT_PANEL,   RESIZE_NONE,     7,    44,    47,    14,    35, 0x0,                        STR_NULL},                                // DTW_SEPERATOR
++{      WWT_PANEL,   RESIZE_NONE,     7,    66,    69,    14,    35, 0x0,                        STR_NULL},                                // DTW_SEPERATOR
+ 
+-{     WWT_IMGBTN,   RESIZE_NONE,     7,    48,    69,    14,    35, SPR_IMG_DYNAMITE,           STR_018D_DEMOLISH_BUILDINGS_ETC},         // DTW_DEMOLISH
+-{     WWT_IMGBTN,   RESIZE_NONE,     7,    70,    91,    14,    35, SPR_IMG_SHIP_DEPOT,         STR_981E_BUILD_SHIP_DEPOT_FOR_BUILDING},  // DTW_DEPOT
+-{     WWT_IMGBTN,   RESIZE_NONE,     7,    92,   113,    14,    35, SPR_IMG_SHIP_DOCK,          STR_981D_BUILD_SHIP_DOCK},                // DTW_STATION
+-{     WWT_IMGBTN,   RESIZE_NONE,     7,   114,   135,    14,    35, SPR_IMG_BOUY,               STR_9834_POSITION_BUOY_WHICH_CAN},        // DTW_BUOY
+-{     WWT_IMGBTN,   RESIZE_NONE,     7,   136,   157,    14,    35, SPR_IMG_AQUEDUCT,           STR_BUILD_AQUEDUCT},                      // DTW_BUILD_AQUEDUCT
++{     WWT_IMGBTN,   RESIZE_NONE,     7,    70,    91,    14,    35, SPR_IMG_DYNAMITE,           STR_018D_DEMOLISH_BUILDINGS_ETC},         // DTW_DEMOLISH
++{     WWT_IMGBTN,   RESIZE_NONE,     7,    92,   113,    14,    35, SPR_IMG_SHIP_DEPOT,         STR_981E_BUILD_SHIP_DEPOT_FOR_BUILDING},  // DTW_DEPOT
++{     WWT_IMGBTN,   RESIZE_NONE,     7,   114,   135,    14,    35, SPR_IMG_SHIP_DOCK,          STR_981D_BUILD_SHIP_DOCK},                // DTW_STATION
++{     WWT_IMGBTN,   RESIZE_NONE,     7,   136,   157,    14,    35, SPR_IMG_BOUY,               STR_9834_POSITION_BUOY_WHICH_CAN},        // DTW_BUOY
++{     WWT_IMGBTN,   RESIZE_NONE,     7,   158,   179,    14,    35, SPR_IMG_AQUEDUCT,           STR_BUILD_AQUEDUCT},                      // DTW_BUILD_AQUEDUCT
+ {   WIDGETS_END},
+ };
+ 
+ static const WindowDesc _build_docks_toolbar_desc = {
+-	WDP_ALIGN_TBR, 22, 158, 36, 158, 36,
++	WDP_ALIGN_TBR, 22, 180, 36, 180, 36,
+ 	WC_BUILD_TOOLBAR, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_STICKY_BUTTON,
+ 	_build_docks_toolb_widgets,

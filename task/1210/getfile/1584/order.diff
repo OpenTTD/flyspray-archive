@@ -1,0 +1,139 @@
+Index: src/vehicle.h
+===================================================================
+--- src/vehicle.h	(revision 11051)
++++ src/vehicle.h	(working copy)
+@@ -622,7 +622,7 @@
+ void TrainPowerChanged(Vehicle *v);
+ Money GetTrainRunningCost(const Vehicle *v);
+ 
+-bool VehicleNeedsService(const Vehicle *v);
++bool VehicleNeedsService(const Vehicle *v, bool order);
+ 
+ uint GenerateVehicleSortList(const Vehicle*** sort_list, uint16 *length_of_array, VehicleType type, PlayerID owner, uint32 index, uint16 window_type);
+ void BuildDepotVehicleList(VehicleType type, TileIndex tile, Vehicle ***engine_list, uint16 *engine_list_length, uint16 *engine_count, Vehicle ***wagon_list, uint16 *wagon_list_length, uint16 *wagon_count);
+Index: src/ship_cmd.cpp
+===================================================================
+--- src/ship_cmd.cpp	(revision 11051)
++++ src/ship_cmd.cpp	(working copy)
+@@ -140,7 +140,8 @@
+ 
+ static void CheckIfShipNeedsService(Vehicle *v)
+ {
+-	if (_patches.servint_ships == 0 || !VehicleNeedsService(v)) return;
++	if (_patches.servint_ships == 0 || !VehicleNeedsService(v, false)) return;
++
+ 	if (v->IsInDepot()) {
+ 		VehicleServiceInDepot(v);
+ 		return;
+@@ -247,7 +248,7 @@
+ 		case OT_GOTO_DEPOT:
+ 			if (!(v->current_order.flags & OF_PART_OF_ORDERS)) return;
+ 			if (v->current_order.flags & OF_SERVICE_IF_NEEDED &&
+-					!VehicleNeedsService(v)) {
++					!VehicleNeedsService(v, true)) {
+ 				UpdateVehicleTimetable(v, true);
+ 				v->cur_order_index++;
+ 			}
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 11051)
++++ src/train_cmd.cpp	(working copy)
+@@ -2374,7 +2374,7 @@
+ 		case OT_GOTO_DEPOT:
+ 			if (!(v->current_order.flags & OF_PART_OF_ORDERS)) return false;
+ 			if ((v->current_order.flags & OF_SERVICE_IF_NEEDED) &&
+-					!VehicleNeedsService(v)) {
++					!VehicleNeedsService(v, true)) {
+ 				UpdateVehicleTimetable(v, true);
+ 				v->cur_order_index++;
+ 			}
+@@ -3350,7 +3350,7 @@
+ 
+ static void CheckIfTrainNeedsService(Vehicle *v)
+ {
+-	if (_patches.servint_trains == 0 || !VehicleNeedsService(v)) return;
++	if (_patches.servint_trains == 0 || !VehicleNeedsService(v, false)) return;
+ 	if (v->IsInDepot()) {
+ 		VehicleServiceInDepot(v);
+ 		return;
+Index: src/roadveh_cmd.cpp
+===================================================================
+--- src/roadveh_cmd.cpp	(revision 11051)
++++ src/roadveh_cmd.cpp	(working copy)
+@@ -759,7 +759,7 @@
+ 			/* Let a depot order in the orderlist interrupt. */
+ 			if (!(v->current_order.flags & OF_PART_OF_ORDERS)) return;
+ 			if (v->current_order.flags & OF_SERVICE_IF_NEEDED &&
+-					!VehicleNeedsService(v)) {
++					!VehicleNeedsService(v, true)) {
+ 				UpdateVehicleTimetable(v, true);
+ 				v->cur_order_index++;
+ 			}
+@@ -1842,7 +1842,8 @@
+ static void CheckIfRoadVehNeedsService(Vehicle *v)
+ {
+ 	/* If we already got a slot at a stop, use that FIRST, and go to a depot later */
+-	if (v->u.road.slot != NULL || _patches.servint_roadveh == 0 || !VehicleNeedsService(v)) return;
++	if (v->u.road.slot != NULL || _patches.servint_roadveh == 0 || !VehicleNeedsService(v, false)) return;
++
+ 	if (v->IsInDepot()) {
+ 		VehicleServiceInDepot(v);
+ 		return;
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 11051)
++++ src/vehicle.cpp	(working copy)
+@@ -89,12 +89,27 @@
+ 	InvalidateWindow(WC_VEHICLE_DETAILS, v->index); // ensure that last service date and reliability are updated
+ }
+ 
+-bool VehicleNeedsService(const Vehicle *v)
++
++/** Tests, if vehicle needs a service
++ *  Called from Process*Order() to test if current 'Service At' order should be executed
++ *  Called from CheckIf*NeedsService() from OnNewDay_*() to test,
++ *   if vehicle should go for service by its own, if it doesn't have any 'GoTo Depot' orders
++ *  Related bug - FS#1210
++ * @param v pointer to vehicle
++ * @param order true if called from Process*Order() to test 'Service At' order
++ * @return true if vehicle needs service, else false
++ * */
++bool VehicleNeedsService(const Vehicle *v, bool order)
+ {
++	if (!order) {
++		/* Has any depot orders, so it doesn't automatic servicing */
++		if (_patches.gotodepot && VehicleHasDepotOrders(v)) return false;
++		/* Actually going to depot, do not search for new/other depot */
++		if (v->current_order.type == OT_GOTO_DEPOT) return false;
++	}
++
+ 	if (v->vehstatus & (VS_STOPPED | VS_CRASHED))       return false;
+-	if (_patches.gotodepot && VehicleHasDepotOrders(v)) return false;
+ 	if (v->current_order.type == OT_LOADING)            return false;
+-	if (v->current_order.type == OT_GOTO_DEPOT && v->current_order.flags & OF_HALT_IN_DEPOT) return false;
+ 
+ 	if (_patches.no_servicing_if_no_breakdowns && _opt.diff.vehicle_breakdowns == 0) {
+ 		return EngineHasReplacementForPlayer(GetPlayer(v->owner), v->engine_type, v->group_id);  /* Vehicles set for autoreplacing needs to go to a depot even if breakdowns are turned off */
+Index: src/aircraft_cmd.cpp
+===================================================================
+--- src/aircraft_cmd.cpp	(revision 11051)
++++ src/aircraft_cmd.cpp	(working copy)
+@@ -696,7 +696,8 @@
+ 
+ static void CheckIfAircraftNeedsService(Vehicle *v)
+ {
+-	if (_patches.servint_aircraft == 0 || !VehicleNeedsService(v)) return;
++	if (_patches.servint_aircraft == 0 || !VehicleNeedsService(v, false)) return;
++
+ 	if (v->IsInDepot()) {
+ 		VehicleServiceInDepot(v);
+ 		return;
+@@ -1334,7 +1335,7 @@
+ 		case OT_GOTO_DEPOT:
+ 			if (!(v->current_order.flags & OF_PART_OF_ORDERS)) return;
+ 			if (v->current_order.flags & OF_SERVICE_IF_NEEDED &&
+-					!VehicleNeedsService(v)) {
++					!VehicleNeedsService(v, true)) {
+ 				UpdateVehicleTimetable(v, true);
+ 				v->cur_order_index++;
+ 			}

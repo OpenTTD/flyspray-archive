@@ -1,0 +1,262 @@
+=== modified file 'src/widget.cpp'
+--- src/widget.cpp	2008-06-29 07:28:01 +0000
++++ src/widget.cpp	2008-07-15 12:55:36 +0000
+@@ -144,8 +144,7 @@
+ 		const Widget *wi = &w->widget[index];
+ 		if (wi->type == WWT_EMPTY || wi->type == WWT_FRAME) continue;
+ 
+-		if (x >= wi->left && x <= wi->right && y >= wi->top &&  y <= wi->bottom &&
+-				!w->IsWidgetHidden(index)) {
++		if (x >= wi->left && x <= wi->right && y >= wi->top &&  y <= wi->bottom && !wi->IsHidden()) {
+ 			found_index = index;
+ 		}
+ 	}
+@@ -196,14 +195,14 @@
+ 
+ 	for (uint i = 0; i < this->widget_count; i++) {
+ 		const Widget *wi = &this->widget[i];
+-		bool clicked = this->IsWidgetLowered(i);
++		bool clicked = wi->IsLowered();
+ 		Rect r;
+ 
+ 		if (dpi->left > (r.right = wi->right) ||
+ 				dpi->left + dpi->width <= (r.left = wi->left) ||
+ 				dpi->top > (r.bottom = wi->bottom) ||
+ 				dpi->top + dpi->height <= (r.top = wi->top) ||
+-				this->IsWidgetHidden(i)) {
++				wi->IsHidden()) {
+ 			continue;
+ 		}
+ 
+@@ -489,7 +488,7 @@
+ 		}
+ 		}
+ 
+-		if (this->IsWidgetDisabled(i)) {
++		if (wi->IsDisabled()) {
+ 			GfxFillRect(r.left + 1, r.top + 1, r.right - 1, r.bottom - 1, _colour_gradient[wi->color & 0xF][2], FILLRECT_CHECKER);
+ 		}
+ 	}
+
+=== modified file 'src/window.cpp'
+--- src/window.cpp	2008-06-13 10:44:30 +0000
++++ src/window.cpp	2008-07-15 12:55:36 +0000
+@@ -107,7 +107,7 @@
+ 	const Widget *wi = &this->widget[widget_index];
+ 
+ 	/* Don't redraw the window if the widget is invisible or of no-type */
+-	if (wi->type == WWT_EMPTY || IsWidgetHidden(widget_index)) return;
++	if (wi->type == WWT_EMPTY || wi->IsHidden()) return;
+ 
+ 	SetDirtyBlocks(this->left + wi->left, this->top + wi->top, this->left + wi->right + 1, this->top + wi->bottom + 1);
+ }
+@@ -136,10 +136,10 @@
+ 		widget = GetWidgetFromPos(w, x, y);
+ 		if (widget < 0) return; // exit if clicked outside of widgets
+ 
++		const Widget *wi = &w->widget[widget];
++
+ 		/* don't allow any interaction if the button has been disabled */
+-		if (w->IsWidgetDisabled(widget)) return;
+-
+-		const Widget *wi = &w->widget[widget];
++		if (wi->IsDisabled()) return;
+ 
+ 		if (wi->type & WWB_MASK) {
+ 			/* special widget handling for buttons*/
+
+=== modified file 'src/window_gui.h'
+--- src/window_gui.h	2008-05-29 19:11:59 +0000
++++ src/window_gui.h	2008-07-15 12:55:36 +0000
+@@ -85,6 +85,22 @@
+ 	int16 left, right, top, bottom;   ///< The position offsets inside the window
+ 	uint16 data;                      ///< The String/Image or special code (list-matrixes) of a widget
+ 	StringID tooltips;                ///< Tooltips that are shown when rightclicking on a widget
++
++	void SetDisabledState(bool disab_stat);
++	void Disable();
++	void Enable();
++	bool IsDisabled() const;
++
++	void SetHiddenState(bool hidden_stat);
++	void Hide();
++	void Show();
++	bool IsHidden() const;
++
++	void SetLoweredState(bool lowered_stat);
++	void ToggleLoweredState();
++	void Lower();
++	void Raise();
++	bool IsLowered() const;
+ };
+ 
+ /**
+@@ -581,6 +597,104 @@
+ void SetVScroll2Count(Window *w, int num);
+ void SetHScrollCount(Window *w, int num);
+ 
++/**
++ * Set the disabled/enabled state of the widget.
++ * By default they are enabled.
++ * @param disab_stat  State to use, \c true means disable (grey out) the widget,
++ *                    \c false means enable the widget
++ */
++FORCEINLINE void Widget::SetDisabledState(bool disab_stat)
++{
++	SB(display_flags, WIDG_DISABLED, 1, !!disab_stat);
++}
++
++/** Disable the widget (grey out) */
++FORCEINLINE void Widget::Disable()
++{
++	SetDisabledState(true);
++}
++
++/** Enable the widget */
++FORCEINLINE void Widget::Enable()
++{
++	SetDisabledState(false);
++}
++
++/**
++ * Gets the enabled/disabled state of the widget
++ * @return \c true if widget is disabled, \c false if the widget is enabled
++ */
++FORCEINLINE bool Widget::IsDisabled() const
++{
++	return HasBit(display_flags, WIDG_DISABLED);
++}
++
++/**
++ * Sets the hiden/shown state of the widget.
++ * By default they are shown.
++ * @param hidden_stat status to use ie. hidden = true, visible = false
++ */
++FORCEINLINE void Widget::SetHiddenState(bool hidden_stat)
++{
++	SB(display_flags, WIDG_HIDDEN, 1, !!hidden_stat);
++}
++
++/** Hide the widget */
++FORCEINLINE void Widget::Hide()
++{
++	SetHiddenState(true);
++}
++
++/** Show the widget */
++FORCEINLINE void Widget::Show()
++{
++	SetHiddenState(false);
++}
++
++/**
++ * Returns whether the widget is hidden
++ * @return \c true means that the widget is hidden, \c false means that it is shown
++ */
++FORCEINLINE bool Widget::IsHidden() const
++{
++	return HasBit(display_flags, WIDG_HIDDEN);
++}
++
++/**
++ * Set the lowered/raised state of the widget.
++ * @param lowered_stat  State to set, \c true means lowered, \c false means raised
++ */
++FORCEINLINE void Widget::SetLoweredState(bool lowered_stat)
++{
++	SB(display_flags, WIDG_LOWERED, 1, !!lowered_stat);
++}
++
++/** Invert the lowered/raised state of the widget */
++FORCEINLINE void Widget::ToggleLoweredState()
++{
++	ToggleBit(display_flags, WIDG_LOWERED);
++}
++
++/** Set widget to lowered state */
++FORCEINLINE void Widget::Lower()
++{
++	SetLoweredState(true);
++}
++
++/** Set widget to raised state */
++FORCEINLINE void Widget::Raise()
++{
++	SetLoweredState(false);
++}
++
++/**
++ * Gets lowered/raised state of the widget
++ * @return \c true means the widget is lowered, \c false means it is raised
++ */
++FORCEINLINE bool Widget::IsLowered() const
++{
++	return HasBit(display_flags, WIDG_LOWERED);
++}
+ 
+ /**
+  * Sets the enabled/disabled status of a widget.
+@@ -592,7 +706,7 @@
+ inline void Window::SetWidgetDisabledState(byte widget_index, bool disab_stat)
+ {
+ 	assert(widget_index < this->widget_count);
+-	SB(this->widget[widget_index].display_flags, WIDG_DISABLED, 1, !!disab_stat);
++	this->widget[widget_index].SetDisabledState(disab_stat);
+ }
+ 
+ /**
+@@ -621,7 +735,7 @@
+ inline bool Window::IsWidgetDisabled(byte widget_index) const
+ {
+ 	assert(widget_index < this->widget_count);
+-	return HasBit(this->widget[widget_index].display_flags, WIDG_DISABLED);
++	return this->widget[widget_index].IsDisabled();
+ }
+ 
+ /**
+@@ -634,7 +748,7 @@
+ inline void Window::SetWidgetHiddenState(byte widget_index, bool hidden_stat)
+ {
+ 	assert(widget_index < this->widget_count);
+-	SB(this->widget[widget_index].display_flags, WIDG_HIDDEN, 1, !!hidden_stat);
++	this->widget[widget_index].SetHiddenState(hidden_stat);
+ }
+ 
+ /**
+@@ -663,7 +777,7 @@
+ inline bool Window::IsWidgetHidden(byte widget_index) const
+ {
+ 	assert(widget_index < this->widget_count);
+-	return HasBit(this->widget[widget_index].display_flags, WIDG_HIDDEN);
++	return this->widget[widget_index].IsHidden();
+ }
+ 
+ /**
+@@ -674,7 +788,7 @@
+ inline void Window::SetWidgetLoweredState(byte widget_index, bool lowered_stat)
+ {
+ 	assert(widget_index < this->widget_count);
+-	SB(this->widget[widget_index].display_flags, WIDG_LOWERED, 1, !!lowered_stat);
++	this->widget[widget_index].SetLoweredState(lowered_stat);
+ }
+ 
+ /**
+@@ -684,7 +798,7 @@
+ inline void Window::ToggleWidgetLoweredState(byte widget_index)
+ {
+ 	assert(widget_index < this->widget_count);
+-	ToggleBit(this->widget[widget_index].display_flags, WIDG_LOWERED);
++	this->widget[widget_index].ToggleLoweredState();
+ }
+ 
+ /**
+@@ -713,7 +827,7 @@
+ inline bool Window::IsWidgetLowered(byte widget_index) const
+ {
+ 	assert(widget_index < this->widget_count);
+-	return HasBit(this->widget[widget_index].display_flags, WIDG_LOWERED);
++	return this->widget[widget_index].IsLowered();
+ }
+ 
+ #endif /* WINDOW_GUI_H */
+

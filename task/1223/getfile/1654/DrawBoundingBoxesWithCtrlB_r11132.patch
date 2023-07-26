@@ -1,0 +1,166 @@
+Index: src/variables.h
+===================================================================
+--- src/variables.h	(revision 11132)
++++ src/variables.h	(working copy)
+@@ -337,6 +337,8 @@
+ 
+ extern const TileTypeProcs * const _tile_type_procs[16];
+ 
++extern bool _draw_bounding_boxes;
++
+ /* misc */
+ VARDEF char _screenshot_name[128];
+ VARDEF byte _vehicle_design_names;
+Index: src/gfx.h
+===================================================================
+--- src/gfx.h	(revision 11132)
++++ src/gfx.h	(working copy)
+@@ -268,6 +268,7 @@
+ 
+ void GfxFillRect(int left, int top, int right, int bottom, int color);
+ void GfxDrawLine(int left, int top, int right, int bottom, int color);
++void DrawBox(int x, int y, int dx1, int dy1, int dx2, int dy2, int dx3, int dy3);
+ 
+ BoundingRect GetStringBoundingBox(const char *str);
+ uint32 FormatStringLinebreaks(char *str, int maxw);
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 11132)
++++ src/viewport.cpp	(working copy)
+@@ -551,11 +551,15 @@
+ 	pt = RemapCoords(x, y, z);
+ 	ps->x = pt.x;
+ 	ps->y = pt.y;
++	int bb_left = RemapCoords(x + w          , y + bb_offset_y, z + bb_offset_z).x;
++	int bb_right = RemapCoords(x + bb_offset_x, y + h          , z + bb_offset_z).x;
++	int bb_top = RemapCoords(x + bb_offset_x, y + bb_offset_y, z + dz         ).y;
++	int bb_bottom = RemapCoords(x + w          , y + h          , z + bb_offset_z).y;
+ 	if (image == SPR_EMPTY_BOUNDING_BOX) {
+-		ps->left = RemapCoords(x + w          , y + bb_offset_y, z + bb_offset_z).x;
+-		right    = RemapCoords(x + bb_offset_x, y + h          , z + bb_offset_z).x;
+-		ps->top  = RemapCoords(x + bb_offset_x, y + bb_offset_y, z + dz         ).y;
+-		bottom   = RemapCoords(x + w          , y + h          , z + bb_offset_z).y;
++		ps->left = bb_left;
++		right    = bb_right;
++		ps->top  = bb_top;
++		bottom   = bb_bottom;
+ 	} else {
+ 		const Sprite *spr = GetSprite(image & SPRITE_MASK);
+ 		ps->left = (pt.x += spr->x_offs);
+@@ -563,10 +567,14 @@
+ 		ps->top  = (pt.y += spr->y_offs);
+ 		bottom   = (pt.y +  spr->height);
+ 	}
+-	if (ps->left >= vd->dpi.left + vd->dpi.width ||
+-	    right    <= vd->dpi.left ||
+-	    ps->top  >= vd->dpi.top + vd->dpi.height ||
+-	    bottom   <= vd->dpi.top) {
++	bb_left = min(bb_left, ps->left);
++	bb_right = max(bb_right, right);
++	bb_top = min(bb_top, ps->top);
++	bb_bottom = max(bb_bottom, bottom);
++	if (bb_left   >= vd->dpi.left + vd->dpi.width ||
++	    bb_right  <= vd->dpi.left ||
++	    bb_top    >= vd->dpi.top + vd->dpi.height ||
++	    bb_bottom <= vd->dpi.top) {
+ 		return;
+ 	}
+ 
+@@ -1231,6 +1239,22 @@
+ 	}
+ }
+ 
++static void ViewportDrawBoundingBoxes(ParentSpriteToDraw *psd[])
++{
++	for (; *psd != NULL; psd++) {
++		const ParentSpriteToDraw* ps = *psd;
++		Point pt1 = RemapCoords(ps->xmax + 1, ps->ymax + 1, ps->zmax + 1);
++		Point pt2 = RemapCoords(ps->xmin    , ps->ymax + 1, ps->zmax + 1);
++		Point pt3 = RemapCoords(ps->xmax + 1, ps->ymin    , ps->zmax + 1);
++		Point pt4 = RemapCoords(ps->xmax + 1, ps->ymax + 1, ps->zmin    );
++
++		DrawBox(        pt1.x,         pt1.y,
++		        pt2.x - pt1.x, pt2.y - pt1.y,
++		        pt3.x - pt1.x, pt3.y - pt1.y,
++		        pt4.x - pt1.x, pt4.y - pt1.y);
++	}
++}
++
+ static void ViewportDrawStrings(DrawPixelInfo *dpi, const StringSpriteToDraw *ss)
+ {
+ 	DrawPixelInfo dp;
+@@ -1354,6 +1378,7 @@
+ 
+ 	ViewportSortParentSprites(parent_list);
+ 	ViewportDrawParentSprites(parent_list);
++	if (_draw_bounding_boxes) ViewportDrawBoundingBoxes(parent_list);
+ 
+ 	if (vd.first_string != NULL) ViewportDrawStrings(&vd.dpi, vd.first_string);
+ 
+Index: src/gfx.cpp
+===================================================================
+--- src/gfx.cpp	(revision 11132)
++++ src/gfx.cpp	(working copy)
+@@ -139,7 +139,36 @@
+ 	blitter->DrawLine(dpi->dst_ptr, x, y, x2, y2, dpi->width, dpi->height, color);
+ }
+ 
++/**
++ * Draws the projection of a parallelepiped.
++ * This can be used to draw boxes in world coordinates.
++ *
++ * @param x   Screen X-coordinate of top front corner.
++ * @param y   Screen Y-coordinate of top front corner.
++ * @param dx1 Screen X-length of first edge.
++ * @param dy1 Screen Y-length of first edge.
++ * @param dx2 Screen X-length of second edge.
++ * @param dy2 Screen Y-length of second edge.
++ * @param dx3 Screen X-length of third edge.
++ * @param dy3 Screen Y-length of third edge.
++ */
++void DrawBox(int x, int y, int dx1, int dy1, int dx2, int dy2, int dx3, int dy3)
++{
++	static const byte color = 255;
+ 
++	GfxDrawLine(x, y, x + dx1, y + dy1, color);
++	GfxDrawLine(x, y, x + dx2, y + dy2, color);
++	GfxDrawLine(x, y, x + dx3, y + dy3, color);
++
++	GfxDrawLine(x + dx1, y + dy1, x + dx1 + dx2, y + dy1 + dy2, color);
++	GfxDrawLine(x + dx1, y + dy1, x + dx1 + dx3, y + dy1 + dy3, color);
++	GfxDrawLine(x + dx2, y + dy2, x + dx2 + dx1, y + dy2 + dy1, color);
++	GfxDrawLine(x + dx2, y + dy2, x + dx2 + dx3, y + dy2 + dy3, color);
++	GfxDrawLine(x + dx3, y + dy3, x + dx3 + dx1, y + dy3 + dy1, color);
++	GfxDrawLine(x + dx3, y + dy3, x + dx3 + dx2, y + dy3 + dy2, color);
++}
++
++
+ /** Truncate a given string to a maximum width if neccessary.
+  * If the string is truncated, add three dots ('...') to show this.
+  * @param *str string that is checked and possibly truncated
+Index: src/main_gui.cpp
+===================================================================
+--- src/main_gui.cpp	(revision 11132)
++++ src/main_gui.cpp	(working copy)
+@@ -59,7 +59,9 @@
+ extern void GenerateIndustries();
+ extern bool GenerateTowns();
+ 
++bool _draw_bounding_boxes = false;
+ 
++
+ void CcGiveMoney(bool success, TileIndex tile, uint32 p1, uint32 p2)
+ {
+ #ifdef ENABLE_NETWORK
+@@ -2262,6 +2264,11 @@
+ 				ToggleTransparency();
+ 				break;
+ 
++			case 'B' | WKC_CTRL:
++				_draw_bounding_boxes = !_draw_bounding_boxes;
++				MarkWholeScreenDirty();
++				break;
++
+ #ifdef ENABLE_NETWORK
+ 			case WKC_RETURN: case 'T': // smart chat; send to team if any, otherwise to all
+ 				if (_networking) {

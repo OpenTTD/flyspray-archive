@@ -1,0 +1,86 @@
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(r‚vision 4906)
++++ train_cmd.c	(copie de travail)
+@@ -112,6 +112,7 @@
+ 	if (v->u.rail.cached_power != power) {
+ 		v->u.rail.cached_power = power;
+ 		InvalidateWindow(WC_VEHICLE_DETAILS, v->index);
++		InvalidateWindow(WC_VEHICLE_VIEW, v->index);
+ 	}
+ }
+ 
+Index: rail_cmd.c
+===================================================================
+--- rail_cmd.c	(r‚vision 4906)
++++ rail_cmd.c	(copie de travail)
+@@ -29,6 +29,7 @@
+ #include "newgrf.h"
+ #include "newgrf_callbacks.h"
+ #include "newgrf_station.h"
++#include "train.h"
+ 
+ const byte _track_sloped_sprites[14] = {
+ 	14, 15, 22, 13,
+@@ -864,11 +865,20 @@
+ 
+ 		/* Update build vehicle window related to this depot */
+ 		if (IsTileDepotType(tile, TRANSPORT_RAIL)) {
++			Vehicle *v;
+ 			Window *w = FindWindowById(WC_BUILD_VEHICLE, tile);
+ 			if (w != NULL) {
+ 				WP(w,buildtrain_d).railtype = totype;
+ 				SetWindowDirty(w);
+ 			}
++
++			/* Update vehicule power */
++			FOR_ALL_VEHICLES(v) {
++				if (v->type == VEH_Train && IsFrontEngine(v) && v->tile == tile && v->u.rail.track == 0x80) {
++					TrainPowerChanged(v);
++				}
++			}
++			InvalidateWindow(WC_VEHICLE_DEPOT, tile);
+ 		}
+ 	}
+ 
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(r‚vision 4906)
++++ train_gui.c	(copie de travail)
+@@ -445,6 +445,9 @@
+ 			/* Draw the pretty flag */
+ 			DrawSprite(v->vehstatus & VS_STOPPED ? SPR_FLAG_VEH_STOPPED : SPR_FLAG_VEH_RUNNING, x + 15, y);
+ 
++			/* Draw a lock if the train can't be started */
++			if (v->u.rail.cached_power == 0) DrawSprite(SPR_LOCK, x + 15, y);
++
+ 			y += 14;
+ 		}
+ 	}
+@@ -594,7 +597,8 @@
+ 		break;
+ 
+ 	case -2: // click start/stop flag
+-		DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_TRAIN | CMD_MSG(STR_883B_CAN_T_STOP_START_TRAIN));
++		if (v->u.rail.cached_power != 0)
++			DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_TRAIN | CMD_MSG(STR_883B_CAN_T_STOP_START_TRAIN));
+ 		break;
+ 	}
+ }
+@@ -917,6 +921,8 @@
+ 
+ 			SETBIT(w->disabled_state, 12);
+ 
++			if (v->u.rail.cached_power == 0) SETBIT(w->disabled_state, 5);
++
+ 			/* See if any vehicle can be refitted */
+ 			for (u = v; u != NULL; u = u->next) {
+ 				if (EngInfo(u->engine_type)->refit_mask != 0 ||
+@@ -983,6 +989,7 @@
+ 
+ 		/* draw the flag plus orders */
+ 		DrawSprite(v->vehstatus & VS_STOPPED ? SPR_FLAG_VEH_STOPPED : SPR_FLAG_VEH_RUNNING, 2, w->widget[5].top + 1);
++		if (v->u.rail.cached_power == 0) DrawSprite(SPR_LOCK, 2, w->widget[5].top + 1);
+ 		DrawStringCenteredTruncated(w->widget[5].left + 8, w->widget[5].right, w->widget[5].top + 1, str, 0);
+ 		DrawWindowViewport(w);
+ 	}	break;

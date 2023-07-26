@@ -1,0 +1,178 @@
+This text is about improving the windowing code of OpenTTD. Hopefully we can
+have a nice discussion, and get to an agreement on what to aim for, and how to
+reach that objective.
+
+The problem seems to break down in two major parts, the windows themselves,
+and the widgets inside them.
+
+Current situation
+=================
+
+Windows
+-------
+At first sight there seems to be only one Window struct. However, it is being
+pushed to the limits to cope with all the different windows that we have:
+
+- WindowClass and WindowNumber exist to give a rough classification of the
+  various window types and variants within the types.
+  These values are used to find windows, and also to perform particular
+  operations (ie close all windows of some class).
+
+- The 'custom' field is used to keep additional data using the *_d structs and
+  a lot of type casts hidden in the WP() macro.
+
+- The widgets and the window event handler really make each window unique.
+  This data is also used to check for existence of a particular window (the
+  window class and number are not enough).
+  There seems to be little or no code-reuse between different window event
+  handlers.
+
+Window communication
+--------------------
+Inter-window communication is typically something like
+
+    Window *w = FindWindowById(WC_BUILD_STATION, 0);
+    if (w != NULL) WP(w, def_d).close = true;
+
+which is direct, compact, and breaks all rules of encapsulation. The above
+code finds a window based on its class, and simply injects a value somewhere
+in its custom field. The code is not near the build (rail) station window
+code, so it is easy to miss it when changing the event handling of that
+window. In addition, the above code will not break at compile time if the
+build station window switches to a different *_d data structure. Instead, it
+will make apparently random changes at run-time in its internals.
+
+
+Widgets
+-------
+The widgets of a window are almost the opposite of a Window struct. They only
+contain just enough information to draw themselves. Also, code heavily relies
+on the fact that they are stored in a linear array. Widget index numbers are
+used everywhere (both absolute and relative to some base widget).
+
+There is no inter-widget structure, each widget 'lives' separately in its
+absolute rectangle in the window. The positions are hard-coded. Resizing a
+widget (ie FS#1072) is not possible due to this lack of inter-widget
+structure.
+
+At least some of the *_d data structures should be part of the widgets (eg the
+vp_d struct would better fit inside a viewport widget (that currently does not
+exist). The same holds for event handling code. At the moment the code is
+organized by event instead of by widget. That makes re-use of event handling
+code impossible.
+
+Goal of the improvements
+========================
+The basic goal is to make the windowing code more encapsulated, more modular.
+In that way, it is more clear what code belongs to what part.
+Also, code should be put together as much as possible to make understanding of
+the code easier. Last but not least, the compiler or the run-time system
+catch as many programming errors as possible, to be better resistant to
+changes.
+
+
+
+Improving windowing code
+========================
+
+Changes would be useful at the following points
+
+1. Have all code belonging to one window live together in one struct/class.
+
+2. Never modify anything directly, always via a method call.
+
+3. Add widget structure
+
+4. Organize event handling by control instead of by event.
+
+(this also seems to be the best order of introducing changes)
+
+
+Put code together
+-----------------
+By putting all code belonging to one window in one struct/class, it becomes
+obvious what code belongs to what window. If we also enforce that values may
+only be accessed/changed through method calls, getting an overview of the code
+of a window, as well as understanding what access is being done, becomes much
+easier.
+The cost of this change is that accessing/changing data belonging to another
+window becomes less easy, a logical consequence of making each window more
+self-contained.
+
+The simplest approach seems to be to have a find function for each window that
+immediately delivers an object of the correct type, eg
+
+    RailBuildStationWindow *w = FindRailBuildStationWindow();
+    if (w != NULL) w->SendClose(true);
+
+In this way, code stays compact, and implementation details like finding the
+window and casting it to the right type can be handled at one place. A safe
+approach would be to use dynamic_cast<>(), but that costs some CPU time. In
+releases we should probably use static_cast<>() instead (the C++ version of
+the normal cast) which, like the normal cast, takes no CPU time.
+In other words, a number of functions are added, but with static casting,
+their run-time cost is exactly like the old situation. In addition, since w
+now points to a specific window, any change there will be detected and
+reported by the compiler.
+
+The above is the extreme case; one struct/class for each window. Less extreme
+approaches like one struct/class for each *_d data structure, or even just
+having a BaseWindow base class/struct above the current Window already have
+much of the same type of costs, so there seems little point in having less
+specific window structs/classes.
+
+
+Always use methods
+------------------
+By always using methods to access/change internals of another window, it
+becomes much more clear how the window is accessed. Changes will often be more
+local. Run-time costs of the additional call can quite easily be eliminated by
+inlining the methods.
+
+
+Add widget structure
+--------------------
+Manually setting sizes and positions of widgets is not really nice to say the
+least. In addition, resizing a widget based on its contents is quite
+impossible. To solve these problems, I propose to add widget containers, also
+used by a number of widget tool-kits. A container contains a number of widgets
+or containers, and aligns them horizontally or vertically. Together with a
+number of settings (whether or not to fill initially), this is enough to allow
+size/positioning to be computed based on the initial size of (the contents of)
+the widgets. Resizing can be computed in the same way.
+The result is a tree of widgets. Near the top of the tree containers define the
+structure, at the leafs, the widgets display themselves.
+
+A simple demonstrator exists (where each widget is a simple rectangle) that
+shows the above working. Main item to add is internal padding and
+alignment/positioning of the widget contents.
+
+
+Organize event handling by controls
+-----------------------------------
+A window contains one or more controls, a combination of one or more widgets
+that together handles all operations on whatever you can control from the
+window. For example in the news setting window, one line with a less-than
+button, the button displaying the value, the bigger-than button, and the label
+text together control a setting for one type of news.
+
+Code for one such control is currently distributed over the events that the
+window accepts (WE_CREATE does a part, WE_REPAINT another part, WE_CLICK
+handles changes in settings, and WE_DESTROY cleans up). It would be much
+clearer to have the code of one control be kept together. The window event
+handler would then reduce to just distributing events to the controls.
+
+Such a control can be considered to be a kind of mega-widget and put in the
+widget tree. However, that would imply mixing of display-functionality and
+event handling functions, which might be less desirable.
+
+
+Path of changes
+===============
+As already indicated, the order of the points seems like a good road to
+introduce changes into the windowing code. First introducing structs/classes
+for each window, and moving access/changes into methods.
+
+Then we can introduce widget structure and/or introduce controls (in
+particular controls are still quite unclear at the moment, too unclear to add
+to trunk).

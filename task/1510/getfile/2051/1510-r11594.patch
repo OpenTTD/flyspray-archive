@@ -1,0 +1,151 @@
+Index: newgrf_gui.cpp
+===================================================================
+--- newgrf_gui.cpp	(revision 11594)
++++ newgrf_gui.cpp	(working copy)
+@@ -250,6 +250,7 @@
+ 	GRFConfig **orig_list; ///< grf list the window is shown with
+ 	GRFConfig **list;      ///< temporary grf list to which changes are made
+ 	GRFConfig *sel;        ///< selected grf item
++	int16 sel_index;       ///< index of selected grf item
+ 	bool editable;         ///< is the window editable
+ 	bool show_params;      ///< are the grf-parameters shown in the info-panel
+ 	bool execute;          ///< on pressing 'apply changes' are grf changes applied immediately, or only list is updated
+@@ -326,8 +327,11 @@
+ 		/* Show new, updated list */
+ 		for (c = *nd->list; c != NULL && c != nd->sel; c = c->next, i++);
+ 		CopyGRFConfigList(nd->list, *nd->orig_list, false);
+-		for (c = *nd->list; c != NULL && i > 0; c = c->next, i--);
++
++		int16 count;
++		for (c = *nd->list, count = 0; c != NULL && i > 0; c = c->next, i--, count++);
+ 		nd->sel = c;
++		nd->sel_index = count;
+ 
+ 		SetWindowDirty(w);
+ 	}
+@@ -413,23 +417,29 @@
+ 
+ 				case SNGRFS_REMOVE: { // Remove GRF
+ 					GRFConfig **pc, *c, *newsel;
++					int16 new_select_index = -1;
++					int16 count = 0;
+ 
++
+ 					/* Choose the next GRF file to be the selected file */
+ 					newsel = WP(w, newgrf_d).sel->next;
+-
+-					for (pc = WP(w, newgrf_d).list; (c = *pc) != NULL; pc = &c->next) {
++					for (pc = WP(w, newgrf_d).list; (c = *pc) != NULL; pc = &c->next, count++) {
+ 						/* If the new selection is empty (i.e. we're deleting the last item
+ 						 * in the list, pick the file just before the selected file */
+-						if (newsel == NULL && c->next == WP(w, newgrf_d).sel) newsel = c;
+-
++						if (newsel == NULL && c->next == WP(w, newgrf_d).sel) {
++							newsel = c;
++							new_select_index = count;
++						}
+ 						if (c == WP(w, newgrf_d).sel) {
+ 							*pc = c->next;
+ 							free(c);
++							if (new_select_index == -1) new_select_index = count;
+ 							break;
+ 						}
+ 					}
+ 
+ 					WP(w, newgrf_d).sel = newsel;
++					WP(w, newgrf_d).sel_index = new_select_index;
+ 					SetupNewGRFWindow(w);
+ 					SetWindowDirty(w);
+ 					break;
+@@ -444,9 +454,11 @@
+ 							c->next = WP(w, newgrf_d).sel->next;
+ 							WP(w, newgrf_d).sel->next = c;
+ 							*pc = WP(w, newgrf_d).sel;
++							WP(w, newgrf_d).sel_index--;
+ 							break;
+ 						}
+ 					}
++					ScrollbarInsureVisibleSelection(w, &w->widget[SNGRFS_SCROLLBAR], WP(w, newgrf_d).sel_index);
+ 					SetWindowDirty(w);
+ 					break;
+ 				}
+@@ -460,9 +472,11 @@
+ 							*pc = c->next;
+ 							c->next = c->next->next;
+ 							(*pc)->next = c;
++							WP(w, newgrf_d).sel_index++;
+ 							break;
+ 						}
+ 					}
++					ScrollbarInsureVisibleSelection(w, &w->widget[SNGRFS_SCROLLBAR], WP(w, newgrf_d).sel_index);
+ 					SetWindowDirty(w);
+ 					break;
+ 				}
+@@ -470,10 +484,10 @@
+ 				case SNGRFS_FILE_LIST: { // Select a GRF
+ 					GRFConfig *c;
+ 					uint i = (e->we.click.pt.y - w->widget[SNGRFS_FILE_LIST].top) / 14 + w->vscroll.pos;
+-
+-					for (c = *WP(w, newgrf_d).list; c != NULL && i > 0; c = c->next, i--);
++					uint count = 0;
++					for (c = *WP(w, newgrf_d).list; c != NULL && i > 0; c = c->next, i--, count++);
+ 					WP(w, newgrf_d).sel = c;
+-
++					WP(w, newgrf_d).sel_index = count;
+ 					SetWindowDirty(w);
+ 					break;
+ 				}
+@@ -582,6 +596,7 @@
+ 
+ 	/* Clear selections */
+ 	WP(w, newgrf_d).sel         = NULL;
++	WP(w, newgrf_d).sel_index   = -1;
+ 	WP(w, newgrf_d).list        = &local;
+ 	WP(w, newgrf_d).orig_list   = config;
+ 	WP(w, newgrf_d).editable    = editable;
+Index: widget.cpp
+===================================================================
+--- widget.cpp	(revision 11594)
++++ widget.cpp	(working copy)
+@@ -121,6 +121,29 @@
+ 	SetWindowDirty(w);
+ }
+ 
++/** Insures item at index is visible.
++ * @param w Window on which a scroll was performed.
++ * @param wi Pointer to the scrollbar widget.
++ * @param index Index in [0..scroll->count-1] */
++void ScrollbarInsureVisibleSelection(Window *w, const Widget *wi, const int index)
++{
++	if (w == NULL || wi == NULL) return;
++	switch (wi->type) {
++		case WWT_SCROLLBAR: {
++			/* vertical scroller */
++			if (index >= 0) {
++				if (index < w->vscroll.pos) {
++					w->vscroll.pos = index;
++				} else if (index >= w->vscroll.pos + w->vscroll.cap) {
++					w->vscroll.pos += index - (w->vscroll.pos + w->vscroll.cap - 1);
++				}
++			}
++			break;
++		}
++		default: return;    // Other scroll cases if ever needed
++	}
++}
++
+ /** Returns the index for the widget located at the given position
+  * relative to the window. It includes all widget-corner pixels as well.
+  * @param *w Window to look inside
+Index: window.h
+===================================================================
+--- window.h	(revision 11594)
++++ window.h	(working copy)
+@@ -677,6 +677,7 @@
+ };
+ 
+ void ScrollbarClickHandler(Window *w, const Widget *wi, int x, int y);
++void ScrollbarInsureVisibleSelection(Window *w, const Widget *wi, const int index);
+ 
+ /** Evenly distribute some widgets when resizing horizontally (often a button row)
+  *  The widgets are presumed to be in a line and numberef from left to right (without gaps)

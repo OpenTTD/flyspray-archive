@@ -1,0 +1,105 @@
+Index: src/road.h
+===================================================================
+--- src/road.h	(Revision 11012)
++++ src/road.h	(Arbeitskopie)
+@@ -126,7 +126,7 @@
+  */
+ static inline RoadBits DiagDirToRoadBits(DiagDirection d)
+ {
+-	return (RoadBits)(1U << (3 ^ d));
++	return (RoadBits)(ROAD_NW << (3 ^ d));
+ }
+ 
+ /**
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(Revision 11012)
++++ src/town_cmd.cpp	(Arbeitskopie)
+@@ -875,8 +875,6 @@
+ {
+ 	RoadBits rcmd;
+ 	TileIndex tmptile;
+-	DiagDirection i;
+-	int j;
+ 	TileIndex tile = *tile_ptr;
+ 
+ 	TILE_ASSERT(tile);
+@@ -1046,13 +1044,14 @@
+ 	/* Return if a water tile */
+ 	if (IsClearWaterTile(tile)) return;
+ 
++	DiagDirection bridge_dir;
+ 	/* Determine direction of slope,
+ 	 *  and build a road if not a special slope. */
+ 	switch (GetTileSlope(tile, NULL)) {
+-		case SLOPE_SW: i = DIAGDIR_NE; break;
+-		case SLOPE_SE: i = DIAGDIR_NW; break;
+-		case SLOPE_NW: i = DIAGDIR_SE; break;
+-		case SLOPE_NE: i = DIAGDIR_SW; break;
++		case SLOPE_SW: bridge_dir = DIAGDIR_NE; break;
++		case SLOPE_SE: bridge_dir = DIAGDIR_NW; break;
++		case SLOPE_NW: bridge_dir = DIAGDIR_SE; break;
++		case SLOPE_NE: bridge_dir = DIAGDIR_SW; break;
+ 
+ 		default:
+ build_road_and_exit:
+@@ -1063,40 +1062,42 @@
+ 	}
+ 
+ 	/* Check if the bridge is in the right direction */
+-	if ((rcmd == ROAD_X && (i == DIAGDIR_NW || i == DIAGDIR_SE)) ||
+-			(rcmd == ROAD_Y && (i == DIAGDIR_NE || i == DIAGDIR_SW))) {
++	if (!(rcmd & DiagDirToRoadBits(bridge_dir)))
+ 		goto build_road_and_exit;
+-	}
+ 
+ 	tmptile = tile;
+ 
+ 	/* Now it contains the direction of the slope */
+-	j = -11; // max 11 tile long bridges
++	uint32 bridge_length = 0;
+ 	do {
+-		if (++j == 0)
++		if (bridge_length++ > 11) {
++			/* Max 11 tile long bridges */
+ 			goto build_road_and_exit;
+-		tmptile = TILE_MASK(tmptile + TileOffsByDiagDir(i));
++		}
++		tmptile = TILE_MASK(tmptile + TileOffsByDiagDir(bridge_dir));
+ 	} while (IsClearWaterTile(tmptile));
+ 
+ 	/* no water tiles in between? */
+-	if (j == -10)
++	if (bridge_length == 1)
+ 		goto build_road_and_exit;
+ 
+-	/* Quit if it selecting an appropiate bridge type fails a large number of times. */
+-	j = 22;
+-	{
+-		int32 bridge_len = GetBridgeLength(tile, tmptile);
+-		do {
+-			byte bridge_type = RandomRange(MAX_BRIDGES - 1);
+-			if (CheckBridge_Stuff(bridge_type, bridge_len)) {
+-				if (CmdSucceeded(DoCommand(tile, tmptile, bridge_type | ((0x80 | ROADTYPES_ROAD) << 8), DC_EXEC | DC_AUTO, CMD_BUILD_BRIDGE)))
+-					_grow_town_result = -1;
++	/* Update the length to the needs of the cmd */
++	bridge_length = GetBridgeLength(tile, tmptile);
+ 
++	for (uint times = 0; times <= 22; times++) {
++		byte bridge_type = RandomRange(MAX_BRIDGES - 1);
++
++		if (CheckBridge_Stuff(bridge_type, bridge_length)) {
++			if (CmdSucceeded(DoCommand(tile, tmptile, bridge_type | ((0x80 | ROADTYPES_ROAD) << 8), DC_EXEC | DC_AUTO, CMD_BUILD_BRIDGE))) {
++				_grow_town_result = -1;
++				return;
++			} else {
+ 				/* obviously, if building any bridge would fail, there is no need to try other bridge-types */
+ 				return;
+ 			}
+-		} while (--j != 0);
++		}
+ 	}
++	/* Quit if it selecting an appropiate bridge type fails a large number of times. */
+ }
+ 
+ /** Returns "growth" if a house was built, or no if the build failed.

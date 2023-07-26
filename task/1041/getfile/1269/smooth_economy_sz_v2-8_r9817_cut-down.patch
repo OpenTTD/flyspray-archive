@@ -1,0 +1,51 @@
+Index: industry.h
+===================================================================
+--- industry.h	(revision 9817)
++++ industry.h	(working copy)
+@@ -266,4 +266,12 @@
+ 	IT_INVALID             = 255,
+ };
+ 
++enum {
++	CHANCE_A               =  10,
++	CHANCE_B               = 500,
++	OVER_70_PCT_BONUS      =  75,
++	OVER_90_PCT_BONUS      =  25,
++	PERCENT_INCREASE       = 153,
++};
++
+ #endif /* INDUSTRY_H */
+Index: industry_cmd.cpp
+===================================================================
+--- industry_cmd.cpp	(revision 9817)
++++ industry_cmd.cpp	(working copy)
+@@ -1642,14 +1642,24 @@
+ 				uint32 r = Random();
+ 				int old_prod, new_prod, percent;
+ 				int mag;
++				/* we evaluate if more or less than 60% of cargo is transported - 
++				 * - "the chance scale" is tipped up or down based on this */
++				int influence = (i->pct_transported[j] > PERCENT_INCREASE) ? i->pct_transported[j] >> 5 : -(i->pct_transported[j] >> 5);
+ 
+ 				new_prod = old_prod = i->production_rate[j];
+-				if (CHANCE16I(20, 1024, r))
+-					new_prod -= ((RandomRange(50) + 10) * old_prod) >> 8;
+-				if (CHANCE16I(20 + (i->pct_transported[j] * 20 >> 8), 1024, r >> 16))
+-					new_prod += ((RandomRange(50) + 10) * old_prod) >> 8;
+-
++				/* if more than 60% of cargo is transported, there is an up to 
++				* 3% chance we increase - higher production = lower increase */
++				if (CHANCE16I((CHANCE_A + influence), CHANCE_B, r))
++					new_prod += (1 + (((old_prod >> 3) * (i->pct_transported[j] + OVER_70_PCT_BONUS)) >> 8) + (old_prod >> 4) - (old_prod >> (5 + ((i->pct_transported[j] + OVER_90_PCT_BONUS) >> 7))) - (old_prod >> 6) - (old_prod >> 7));
++				
++				/* if less than 60% of cargo is transported, there is an up to 
++				* 3% chance we decrease - higher production = higher decrease */
++				if (CHANCE16I((CHANCE_A - influence), CHANCE_B, r >> 16))
++					new_prod -= (RandomRange((old_prod >> 2) + 1) - (old_prod >> 3) + (old_prod >> 4) + (old_prod >> 5) + (old_prod >> 6) + (old_prod >> 7));
++				
++				/* limit the production rate not to overflow */
+ 				new_prod = clamp(new_prod, 0, 255);
++				if (i->type == IT_OIL_RIG && j == 1) new_prod = clamp(new_prod, 0, 16);
+ 				if (new_prod == old_prod) {
+ 					closeit = false;
+ 					continue;

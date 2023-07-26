@@ -1,0 +1,464 @@
+=== src/lang/english.txt
+==================================================================
+--- src/lang/english.txt	(/trunk)	(revision 78)
++++ src/lang/english.txt	(/branch/performance_meter)	(revision 78)
+@@ -794,6 +794,7 @@
+ STR_02D5_LAND_BLOCK_INFO                                        :Land area information
+ STR_02D6                                                        :
+ STR_CONSOLE_SETTING                                             :Toggle Console
++STR_PERFORMANCE_GUI                                             :Performance Meter
+ STR_02D7_SCREENSHOT_CTRL_S                                      :Screenshot (Ctrl-S)
+ STR_02D8_GIANT_SCREENSHOT_CTRL_G                                :Giant Screenshot (Ctrl-G)
+ STR_02D9_ABOUT_OPENTTD                                          :About 'OpenTTD'
+@@ -3366,6 +3367,12 @@
+ STR_PROFIT_GOOD_THIS_YEAR_BAD_LAST_YEAR                         :{TINYFONT}{BLACK}Profit this year: {GREEN}{CURRENCY} {BLACK}(last year: {RED}{CURRENCY}{BLACK})
+ STR_PROFIT_BAD_THIS_YEAR_BAD_LAST_YEAR                          :{TINYFONT}{BLACK}Profit this year: {RED}{CURRENCY} {BLACK}(last year: {RED}{CURRENCY}{BLACK})
+ 
++STR_PERFORMANCE_METER                                           :{WHITE}Performance Meter
++STR_PERFORMANCE_METER_LABELS                                    :{BLACK}Current:{}Average:{}Time:
++STR_PERFORMANCE_METER_START                                     :{BLACK}Start
++STR_PERFORMANCE_METER_STOP                                      :{BLACK}Stop
++STR_PERFORMANCE_METER_START_STOP_TIP                            :{BLACK}Start/stop the performance meter (click+ctrl starts a timed performance measurement)
++
+ STR_COMPANY_NAME                                                :{COMPANY}
+ STR_ENGINE_NAME                                                 :{ENGINE}
+ STR_GROUP_NAME                                                  :{GROUP}
+=== src/gui.h
+==================================================================
+--- src/gui.h	(/trunk)	(revision 78)
++++ src/gui.h	(/branch/performance_meter)	(revision 78)
+@@ -36,6 +36,9 @@
+ void ShowMessageOptions();
+ void ShowMessageHistory();
+ 
++/* performance_gui.cpp */
++void ShowPerformanceMeterWindow();
++
+ /* rail_gui.cpp */
+ void ShowBuildRailToolbar(RailType railtype, int button);
+ void PlaceProc_BuyLand(TileIndex tile);
+=== src/openttd.h
+==================================================================
+--- src/openttd.h	(/trunk)	(revision 78)
++++ src/openttd.h	(/branch/performance_meter)	(revision 78)
+@@ -572,6 +572,7 @@
+ 	WC_CONFIRM_POPUP_QUERY,
+ 	WC_TRANSPARENCY_TOOLBAR,
+ 	WC_VEHICLE_TIMETABLE,
++	WC_PERFORMANCE_METER,
+ };
+ 
+ 
+=== src/performance_gui.cpp
+==================================================================
+--- src/performance_gui.cpp	(/trunk)	(revision 78)
++++ src/performance_gui.cpp	(/branch/performance_meter)	(revision 78)
+@@ -0,0 +1,320 @@
++#include "stdafx.h"
++#include "openttd.h"
++#include "table/sprites.h"
++#include "table/strings.h"
++#include "strings.h"
++#include "functions.h"
++#include "window.h"
++#include "gui.h"
++#include "gfx.h"
++#include "variables.h"
++#include "macros.h"
++
++#include "misc/blob.hpp"
++#include "misc/str.hpp"
++
++#include <time.h>
++
++#define CLOCKS_PER_MILLI_SEC (CLOCKS_PER_SEC / 1000)
++
++/* Differ time values from performance values more obvious. */
++typedef uint32 timestamp;
++
++/**
++ * Return a unique timestamp.
++ *
++ * @return the amount of processor time actually used by the current process in milliseconds.
++ */
++static timestamp GetTimestamp()
++{
++	return (clock() / CLOCKS_PER_MILLI_SEC);
++}
++
++/**
++ * Interface for the performance meter.
++ * @See PerfMeterTPS
++ */
++struct PerfMeter {
++	enum ResultType {
++		RET_TIME = 0, ///< time since startup
++		RET_CUR,      ///< current value
++		RET_AVG,      ///< average value
++	};
++
++	virtual ~PerfMeter() {};
++	virtual void Start() = 0;
++	virtual void Stop() = 0;
++	virtual void SetTimer(const bool timed) = 0;
++	virtual bool IsActive() = 0;
++	virtual CStrA GetResultStr(const ResultType result_type) = 0;
++	virtual bool OnTick() = 0;
++};
++
++/**
++ * Performance meter for ticks per second.
++ * Calculation is based on WE_TICK and the milliseconds of prog runtime.
++ */
++struct PerfMeterTPS : public PerfMeter {
++	protected:
++		bool m_active;             ///< is running ATM
++		bool m_is_timed;           ///< is it a timed performance check
++		timestamp m_start_time;    ///< start timestamp
++		timestamp m_last_time;     ///< last calculation timestamp
++		timestamp m_cur_time;      ///< current timestamp
++		uint32 m_total_tick_count; ///< total ticks since start
++		uint16 m_tick_count;       ///< ticks since last calculation
++
++		timestamp m_total_time;    ///< total time since start
++		uint16 m_calc_ticks_cur;   ///< current TPS value
++		uint16 m_calc_ticks_avg;   ///< average TPS value
++
++	public:
++		PerfMeterTPS()
++			: m_active(false)
++			, m_is_timed(false)
++			, m_start_time(0)
++			, m_last_time(0)
++			, m_cur_time(0)
++			, m_total_tick_count(0)
++			, m_tick_count(0)
++			, m_total_time(0)
++			, m_calc_ticks_cur(0)
++			, m_calc_ticks_avg(0)
++		{}
++
++		/* Mandatory PerfMeter overides. */
++		/* virtual */ void Start();
++		/* virtual */ void Stop();
++		/* virtual */ void SetTimer(const bool timed);
++		/* virtual */ bool IsActive();
++		/* virtual */ CStrA GetResultStr(const ResultType result_type);
++		/* virtual */ bool OnTick();
++
++	private:
++		void CalculateTPS();
++};
++
++/**
++ * Activate
++ */
++/* virtual */ void PerfMeterTPS::Start()
++{
++	m_active = true;
++	m_start_time = GetTimestamp();
++	/* Reset the PerfMeterTPS */
++	m_last_time = 0;
++	m_total_time = 0;
++	m_total_tick_count = 0;
++	m_tick_count = 0;
++	m_calc_ticks_cur = 0;
++	m_calc_ticks_avg = 0;
++}
++
++/**
++ * Inactivate
++ */
++/* virtual */ void PerfMeterTPS::Stop()
++{
++	m_active = false;
++}
++
++/**
++ * Format a requested output of the performance meter.
++ * @param result_type is the output you want to get
++ * @return the requested string
++ */
++/* virtual */ CStrA PerfMeterTPS::GetResultStr(const ResultType result_type)
++{
++	uint32 calc_value = 0;
++	const char *unit = "TPS";
++
++	switch (result_type) {
++		default: NOT_REACHED();
++		case RET_TIME:
++			calc_value = (uint32)(this->m_total_time / 100);
++			unit = "SEC";
++			break;
++		case RET_CUR:
++			calc_value = (uint32)(this->m_calc_ticks_cur);
++			break;
++		case RET_AVG:
++			calc_value = (uint32)(this->m_calc_ticks_avg);
++			break;
++	}
++	/* Format the number to a decimal string */
++	CStrA str;
++	str.Format("%d.%d %s", calc_value / 10, calc_value % 10, unit);
++	return str.Transfer();
++}
++
++/**
++ * Raise the counter of the performance meter
++ * @return true if a calculation has been done else false
++ */
++/* virtual */ bool PerfMeterTPS::OnTick()
++{
++	this->m_tick_count++;
++	this->m_cur_time = GetTimestamp();
++
++	if ((this->m_cur_time - this->m_last_time) < 100) {
++		/* Calculate only every 100 ms */
++		return false;
++	}
++
++	this->CalculateTPS();
++	return true;
++}
++
++/**
++ * Activate the timer
++ * @param timed if true activate the timer else not
++ */
++void PerfMeterTPS::SetTimer(const bool timed) {
++	this->m_is_timed = (this->m_active && timed) ? true : false;
++}
++
++/**
++ * Check if ther performance meter is running
++ * @return true if the performance meter is running else false
++ */
++bool PerfMeterTPS::IsActive() { return this->m_active; }
++
++/**
++ * Calculate the TPS values
++ */
++void PerfMeterTPS::CalculateTPS()
++{
++	/* Update the memorised time values */
++	this->m_last_time = this->m_cur_time;
++	this->m_total_time = max((timestamp)1, this->m_cur_time - this->m_start_time);
++
++	/* Calculate the ticks per 100 ms. */
++	this->m_calc_ticks_cur = this->m_tick_count * 100;
++	/* Calculate the overall ticks per second. */
++	this->m_calc_ticks_avg = this->m_total_tick_count * 10000 / this->m_total_time;
++	/* Secure total ticks counter */
++	this->m_total_tick_count = max((uint32)1, this->m_total_tick_count + this->m_tick_count);
++	this->m_tick_count = 0;
++
++	/* Stop the performance meter
++	 * @li if it is timed after 10 seconds
++	 * @li if the tick_counter reaches its limit
++	 */
++	if ( (this->m_is_timed && (this->m_total_time / 1000) >= 10)
++			|| (this->m_total_tick_count >= (UINT32_MAX - 7295)))
++		this->m_active = false;
++}
++
++/**
++ * Names of the performance meter widgets.
++ */
++enum PerformanceMeterWidgets {
++	PERFORMANCE_WIDGET_CLOSEBOX = 0,
++	PERFORMANCE_WIDGET_CAPTION,
++	PERFORMANCE_WIDGET_STICKY,
++	PERFORMANCE_WIDGET_TEXT,
++	PERFORMANCE_WIDGET_START_STOP,
++};
++
++struct perf_meter_d {
++	PerfMeter *pm;
++	};
++
++	assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(perf_meter_d));
++
++/**
++ * Handle the events of the performance meter
++ */
++void PerformanceMeterWndProc(Window *w, WindowEvent *e)
++{
++	perf_meter_d *pm_d = &WP(w, perf_meter_d);
++
++	switch (e->event) {
++		case WE_CREATE:
++			pm_d->pm = new PerfMeterTPS();
++			break;
++
++		case WE_DESTROY:
++			/* Delete perf meter object. */
++			delete(pm_d->pm);
++			pm_d->pm = NULL;
++			break;
++
++		case WE_PAINT:
++			DrawWindowWidgets(w);
++			/* Draw the specifications and the units first. */
++			DrawString(3, 17, STR_PERFORMANCE_METER_LABELS, 16);
++
++			/* Now draw the data. */
++			DrawStringRightAligned(128, 17, BindCString(pm_d->pm->GetResultStr(PerfMeter::RET_CUR).Data()), 16);
++			DrawStringRightAligned(128, 27, BindCString(pm_d->pm->GetResultStr(PerfMeter::RET_AVG).Data()), 16);
++			DrawStringRightAligned(128, 37, BindCString(pm_d->pm->GetResultStr(PerfMeter::RET_TIME).Data()), 16);
++			break;
++
++		case WE_TICK:
++			if (pm_d->pm->IsActive()) {
++				/* Redraw only when needed */
++				if (pm_d->pm->OnTick()) {
++					InvalidateWindow(WC_PERFORMANCE_METER, 0);
++				}
++
++				if (!pm_d->pm->IsActive()) {
++					/* Performance meter has been stoped */
++					w->widget[PERFORMANCE_WIDGET_START_STOP].data = STR_PERFORMANCE_METER_START;
++					InvalidateWindow(WC_PERFORMANCE_METER, 0);
++				}
++			}
++			break;
++
++		case WE_CLICK:
++			if (e->we.click.widget == PERFORMANCE_WIDGET_START_STOP) {
++
++				/* Toogle performance meter */
++				if (!pm_d->pm->IsActive()) {
++
++					pm_d->pm->Start();
++					/* ctrl activates timed measurement */
++					pm_d->pm->SetTimer(_ctrl_pressed);
++
++					w->widget[PERFORMANCE_WIDGET_START_STOP].data = STR_PERFORMANCE_METER_STOP;
++				} else {
++					pm_d->pm->Stop();
++					w->widget[PERFORMANCE_WIDGET_START_STOP].data = STR_PERFORMANCE_METER_START;
++				}
++
++				InvalidateWindow(WC_PERFORMANCE_METER, 0);
++			}
++			break;
++	}
++}
++
++/**
++ * Widget definition for the performance meter.
++ */
++static const Widget _performance_meter_widgets[] = {
++	{   WWT_CLOSEBOX,  RESIZE_NONE,  14,   0,   10,   0,  13, STR_00C5,                     STR_018B_CLOSE_WINDOW},                // PERFORMANCE_WIDGET_CLOSEBOX
++	{    WWT_CAPTION,  RESIZE_NONE,  14,  11,  118,   0,  13, STR_PERFORMANCE_METER,        STR_018C_WINDOW_TITLE_DRAG_THIS},      // PERFORMANCE_WIDGET_CAPTION
++	{  WWT_STICKYBOX,    RESIZE_LR,  14, 119,  130,   0,  13, 0x0,                          STR_STICKY_BUTTON },                   // PERFORMANCE_WIDGET_STICKY
++	{      WWT_PANEL,  RESIZE_NONE,  14,   0,  130,  14,  49, 0x0,                          STR_NULL},                             // PERFORMANCE_WIDGET_TEXT
++	{    WWT_TEXTBTN,  RESIZE_NONE,  14,   0,  130,  50,  63, STR_PERFORMANCE_METER_START,  STR_PERFORMANCE_METER_START_STOP_TIP}, // PERFORMANCE_WIDGET_START_STOP
++	{   WIDGETS_END},
++};
++
++/**
++ * Window definition for the performance meter.
++ */
++static const WindowDesc _performance_meter_desc = {
++	WDP_AUTO, WDP_AUTO, 131, 64,
++	WC_PERFORMANCE_METER, WC_NONE,
++	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET | WDF_STD_BTN | WDF_STICKY_BUTTON,
++	_performance_meter_widgets,
++	PerformanceMeterWndProc
++};
++
++/**
++ * Bring the performance meter window up.
++ */
++void ShowPerformanceMeterWindow()
++{
++	AllocateWindowDescFront(&_performance_meter_desc, 0);
++}
+=== src/main_gui.cpp
+==================================================================
+--- src/main_gui.cpp	(/trunk)	(revision 78)
++++ src/main_gui.cpp	(/branch/performance_meter)	(revision 78)
+@@ -402,11 +402,12 @@
+ static void MenuClickHelp(int index)
+ {
+ 	switch (index) {
+-		case 0: PlaceLandBlockInfo();       break;
+-		case 2: IConsoleSwitch();           break;
+-		case 3: MenuClickSmallScreenshot(); break;
+-		case 4: MenuClickWorldScreenshot(); break;
+-		case 5: ShowAboutWindow();          break;
++		case 0: PlaceLandBlockInfo();         break;
++		case 2: IConsoleSwitch();             break;
++		case 3: ShowPerformanceMeterWindow(); break;
++		case 4: MenuClickSmallScreenshot();   break;
++		case 5: MenuClickWorldScreenshot();   break;
++		case 6: ShowAboutWindow();            break;
+ 	}
+ }
+ 
+@@ -970,7 +971,7 @@
+ 
+ static void ToolbarHelpClick(Window *w)
+ {
+-	PopupMainToolbMenu(w, 26, STR_02D5_LAND_BLOCK_INFO, 6, 0);
++	PopupMainToolbMenu(w, 26, STR_02D5_LAND_BLOCK_INFO, 7, 0);
+ }
+ 
+ static void ToolbarOptionsClick(Window *w)
+@@ -1666,7 +1667,8 @@
+ 		case WKC_CTRL  | 'S': MenuClickSmallScreenshot(); break;
+ 		case WKC_CTRL  | 'G': MenuClickWorldScreenshot(); break;
+ 		case WKC_CTRL | WKC_ALT | 'C': if (!_networking) ShowCheatWindow(); break;
+-		case 'A': if (CanBuildVehicleInfrastructure(VEH_TRAIN)) ShowBuildRailToolbar(_last_built_railtype, 4); break; // Invoke Autorail
++		case WKC_CTRL | WKC_ALT | 'P': ShowPerformanceMeterWindow(); break;
++		case 'A': if (CanBuildVehicleInfrastructure(VEH_TRAIN)) ShowBuildRailToolbar(_last_built_railtype, 4); break; /* Invoke Autorail */
+ 		case 'L': ShowTerraformToolbar(); break;
+ 		case 'M': ShowSmallMap(); break;
+ 		case 'V': ShowExtraViewPortWindow(); break;
+=== projects/openttd.vcproj
+==================================================================
+--- projects/openttd.vcproj	(/trunk)	(revision 78)
++++ projects/openttd.vcproj	(/branch/performance_meter)	(revision 78)
+@@ -766,6 +766,9 @@
+ 				RelativePath=".\..\src\order_gui.cpp">
+ 			</File>
+ 			<File
++				RelativePath=".\..\src\performance_gui.cpp">
++			</File>
++			<File
+ 				RelativePath=".\..\src\player_gui.cpp">
+ 			</File>
+ 			<File
+=== projects/openttd_vs80.vcproj
+==================================================================
+--- projects/openttd_vs80.vcproj	(/trunk)	(revision 78)
++++ projects/openttd_vs80.vcproj	(/branch/performance_meter)	(revision 78)
+@@ -1248,6 +1248,10 @@
+ 				>
+ 			</File>
+ 			<File
++				RelativePath=".\..\src\performance_gui.cpp"
++				>
++			</File>
++			<File
+ 				RelativePath=".\..\src\player_gui.cpp"
+ 				>
+ 			</File>
+=== source.list
+==================================================================
+--- source.list	(/trunk)	(revision 78)
++++ source.list	(/branch/performance_meter)	(revision 78)
+@@ -223,6 +223,7 @@
+ newgrf_gui.cpp
+ news_gui.cpp
+ order_gui.cpp
++performance_gui.cpp
+ player_gui.cpp
+ rail_gui.cpp
+ road_gui.cpp
+
+Property changes on: 
+___________________________________________________________________
+Name: svk:merge
+ +6aa0318a-3be1-0310-93fa-89fd2396df07:/trunk:10672
+

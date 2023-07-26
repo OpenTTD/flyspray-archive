@@ -1,0 +1,338 @@
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(revision 11123)
++++ src/rail_cmd.cpp	(working copy)
+@@ -1262,7 +1262,7 @@
+ 		sprite = _signal_base + (GetSignalType(tile, track) - 1) * 16 + GetSignalVariant(tile, track) * 64 + image + condition;
+ 	}
+ 
+-	AddSortableSpriteToDraw(sprite, PAL_NONE, x, y, 1, 1, 10, GetSlopeZ(x,y));
++	AddSortableSpriteToDraw(sprite, PAL_NONE, x, y, 1, 1, BB_HEIGHT_UNDER_BRIDGE, GetSlopeZ(x,y));
+ }
+ 
+ static uint32 _drawtile_track_palette;
+Index: src/table/sprites.h
+===================================================================
+--- src/table/sprites.h	(revision 11123)
++++ src/table/sprites.h	(working copy)
+@@ -176,8 +176,11 @@
+ 	/* One way road sprites */
+ 	SPR_ONEWAY_BASE = SPR_TRAMWAY_BASE + 113,
+ 
++	/* Not really a sprite, but an empty bounding box. Used to construct bounding boxes, that help to sort the sprites, but do not have a sprite associated. */
++	SPR_EMPTY_BOUNDING_BOX = SPR_ONEWAY_BASE + 6,
++
+ 	/* Flags sprites (in same order as enum NetworkLanguage) */
+-	SPR_FLAGS_BASE = SPR_ONEWAY_BASE + 6,
++	SPR_FLAGS_BASE = SPR_EMPTY_BOUNDING_BOX + 1,
+ 
+ 	/* Manager face sprites */
+ 	SPR_GRADIENT = 874, // background gradient behind manager face
+Index: src/viewport.h
+===================================================================
+--- src/viewport.h	(revision 11123)
++++ src/viewport.h	(working copy)
+@@ -44,6 +44,18 @@
+ 	while (DoZoomInOutWindow(how, w)) {};
+ }
+ 
++/**
++ * Some values for constructing bounding boxes (BB). The Z positions of bridges/tunnels are:
++ * z=0..5  Everything that can be built under low bridges.
++ * z=6     Currently used for tunnel catenary
++ * z=7     Z separator between bridge and the things under the bridge, or the tunnel and things above it.
++ */
++enum {
++	BB_HEIGHT_UNDER_BRIDGE = 6, ///< Everything that can be built under low bridges, must not exceed this Z height.
++	BB_Z_CATENARY   = 6,        ///< Z position of tunnel catenary
++	BB_Z_SEPARATOR  = 7,        ///< Separates the bridge/tunnel from the things under/above it.
++};
++
+ void OffsetGroundSprite(int x, int y);
+ 
+ void DrawGroundSprite(SpriteID image, SpriteID pal);
+Index: src/road_cmd.cpp
+===================================================================
+--- src/road_cmd.cpp	(revision 11123)
++++ src/road_cmd.cpp	(working copy)
+@@ -914,8 +914,8 @@
+ 		front = SPR_TRAMWAY_BASE + _road_frontwire_sprites_1[tram];
+ 	}
+ 
+-	AddSortableSpriteToDraw(back,  PAL_NONE, ti->x, ti->y, 16, 16, 0x1F, ti->z, HASBIT(_transparent_opt, TO_BUILDINGS));
+-	AddSortableSpriteToDraw(front, PAL_NONE, ti->x, ti->y, 16, 16, 0x1F, ti->z, HASBIT(_transparent_opt, TO_BUILDINGS));
++	AddSortableSpriteToDraw(back,  PAL_NONE, ti->x, ti->y, 16, 16, TILE_HEIGHT + BB_HEIGHT_UNDER_BRIDGE, ti->z, HASBIT(_transparent_opt, TO_BUILDINGS));
++	AddSortableSpriteToDraw(front, PAL_NONE, ti->x, ti->y, 16, 16, TILE_HEIGHT + BB_HEIGHT_UNDER_BRIDGE, ti->z, HASBIT(_transparent_opt, TO_BUILDINGS));
+ }
+ 
+ /**
+Index: src/tree_cmd.cpp
+===================================================================
+--- src/tree_cmd.cpp	(revision 11123)
++++ src/tree_cmd.cpp	(working copy)
+@@ -404,7 +404,7 @@
+ 
+ 			if (tep == NULL) break;
+ 
+-			AddSortableSpriteToDraw(tep->image, tep->pal, ti->x + tep->x, ti->y + tep->y, 5, 5, 0x10, z, HASBIT(_transparent_opt, TO_TREES));
++			AddSortableSpriteToDraw(tep->image, tep->pal, ti->x + tep->x, ti->y + tep->y, 16 - tep->x, 16 - tep->y, 0x30, z, HASBIT(_transparent_opt, TO_TREES), -tep->x, -tep->y);
+ 			tep->image = 0;
+ 		}
+ 	}
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 11123)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -859,11 +859,11 @@
+ 			 * sprites is at the top
+ 			 */
+ 			if (z >= front_height) { // front facing pillar
+-				AddSortableSpriteToDraw(image, psid->pal, x, y, p[4], p[5], 1, z, HASBIT(_transparent_opt, TO_BRIDGES));
++				AddSortableSpriteToDraw(image, psid->pal, x, y, p[4], p[5], BB_HEIGHT_UNDER_BRIDGE - 5, z, HASBIT(_transparent_opt, TO_BRIDGES), 0, 0, -5);
+ 			}
+ 
+ 			if (drawfarpillar && z >= back_height && z < i - TILE_HEIGHT) { // back facing pillar
+-				AddSortableSpriteToDraw(image, psid->pal, x - p[6], y - p[7], p[4], p[5], 1, z, HASBIT(_transparent_opt, TO_BRIDGES));
++				AddSortableSpriteToDraw(image, psid->pal, x - p[6], y - p[7], p[4], p[5], BB_HEIGHT_UNDER_BRIDGE - 5, z, HASBIT(_transparent_opt, TO_BRIDGES), 0, 0, -5);
+ 			}
+ 		}
+ 	}
+@@ -890,14 +890,23 @@
+ 	static const SpriteID back_offsets[6]    =   {  95,  96,  99, 102, 100, 101 };
+ 	static const SpriteID front_offsets[6]   =   {  97,  98, 103, 106, 104, 105 };
+ 
+-	static const uint size_x[6] = { 11, 16, 16, 16, 16, 16 };
+-	static const uint size_y[6] = { 16, 11, 16, 16, 16, 16 };
++	static const uint size_x[6] = {  1, 16, 16,  1, 16,  1 };
++	static const uint size_y[6] = { 16,  1,  1, 16,  1, 16 };
++	static const uint front_bb_offset_x[6] = { 12,  0,  0, 12,  0, 12 };
++	static const uint front_bb_offset_y[6] = {  0, 12, 12,  0, 12,  0 };
+ 
+-	AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + tram_offsets[overlay][offset], PAL_NONE, x, y, size_x[offset], size_y[offset], offset >= 2 ? 1 : 0, z, HASBIT(_transparent_opt, TO_BRIDGES));
++	/* The sprites under the vehicles are drawn as SpriteCombine. StartSpriteCombine() has already been called
++	 * The bounding boxes here are the same as for bridge front/roof */
++	AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + tram_offsets[overlay][offset], PAL_NONE, x, y, size_x[offset], size_y[offset], 0x28, z, HASBIT(_transparent_opt, TO_BRIDGES));
+ 
+-	AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + back_offsets[offset],  PAL_NONE, x, y, size_x[offset], size_y[offset], 0, z, HASBIT(_transparent_opt, TO_BUILDINGS));
++	AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + back_offsets[offset],  PAL_NONE, x, y, size_x[offset], size_y[offset], 0x28, z, HASBIT(_transparent_opt, TO_BUILDINGS));
++
++	/* Start a new SpriteCombine for the front part */
++	EndSpriteCombine();
++	StartSpriteCombine();
++
+ 	/* For sloped sprites the bounding box needs to be higher, as the pylons stop on a higher point */
+-	AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + front_offsets[offset], PAL_NONE, x, y, size_x[offset], size_y[offset], offset >= 2 ? 0x30 : 0x10, z, HASBIT(_transparent_opt, TO_BUILDINGS));
++	AddSortableSpriteToDraw(SPR_TRAMWAY_BASE + front_offsets[offset], PAL_NONE, x, y, size_x[offset] + front_bb_offset_x[offset], size_y[offset] + front_bb_offset_y[offset], 0x28, z, HASBIT(_transparent_opt, TO_BUILDINGS), front_bb_offset_x[offset], front_bb_offset_y[offset]);
+ }
+ 
+ /**
+@@ -936,13 +945,13 @@
+ 				static const SpriteID tunnel_sprites[2][4] = { { 28, 78, 79, 27 }, {  5, 76, 77,  4 } };
+ 
+ 				DrawGroundSprite(SPR_TRAMWAY_BASE + tunnel_sprites[rts - ROADTYPES_TRAM][dir], PAL_NONE);
+-				AddSortableSpriteToDraw(SPR_TRAMWAY_TUNNEL_WIRES + dir, PAL_NONE, ti->x, ti->y, 16, 16, 16, (byte)ti->z, HASBIT(_transparent_opt, TO_BUILDINGS));
++				AddSortableSpriteToDraw(SPR_TRAMWAY_TUNNEL_WIRES + dir, PAL_NONE, ti->x, ti->y, 16, 16, TILE_HEIGHT + BB_HEIGHT_UNDER_BRIDGE, (byte)ti->z, HASBIT(_transparent_opt, TO_BUILDINGS));
+ 			}
+ 		} else if (GetRailType(ti->tile) == RAILTYPE_ELECTRIC) {
+ 			DrawCatenary(ti);
+ 		}
+ 
+-		AddSortableSpriteToDraw(image + 1, PAL_NONE, ti->x + TILE_SIZE - 1, ti->y + TILE_SIZE - 1, 1, 1, 8, (byte)ti->z);
++		AddSortableSpriteToDraw(image + 1, PAL_NONE, ti->x + TILE_SIZE - 1, ti->y + TILE_SIZE - 1, 1, 1, TILE_HEIGHT, (byte)ti->z, false, -15, -15, BB_Z_SEPARATOR);
+ 		DrawBridgeMiddle(ti);
+ 	} else if (IsBridge(ti->tile)) { // XXX is this necessary?
+ 		const PalSpriteID *psid;
+@@ -975,6 +984,9 @@
+ 			DrawGroundSprite(SPR_FLAT_SNOWY_TILE + _tileh_to_sprite[ti->tileh], PAL_NONE);
+ 		}
+ 
++		/* Draw Trambits as SpriteCombine */
++		if (GetBridgeTransportType(ti->tile) == TRANSPORT_ROAD) StartSpriteCombine();
++
+ 		/* draw ramp */
+ 
+ 		/* HACK set the height of the BB of a sloped ramp to 1 so a vehicle on
+@@ -996,8 +1008,10 @@
+ 				} else {
+ 					offset += 2;
+ 				}
++				/* DrawBridgeTramBits() calls EndSpriteCombine() and StartSpriteCombine() */
+ 				DrawBridgeTramBits(ti->x, ti->y, z, offset, HASBIT(rts, ROADTYPE_ROAD));
+ 			}
++			EndSpriteCombine();
+ 		} else if (GetRailType(ti->tile) == RAILTYPE_ELECTRIC) {
+ 			DrawCatenary(ti);
+ 		}
+@@ -1080,10 +1094,17 @@
+ 	uint bridge_z = GetBridgeHeight(rampsouth);
+ 	z = bridge_z - 3;
+ 
++	/* Add a bounding box, that separates the bridge from things below it. */
++	AddSortableSpriteToDraw(SPR_EMPTY_BOUNDING_BOX, PAL_NONE, x, y, 16, 16, 1, z - 5 + BB_Z_SEPARATOR);
++
++	/* Draw Trambits as SpriteCombine */
++	if (GetBridgeTransportType(rampsouth) == TRANSPORT_ROAD) StartSpriteCombine();
++
++	/* Draw floor and far part of bridge*/
+ 	if (axis == AXIS_X) {
+-		AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 16, 11, 1, z, HASBIT(_transparent_opt, TO_BRIDGES));
++		AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 16, 1, 0x28, z, HASBIT(_transparent_opt, TO_BRIDGES), 0, 0, 3);
+ 	} else {
+-		AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 11, 16, 1, z, HASBIT(_transparent_opt, TO_BRIDGES));
++		AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 1, 16, 0x28, z, HASBIT(_transparent_opt, TO_BRIDGES), 0, 0, 3);
+ 	}
+ 
+ 	psid++;
+@@ -1092,7 +1113,11 @@
+ 		RoadTypes rts = GetRoadTypes(rampsouth);
+ 
+ 		if (HASBIT(rts, ROADTYPE_TRAM)) {
++			/* DrawBridgeTramBits() calls EndSpriteCombine() and StartSpriteCombine() */
+ 			DrawBridgeTramBits(x, y, bridge_z, axis ^ 1, HASBIT(rts, ROADTYPE_ROAD));
++		} else {
++			EndSpriteCombine();
++			StartSpriteCombine();
+ 		}
+ 	} else if (GetRailType(rampsouth) == RAILTYPE_ELECTRIC) {
+ 		DrawCatenary(ti);
+@@ -1101,12 +1126,15 @@
+ 	/* draw roof, the component of the bridge which is logically between the vehicle and the camera */
+ 	if (axis == AXIS_X) {
+ 		y += 12;
+-		if (psid->sprite & SPRITE_MASK) AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 16, 1, 0x28, z, HASBIT(_transparent_opt, TO_BRIDGES));
++		if (psid->sprite & SPRITE_MASK) AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 16, 1, 0x28, z, HASBIT(_transparent_opt, TO_BRIDGES), 0, 0, 3);
+ 	} else {
+ 		x += 12;
+-		if (psid->sprite & SPRITE_MASK) AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 1, 16, 0x28, z, HASBIT(_transparent_opt, TO_BRIDGES));
++		if (psid->sprite & SPRITE_MASK) AddSortableSpriteToDraw(psid->sprite, psid->pal, x, y, 1, 16, 0x28, z, HASBIT(_transparent_opt, TO_BRIDGES), 0, 0, 3);
+ 	}
+ 
++	/* Draw TramFront as SpriteCombine */
++	if (GetBridgeTransportType(rampsouth) == TRANSPORT_ROAD) EndSpriteCombine();
++
+ 	psid++;
+ 	if (ti->z + 5 == z) {
+ 		/* draw poles below for small bridges */
+Index: src/unmovable_cmd.cpp
+===================================================================
+--- src/unmovable_cmd.cpp	(revision 11123)
++++ src/unmovable_cmd.cpp	(working copy)
+@@ -148,7 +148,7 @@
+ 
+ 			AddSortableSpriteToDraw(
+ 				SPR_BOUGHT_LAND, PLAYER_SPRITE_COLOR(GetTileOwner(ti->tile)),
+-				ti->x + TILE_SIZE / 2, ti->y + TILE_SIZE / 2, 1, 1, 10, GetSlopeZ(ti->x + TILE_SIZE / 2, ti->y + TILE_SIZE / 2)
++				ti->x + TILE_SIZE / 2, ti->y + TILE_SIZE / 2, 1, 1, BB_HEIGHT_UNDER_BRIDGE, GetSlopeZ(ti->x + TILE_SIZE / 2, ti->y + TILE_SIZE / 2)
+ 			);
+ 			DrawBridgeMiddle(ti);
+ 			break;
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 11123)
++++ src/viewport.cpp	(working copy)
+@@ -513,8 +513,8 @@
+ {
+ 	ViewportDrawer *vd = _cur_vd;
+ 	ParentSpriteToDraw *ps;
+-	const Sprite *spr;
+ 	Point pt;
++	int32 right, bottom;
+ 
+ 	assert((image & SPRITE_MASK) < MAX_SPRITES);
+ 
+@@ -551,11 +551,22 @@
+ 	pt = RemapCoords(x, y, z);
+ 	ps->x = pt.x;
+ 	ps->y = pt.y;
+-	spr = GetSprite(image & SPRITE_MASK);
+-	if ((ps->left   = (pt.x += spr->x_offs)) >= vd->dpi.left + vd->dpi.width ||
+-			(             (pt.x +  spr->width )) <= vd->dpi.left ||
+-			(ps->top    = (pt.y += spr->y_offs)) >= vd->dpi.top + vd->dpi.height ||
+-			(             (pt.y +  spr->height)) <= vd->dpi.top) {
++	if (image == SPR_EMPTY_BOUNDING_BOX) {
++		ps->left = RemapCoords(x + w          , y + bb_offset_y, z + bb_offset_z).x;
++		right    = RemapCoords(x + bb_offset_x, y + h          , z + bb_offset_z).x;
++		ps->top  = RemapCoords(x + bb_offset_x, y + bb_offset_y, z + dz         ).y;
++		bottom   = RemapCoords(x + w          , y + h          , z + bb_offset_z).y;
++	} else {
++		const Sprite *spr = GetSprite(image & SPRITE_MASK);
++		ps->left = (pt.x += spr->x_offs);
++		right    = (pt.x +  spr->width );
++		ps->top  = (pt.y += spr->y_offs);
++		bottom   = (pt.y +  spr->height);
++	}
++	if (ps->left >= vd->dpi.left + vd->dpi.width ||
++	    right    <= vd->dpi.left ||
++	    ps->top  >= vd->dpi.top + vd->dpi.height ||
++	    bottom   <= vd->dpi.top) {
+ 		return;
+ 	}
+ 
+@@ -1212,7 +1223,7 @@
+ 		const ParentSpriteToDraw* ps = *psd;
+ 		const ChildScreenSpriteToDraw* cs;
+ 
+-		DrawSprite(ps->image, ps->pal, ps->x, ps->y);
++		if (ps->image != SPR_EMPTY_BOUNDING_BOX) DrawSprite(ps->image, ps->pal, ps->x, ps->y);
+ 
+ 		for (cs = ps->child; cs != NULL; cs = cs->next) {
+ 			DrawSprite(cs->image, cs->pal, ps->left + cs->x, ps->top + cs->y);
+Index: src/elrail.cpp
+===================================================================
+--- src/elrail.cpp	(revision 11123)
++++ src/elrail.cpp	(working copy)
+@@ -300,9 +300,9 @@
+ 						continue; /* No neighbour, go looking for a better position */
+ 					}
+ 
+-					AddSortableSpriteToDraw(pylon_sprites[temp], PAL_NONE, x, y, 1, 1, 10,
++					AddSortableSpriteToDraw(pylon_sprites[temp], PAL_NONE, x, y, 1, 1, BB_HEIGHT_UNDER_BRIDGE,
+ 							GetPCPElevation(ti->tile, i),
+-							HASBIT(_transparent_opt, TO_BUILDINGS));
++							HASBIT(_transparent_opt, TO_BUILDINGS), -1, -1);
+ 					break; /* We already have drawn a pylon, bail out */
+ 				}
+ 			}
+@@ -324,9 +324,9 @@
+ 
+ 				AddSortableSpriteToDraw(
+ 					sss->image, PAL_NONE, ti->x + sss->x_offset, ti->y + sss->y_offset,
+-					sss->x_size, sss->y_size, sss->z_size,
++					sss->x_size, sss->y_size, BB_Z_CATENARY - sss->z_offset + 1,
+ 					GetTileZ(ti->tile) + sss->z_offset,
+-					HASBIT(_transparent_opt, TO_BUILDINGS)
++					HASBIT(_transparent_opt, TO_BUILDINGS), 0, 0, BB_Z_CATENARY - sss->z_offset
+ 				);
+ 				break;
+ 			}
+@@ -391,7 +391,7 @@
+ 		if (HASBIT(tlg, (axis == AXIS_X ? 0 : 1))) PPPpos = ReverseDir(PPPpos);
+ 		uint x = ti->x + x_pcp_offsets[PCPpos] + x_ppp_offsets[PPPpos];
+ 		uint y = ti->y + y_pcp_offsets[PCPpos] + y_ppp_offsets[PPPpos];
+-		AddSortableSpriteToDraw(pylon_sprites[PPPpos], PAL_NONE, x, y, 1, 1, 10, height, HASBIT(_transparent_opt, TO_BUILDINGS));
++		AddSortableSpriteToDraw(pylon_sprites[PPPpos], PAL_NONE, x, y, 1, 1, BB_HEIGHT_UNDER_BRIDGE, height, HASBIT(_transparent_opt, TO_BUILDINGS));
+ 	}
+ 
+ 	/* need a pylon on the southern end of the bridge */
+@@ -401,7 +401,7 @@
+ 		if (HASBIT(tlg, (axis == AXIS_X ? 0 : 1))) PPPpos = ReverseDir(PPPpos);
+ 		uint x = ti->x + x_pcp_offsets[PCPpos] + x_ppp_offsets[PPPpos];
+ 		uint y = ti->y + y_pcp_offsets[PCPpos] + y_ppp_offsets[PPPpos];
+-		AddSortableSpriteToDraw(pylon_sprites[PPPpos], PAL_NONE, x, y, 1, 1, 10, height, HASBIT(_transparent_opt, TO_BUILDINGS));
++		AddSortableSpriteToDraw(pylon_sprites[PPPpos], PAL_NONE, x, y, 1, 1, BB_HEIGHT_UNDER_BRIDGE, height, HASBIT(_transparent_opt, TO_BUILDINGS));
+ 	}
+ }
+ 
+Index: src/gfxinit.cpp
+===================================================================
+--- src/gfxinit.cpp	(revision 11123)
++++ src/gfxinit.cpp	(working copy)
+@@ -384,6 +384,8 @@
+ 	assert(load_index == SPR_ONEWAY_BASE);
+ 	load_index += LoadGrfFile("oneway.grf", load_index, i++);
+ 
++	load_index++; // SPR_EMPTY_BOUNDING_BOX
++
+ 	assert(load_index == SPR_FLAGS_BASE);
+ 	load_index += LoadGrfFile("flags.grf", load_index, i++);
+ 

@@ -1,0 +1,986 @@
+Index: oldloader.c
+===================================================================
+--- oldloader.c	(revision 3261)
++++ oldloader.c	(working copy)
+@@ -1386,24 +1386,24 @@
+ 
+ static bool LoadOldMapPart1(LoadgameState *ls, int num)
+ {
+-	uint i;
++	TileIndex tile;
+ 
+-	for (i = 0; i < OLD_MAP_SIZE; i++) {
+-		_m[i].m1 = ReadByte(ls);
++	for (tile = 0; tile < OLD_MAP_SIZE; tile++) {
++		SetTileOwner(tile, ReadByte(ls));
+ 	}
+-	for (i = 0; i < OLD_MAP_SIZE; i++) {
+-		_m[i].m2 = ReadByte(ls);
++	for (tile = 0; tile < OLD_MAP_SIZE; tile++) {
++		_m[tile].m2 = ReadByte(ls);
+ 	}
+-	for (i = 0; i < OLD_MAP_SIZE; i++) {
+-		_old_map3[i * 2] = ReadByte(ls);
+-		_old_map3[i * 2 + 1] = ReadByte(ls);
++	for (tile = 0; tile < OLD_MAP_SIZE; tile++) {
++		_old_map3[tile * 2] = ReadByte(ls);
++		_old_map3[tile * 2 + 1] = ReadByte(ls);
+ 	}
+-	for (i = 0; i < OLD_MAP_SIZE / 4; i++) {
++	for (tile = 0; tile < OLD_MAP_SIZE / 4; tile++) {
+ 		byte b = ReadByte(ls);
+-		_m[i * 4 + 0].extra = GB(b, 0, 2);
+-		_m[i * 4 + 1].extra = GB(b, 2, 2);
+-		_m[i * 4 + 2].extra = GB(b, 4, 2);
+-		_m[i * 4 + 3].extra = GB(b, 6, 2);
++		_m[tile * 4 + 0].extra = GB(b, 0, 2);
++		_m[tile * 4 + 1].extra = GB(b, 2, 2);
++		_m[tile * 4 + 2].extra = GB(b, 4, 2);
++		_m[tile * 4 + 3].extra = GB(b, 6, 2);
+ 	}
+ 
+ 	return !ls->failed;
+Index: rail.h
+===================================================================
+--- rail.h	(revision 3261)
++++ rail.h	(working copy)
+@@ -549,6 +549,35 @@
+ 	return (_m[tile].m5 & 0xF0) == 0x10;
+ }
+ 
++
++static inline Owner GetLevelCrossingRoadOwner(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsLevelCrossing(tile));
++
++	return _m[tile].m3;
++}
++
++static inline Owner GetLevelCrossingRailOwner(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsLevelCrossing(tile));
++
++	return _m[tile].m1;
++}
++
++static inline void SetLevelCrossingRoadOwner(TileIndex tile, Owner owner){
++	assert(tile < MapSize());
++	assert(IsLevelCrossing(tile));
++
++	_m[tile].m3 = owner;
++}
++
++static inline void SetLevelCrossingRailOwner(TileIndex tile, Owner owner){
++	assert(tile < MapSize());
++	assert(IsLevelCrossing(tile));
++
++	_m[tile].m1 = owner;
++}
++
+ /**
+  * Gets the transport type of the given track on the given crossing tile.
+  * @return  The transport type of the given track, either TRANSPORT_ROAD,
+Index: docs/landscape.html
+===================================================================
+--- docs/landscape.html	(revision 3261)
++++ docs/landscape.html	(working copy)
+@@ -544,7 +544,7 @@
+ </li>
+ <li>m1 bit 7: clear = under construction
+ <ul>
+-<li>m1 bits 4..2: construction counter, for buildings under construction incremented on every periodic tile processing
++<li>m1 bits 3..2: construction counter, for buildings under construction incremented on every periodic tile processing
+ </li>
+ </ul></li>
+ <li>m1 bits 1..0: stage of construction (<tt>3</tt> = completed), incremented when the construction counter wraps around
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 3261)
++++ openttd.c	(working copy)
+@@ -1057,12 +1057,21 @@
+ 	TileIndex tile;
+ 
+ 	for (tile = 0; tile != MapSize(); tile++) {
++
+ 		if (IsTileType(tile, MP_STREET)) {
+-			if (IsLevelCrossing(tile) && _m[tile].m3 & 0x80) _m[tile].m3 = OWNER_TOWN;
+ 
+-			if (_m[tile].m1 & 0x80) SetTileOwner(tile, OWNER_TOWN);
++			if (IsLevelCrossing(tile) && GetLevelCrossingRoadOwner(tile) & 0x80){
++				SetLevelCrossingRoadOwner(tile, OWNER_TOWN);
++			}
++
++			if (GetTileOwner(tile) & 0x80){
++				SetTileOwner(tile, OWNER_TOWN);
++			}
++
+ 		} else if (IsTileType(tile, MP_TUNNELBRIDGE)) {
+-			if (_m[tile].m1 & 0x80) SetTileOwner(tile, OWNER_TOWN);
++			if (GetTileOwner(tile) & 0x80){
++				SetTileOwner(tile, OWNER_TOWN);
++			}
+ 		}
+ 	}
+ }
+Index: industry_cmd.c
+===================================================================
+--- industry_cmd.c	(revision 3261)
++++ industry_cmd.c	(working copy)
+@@ -255,13 +255,173 @@
+ 	STR_4832_ANNOUNCES_IMMINENT_CLOSURE
+ };
+ 
++// =============== Industry tile map accessors =====================
+ 
++/**
++ * I'm not quite sure what this function does. for some reason it sets bit 4
++ * which is never used elsewhere in industry_cmd.c and thus does not quite fit
++ * into the model..... So just leave it be
++ */
++static inline void SetInitialIndutryTileConstructionState(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	_m[tile].m1 = 0x1E;
++}
++
++static inline byte GetIndustryConstructionStageByTile(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	return GB(_m[tile].m1, 0, 2);
++}
++
++static inline bool IsIndustryTileUnderConstruction(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	return _m[tile].m1 & 0x80;
++}
++
++static inline uint16 GetPowerStationSparklesAnimationState(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	return GB(_m[tile].m1, 2, 5);
++}
++
++static inline void SetPowerStationSparklesAnimationState(TileIndex tile, uint16 state){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	SB(_m[tile].m1, 2, 5, state);
++}
++
++static inline byte GetIndustryTileConstructionCounter(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++	assert(IsIndustryTileUnderConstruction(tile));
++
++	return GB(_m[tile].m1, 2, 2);
++}
++
++static inline void SetIndustryTileConstructionCounter(TileIndex tile, byte value){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++	assert(IsIndustryTileUnderConstruction(tile));
++
++	SB(_m[tile].m1, 2, 2, value);
++}
++
++static inline void SetIndustryTileConstructionState(TileIndex tile, byte value){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++	assert(IsIndustryTileUnderConstruction(tile));
++
++	SB(_m[tile].m1, 0, 2, value);
++}
++
++static inline byte GetIndustryTileConstructionState(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++	assert(IsIndustryTileUnderConstruction(tile));
++
++	return GB(_m[tile].m1, 0, 2);
++}
++
++static inline uint16 GetOilWellsAnimationState(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	return GB(_m[tile].m1, 0, 2);
++}
++
++static inline void SetOilWellsAnimationState(TileIndex tile, byte state){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	SB(_m[tile].m1, 0, 2, state);
++}
++
++static inline void SetIndustryConstructionFinished(TileIndex tile, bool finished){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	if(finished){
++		SB(_m[tile].m1, 7, 1, 1);
++	}else{
++		SB(_m[tile].m1, 7, 1, 0);
++	}
++}
++
++static inline byte GetIndustryTileType(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	return _m[tile].m5;
++}
++
++static inline void SetTileIndustryType(TileIndex tile, byte type){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	_m[tile].m5 = type;
++}
++
++static inline void SetMiningMachinerySoundPlayed(TileIndex tile, bool played){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	if(played){
++		SB(_m[tile].m1, 6, 1, 1);
++	}else{
++		SB(_m[tile].m1, 6, 1, 0);
++	}
++}
++
++static inline bool GetMiningMachinerySoundPlayed(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	return GB(_m[tile].m1, 6, 1) == 1;
++}
++
++static inline void SetMineAnimationState(TileIndex tile, byte state){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	SB(_m[tile].m1, 0, 6, state);
++}
++
++static inline byte GetMineAnimationState(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	return GB(_m[tile].m1, 0, 6);
++}
++
++static inline byte GetIndustryTileConstructionStage(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	return GB(_m[tile].m1, 0, 2);
++}
++
++static inline void SetIndustryTileConstructionStage(TileIndex tile, byte value){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	SB(_m[tile].m1, 0, 2, value);
++}
++
++// =========== end of Industry tile map accessors ==================
++
+ static void IndustryDrawTileProc1(const TileInfo *ti)
+ {
+ 	const DrawIndustrySpec1Struct *d;
+ 	uint32 image;
+ 
+-	if (!(_m[ti->tile].m1 & 0x80)) return;
++	if (IsIndustryTileUnderConstruction(ti->tile)) return;
+ 
+ 	d = &_draw_industry_spec1[_m[ti->tile].m3];
+ 
+@@ -281,7 +441,7 @@
+ {
+ 	int x = 0;
+ 
+-	if (_m[ti->tile].m1 & 0x80) {
++	if (!IsIndustryTileUnderConstruction(ti->tile)) {
+ 		x = _industry_anim_offs[_m[ti->tile].m3];
+ 		if ( (byte)x == 0xFF)
+ 			x = 0;
+@@ -293,7 +453,7 @@
+ 
+ static void IndustryDrawTileProc3(const TileInfo *ti)
+ {
+-	if (_m[ti->tile].m1 & 0x80) {
++	if (!IsIndustryTileUnderConstruction(ti->tile)) {
+ 		AddChildSpriteScreen(0x128B, 5, _industry_anim_offs_2[_m[ti->tile].m3]);
+ 	} else {
+ 		AddChildSpriteScreen(4746, 3, 67);
+@@ -320,9 +480,8 @@
+ 
+ static void DrawCoalPlantSparkles(const TileInfo *ti)
+ {
+-	int image = _m[ti->tile].m1;
+-	if (image & 0x80) {
+-		image = GB(image, 2, 5);
++	if (!IsIndustryTileUnderConstruction(ti->tile)) {
++		int image = GetPowerStationSparklesAnimationState(ti->tile);
+ 		if (image != 0 && image < 7) {
+ 			AddChildSpriteScreen(image + 0x806,
+ 				_coal_plant_sparkles_x[image - 1],
+@@ -353,7 +512,7 @@
+ 	ormod = (ind->color_map + 0x307) << PALETTE_SPRITE_START;
+ 
+ 	/* Retrieve pointer to the draw industry tile struct */
+-	dits = &_industry_draw_tile_data[(ti->map5 << 2) | GB(_m[ti->tile].m1, 0, 2)];
++	dits = &_industry_draw_tile_data[(ti->map5 << 2) | GetIndustryConstructionStageByTile(ti->tile)];
+ 
+ 	image = dits->sprite_1;
+ 	if (image & PALETTE_MODIFIER_COLOR && (image & PALETTE_SPRITE_MASK) == 0)
+@@ -427,7 +586,7 @@
+ 
+ 	td->owner = i->owner;
+ 	td->str = STR_4802_COAL_MINE + i->type;
+-	if ((_m[tile].m1 & 0x80) == 0) {
++	if (IsIndustryTileUnderConstruction(tile)) {
+ 		SetDParamX(td->dparam, 0, td->str);
+ 		td->str = STR_2058_UNDER_CONSTRUCTION;
+ 	}
+@@ -481,7 +640,7 @@
+ 		am = MoveGoodsToStation(i->xy, i->width, i->height, i->produced_cargo[0], cw);
+ 		i->last_mo_transported[0] += am;
+ 		if (am != 0 && (m5 = _industry_produce_map5[_m[tile].m5]) != 0xFF) {
+-			_m[tile].m1 = 0x80;
++			SetIndustryConstructionFinished(tile, true);
+ 			_m[tile].m5 = m5;
+ 			MarkTileDirtyByTile(tile);
+ 		}
+@@ -503,119 +662,129 @@
+ 
+ static void AnimateTile_Industry(TileIndex tile)
+ {
+-	byte m,n;
++	byte state, tileType;
+ 
+-	switch(_m[tile].m5) {
+-	case 174:
++	switch(GetIndustryTileType(tile)) {
++	case 174: // Sugar Mine
+ 		if ((_tick_counter & 1) == 0) {
+-			m = _m[tile].m3 + 1;
++			state = _m[tile].m3 + 1;
+ 
+-			switch(m & 7) {
++			switch(state & 7) {
+ 			case 2:	SndPlayTileFx(SND_2D_RIP_2, tile); break;
+ 			case 6: SndPlayTileFx(SND_29_RIP, tile); break;
+ 			}
+ 
+-			if (m >= 96) {
+-				m = 0;
++			if (state >= 96) {
++				state = 0;
+ 				DeleteAnimatedTile(tile);
+ 			}
+-			_m[tile].m3 = m;
++			_m[tile].m3 = state;
+ 
+ 			MarkTileDirtyByTile(tile);
+ 		}
+ 		break;
+ 
+-	case 165:
++	case 165: // Tofee Quary
+ 		if ((_tick_counter & 3) == 0) {
+-			m = _m[tile].m3;
++			state = _m[tile].m3;
+ 
+-			if (_industry_anim_offs[m] == 0xFF) {
++			if (_industry_anim_offs[state] == 0xFF) {
+ 				SndPlayTileFx(SND_30_CARTOON_SOUND, tile);
+ 			}
+ 
+-			if (++m >= 70) {
+-				m = 0;
++			if (++state >= 70) {
++				state = 0;
+ 				DeleteAnimatedTile(tile);
+ 			}
+-			_m[tile].m3 = m;
++			_m[tile].m3 = state;
+ 
+ 			MarkTileDirtyByTile(tile);
+ 		}
+ 		break;
+ 
+-	case 162:
++	case 162: // bubble generator
+ 		if ((_tick_counter&1) == 0) {
+-			m = _m[tile].m3;
++			state = _m[tile].m3;
+ 
+-			if (++m >= 40) {
+-				m = 0;
++			if (++state >= 40) {
++				state = 0;
+ 				DeleteAnimatedTile(tile);
+ 			}
+-			_m[tile].m3 = m;
++			_m[tile].m3 = state;
+ 
+ 			MarkTileDirtyByTile(tile);
+ 		}
+ 		break;
+ 
+-	// Sparks on a coal plant
+-	case 10:
++	case 10: // power station transformer sparks animation
+ 		if ((_tick_counter & 3) == 0) {
+-			m = _m[tile].m1;
+-			if (GB(m, 2, 5) == 6) {
+-				SB(_m[tile].m1, 2, 5, 0);
++			state = GetPowerStationSparklesAnimationState(tile);
++			if (state == 6) { //
++				SetPowerStationSparklesAnimationState(tile, 0);
+ 				DeleteAnimatedTile(tile);
+ 			} else {
+-				_m[tile].m1 = m + (1<<2);
++				SetPowerStationSparklesAnimationState(tile, state + 1);
+ 				MarkTileDirtyByTile(tile);
+ 			}
+ 		}
+ 		break;
+ 
+-	case 143:
++	case 143: // toy factory
+ 		if ((_tick_counter & 1) == 0) {
+-			m = _m[tile].m3 + 1;
++			state = _m[tile].m3 + 1;
+ 
+-			if (m == 1) {
++			if (state == 1) {
+ 				SndPlayTileFx(SND_2C_MACHINERY, tile);
+-			} else if (m == 23) {
++			} else if (state == 23) {
+ 				SndPlayTileFx(SND_2B_COMEDY_HIT, tile);
+-			} else if (m == 28) {
++			} else if (state == 28) {
+ 				SndPlayTileFx(SND_2A_EXTRACT_AND_POP, tile);
+ 			}
+ 
+-			if (m >= 50 && (m=0,++_m[tile].m4 >= 8)) {
++			if (state >= 50 && (state=0,++_m[tile].m4 >= 8)) {
+ 				_m[tile].m4 = 0;
+ 				DeleteAnimatedTile(tile);
+ 			}
+-			_m[tile].m3 = m;
++			_m[tile].m3 = state;
+ 			MarkTileDirtyByTile(tile);
+ 		}
+ 		break;
+ 
+ 	case 148: case 149: case 150: case 151:
+-	case 152: case 153: case 154: case 155:
++	case 152: case 153: case 154: case 155: // plastic fountains
+ 		if ((_tick_counter & 3) == 0) {
+-			m = _m[tile].m5	+ 1;
+-			if (m == 155+1) m = 148;
+-			_m[tile].m5 = m;
++			state = _m[tile].m5	+ 1;
++			if (state == 155+1) state = 148;
++			_m[tile].m5 = state;
+ 
+ 			MarkTileDirtyByTile(tile);
+ 		}
+ 		break;
+ 
+-	case 30: case 31: case 32:
++	case 30: case 31: case 32: // oil wells
+ 		if ((_tick_counter & 7) == 0) {
+ 			bool b = CHANCE16(1,7);
+-			m = _m[tile].m1;
+-			m = (m & 3) + 1;
+-			n = _m[tile].m5;
+-			if (m == 4 && (m=0,++n) == 32+1 && (n=30,b)) {
+-				_m[tile].m1 = 0x83;
+-				_m[tile].m5 = 29;
+-				DeleteAnimatedTile(tile);
+-			} else {
+-				SB(_m[tile].m1, 0, 2, m);
+-				_m[tile].m5 = n;
++			bool wrapAnimation = false;
++			state = GetOilWellsAnimationState(tile);
++			state ++;
++			tileType = GetIndustryTileType(tile);
++
++			if(state == 4){
++				state = 0;
++				tileType ++;
++				if(tileType == 32 + 1){ // animation is wrapping
++					tileType = 30;
++					if(b){
++						wrapAnimation = true;
++						SetOilWellsAnimationState(tile, 3);
++						SetTileIndustryType(tile, 29);
++						DeleteAnimatedTile(tile);
++					}
++				}
++			}
++			if(!wrapAnimation){
++				SetOilWellsAnimationState(tile, state);
++				SetTileIndustryType(tile, tileType);
+ 				MarkTileDirtyByTile(tile);
+ 			}
+ 		}
+@@ -623,7 +792,7 @@
+ 
+ 	case 88:
+ 	case 48:
+-	case 1: {
++	case 1: { // animated wheel tower for coal, gold and copper ore mines
+ 			int state = _tick_counter & 0x7FF;
+ 
+ 			if ((state -= 0x400) < 0)
+@@ -631,8 +800,8 @@
+ 
+ 			if (state < 0x1A0) {
+ 				if (state < 0x20 || state >= 0x180) {
+-					if (!(_m[tile].m1 & 0x40)) {
+-						_m[tile].m1 |= 0x40;
++					if (!GetMiningMachinerySoundPlayed(tile)) {
++						SetMiningMachinerySoundPlayed(tile, true);
+ 						SndPlayTileFx(SND_0B_MINING_MACHINERY, tile);
+ 					}
+ 					if (state & 7)
+@@ -641,19 +810,29 @@
+ 					if (state & 3)
+ 						return;
+ 				}
+-				m = (_m[tile].m1 + 1) | 0x40;
+-				if (m > 0xC2) m = 0xC0;
+-				_m[tile].m1 = m;
++
++				state = GetMineAnimationState(tile) + 1;
++				if(state > 2){
++					state = 0;
++				}
++				SetMineAnimationState(tile, state);
++				SetMiningMachinerySoundPlayed(tile, true);
+ 				MarkTileDirtyByTile(tile);
++
+ 			} else if (state >= 0x200 && state < 0x3A0) {
+ 				int i;
+ 				i = (state < 0x220 || state >= 0x380) ? 7 : 3;
+ 				if (state & i)
+ 					return;
+ 
+-				m = (_m[tile].m1 & 0xBF) - 1;
+-				if (m < 0x80) m = 0x82;
+-				_m[tile].m1 = m;
++				SetMiningMachinerySoundPlayed(tile, false);
++				state = GetMineAnimationState(tile);
++				if(state == 0){
++					state = 2;
++				}else{
++					state --;
++				}
++				SetMineAnimationState(tile, state);
+ 				MarkTileDirtyByTile(tile);
+ 			}
+ 		} break;
+@@ -667,22 +846,32 @@
+ 	CreateEffectVehicle(ti.x + 15, ti.y + 14, ti.z + 59 + (ti.tileh != 0 ? 8 : 0), EV_CHIMNEY_SMOKE);
+ }
+ 
+-static void MakeIndustryTileBigger(TileIndex tile, byte size)
++/**
++ * This function
++ */
++static void MakeIndustryTileBigger(TileIndex tile)
+ {
+-	byte b = (byte)((size + (1<<2)) & (3<<2));
++	byte stage = GetIndustryTileConstructionStage(tile);
++	byte counter = GetIndustryTileConstructionCounter(tile);
++	counter ++;
+ 
+-	if (b != 0) {
+-		_m[tile].m1 = b | (size & 3);
++	if(counter > 3){
++		SetIndustryTileConstructionCounter(tile, counter);
+ 		return;
+ 	}
++	// the construction counter passed the max, so set it to 0
++	SetIndustryTileConstructionCounter(tile, 0);
+ 
+-	size = (size + 1) & 3;
+-	if (size == 3) size |= 0x80;
+-	_m[tile].m1 = size | b;
++	stage ++;
++	if(stage == 3){
++		SetIndustryConstructionFinished(tile, true);
++	}else{
++		SetIndustryTileConstructionStage(tile, stage);
++	}
+ 
+ 	MarkTileDirtyByTile(tile);
+ 
+-	if (!(_m[tile].m1 & 0x80))
++	if (IsIndustryTileUnderConstruction(tile))
+ 		return;
+ 
+ 	switch(_m[tile].m5) {
+@@ -737,8 +926,8 @@
+ {
+ 	byte n;
+ 
+-	if (!(_m[tile].m1 & 0x80)) {
+-		MakeIndustryTileBigger(tile, _m[tile].m1);
++	if (IsIndustryTileUnderConstruction(tile)) {
++		MakeIndustryTileBigger(tile);
+ 		return;
+ 	}
+ 
+@@ -748,15 +937,16 @@
+ 
+ 	n = _industry_map5_animation_next[_m[tile].m5];
+ 	if (n != 255) {
+-		_m[tile].m1 = 0;
++		// set the industry tile to be at the very beginning of the construction progress
++		SetIndustryConstructionFinished(tile, false);
++		SetIndustryTileConstructionStage(tile, 0);
++		SetIndustryTileConstructionCounter(tile, 0);
++
+ 		_m[tile].m5 = n;
+ 		MarkTileDirtyByTile(tile);
+ 		return;
+ 	}
+ 
+-#define SET_AND_ANIMATE(tile, a, b)   { _m[tile].m5 = a; _m[tile].m1 = b; AddAnimatedTile(tile); }
+-#define SET_AND_UNANIMATE(tile, a, b) { _m[tile].m5 = a; _m[tile].m1 = b; DeleteAnimatedTile(tile); }
+-
+ 	switch (_m[tile].m5) {
+ 	case 0x18: // coast line at oilrigs
+ 	case 0x19:
+@@ -766,42 +956,91 @@
+ 		TileLoop_Water(tile);
+ 		break;
+ 
+-	case 0:
+-		if (!(_tick_counter & 0x400) && CHANCE16(1,2))
+-			SET_AND_ANIMATE(tile,1,0x80);
++	case 0: // non animated coal mine wheel tower
++		if (!(_tick_counter & 0x400) && CHANCE16(1,2)){
++			_m[tile].m5 = 1;
++
++			SetIndustryConstructionFinished(tile, true);
++			SetIndustryTileConstructionStage(tile, 0);
++			SetIndustryTileConstructionCounter(tile, 0);
++
++			AddAnimatedTile(tile);
++		}
+ 		break;
+ 
+-	case 47:
+-		if (!(_tick_counter & 0x400) && CHANCE16(1,2))
+-			SET_AND_ANIMATE(tile,0x30,0x80);
++	case 47: // non animated copper mine wheel tower
++		if (!(_tick_counter & 0x400) && CHANCE16(1,2)){
++			_m[tile].m5 = 0x30;
++
++			SetIndustryConstructionFinished(tile, true);
++			SetIndustryTileConstructionStage(tile, 0);
++			SetIndustryTileConstructionCounter(tile, 0);
++
++			AddAnimatedTile(tile);
++		}
+ 		break;
+ 
+-	case 79:
+-		if (!(_tick_counter & 0x400) && CHANCE16(1,2))
+-			SET_AND_ANIMATE(tile,0x58,0x80);
++	case 79: // non animated gold mine wheel tower
++		if (!(_tick_counter & 0x400) && CHANCE16(1,2)){
++			_m[tile].m5 = 0x58;
++
++			SetIndustryConstructionFinished(tile, true);
++			SetIndustryTileConstructionStage(tile, 0);
++			SetIndustryTileConstructionCounter(tile, 0);
++
++			AddAnimatedTile(tile);
++		}
+ 		break;
+ 
+-	case 29:
+-		if (CHANCE16(1,6))
+-			SET_AND_ANIMATE(tile,0x1E,0x80);
++	case 29: // non animated oil wells
++		if (CHANCE16(1,6)){
++			_m[tile].m5 = 0x1E;
++
++			SetIndustryConstructionFinished(tile, true);
++			SetIndustryTileConstructionStage(tile, 0);
++			SetIndustryTileConstructionCounter(tile, 0);
++
++			AddAnimatedTile(tile);
++		}
+ 		break;
+ 
+-	case 1:
+-		if (!(_tick_counter & 0x400))
+-			SET_AND_UNANIMATE(tile, 0, 0x83);
++	case 1: // animated coal mine wheel tower
++		if (!(_tick_counter & 0x400)){
++			_m[tile].m5 = 0;
++
++			SetIndustryConstructionFinished(tile, true);
++			SetMiningMachinerySoundPlayed(tile, false);
++			SetMineAnimationState(tile, 3);
++
++			DeleteAnimatedTile(tile);
++		}
+ 		break;
+ 
+-	case 48:
+-		if (!(_tick_counter & 0x400))
+-			SET_AND_UNANIMATE(tile, 0x2F, 0x83);
++	case 48: // animated coper mine wheel tower
++		if (!(_tick_counter & 0x400)){
++			_m[tile].m5 = 0x2F;
++
++			SetIndustryConstructionFinished(tile, true);
++			SetMiningMachinerySoundPlayed(tile, false);
++			SetMineAnimationState(tile, 3);
++
++			DeleteAnimatedTile(tile);
++		}
+ 		break;
+ 
+-	case 88:
+-		if (!(_tick_counter & 0x400))
+-			SET_AND_UNANIMATE(tile, 0x4F, 0x83);
++	case 88: // animated gold mine wheel tower
++		if (!(_tick_counter & 0x400)){
++			_m[tile].m5 = 0x4F;
++
++			SetIndustryConstructionFinished(tile, true);
++			SetMiningMachinerySoundPlayed(tile, false);
++			SetMineAnimationState(tile, 3);
++
++			DeleteAnimatedTile(tile);
++		}
+ 		break;
+ 
+-	case 10:
++	case 10: // power plant transformer
+ 		if (CHANCE16(1,3)) {
+ 			SndPlayTileFx(SND_0C_ELECTRIC_SPARK, tile);
+ 			AddAnimatedTile(tile);
+@@ -1019,7 +1258,7 @@
+ 	TileIndex tile = i->xy;
+ 	int a;
+ 
+-	if ((_m[tile].m1 & 0x80) == 0) return;
++	if (IsIndustryTileUnderConstruction(tile)) return;
+ 
+ 	/* search outwards as a rectangular spiral */
+ 	for (a = 1; a != 41; a += 2) {
+@@ -1485,7 +1724,11 @@
+ 			SetTileType(cur_tile, MP_INDUSTRY);
+ 			_m[cur_tile].m5 = it->map5;
+ 			_m[cur_tile].m2 = i->index;
+-			_m[cur_tile].m1 = _generating_world ? 0x1E : 0; /* maturity */
++			if(_generating_world){
++				SetInitialIndutryTileConstructionState(cur_tile);
++			}else{
++				ResetIndustryTileConstructionProgress(cur_tile);
++			}
+ 		}
+ 	} while ((++it)->ti.x != -0x80);
+ 
+Index: landscape.c
+===================================================================
+--- landscape.c	(revision 3261)
++++ landscape.c	(working copy)
+@@ -382,7 +382,7 @@
+ 	if (flags & (MP_MAPOWNER|MP_MAPOWNER_CURRENT)) {
+ 		PlayerID x = _current_player;
+ 		if (flags & MP_MAPOWNER) x = va_arg(va, int);
+-		_m[tile].m1 = x;
++		SetTileOwner(tile, x);
+ 	}
+ 
+ 	if (flags & MP_MAP5) {
+@@ -436,7 +436,7 @@
+ 	map_size = MapSize();
+ 	for (i = 0; i < map_size; i++) {
+ 		_m[i].type_height = MP_CLEAR << 4;
+-		_m[i].m1          = OWNER_NONE;
++		SetTileOwner(i,OWNER_NONE);
+ 		_m[i].m2          = 0;
+ 		_m[i].m3          = 0;
+ 		_m[i].m4          = 0;
+Index: misc.c
+===================================================================
+--- misc.c	(revision 3261)
++++ misc.c	(working copy)
+@@ -776,28 +776,32 @@
+ static void Load_MAP1(void)
+ {
+ 	uint size = MapSize();
+-	uint i;
++	TileIndex t;
+ 
+-	for (i = 0; i != size;) {
++	for (t = 0; t != size;) {
+ 		byte buf[4096];
+ 		uint j;
+ 
+ 		SlArray(buf, lengthof(buf), SLE_UINT8);
+-		for (j = 0; j != lengthof(buf); j++) _m[i++].m1 = buf[j];
++		for (j = 0; j != lengthof(buf); j++){
++			SetTileOwner(t++, buf[j]);
++		}
+ 	}
+ }
+ 
+ static void Save_MAP1(void)
+ {
+ 	uint size = MapSize();
+-	uint i;
++	TileIndex tile;
+ 
+ 	SlSetLength(size);
+-	for (i = 0; i != size;) {
++	for (tile = 0; tile != size;) {
+ 		byte buf[4096];
+ 		uint j;
+ 
+-		for (j = 0; j != lengthof(buf); j++) buf[j] = _m[i++].m1;
++		for (j = 0; j != lengthof(buf); j++){
++			buf[j] = GetTileOwner(tile++);
++		}
+ 		SlArray(buf, lengthof(buf), SLE_UINT8);
+ 	}
+ }
+Index: town_cmd.c
+===================================================================
+--- town_cmd.c	(revision 3261)
++++ town_cmd.c	(working copy)
+@@ -75,10 +75,29 @@
+ 
+ #include "table/town_land.h"
+ 
++static inline byte GetHouseLiftPosition(TileIndex tile){
++	return GB(_m[tile].m1, 0, 7);
++}
+ 
++static inline void SetHouseLiftPosition(TileIndex tile, byte position){
++	SB(_m[tile].m1, 0, 7, position);
++}
++
++static inline bool IsHouseLiftMoving(TileIndex tile){
++	return GB(_m[tile].m1,7,1) == 1;
++}
++
++static inline void SetHouseLiftMoving(TileIndex tile, bool moving){
++	if(moving){
++		SB(_m[tile].m1, 7, 1, 1);
++	}else{
++		SB(_m[tile].m1, 7, 1, 0);
++	}
++}
++
+ static void TownDrawHouseLift(const TileInfo *ti)
+ {
+-	AddChildSpriteScreen(0x5A3, 0xE, 0x3C - GB(_m[ti->tile].m1, 0, 7));
++	AddChildSpriteScreen(0x5A3, 0xE, 0x3C - GetHouseLiftPosition(ti->tile));
+ }
+ 
+ typedef void TownDrawTileProc(const TileInfo *ti);
+@@ -156,8 +175,7 @@
+ 
+ static void AnimateTile_Town(TileIndex tile)
+ {
+-	int old;
+-	int a,b;
++	int liftPos,b;
+ 
+ 	if (_tick_counter & 3) return;
+ 
+@@ -170,11 +188,11 @@
+ 		return;
+ 	}
+ 
+-	if (!((old = _m[tile].m1) & 0x80)) {
++	if (!IsHouseLiftMoving(tile)) {
+ 		int i;
++		int old = GetHouseLiftPosition(tile);
++		SetHouseLiftMoving(tile, true);
+ 
+-		_m[tile].m1 |= 0x80;
+-
+ 		do {
+ 			i = (Random() & 7) - 1;
+ 		} while (i < 0 || i == 1 || i * 6 == old);
+@@ -182,13 +200,13 @@
+ 		SB(_m[tile].m5, 0, 6, i);
+ 	}
+ 
+-	a = GB(_m[tile].m1, 0, 7);
++	liftPos = GetHouseLiftPosition(tile);
+ 	b = GB(_m[tile].m5, 0, 6) * 6;
+-	a += (a < b) ? 1 : -1;
+-	SB(_m[tile].m1, 0, 7, a);
++	liftPos += (liftPos < b) ? 1 : -1;
++	SetHouseLiftPosition(tile, liftPos);
+ 
+-	if (a == b) {
+-		_m[tile].m1 &= 0x7F;
++	if (liftPos == b) {
++		SetHouseLiftMoving(tile, false);
+ 		_m[tile].m5 &= 0x40;
+ 		DeleteAnimatedTile(tile);
+ 	}
+Index: disaster_cmd.c
+===================================================================
+--- disaster_cmd.c	(revision 3261)
++++ disaster_cmd.c	(working copy)
+@@ -337,8 +337,8 @@
+ 	TileIndex tile;
+ 
+ 	for (tile = 0; tile != MapSize(); tile++) {
+-		if (IsTileType(tile, MP_INDUSTRY) && _m[tile].m2 == i->index) {
+-			_m[tile].m1 = 0;
++		if (IsTileType(tile, MP_INDUSTRY) && GetIndustryIndexByTile(tile) == i->index) {
++			ResetIndustryTileConstructionProgress(tile);
+ 			MarkTileDirtyByTile(tile);
+ 		}
+ 	}
+Index: tile.h
+===================================================================
+--- tile.h	(revision 3261)
++++ tile.h	(working copy)
+@@ -122,6 +122,20 @@
+ 	_m[tile].m1 = owner;
+ }
+ 
++static inline void ResetIndustryTileConstructionProgress(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	_m[tile].m1 = 0;
++}
++
++static inline uint16 GetIndustryIndexByTile(TileIndex tile){
++	assert(tile < MapSize());
++	assert(IsTileType(tile, MP_INDUSTRY));
++
++	return _m[tile].m2;
++}
++
+ static inline bool IsTileOwner(TileIndex tile, Owner owner)
+ {
+ 	return GetTileOwner(tile) == owner;

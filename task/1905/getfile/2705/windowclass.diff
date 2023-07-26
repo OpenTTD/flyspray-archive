@@ -1,0 +1,277 @@
+Index: src/window_type.h
+===================================================================
+--- src/window_type.h	(revision 12630)
++++ src/window_type.h	(working copy)
+@@ -7,6 +7,9 @@
+ 
+ #include "core/enum_type.hpp"
+ 
++/**
++ * Window classes
++ */
+ enum WindowClass {
+ 	WC_NONE,
+ 	WC_MAIN_WINDOW = WC_NONE,
+@@ -93,7 +96,7 @@
+ 	WC_OSK,
+ };
+ 
+-struct Window;
++class Window;
+ struct WindowEvent;
+ typedef int32 WindowNumber;
+ 
+Index: src/window_gui.h
+===================================================================
+--- src/window_gui.h	(revision 12630)
++++ src/window_gui.h	(working copy)
+@@ -287,18 +287,35 @@
+ };
+ 
+ /**
+- * Data structure for an opened window
++ * Base class of an opened window.
+  */
+-struct Window {
+-	uint16 flags4;              ///< Window flags, @see WindowFlags
+-	WindowClass window_class;   ///< Window class
+-	WindowNumber window_number; ///< Window number within the window class
++class BaseWindow
++{
++public:
++	BaseWindow();
++	virtual ~BaseWindow();
+ 
+ 	int left;   ///< x position of left edge of the window
+ 	int top;    ///< y position of top edge of the window
+ 	int width;  ///< width of the window (number of pixels to the right in x direction)
+ 	int height; ///< Height of the window (number of pixels down in y direction)
+ 
++	ViewPort *viewport;    ///< Pointer to viewport, if present
++};
++
++/**
++ * Data structure for an opened window
++ */
++class Window: public BaseWindow
++{
++public:
++	Window();
++	~Window();
++
++	uint16 flags4;              ///< Window flags, @see WindowFlags
++	WindowClass window_class;   ///< Window class
++	WindowNumber window_number; ///< Window number within the window class
++
+ 	Scrollbar hscroll;  ///< Horizontal scroll bar
+ 	Scrollbar vscroll;  ///< First vertical scroll bar
+ 	Scrollbar vscroll2; ///< Second vertical scroll bar
+@@ -307,7 +324,6 @@
+ 	byte caption_color; ///< Background color of the window caption, contains PlayerID
+ 
+ 	WindowProc *wndproc;   ///< Event handler function for the window
+-	ViewPort *viewport;    ///< Pointer to viewport, if present (structure is part of derived class)
+ 	const Widget *original_widget; ///< Original widget layout, copied from WindowDesc
+ 	Widget *widget;        ///< Widgets of the window
+ 	uint widget_count;     ///< Number of widgets of the window
+Index: src/window.cpp
+===================================================================
+--- src/window.cpp	(revision 12630)
++++ src/window.cpp	(working copy)
+@@ -47,7 +47,22 @@
+ 
+ byte _special_mouse_mode;
+ 
++BaseWindow::BaseWindow()
++{
++}
+ 
++BaseWindow::~BaseWindow()
++{
++}
++
++Window::Window(): BaseWindow()
++{
++}
++
++Window::~Window()
++{
++}
++
+ void CDECL Window::SetWidgetsDisabledState(bool disab_stat, int widgets, ...)
+ {
+ 	va_list wdg_list;
+@@ -250,34 +265,7 @@
+ 	}
+ }
+ 
+-static void DrawOverlappedWindow(Window* const *wz, int left, int top, int right, int bottom);
+-
+ /**
+- * From a rectangle that needs redrawing, find the windows that intersect with the rectangle.
+- * These windows should be re-painted.
+- * @param left Left edge of the rectangle that should be repainted
+- * @param top Top edge of the rectangle that should be repainted
+- * @param right Right edge of the rectangle that should be repainted
+- * @param bottom Bottom edge of the rectangle that should be repainted
+- */
+-void DrawOverlappedWindowForAll(int left, int top, int right, int bottom)
+-{
+-	Window* const *wz;
+-	DrawPixelInfo bk;
+-	_cur_dpi = &bk;
+-
+-	FOR_ALL_WINDOWS(wz) {
+-		const Window *w = *wz;
+-		if (right > w->left &&
+-				bottom > w->top &&
+-				left < w->left + w->width &&
+-				top < w->top + w->height) {
+-			DrawOverlappedWindow(wz, left, top, right, bottom);
+-		}
+-	}
+-}
+-
+-/**
+  * Generate repaint events for the visible part of window *wz within the rectangle.
+  *
+  * The function goes recursively upwards in the window stack, and splits the rectangle
+@@ -288,8 +276,6 @@
+  * @param top Top edge of the rectangle that should be repainted
+  * @param right Right edge of the rectangle that should be repainted
+  * @param bottom Bottom edge of the rectangle that should be repainted
+- *
+- * @todo Swap this function to above DrawOverlappedWindowForAll() to eliminate the forward declaration
+  */
+ static void DrawOverlappedWindow(Window* const *wz, int left, int top, int right, int bottom)
+ {
+@@ -347,6 +333,31 @@
+ }
+ 
+ /**
++ * From a rectangle that needs redrawing, find the windows that intersect with the rectangle.
++ * These windows should be re-painted.
++ * @param left Left edge of the rectangle that should be repainted
++ * @param top Top edge of the rectangle that should be repainted
++ * @param right Right edge of the rectangle that should be repainted
++ * @param bottom Bottom edge of the rectangle that should be repainted
++ */
++void DrawOverlappedWindowForAll(int left, int top, int right, int bottom)
++{
++	Window* const *wz;
++	DrawPixelInfo bk;
++	_cur_dpi = &bk;
++
++	FOR_ALL_WINDOWS(wz) {
++		const Window *w = *wz;
++		if (right > w->left &&
++				bottom > w->top &&
++				left < w->left + w->width &&
++				top < w->top + w->height) {
++			DrawOverlappedWindow(wz, left, top, right, bottom);
++		}
++	}
++}
++
++/**
+  * Dispatch an event to a possibly non-existing window.
+  * If the window pointer w is \c NULL, the event is not dispatched
+  * @param w Window to dispatch the event to, may be \c NULL
+@@ -709,8 +720,7 @@
+ 		DeleteWindow(w);
+ 	}
+ 
+-	/* Set up window properties */
+-	memset(w, 0, sizeof(*w));
++	/* Initialize all variables, and set up window properties */
+ 	w->window_class = cls;
+ 	w->flags4 = WF_WHITE_BORDER_MASK; // just opened windows have a white border
+ 	w->caption_color = 0xFF;
+@@ -719,13 +729,44 @@
+ 	w->width = min_width;
+ 	w->height = min_height;
+ 	w->wndproc = proc;
+-	AssignWidgetToWindow(w, widget);
++
++	w->hscroll.count = 0;
++	w->hscroll.cap = 0;
++	w->hscroll.pos = 0;
++
++	w->vscroll.count = 0;
++	w->vscroll.cap = 0;
++	w->vscroll.pos = 0;
++
++	w->vscroll2.count = 0;
++	w->vscroll2.cap = 0;
++	w->vscroll2.pos = 0;
++
+ 	w->resize.width = min_width;
+ 	w->resize.height = min_height;
+ 	w->resize.step_width = 1;
+ 	w->resize.step_height = 1;
+ 	w->window_number = window_number;
+ 
++	w->viewport = NULL;
++	w->original_widget= NULL;
++	w->widget= NULL;
++	w->widget_count = 0;
++	w->desc_flags = 0;
++
++	w->message.msg = 0;
++	w->message.wparam = 0;
++	w->message.lparam = 0;
++
++	w->parent= NULL;
++	for (int i = 0; i < WINDOW_CUSTOM_SIZE; i++) {
++		w->custom[i] = 0;
++	}
++
++	/* w->widget must be initialized before calling AssignWidgetToWindow() */
++	AssignWidgetToWindow(w, widget);
++
++
+ 	{
+ 		Window **wz = _last_z_window;
+ 
+@@ -1053,16 +1094,21 @@
+ 	return NULL;
+ }
+ 
++/**
++ * (re)initialize the windowing system
++ */
+ void InitWindowSystem()
+ {
+ 	IConsoleClose();
+ 
+-	memset(&_windows, 0, sizeof(_windows));
+ 	_last_z_window = _z_windows;
+ 	InitViewports();
+ 	_no_scroll = 0;
+ }
+ 
++/**
++ * Close down the windowing system
++ */
+ void UnInitWindowSystem()
+ {
+ 	Window **wz;
+@@ -1081,6 +1127,9 @@
+ 	assert(_last_z_window == _z_windows);
+ }
+ 
++/**
++ * Reset the windowing system, by means of shutting it down followed by re-initialization
++ */
+ void ResetWindowSystem()
+ {
+ 	UnInitWindowSystem();
+@@ -1206,7 +1255,7 @@
+ 		e.event = WE_MOUSEOVER;
+ 		e.we.mouseover.pt.x = -1;
+ 		e.we.mouseover.pt.y = -1;
+-		if (last_w->wndproc) last_w->wndproc(last_w, &e);
++		if (last_w->wndproc != NULL) last_w->wndproc(last_w, &e);
+ 	}
+ 	last_w = w;
+ 

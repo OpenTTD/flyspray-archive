@@ -1,0 +1,1268 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 11353)
++++ lang/english.txt	(working copy)
+@@ -3285,7 +3285,10 @@
+ STR_FLAT_WORLD_HEIGHT_NUM                                       :{NUM}
+ 
+ STR_SMALLMAP_CENTER                                             :{BLACK}Center the smallmap on the current position
++STR_SMALLMAP_ZOOM_IN                                            :{BLACK}Zoom in
++STR_SMALLMAP_ZOOM_OUT                                           :{BLACK}Zoom out
+ 
++
+ ########### String for new airports
+ STR_SMALL_AIRPORT                                               :{BLACK}Small
+ STR_CITY_AIRPORT                                                :{BLACK}City
+Index: smallmap_gui.cpp
+===================================================================
+--- smallmap_gui.cpp	(revision 11353)
++++ smallmap_gui.cpp	(working copy)
+@@ -42,14 +42,25 @@
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   328,   349,   180,   201, SPR_IMG_COMPANY_GENERAL, STR_0196_SHOW_LAND_OWNERS_ON_MAP},
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   262,   283,   158,   179, SPR_IMG_SMALLMAP,        STR_SMALLMAP_CENTER},
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   262,   283,   180,   201, SPR_IMG_TOWN,            STR_0197_TOGGLE_TOWN_NAMES_ON_OFF},
+-{     WWT_PANEL,    RESIZE_RTB,    13,     0,   261,   158,   201, 0x0,                     STR_NULL},
++{    WWT_IMGBTN,   RESIZE_LRTB,    13,   240,   261,   158,   179, SPR_IMG_ZOOMIN,          STR_SMALLMAP_ZOOM_IN},
++{    WWT_IMGBTN,   RESIZE_LRTB,    13,   240,   261,   180,   201, SPR_IMG_ZOOMOUT,         STR_SMALLMAP_ZOOM_OUT},
++{     WWT_PANEL,    RESIZE_RTB,    13,     0,   239,   158,   201, 0x0,                     STR_NULL},
+ {     WWT_PANEL,    RESIZE_RTB,    13,     0,   337,   202,   213, 0x0,                     STR_NULL},
+ { WWT_RESIZEBOX,   RESIZE_LRTB,    13,   338,   349,   202,   213, 0x0,                     STR_RESIZE_BUTTON},
+ {  WIDGETS_END},
+ };
+ 
+-static int _smallmap_type;
+-static bool _smallmap_show_towns = true;
++/** Determines the size of one step of zoom. Must be at least 1. See
++ *  SmallMapZoomOut for more info. */
++static const int _smallmap_zoom_step = 2;
++/** Determines the maximum zoom-out level available. For example, 27 means
++ *  1/27th of the scale in which one tile occupies 4 pixels. */
++static const int _smallmap_zoom_max = 27;
++/** This constant is used to determine the population limit for each zoom level
++ *  at which town signs are replaced with white dots. */
++static const int _smallmap_town_poplimit_gradient = 300;
++/** At this zoom level all town signs are replaced with single pixels. */
++static const int _smallmap_town_alldots_atzoom = 10;
+ 
+ /** Macro for ordinary entry of LegendAndColor */
+ #define MK(a,b) {a, b, false, false}
+@@ -250,55 +261,9 @@
+ 	{MKCOLOR(0x00D7D700), MKCOLOR(0xFF0000FF)},
+ };
+ 
+-typedef uint32 GetSmallMapPixels(TileIndex tile); // typedef callthrough function
++typedef uint32 GetSmallMapPixels(Window *w, TileIndex tile); // typedef callthrough function
+ 
+-/**
+- * Draws one column of the small map in a certain mode onto the screen buffer. This
+- * function looks exactly the same for all types
+- *
+- * @param dst Pointer to a part of the screen buffer to write to.
+- * @param xc The X coordinate of the first tile in the column.
+- * @param yc The Y coordinate of the first tile in the column
+- * @param pitch Number of pixels to advance in the screen buffer each time a pixel is written.
+- * @param reps Number of lines to draw
+- * @param mask ?
+- * @param proc Pointer to the colour function
+- * @see GetSmallMapPixels(TileIndex)
+- */
+-static void DrawSmallMapStuff(void *dst, uint xc, uint yc, int pitch, int reps, uint32 mask, GetSmallMapPixels *proc)
+-{
+-	Blitter *blitter = BlitterFactoryBase::GetCurrentBlitter();
+-	void *dst_ptr_abs_end = blitter->MoveTo(_screen.dst_ptr, 0, _screen.height);
+-	void *dst_ptr_end = blitter->MoveTo(dst_ptr_abs_end, -4, 0);
+ 
+-	do {
+-		/* check if the tile (xc,yc) is within the map range */
+-		if (xc < MapMaxX() && yc < MapMaxY()) {
+-			/* check if the dst pointer points to a pixel inside the screen buffer */
+-			if (dst < _screen.dst_ptr) continue;
+-			if (dst >= dst_ptr_abs_end) continue;
+-
+-			uint32 val = proc(TileXY(xc, yc)) & mask;
+-			uint8 *val8 = (uint8 *)&val;
+-
+-			if (dst <= dst_ptr_end) {
+-				blitter->SetPixelIfEmpty(dst, 0, 0, val8[0]);
+-				blitter->SetPixelIfEmpty(dst, 1, 0, val8[1]);
+-				blitter->SetPixelIfEmpty(dst, 2, 0, val8[2]);
+-				blitter->SetPixelIfEmpty(dst, 3, 0, val8[3]);
+-			} else {
+-				/* It happens that there are only 1, 2 or 3 pixels left to fill, so in that special case, write till the end of the video-buffer */
+-				int i = 0;
+-				do {
+-					blitter->SetPixelIfEmpty(dst, 0, 0, val8[i]);
+-				} while (i++, dst = blitter->MoveTo(dst, 1, 0), dst < dst_ptr_abs_end);
+-			}
+-		}
+-	/* switch to next tile in the column */
+-	} while (xc++, yc++, dst = blitter->MoveTo(dst, pitch, 0), --reps != 0);
+-}
+-
+-
+ static inline TileType GetEffectiveTileType(TileIndex tile)
+ {
+ 	TileType t = GetTileType(tile);
+@@ -322,10 +287,12 @@
+ 
+ /**
+  * Return the color a tile would be displayed with in the small map in mode "Contour".
++ *
++ * @param w Pointer to the Window containing the small map.
+  * @param tile The tile of which we would like to get the color.
+  * @return The color of tile in the small map in mode "Contour"
+  */
+-static inline uint32 GetSmallMapContoursPixels(TileIndex tile)
++static inline uint32 GetSmallMapContoursPixels(Window *w, TileIndex tile)
+ {
+ 	TileType t = GetEffectiveTileType(tile);
+ 
+@@ -336,10 +303,11 @@
+ /**
+  * Return the color a tile would be displayed with in the small map in mode "Vehicles".
+  *
++ * @param w Pointer to the Window containing the small map.
+  * @param tile The tile of which we would like to get the color.
+  * @return The color of tile in the small map in mode "Vehicles"
+  */
+-static inline uint32 GetSmallMapVehiclesPixels(TileIndex tile)
++static inline uint32 GetSmallMapVehiclesPixels(Window *w, TileIndex tile)
+ {
+ 	TileType t = GetEffectiveTileType(tile);
+ 
+@@ -349,10 +317,11 @@
+ /**
+  * Return the color a tile would be displayed with in the small map in mode "Industries".
+  *
++ * @param w Pointer to the Window containing the small map.
+  * @param tile The tile of which we would like to get the color.
+  * @return The color of tile in the small map in mode "Industries"
+  */
+-static inline uint32 GetSmallMapIndustriesPixels(TileIndex tile)
++static inline uint32 GetSmallMapIndustriesPixels(Window *w, TileIndex tile)
+ {
+ 	TileType t = GetEffectiveTileType(tile);
+ 
+@@ -360,16 +329,20 @@
+ 		return GetIndustrySpec(GetIndustryByTile(tile)->type)->map_colour * 0x01010101;
+ 	}
+ 
+-	return ApplyMask(MKCOLOR(0x54545454), &_smallmap_vehicles_andor[t]);
++	if (WP(w, smallmap_d).zoom > 2)
++		return (t == MP_WATER) ? _smallmap_vehicles_andor[t].mor : MKCOLOR(0x54545454);
++	else
++		return ApplyMask(MKCOLOR(0x54545454), &_smallmap_vehicles_andor[t]);
+ }
+ 
+ /**
+  * Return the color a tile would be displayed with in the small map in mode "Routes".
+  *
++ * @param w Pointer to the Window containing the small map.
+  * @param tile The tile of which we would like to get the color.
+  * @return The color of tile  in the small map in mode "Routes"
+  */
+-static inline uint32 GetSmallMapRoutesPixels(TileIndex tile)
++static inline uint32 GetSmallMapRoutesPixels(Window *w, TileIndex tile)
+ {
+ 	TileType t = GetEffectiveTileType(tile);
+ 	uint32 bits;
+@@ -402,7 +375,7 @@
+ 	MKCOLOR(0x54545454), ///< unused
+ };
+ 
+-static inline uint32 GetSmallMapVegetationPixels(TileIndex tile)
++static inline uint32 GetSmallMapVegetationPixels(Window *w, TileIndex tile)
+ {
+ 	TileType t = GetEffectiveTileType(tile);
+ 	uint32 bits;
+@@ -442,10 +415,11 @@
+ /**
+  * Return the color a tile would be displayed with in the small map in mode "Owner".
+  *
++ * @param w Pointer to the Window containing the small map.
+  * @param tile The tile of which we would like to get the color.
+  * @return The color of tile in the small map in mode "Owner"
+  */
+-static inline uint32 GetSmallMapOwnerPixels(TileIndex tile)
++static inline uint32 GetSmallMapOwnerPixels(Window *w, TileIndex tile)
+ {
+ 	Owner o;
+ 
+@@ -458,21 +432,8 @@
+ 	return _owner_colors[o];
+ }
+ 
+-
+-static const uint32 _smallmap_mask_left[3] = {
+-	MKCOLOR(0xFF000000),
+-	MKCOLOR(0xFFFF0000),
+-	MKCOLOR(0xFFFFFF00),
+-};
+-
+-static const uint32 _smallmap_mask_right[] = {
+-	MKCOLOR(0x000000FF),
+-	MKCOLOR(0x0000FFFF),
+-	MKCOLOR(0x00FFFFFF),
+-};
+-
+-/* each tile has 4 x pixels and 1 y pixel */
+-
++/** Holds function pointers to determine tile color in the smallmap for each
++ *  of the possible values of WP(w, smallmap_d).type */
+ static GetSmallMapPixels *_smallmap_draw_procs[] = {
+ 	GetSmallMapContoursPixels,
+ 	GetSmallMapVehiclesPixels,
+@@ -486,260 +447,650 @@
+ 	184, 191, 152, 15, 215, 184
+ };
+ 
++/**
++ * Converts main map coordinates into smallmap "pips". See SmallMapDrawSurface
++ * for more information.
++ *
++ * @param mmx Main map X-coordinate to be converted
++ * @param mmy Main map Y-coordinate to be converted
++ * @return A Point struct containing the converted coordinates.
++ */
++static inline Point MainMapToPip(int mmx, int mmy)
++{
++	Point pt;
++	pt.x = mmx/TILE_SIZE + 2 * MapMaxX();
++	pt.y = mmy/TILE_SIZE - 1;
++	return pt;
++}
+ 
+-static void DrawVertMapIndicator(int x, int y, int x2, int y2)
++/**
++ * The inverse function of MainMapToPip.
++ */
++static inline Point PipToMainMap(int px, int py)
+ {
+-	GfxFillRect(x, y,      x2, y + 3, 69);
+-	GfxFillRect(x, y2 - 3, x2, y2,    69);
++	Point pt;
++	pt.x = (px - 2*MapMaxX()) * TILE_SIZE;
++	pt.y = (py + 1) * TILE_SIZE;
++	return pt;
+ }
+ 
+-static void DrawHorizMapIndicator(int x, int y, int x2, int y2)
++/**
++ * Converts small map pixel coordinates into smallmap "pips". See
++ * SmallMapDrawSurface for more information.
++ *
++ * @param w Pointer to the Window containing the small map.
++ * @param smx Small map pixel X-coordinate to be converted
++ * @param smy Small map pixel Y-coordinate to be converted
++ * @return A Point struct containing the converted coordinates.
++ */
++static inline Point SmallMapToPip(Window *w, int smx, int smy)
+ {
+-	GfxFillRect(x,      y, x + 3, y2, 69);
+-	GfxFillRect(x2 - 3, y, x2,    y2, 69);
++	Point pt;
++	pt.x = WP(w, smallmap_d).scroll_x + (smx - (w->widget[4].right - w->widget[4].left) / 2) * WP(w, smallmap_d).zoom;
++	pt.y = WP(w, smallmap_d).scroll_y + (smy - (w->widget[4].bottom - w->widget[4].top) / 2) * WP(w, smallmap_d).zoom;
++	return pt;
+ }
+ 
+ /**
+- * Draws the small map.
++ * The inverse function of SmallMapToPip.
++ */
++static inline Point PipToSmallMap(Window *w, int px, int py)
++{
++	Point pt;
++	pt.x = px / WP(w, smallmap_d).zoom - WP(w, smallmap_d).scroll_x / WP(w, smallmap_d).zoom + (w->widget[4].right - w->widget[4].left) / 2;
++	pt.y = py / WP(w, smallmap_d).zoom - WP(w, smallmap_d).scroll_y / WP(w, smallmap_d).zoom + (w->widget[4].bottom - w->widget[4].top) / 2;
++	return pt;
++}
++
++/**
++ * Converts tile coordinates into smallmap "pips". See SmallMapDrawSurface for
++ * more information.
+  *
+- * Basically, the small map is draw column of pixels by column of pixels. The pixels
+- * are drawn directly into the screen buffer. The final map is drawn in multiple passes.
+- * The passes are:
+- * <ol><li>The colors of tiles in the different modes.</li>
+- * <li>Town names (optional)</li></ol>
++ * @param tx Tile X-coordinate to be converted
++ * @param ty Tile Y-coordinate to be converted
++ * @return A Point struct containing the converted coordinates.
++ */
++static inline Point TileToPip(int tx, int ty)
++{
++	Point pt;
++	pt.x = ((int)MapMaxX() + ty - tx) * 2;
++	pt.y = ty + tx;
++	return pt;
++}
++
++/**
++ * The inverse function of TileToPip.
++ */
++static inline Point PipToTile(int px, int py)
++{
++	Point pt;
++	pt.y = (px/2 + py - (int)MapMaxX()) / 2;
++	pt.x = (int)MapMaxX() - (px - 2*pt.y) / 2;
++	return pt;
++}
++
++/**
++ * Converts small map pixel coordinates into main map coordinates. See
++ * SmallMapDrawSurface for more information.
+  *
+- * @param dpi pointer to pixel to write onto
+- * @param w pointer to Window struct
+- * @param type type of map requested (vegetation, owners, routes, etc)
+- * @param show_towns true if the town names should be displayed, false if not.
++ * @param w Pointer to the Window containing the small map.
++ * @param smx Small map pixel X-coordinate to be converted
++ * @param smy Small map pixel Y-coordinate to be converted
++ * @return A Point struct containing the converted coordinates.
+  */
+-static void DrawSmallMap(DrawPixelInfo *dpi, Window *w, int type, bool show_towns)
++static inline Point SmallMapToMainMap(Window *w, int smx, int smy)
+ {
+-	Blitter *blitter = BlitterFactoryBase::GetCurrentBlitter();
+-	DrawPixelInfo *old_dpi;
+-	int dx,dy, x, y, x2, y2;
+-	void *ptr;
+-	int tile_x;
+-	int tile_y;
+-	ViewPort *vp;
++	Point pt = SmallMapToPip(w, smx, smy);
++	return PipToMainMap(pt.x, pt.y);
++}
+ 
+-	old_dpi = _cur_dpi;
+-	_cur_dpi = dpi;
++/**
++ * The inverse function of SmallMapToMainMap.
++ */
++static inline Point MainMapToSmallMap(Window *w, int mmx, int mmy)
++{
++	Point pt = MainMapToPip(mmx, mmy);
++	return PipToSmallMap(w, pt.x, pt.y);
++}
+ 
+-	/* clear it */
+-	GfxFillRect(dpi->left, dpi->top, dpi->left + dpi->width - 1, dpi->top + dpi->height - 1, 0);
++/**
++ * Converts small map pixel coordinates into game tile coordinates. See
++ * SmallMapDrawSurface for more information.
++ *
++ * @param w Pointer to the Window containing the small map.
++ * @param smx Small map pixel X-coordinate to be converted
++ * @param smy Small map pixel Y-coordinate to be converted
++ * @return A Point struct containing the converted coordinates.
++ */
++static inline Point SmallMapToTile(Window *w, int smx, int smy)
++{
++	Point pt = SmallMapToPip(w, smx, smy);
++	return PipToTile(pt.x, pt.y);
++}
+ 
+-	/* setup owner table */
+-	if (type == 5) {
+-		const Player *p;
++/**
++ * The inverse function of SmallMapToTile.
++ */
++static inline Point TileToSmallMap(Window *w, int tx, int ty)
++{
++	Point pt = TileToPip(tx, ty);
++	return PipToSmallMap(w, pt.x, pt.y);
++}
+ 
+-		/* fill with some special colors */
+-		_owner_colors[OWNER_TOWN] = MKCOLOR(0xB4B4B4B4);
+-		_owner_colors[OWNER_NONE] = MKCOLOR(0x54545454);
+-		_owner_colors[OWNER_WATER] = MKCOLOR(0xCACACACA);
+-		_owner_colors[OWNER_END]   = MKCOLOR(0x20202020); /* industry */
++/**
++ * If defined, a new dithering algorithm will be used, in which pixel colors
++ * alternate both vertically and horizontally.
++ *
++ * If not defined, smallmap dithering will be done using the standard method,
++ * which results in vertical lines of alternating colors.
++ *
++ * The idea is to let people try both and only keep one if/when merging into
++ * trunk.
++ */
++//#define SMALLMAP_DITHER_STANDARD
+ 
+-		/* now fill with the player colors */
+-		FOR_ALL_PLAYERS(p) {
+-			if (p->is_active) {
+-				_owner_colors[p->index] =
+-					_colour_gradient[p->player_color][5] * 0x01010101;
+-			}
+-		}
++#if defined(SMALLMAP_DITHER_STANDARD)
++
++static inline uint8 MakeDitheredColor1px(uint32 color, int smx, int smy)
++{
++	uint8 *clr8 = (uint8*)&color;
++	return clr8[1 + (smx & 1)];
++}
++
++static inline uint32 MakeDitheredColor4px(uint32 color, int smx, int smy)
++{
++	return color;
++}
++
++#else
++
++static inline uint8 MakeDitheredColor1px(uint32 color, int smx, int smy)
++{
++	uint8 *clr8 = (uint8*)&color;
++	return clr8[1 + ((smx & 1) ^ (smy & 1))];
++}
++
++static inline uint32 MakeDitheredColor4px(uint32 color, int smx, int smy)
++{
++	if ((smx & 1) ^ (smy & 1))
++		return color;
++	else {
++		uint32 clr;
++		uint8 *fr = (uint8*)&color;
++		uint8 *to = (uint8*)&clr;
++		to[0] = fr[3];
++		to[1] = fr[2];
++		to[2] = fr[1];
++		to[3] = fr[0];
++		return clr;
+ 	}
++}
+ 
+-	tile_x = WP(w,smallmap_d).scroll_x / TILE_SIZE;
+-	tile_y = WP(w,smallmap_d).scroll_y / TILE_SIZE;
++#endif
+ 
+-	dx = dpi->left + WP(w,smallmap_d).subscroll;
+-	tile_x -= dx / 4;
+-	tile_y += dx / 4;
+-	dx &= 3;
++/**
++ * This function is invoked every time before drawing the smallmap to populate
++ * the _owner_colors table with the colors of active players.
++ */
++static void SmallMapPopulateOwnerColorTable()
++{
++	const Player *p;
+ 
+-	dy = dpi->top;
+-	tile_x += dy / 2;
+-	tile_y += dy / 2;
++	/* fill with some special colors */
++	_owner_colors[OWNER_TOWN] = MKCOLOR(0xB4B4B4B4);
++	_owner_colors[OWNER_NONE] = MKCOLOR(0x54545454);
++	_owner_colors[OWNER_WATER] = MKCOLOR(0xCACACACA);
++	_owner_colors[OWNER_END]   = MKCOLOR(0x20202020); /* industry */
+ 
+-	if (dy & 1) {
+-		tile_x++;
+-		dx += 2;
+-		if (dx > 3) {
+-			dx -= 4;
+-			tile_x--;
+-			tile_y++;
++	/* now fill with the player colors */
++	FOR_ALL_PLAYERS(p) {
++		if (p->is_active) {
++			_owner_colors[p->index] =
++				_colour_gradient[p->player_color][5] * 0x01010101;
+ 		}
+ 	}
++}
+ 
+-	ptr = blitter->MoveTo(dpi->dst_ptr, -dx - 4, 0);
+-	x = - dx - 4;
+-	y = 0;
++/**
++ * Draws the surface of the small map.
+ 
++   The algorithm iterates over the tiles starting at tile 0, 0. The main loop
++   variables are specified in the units of "pips", which are best understood
++   with a diagram.
++
++   Here is a diagram of the original TTD small map. Each point is a pixel; the
++   "o" shows the pixels where the centre of the tile is located logically:
++
++   <pre>
++   . . . . . P . . . . . . . X . . . . . . . . . . . . . . . . . . . . .
++   . . . . . . . . . . . o . . . o . . . . . . . . . . . . . . . . . . .
++   . . . . . . . . . o . . . o . . . o . . . . . . . . . . . . . . . . .
++   . . . . . . . o . . . o . . . o . . . o . . . . . . . . . . . . . . .
++   . . . . . o . . . o . . . o . . . o . . . o . . . . . . . . . . . . .
++   . . . . . . . o . . . o . . . o . . . o . . . o . . . . . . . . . . .
++   . . . . . . . . . o . . . o . . . o . . . o . . . o . . . . . . . . .
++   . . . . . . . . . . . o . . . o . . . o . . . o . . . . . . . . . . .
++   . . . . . . . . . . . . . o . . . o . . . o . . . . . . . . . . . . .
++   . . . . . . . . . . . . . . . o . . . o . . . . . . . . . . . . . . .
++   . . . . . . . . . . . . . . . . . o . . . . . . . . . . . . . . . . .
++   </pre>
++
++   A "pip" is nothing more than a single "pixel" in the above diagram, except
++   that with zooming, a pixel can cover more than a single pip. In fact, the
++   current implementation is such that a single pixel always covers a square
++   of an integer number of pips, where the side of the square is equal to
++   WP(w, smallmap_d).zoom.
++
++   So, for example, at zoom level = 1, each pixel covers exactly one pip, and
++   we get the original TTD small map. At zoom level = 2, a pixel covers 2x2
++   pips; at zoom = 3 it covers 3x3 pips.
++
++   The point mapped with X is the tile 0,0. The pip marked with P is at pip
++   coordinates 0,0. Pip axes are the same as pixel axes - X going to the right
++   and Y going towards the bottom.
++
++   With this introduction in mind, the actual algorithm is described within the
++   code.
++
++ * @param w Pointer to the Window containing the small map.
++ * @pre _cur_dpi must be set to point to the first pixel of the smallmap region
++ * to be drawn. Its width and height must be the size of the region, and its
++ * left and top coordinates must be relative to the top left corner of the
++ * smallmap drawing area.
++ */
++static void SmallMapDrawSurface(Window *w)
++{
++	Blitter *blitter = BlitterFactoryBase::GetCurrentBlitter();
++	DrawPixelInfo *dpi = _cur_dpi;
++	GetSmallMapPixels *draw_proc = _smallmap_draw_procs[WP(w, smallmap_d).type];
++
++	/* Calculate the coordinates, in smallmap pixels, of the tile 0,0. This is
++	   the starting point for the algorithm. */
++	Point pt = TileToSmallMap(w, 0, 0);
++	pt.x -= dpi->left;
++	pt.y -= dpi->top;
++
++	/* The algorithm draws one row of pixels per iteration of the outer loop
++	   below. For each iteration, it keeps track of the X and Y coordinates of
++	   the leftmost pixel in the smallmap row (which may be off the screen).
++	   fr_ stands for "from"; see inner loop. */
++	int smy    = pt.y;
++	int fr_smx = pt.x;
++	/* The algorithm also keeps track of the tile coordinates corresponding to
++	   the leftmost pixel in the smallmap row, multiplied by 4 (or you can
++	   think of it as 2 bits for the fractional part) */
++	int fr_tilex4 = 0;
++	int fr_tiley4 = 0;
++	/* These are increments of the above, per loop. These get updated once the
++	   algorithm reaches the left corner of the map. */
++	int inc_smx = -2;
++	int inc_tilex4 = WP(w, smallmap_d).zoom * 4;
++	int inc_tiley4 = 0;
++	/* Map sizes with the void tiles subtracted. */
++	int MapSizeY_novoid = (int)MapSizeY() - 1;
++	int MapSizeX4_novoid = (int)MapSizeX() * 4 - 4;
++	int MapSizeY4_novoid = (int)MapSizeY() * 4 - 4;
++
++	/* Dither is based on the parity of pixel coodinates; this variable is used
++	   to compensate for the map being moved around, to maintain the exact same
++	   picture at all times. */
++#ifdef SMALLMAP_DITHER_STANDARD
++	int dither_comp = fr_smx & 1;
++#else
++	int dither_comp = (fr_smx & 1) ^ (smy & 1);
++#endif
++
+ 	for (;;) {
+-		uint32 mask = 0xFFFFFFFF;
+-		int reps;
+-		int t;
++		if (smy >= 0) {
++			/* Draw the row of pixels at y = smy. */
+ 
+-		/* distance from left edge */
+-		if (x < 0) {
+-			if (x < -3) goto skip_column;
+-			/* mask to use at the left edge */
+-			mask = _smallmap_mask_left[x + 3];
+-		}
++			int tilex4 = fr_tilex4;
++			int tiley4 = fr_tiley4;
++			int smx = fr_smx;
+ 
+-		/* distance from right edge */
+-		t = dpi->width - x;
+-		if (t < 4) {
+-			if (t <= 0) break; /* exit loop */
+-			/* mask to use at the right edge */
+-			mask &= _smallmap_mask_right[t - 1];
++			/* Use different code for max zoom-in and all other zoom levels
++			   because the latter have >= 1 tile per pixel. */
++			if (WP(w, smallmap_d).zoom > 1) {
++				if (smx < 0) {
++					tilex4 += smx * WP(w, smallmap_d).zoom;
++					tiley4 -= smx * WP(w, smallmap_d).zoom;  /* Note that smx is negative */
++					smx = 0;
++				}
++
++				/* The actual drawing loop. */
++				void *ptr = blitter->MoveTo(dpi->dst_ptr, smx, smy);
++				while (tilex4 >= 0 && tiley4 < MapSizeY4_novoid && smx < dpi->width) {
++					uint8 clr8 = MakeDitheredColor1px(
++					                    draw_proc(w, TileXY(tilex4>>2, tiley4>>2)),
++					                    smx + dither_comp, smy);
++					blitter->SetPixel(ptr, 0, 0, clr8);
++					ptr = blitter->MoveTo(ptr, 1, 0);
++					smx++;
++					tilex4 -= WP(w, smallmap_d).zoom;
++					tiley4 += WP(w, smallmap_d).zoom;
++				}
++			} else {
++				/* The special algorithm doesn't need fractional tiles. */
++				int tilex = tilex4 >> 2;
++				int tiley = tiley4 >> 2;
++
++				if (smx < -3) {
++					int diff = smx - (smx % 4);
++					tilex += diff>>2;
++					tiley -= diff>>2;
++					smx -= diff;
++				}
++
++				/* The actual drawing loop for zoom = 1. */
++				void *ptr = blitter->MoveTo(dpi->dst_ptr, smx, smy);
++				while (tilex >= 0 && tiley < MapSizeY_novoid && smx < dpi->width) {
++					uint32 color = MakeDitheredColor4px(
++					                      draw_proc(w, TileXY(tilex, tiley)),
++					                      smx + dither_comp, smy);
++					uint8 *clr8 = (uint8*)&color;
++					blitter->SetPixelIfEmpty(ptr, 0, 0, clr8[0]);
++					blitter->SetPixelIfEmpty(ptr, 1, 0, clr8[1]);
++					blitter->SetPixelIfEmpty(ptr, 2, 0, clr8[2]);
++					blitter->SetPixelIfEmpty(ptr, 3, 0, clr8[3]);
++					ptr = blitter->MoveTo(ptr, 4, 0);
++					smx += 4;
++					tilex--;
++					tiley++;
++				}
++			}
+ 		}
+ 
+-		/* number of lines */
+-		reps = (dpi->height - y + 1) / 2;
+-		if (reps > 0) {
+-			DrawSmallMapStuff(ptr, tile_x, tile_y, dpi->pitch * 2, reps, mask, _smallmap_draw_procs[type]);
++		/* Proceed to the next row */
++		smy++;
++		if (smy >= dpi->height)
++			break;
++		fr_smx += inc_smx;
++		fr_tilex4 += inc_tilex4;
++		fr_tiley4 += inc_tiley4;
++
++		/* Have we gone too far? */
++		if (fr_tilex4 >= MapSizeX4_novoid - 4) { /* -4 to make it MapMaxX */
++			/* Reached the left corner. Change the direction! */
++			inc_smx = 2;
++			inc_tilex4 = 0;
++			inc_tiley4 = WP(w, smallmap_d).zoom * 4;
++
++			/* Might be outside the map now, so move right until back inside */
++			while (fr_tilex4 >= MapSizeX4_novoid) {
++				fr_smx++;
++				fr_tilex4 -= WP(w, smallmap_d).zoom;
++				fr_tiley4 += WP(w, smallmap_d).zoom;
++			}
+ 		}
+ 
+-skip_column:
+-		if (y == 0) {
+-			tile_y++;
+-			y++;
+-			ptr = blitter->MoveTo(ptr, 0, 1);
+-		} else {
+-			tile_x--;
+-			y--;
+-			ptr = blitter->MoveTo(ptr, 0, -1);
+-		}
+-		ptr = blitter->MoveTo(ptr, 2, 0);
+-		x += 2;
++		if (fr_tiley4 >= MapSizeY4_novoid)
++			break;
+ 	}
++}
+ 
+-	/* draw vehicles? */
+-	if (type == 0 || type == 1) {
+-		Vehicle *v;
+-		bool skip;
+-		byte color;
++/**
++ * Draws all vehicles on the small map.
++ *
++ * In zoom level 1, vehicles are drawn using two pixels in the centre of the
++ * four-pixel tile. In all other zoom levels vehicles are drawn with just one
++ * pixel.
++ *
++ * @param w Pointer to the Window containing the small map.
++ * @pre _cur_dpi must be set to point to the first pixel of the smallmap region
++ * to be drawn. Its width and height must be the size of the region, and its
++ * left and top coordinates must be relative to the top left corner of the
++ * smallmap drawing area.
++ */
++static void SmallMapDrawVehicles(Window *w)
++{
++	Blitter *blitter = BlitterFactoryBase::GetCurrentBlitter();
++	DrawPixelInfo *dpi = _cur_dpi;
+ 
+-		FOR_ALL_VEHICLES(v) {
+-			if (v->type != VEH_SPECIAL &&
+-					(v->vehstatus & (VS_HIDDEN | VS_UNCLICKABLE)) == 0) {
+-				/* Remap into flat coordinates. */
+-				Point pt = RemapCoords(
+-					v->x_pos / TILE_SIZE - WP(w,smallmap_d).scroll_x / TILE_SIZE, // divide each one separately because (a-b)/c != a/c-b/c in integer world
+-					v->y_pos / TILE_SIZE - WP(w,smallmap_d).scroll_y / TILE_SIZE, //    dtto
+-					0);
+-				x = pt.x;
+-				y = pt.y;
++	Vehicle *v;
++	byte color;
++	int x, y;
++	Point pt;
+ 
+-				/* Check if y is out of bounds? */
+-				y -= dpi->top;
+-				if (!IS_INT_INSIDE(y, 0, dpi->height)) continue;
++	FOR_ALL_VEHICLES(v) {
++		if (v->type != VEH_SPECIAL &&
++				(v->vehstatus & (VS_HIDDEN | VS_UNCLICKABLE)) == 0) {
++			/* Map vehicle to screen coordinates inside dpi */
++			pt = TileToSmallMap(w, v->x_pos / TILE_SIZE, v->y_pos / TILE_SIZE);
++			x = pt.x - dpi->left;
++			y = pt.y - dpi->top;
+ 
+-				/* Default is to draw both pixels. */
+-				skip = false;
++			/* Check if y is out of bounds? */
++			if (!IS_INT_INSIDE(y, 0, dpi->height)) continue;
+ 
+-				/* Offset X coordinate */
+-				x -= WP(w,smallmap_d).subscroll + 3 + dpi->left;
++			if (WP(w, smallmap_d).zoom == 1) {
++				x++;  /* Center across the 4 tile pixels: [o V V o] */
+ 
+-				if (x < 0) {
+-					/* if x+1 is 0, that means we're on the very left edge,
+-					 *  and should thus only draw a single pixel */
+-					if (++x != 0) continue;
+-					skip = true;
+-				} else if (x >= dpi->width - 1) {
+-					/* Check if we're at the very right edge, and if so draw only a single pixel */
+-					if (x != dpi->width - 1) continue;
+-					skip = true;
+-				}
++				if (!IS_INT_INSIDE(x, -1, dpi->width))
++					continue;
+ 
+-				/* Calculate pointer to pixel and the color */
+-				color = (type == 1) ? _vehicle_type_colors[v->type] : 0xF;
++				color = (WP(w, smallmap_d).type == 1) ? _vehicle_type_colors[v->type] : 0xF;
++				if (x >= 0)
++					blitter->SetPixel(dpi->dst_ptr, x, y, color);
++				if (x+1 < dpi->width)
++					blitter->SetPixel(dpi->dst_ptr, x+1, y, color);
+ 
+-				/* And draw either one or two pixels depending on clipping */
++			} else {
++
++				if (!IS_INT_INSIDE(x, 0, dpi->width)) continue;
++
++				color = (WP(w, smallmap_d).type == 1) ? _vehicle_type_colors[v->type] : 0xF;
+ 				blitter->SetPixel(dpi->dst_ptr, x, y, color);
+-				if (!skip) blitter->SetPixel(dpi->dst_ptr, x + 1, y, color);
+ 			}
++
+ 		}
+ 	}
++}
+ 
+-	if (show_towns) {
+-		const Town *t;
++/**
++ * Draws all industries on the smallmap, using "fat" dots 2x2 pixels.
++ *
++ * @param w Pointer to the Window containing the small map.
++ * @pre _cur_dpi must be set to point to the first pixel of the smallmap region
++ * to be drawn. Its width and height must be the size of the region, and its
++ * left and top coordinates must be relative to the top left corner of the
++ * smallmap drawing area.
++ */
++static void SmallMapDrawIndustries(Window *w)
++{
++	DrawPixelInfo *dpi = _cur_dpi;
++	Industry *ind;
+ 
+-		FOR_ALL_TOWNS(t) {
+-			/* Remap the town coordinate */
+-			Point pt = RemapCoords(
+-				(int)(TileX(t->xy) * TILE_SIZE - WP(w, smallmap_d).scroll_x) / TILE_SIZE,
+-				(int)(TileY(t->xy) * TILE_SIZE - WP(w, smallmap_d).scroll_y) / TILE_SIZE,
+-				0);
+-			x = pt.x - WP(w,smallmap_d).subscroll + 3 - (t->sign.width_2 >> 1);
+-			y = pt.y;
++	FOR_ALL_INDUSTRIES(ind) {
++		uint8 color = GetIndustrySpec(ind->type)->map_colour;
++		Point pt = TileToSmallMap(w, TileX(ind->xy), TileY(ind->xy));
+ 
++		if (pt.x >= dpi->left - 1 && pt.x < dpi->left + dpi->width
++		 && pt.y >= dpi->top - 1  && pt.y < dpi->top  + dpi->height) {
++			GfxFillRect(pt.x, pt.y, pt.x + 1, pt.y + 1, color);
++		}
++	}
++}
++
++/**
++ * Draws all towns on the smallmap. Depending on zoom level, towns will be
++ * drawn as single white pixels, 2x2 pixel dots or town name signs.
++ *
++ * @param w Pointer to the Window containing the small map.
++ * @pre _cur_dpi must be set to point to the first pixel of the smallmap region
++ * to be drawn. Its width and height must be the size of the region, and its
++ * left and top coordinates must be relative to the top left corner of the
++ * smallmap drawing area.
++ */
++static void SmallMapDrawTowns(Window *w)
++{
++	Blitter *blitter = BlitterFactoryBase::GetCurrentBlitter();
++	DrawPixelInfo *dpi = _cur_dpi;
++
++	/* determine the minimum population at which we still draw town names */
++	uint population_limit = (WP(w, smallmap_d).zoom - 1) * _smallmap_town_poplimit_gradient;
++
++	const Town *t;
++
++	FOR_ALL_TOWNS(t) {
++		/* Remap the town coordinate */
++		Point pt = TileToSmallMap(w, TileX(t->xy), TileY(t->xy));
++
++		/* Decide what to draw */
++		if (WP(w, smallmap_d).zoom > _smallmap_town_alldots_atzoom) {
++			/* show single pixels only */
++			pt.x -= dpi->left;
++			pt.y -= dpi->top;
++			if (IS_INT_INSIDE(pt.x, 0, dpi->width) && IS_INT_INSIDE(pt.y, 0, dpi->height))
++				blitter->SetPixel(dpi->dst_ptr, pt.x, pt.y, 255);
++		} else if (t->population < population_limit) {
++			/* show fat 4-pixel points but no sign */
++			if (pt.x >= dpi->left - 1 && pt.x < dpi->left + dpi->width
++			 && pt.y >= dpi->top - 1  && pt.y < dpi->top  + dpi->height) {
++				GfxFillRect(pt.x, pt.y, pt.x + 1, pt.y + 1, 255);
++			}
++		} else {
++			/* show sign */
++			int x = pt.x - t->sign.width_2 / 2;
++			int y = pt.y;
++
+ 			/* Check if the town sign is within bounds */
+-			if (x + t->sign.width_2 > dpi->left &&
+-					x < dpi->left + dpi->width &&
+-					y + 6 > dpi->top &&
+-					y < dpi->top + dpi->height) {
++			if (x + t->sign.width_2 > dpi->left && x < dpi->left + dpi->width
++						&& y + 6 > dpi->top && y < dpi->top + dpi->height) {
+ 				/* And draw it. */
+ 				SetDParam(0, t->index);
+ 				DrawString(x, y, STR_2056, 12);
+ 			}
+ 		}
+ 	}
++}
+ 
+-	/* Draw map indicators */
+-	{
+-		Point pt;
++/**
++ * Draws, on the smallmap, the corners of the rectangle representing the area
++ * currently visible on the main map.
++ *
++ * @param w Pointer to the Window containing the small map.
++ * @pre _cur_dpi must be set to point to the first pixel of the smallmap region
++ * to be drawn. Its width and height must be the size of the region, and its
++ * left and top coordinates must be relative to the top left corner of the
++ * smallmap drawing area.
++ */
++static void SmallMapDrawViewRect(Window *w)
++{
++	/* Find main viewport. */
++	ViewPort *vp = FindWindowById(WC_MAIN_WINDOW,0)->viewport;
++	int len = (WP(w, smallmap_d).zoom < 10) ? 3
++	        : (WP(w, smallmap_d).zoom < 17) ? 2 : 1;
+ 
+-		/* Find main viewport. */
+-		vp = FindWindowById(WC_MAIN_WINDOW,0)->viewport;
++	Point ptTL = MainMapToSmallMap(w, vp->virtual_left, vp->virtual_top);
++	Point ptBR = MainMapToSmallMap(w, vp->virtual_left + vp->virtual_width, vp->virtual_top + vp->virtual_height);
+ 
+-		pt = RemapCoords(WP(w, smallmap_d).scroll_x, WP(w, smallmap_d).scroll_y, 0);
++	// Top left
++	GfxFillRect(ptTL.x,      ptTL.y,      ptTL.x +len, ptTL.y,      69);
++	GfxFillRect(ptTL.x,      ptTL.y,      ptTL.x,      ptTL.y +len, 69);
++	// Bottom right
++	GfxFillRect(ptBR.x -len, ptBR.y,      ptBR.x,      ptBR.y,      69);
++	GfxFillRect(ptBR.x,      ptBR.y -len, ptBR.x,      ptBR.y,      69);
++	// Top right
++	GfxFillRect(ptBR.x -len, ptTL.y,      ptBR.x,      ptTL.y,      69);
++	GfxFillRect(ptBR.x,      ptTL.y,      ptBR.x,      ptTL.y +len, 69);
++	// Bottom left
++	GfxFillRect(ptTL.x,      ptBR.y,      ptTL.x +len, ptBR.y,      69);
++	GfxFillRect(ptTL.x,      ptBR.y -len, ptTL.x,      ptBR.y,      69);
++}
+ 
+-		x = vp->virtual_left - pt.x;
+-		y = vp->virtual_top - pt.y;
+-		x2 = (x + vp->virtual_width) / TILE_SIZE;
+-		y2 = (y + vp->virtual_height) / TILE_SIZE;
+-		x /= TILE_SIZE;
+-		y /= TILE_SIZE;
++void SmallMapCenterOnCurrentPos(Window *w)
++{
++	ViewPort *vp = FindWindowById(WC_MAIN_WINDOW, 0)->viewport;
++	Point pt = MainMapToPip(vp->virtual_left + vp->virtual_width/2, vp->virtual_top + vp->virtual_height/2);
+ 
+-		x -= WP(w,smallmap_d).subscroll;
+-		x2 -= WP(w,smallmap_d).subscroll;
++	WP(w, smallmap_d).scroll_x = pt.x;
++	WP(w, smallmap_d).scroll_y = pt.y;
+ 
+-		DrawVertMapIndicator(x, y, x, y2);
+-		DrawVertMapIndicator(x2, y, x2, y2);
++	SetWindowDirty(w);
++}
+ 
+-		DrawHorizMapIndicator(x, y, x2, y);
+-		DrawHorizMapIndicator(x, y2, x2, y2);
+-	}
+-	_cur_dpi = old_dpi;
++/**
++ * Zooms out of the smallmap. Updates the zoom button states. Zooming out means
++ * making the value stored in WP(w, smallmap_d).zoom <i>bigger</i>.
++ *
++ * The amount by which one call zooms in/out is controlled by the constant
++ * _smallmap_zoom_step. If set to 1 (min value) then the values of
++ * smallmap_d.zoom will follow this sequence: 1, 2, 4, 8, 16, ... Using bigger
++ * values slows down the growth. SmallMapZoomIn and Out are exact inverses of
++ * each other, i.e. they always go up and down the same set of zoom levels.
++ *
++ * _smallmap_zoom_max defines the maximum valid zoom level.
++ *
++ * @param w Pointer to the Window containing the small map.
++ */
++static void SmallMapZoomOut(Window *w)
++{
++	WP(w, smallmap_d).zoom += (WP(w, smallmap_d).zoom + _smallmap_zoom_step - 1) / _smallmap_zoom_step;
++	if (WP(w, smallmap_d).zoom > _smallmap_zoom_max)
++		WP(w, smallmap_d).zoom = _smallmap_zoom_max;
++
++	SetWindowWidgetDisabledState(w, 13, WP(w, smallmap_d).zoom == 1);
++	SetWindowWidgetDisabledState(w, 14, WP(w, smallmap_d).zoom == _smallmap_zoom_max);
+ }
+ 
+-void SmallMapCenterOnCurrentPos(Window *w)
++/**
++ * Zooms in on the smallmap. Updates the zoom button states. Zooming in means
++ * making the value stored in WP(w, smallmap_d).zoom <i>smaller</i>. See
++ * SmallMapZoomOut for more info.
++ *
++ * @param w Pointer to the Window containing the small map.
++ */
++static void SmallMapZoomIn(Window *w)
+ {
+-	int x, y;
+-	ViewPort *vp;
+-	vp = FindWindowById(WC_MAIN_WINDOW, 0)->viewport;
++	WP(w, smallmap_d).zoom = (WP(w, smallmap_d).zoom * _smallmap_zoom_step) / (_smallmap_zoom_step + 1);
++	if (WP(w, smallmap_d).zoom < 1)
++		WP(w, smallmap_d).zoom = 1;
+ 
+-	x  = ((vp->virtual_width  - (w->widget[4].right  - w->widget[4].left) * TILE_SIZE) / 2 + vp->virtual_left) / 4;
+-	y  = ((vp->virtual_height - (w->widget[4].bottom - w->widget[4].top ) * TILE_SIZE) / 2 + vp->virtual_top ) / 2 - TILE_SIZE * 2;
+-	WP(w, smallmap_d).scroll_x = (y - x) & ~0xF;
+-	WP(w, smallmap_d).scroll_y = (x + y) & ~0xF;
+-	SetWindowDirty(w);
++	SetWindowWidgetDisabledState(w, 13, WP(w, smallmap_d).zoom == 1);
++	SetWindowWidgetDisabledState(w, 14, WP(w, smallmap_d).zoom == _smallmap_zoom_max);
+ }
+ 
++/**
++ * Ensures that the surface of the map drawn in the smallmap window always
++ * contains the central pixel of the smallmap area. In other words, ensures
++ * that the surface of the map is never too far.
++ *
++ * @param w Pointer to the Window containing the small map.
++ */
++static void SmallMapEnforceScrollLimits(Window *w)
++{
++	Point pt = PipToTile(WP(w, smallmap_d).scroll_x, WP(w, smallmap_d).scroll_y);
++
++	if (pt.x < 0 || pt.y < 0 || pt.x > (int)MapMaxX() || pt.y > (int)MapMaxY())
++	{
++		if (pt.x < 0) pt.x = 0;
++		if (pt.y < 0) pt.y = 0;
++		if (pt.x > (int)MapMaxX()) pt.x = MapMaxX();
++		if (pt.y > (int)MapMaxY()) pt.y = MapMaxY();
++		pt = TileToPip(pt.x, pt.y);
++		WP(w, smallmap_d).scroll_x = pt.x;
++		WP(w, smallmap_d).scroll_y = pt.y;
++	}
++}
++
+ static void SmallMapWindowProc(Window *w, WindowEvent *e)
+ {
+ 	switch (e->event) {
++		case WE_CREATE:
++			/* this sets zoom=1 and updates the zoom buttons */
++			SmallMapZoomIn(w);
++			break;
++
+ 		case WE_PAINT: {
+ 			const LegendAndColour *tbl;
+ 			int x, y, y_org;
+ 			DrawPixelInfo new_dpi;
+ 
+ 			/* draw the window */
+-			SetDParam(0, STR_00E5_CONTOURS + _smallmap_type);
++			SetDParam(0, STR_00E5_CONTOURS + WP(w, smallmap_d).type);
+ 			DrawWindowWidgets(w);
+ 
+-			tbl = _legend_table[_smallmap_type];
++			tbl = _legend_table[WP(w, smallmap_d).type];
+ 
+ 			x = 4;
+ 			y_org = w->height - 44 - 11;
+@@ -748,7 +1099,7 @@
+ 				GfxFillRect(x,     y + 1, x + 8, y + 5, 0);
+ 				GfxFillRect(x + 1, y + 2, x + 7, y + 4, tbl->colour);
+ 
+-				if (_smallmap_type == 2) {
++				if (WP(w, smallmap_d).type == 2) {
+ 					/* Industry name must be formated, since it's not in tiny font in the specs.
+ 					* So, draw with a parameter and use the STR_7065 string, which is tiny, black */
+ 					SetDParam(0, tbl->legend);
+@@ -769,18 +1120,40 @@
+ 				}
+ 			}
+ 
++			/* set new clipping region temporarily */
+ 			if (!FillDrawPixelInfo(&new_dpi, 3, 17, w->width - 28 + 22, w->height - 64 - 11))
+ 				return;
++			DrawPixelInfo *old_dpi = _cur_dpi;
++			_cur_dpi = &new_dpi;
+ 
+-			DrawSmallMap(&new_dpi, w, _smallmap_type, _smallmap_show_towns);
++			/* clear the region */
++			GfxFillRect(new_dpi.left, new_dpi.top, new_dpi.left + new_dpi.width - 1, new_dpi.top + new_dpi.height - 1, 0);
++
++			if (WP(w, smallmap_d).type == 5)
++				SmallMapPopulateOwnerColorTable();
++
++			SmallMapDrawSurface(w);
++
++			if (WP(w, smallmap_d).type == 0 || WP(w, smallmap_d).type == 1)
++				SmallMapDrawVehicles(w);
++
++			if (WP(w, smallmap_d).type == 2 && WP(w, smallmap_d).zoom > 2)
++				SmallMapDrawIndustries(w);
++				/* Industries are drawn anyway by DrawSurface, however at large
++				   zoom-out they may become too small to see easily. */
++
++			if (WP(w, smallmap_d).show_towns)
++				SmallMapDrawTowns(w);
++
++			SmallMapDrawViewRect(w);
++
++			/* restore clipping region */
++			_cur_dpi = old_dpi;
+ 		} break;
+ 
+ 		case WE_CLICK:
+ 			switch (e->we.click.widget) {
+ 				case 4: { // Map window
+-					Window *w2 = FindWindowById(WC_MAIN_WINDOW, 0);
+-					Point pt;
+-
+ 					/*
+ 					 * XXX: scrolling with the left mouse button is done by subsequently
+ 					 * clicking with the left mouse button; clicking once centers the
+@@ -791,10 +1164,14 @@
+ 					 */
+ 					_left_button_clicked = false;
+ 
+-					pt = RemapCoords(WP(w,smallmap_d).scroll_x, WP(w,smallmap_d).scroll_y, 0);
+-					WP(w2, vp_d).dest_scrollpos_x = pt.x + ((_cursor.pos.x - w->left + 2) << 4) - (w2->viewport->virtual_width >> 1);
+-					WP(w2, vp_d).dest_scrollpos_y = pt.y + ((_cursor.pos.y - w->top - 16) << 4) - (w2->viewport->virtual_height >> 1);
++					Window *wmain = FindWindowById(WC_MAIN_WINDOW, 0);
+ 
++					Point pt;
++					pt = SmallMapToMainMap(w, _cursor.pos.x - w->left - w->widget[4].left,
++					                          _cursor.pos.y - w->top  - w->widget[4].top);
++					WP(wmain, vp_d).dest_scrollpos_x = pt.x - wmain->viewport->virtual_width / 2;
++					WP(wmain, vp_d).dest_scrollpos_y = pt.y - wmain->viewport->virtual_height / 2;
++
+ 					SetWindowDirty(w);
+ 				} break;
+ 
+@@ -804,9 +1181,9 @@
+ 				case 8:  // Show transport routes
+ 				case 9:  // Show vegetation
+ 				case 10: // Show land owners
+-					RaiseWindowWidget(w, _smallmap_type + 5);
+-					_smallmap_type = e->we.click.widget - 5;
+-					LowerWindowWidget(w, _smallmap_type + 5);
++					RaiseWindowWidget(w, WP(w, smallmap_d).type + 5);
++					WP(w, smallmap_d).type = e->we.click.widget - 5;
++					LowerWindowWidget(w, WP(w, smallmap_d).type + 5);
+ 
+ 					SetWindowDirty(w);
+ 					SndPlayFx(SND_15_BEEP);
+@@ -821,11 +1198,23 @@
+ 
+ 				case 12: // Toggle town names
+ 					ToggleWidgetLoweredState(w, 12);
+-					_smallmap_show_towns = IsWindowWidgetLowered(w, 12);
++					WP(w, smallmap_d).show_towns = IsWindowWidgetLowered(w, 12);
+ 
+ 					SetWindowDirty(w);
+ 					SndPlayFx(SND_15_BEEP);
+ 					break;
++
++				case 13: // Zoom in
++					SmallMapZoomIn(w);
++					SetWindowDirty(w);
++					SndPlayFx(SND_15_BEEP);
++					break;
++
++				case 14: // Zoom out
++					SmallMapZoomOut(w);
++					SetWindowDirty(w);
++					SndPlayFx(SND_15_BEEP);
++					break;
+ 				}
+ 			break;
+ 
+@@ -843,66 +1232,37 @@
+ 			if ((++w->vscroll.pos & 0x1F) == 0) SetWindowDirty(w);
+ 			break;
+ 
+-		case WE_SCROLL: {
+-			int x;
+-			int y;
+-			int sub;
+-			int hx;
+-			int hy;
+-			int hvx;
+-			int hvy;
+-
++		case WE_SCROLL:
+ 			_cursor.fix_at = true;
+ 
+-			x = WP(w, smallmap_d).scroll_x;
+-			y = WP(w, smallmap_d).scroll_y;
++			WP(w, smallmap_d).scroll_x += e->we.scroll.delta.x * WP(w, smallmap_d).zoom;
++			WP(w, smallmap_d).scroll_y += e->we.scroll.delta.y * WP(w, smallmap_d).zoom;
+ 
+-			sub = WP(w, smallmap_d).subscroll + e->we.scroll.delta.x;
++			SmallMapEnforceScrollLimits(w);
++			SetWindowDirty(w);
+ 
+-			x -= (sub >> 2) << 4;
+-			y += (sub >> 2) << 4;
+-			sub &= 3;
++			break;
+ 
+-			x += (e->we.scroll.delta.y >> 1) << 4;
+-			y += (e->we.scroll.delta.y >> 1) << 4;
++		case WE_MOUSEWHEEL:
++			/* position of the mouse pointer, in pips, before zoom-in */
++			int cursor_x = _cursor.pos.x - w->left - w->widget[4].left;
++			int cursor_y = _cursor.pos.y - w->top  - w->widget[4].top;
++			Point pt1 = SmallMapToPip(w, cursor_x, cursor_y);
+ 
+-			if (e->we.scroll.delta.y & 1) {
+-				x += TILE_SIZE;
+-				sub += 2;
+-				if (sub > 3) {
+-					sub -= 4;
+-					x -= TILE_SIZE;
+-					y += TILE_SIZE;
+-				}
+-			}
++			if (e->we.wheel.wheel < 0)
++				SmallMapZoomIn(w);
++			else
++				SmallMapZoomOut(w);
+ 
+-			hx = (w->widget[4].right  - w->widget[4].left) / 2;
+-			hy = (w->widget[4].bottom - w->widget[4].top ) / 2;
+-			hvx = hx * -4 + hy * 8;
+-			hvy = hx *  4 + hy * 8;
+-			if (x < -hvx) {
+-				x = -hvx;
+-				sub = 0;
+-			}
+-			if (x > (int)MapMaxX() * TILE_SIZE - hvx) {
+-				x = MapMaxX() * TILE_SIZE - hvx;
+-				sub = 0;
+-			}
+-			if (y < -hvy) {
+-				y = -hvy;
+-				sub = 0;
+-			}
+-			if (y > (int)MapMaxY() * TILE_SIZE - hvy) {
+-				y = MapMaxY() * TILE_SIZE - hvy;
+-				sub = 0;
+-			}
++			/* update scroll so as to keep cursor on the same pip */
++			Point pt2 = SmallMapToPip(w, cursor_x, cursor_y);
++			WP(w, smallmap_d).scroll_x += pt1.x - pt2.x;
++			WP(w, smallmap_d).scroll_y += pt1.y - pt2.y;
+ 
+-			WP(w, smallmap_d).scroll_x = x;
+-			WP(w, smallmap_d).scroll_y = y;
+-			WP(w, smallmap_d).subscroll = sub;
++			SmallMapEnforceScrollLimits(w);
++			SetWindowDirty(w);
+ 
+-			SetWindowDirty(w);
+-		} break;
++			break;
+ 	}
+ }
+ 
+@@ -921,8 +1281,8 @@
+ 	w = AllocateWindowDescFront(&_smallmap_desc, 0);
+ 	if (w == NULL) return;
+ 
+-	LowerWindowWidget(w, _smallmap_type + 5);
+-	SetWindowWidgetLoweredState(w, 12, _smallmap_show_towns);
++	LowerWindowWidget(w, WP(w, smallmap_d).type + 5);
++	SetWindowWidgetLoweredState(w, 12, WP(w, smallmap_d).show_towns);
+ 
+ 	SmallMapCenterOnCurrentPos(w);
+ }
+Index: window.h
+===================================================================
+--- window.h	(revision 11353)
++++ window.h	(working copy)
+@@ -384,9 +384,11 @@
+ assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(vehicledetails_d));
+ 
+ struct smallmap_d {
+-	int32 scroll_x;
+-	int32 scroll_y;
+-	int32 subscroll;
++	int32 scroll_x;  /* coordinates, in "pips", of the centre */
++	int32 scroll_y;  /*   of the smallmap view                */
++	int type;
++	bool show_towns;
++	int zoom;
+ };
+ assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(smallmap_d));
+ 

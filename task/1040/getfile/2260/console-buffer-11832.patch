@@ -1,0 +1,222 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 11832)
++++ src/settings.cpp	(working copy)
+@@ -1476,6 +1476,8 @@
+ 	 SDT_VAR(Patches, dist_local_authority,SLE_UINT8, 0, 0, 20, 5,  60, 0, STR_NULL, NULL),
+ 	 SDT_VAR(Patches, wait_oneway_signal,  SLE_UINT8, 0, 0, 15, 2, 100, 0, STR_NULL, NULL),
+ 	 SDT_VAR(Patches, wait_twoway_signal,  SLE_UINT8, 0, 0, 41, 2, 100, 0, STR_NULL, NULL),
++	 SDT_VAR(Patches, console_history_lines,SLE_UINT, 0, 0, 20, 5, 100000, 0, STR_NULL, NULL),
++	 SDT_VAR(Patches, console_buffer_lines, SLE_UINT, 0, 0, 100, 50, 100000, 0, STR_NULL, NULL),
+ 
+ 	/***************************************************************************/
+ 	/* New Pathfinding patch settings */
+Index: src/console.cpp
+===================================================================
+--- src/console.cpp	(revision 11832)
++++ src/console.cpp	(working copy)
+@@ -21,8 +21,6 @@
+ 
+ #include "table/strings.h"
+ 
+-#define ICON_BUFFER 79
+-#define ICON_HISTORY_SIZE 20
+ #define ICON_LINE_HEIGHT 12
+ #define ICON_RIGHT_BORDERWIDTH 10
+ #define ICON_BOTTOM_BORDERWIDTH 12
+@@ -43,8 +41,10 @@
+ IConsoleModes _iconsole_mode;
+ 
+ /* ** main console ** */
+-static char *_iconsole_buffer[ICON_BUFFER + 1];
+-static uint16 _iconsole_cbuffer[ICON_BUFFER + 1];
++int _icon_buffer_size;
++int _icon_history_size;
++static char **_iconsole_buffer = NULL;
++static uint16 *_iconsole_cbuffer = NULL;
+ static Textbuf _iconsole_cmdline;
+ 
+ /* ** stdlib ** */
+@@ -53,13 +53,25 @@
+ FILE *_iconsole_output_file;
+ 
+ /* ** main console cmd buffer ** */
+-static char *_iconsole_history[ICON_HISTORY_SIZE];
+-static byte _iconsole_historypos;
++static char **_iconsole_history;
++static int _iconsole_historypos;
+ 
+ /* *************** *
+  *  end of header  *
+  * *************** */
+ 
++/** Allocate console buffers */
++static void AllocConsoleBuffers()
++{
++	_icon_buffer_size = _patches.console_buffer_lines;
++	_icon_history_size = _patches.console_history_lines;
++	assert(_icon_buffer_size > 0);
++	assert(_icon_history_size > 0);
++	_iconsole_buffer  = MallocT<char*>(_icon_buffer_size + 1);
++	_iconsole_cbuffer = MallocT<uint16>(_icon_buffer_size + 1);
++	_iconsole_history = MallocT<char*>(_icon_history_size + 1);
++}
++
+ static void IConsoleClearCommand()
+ {
+ 	memset(_iconsole_cmdline.buf, 0, ICON_CMDLN_SIZE);
+@@ -70,7 +82,7 @@
+ 	SetWindowDirty(FindWindowById(WC_CONSOLE, 0));
+ }
+ 
+-static inline void IConsoleResetHistoryPos() {_iconsole_historypos = ICON_HISTORY_SIZE - 1;}
++static inline void IConsoleResetHistoryPos() {_iconsole_historypos = _icon_history_size - 1;}
+ 
+ 
+ static void IConsoleHistoryAdd(const char *cmd);
+@@ -79,7 +91,9 @@
+ /* ** console window ** */
+ static void IConsoleWndProc(Window *w, WindowEvent *e)
+ {
+-	static byte iconsole_scroll = ICON_BUFFER;
++	assert(_iconsole_buffer);
++	assert(_iconsole_cbuffer);
++	static int iconsole_scroll = _icon_buffer_size;
+ 
+ 	switch (e->event) {
+ 		case WE_PAINT: {
+@@ -132,8 +146,8 @@
+ 					SetWindowDirty(w);
+ 					break;
+ 				case WKC_SHIFT | WKC_PAGEDOWN:
+-					if (iconsole_scroll + (w->height / ICON_LINE_HEIGHT) - 1 > ICON_BUFFER) {
+-						iconsole_scroll = ICON_BUFFER;
++					if (iconsole_scroll + (w->height / ICON_LINE_HEIGHT) - 1 > _icon_buffer_size) {
++						iconsole_scroll = _icon_buffer_size;
+ 					} else {
+ 						iconsole_scroll += (w->height / ICON_LINE_HEIGHT) - 1;
+ 					}
+@@ -148,8 +162,8 @@
+ 					SetWindowDirty(w);
+ 					break;
+ 				case WKC_SHIFT | WKC_DOWN:
+-					if (iconsole_scroll >= ICON_BUFFER) {
+-						iconsole_scroll = ICON_BUFFER;
++					if (iconsole_scroll >= _icon_buffer_size) {
++						iconsole_scroll = _icon_buffer_size;
+ 					} else {
+ 						++iconsole_scroll;
+ 					}
+@@ -197,7 +211,7 @@
+ 					break;
+ 				default:
+ 					if (IsValidChar(e->we.keypress.key, CS_ALPHANUMERAL)) {
+-						iconsole_scroll = ICON_BUFFER;
++						iconsole_scroll = _icon_buffer_size;
+ 						InsertTextBufferChar(&_iconsole_cmdline, e->we.keypress.key);
+ 						IConsoleResetHistoryPos();
+ 						SetWindowDirty(w);
+@@ -224,22 +238,23 @@
+ void IConsoleInit()
+ {
+ 	extern const char _openttd_revision[];
++	AllocConsoleBuffers();
+ 	_iconsole_output_file = NULL;
+ 	_icolour_def  =  1;
+ 	_icolour_err  =  3;
+ 	_icolour_warn = 13;
+ 	_icolour_dbg  =  5;
+ 	_icolour_cmd  = TC_GOLD;
+-	_iconsole_historypos = ICON_HISTORY_SIZE - 1;
++	_iconsole_historypos = _icon_history_size - 1;
+ 	_iconsole_mode = ICONSOLE_CLOSED;
+ 
+ #ifdef ENABLE_NETWORK /* Initialize network only variables */
+ 	_redirect_console_to_client = 0;
+ #endif
+ 
+-	memset(_iconsole_history, 0, sizeof(_iconsole_history));
+-	memset(_iconsole_buffer, 0, sizeof(_iconsole_buffer));
+-	memset(_iconsole_cbuffer, 0, sizeof(_iconsole_cbuffer));
++	memset(_iconsole_history, 0, sizeof(_iconsole_history[0]) * (_icon_history_size + 1));
++	memset(_iconsole_buffer, 0, sizeof(_iconsole_buffer[0]) * (_icon_buffer_size + 1));
++	memset(_iconsole_cbuffer, 0, sizeof(_iconsole_cbuffer[0]) * (_icon_buffer_size + 1));
+ 	_iconsole_cmdline.buf = CallocT<char>(ICON_CMDLN_SIZE); // create buffer and zero it
+ 	_iconsole_cmdline.maxlength = ICON_CMDLN_SIZE;
+ 
+@@ -254,8 +269,8 @@
+ 
+ void IConsoleClearBuffer()
+ {
+-	uint i;
+-	for (i = 0; i <= ICON_BUFFER; i++) {
++	int i;
++	for (i = 0; i <= _icon_buffer_size; i++) {
+ 		free(_iconsole_buffer[i]);
+ 		_iconsole_buffer[i] = NULL;
+ 	}
+@@ -341,9 +356,9 @@
+  */
+ static void IConsoleHistoryAdd(const char *cmd)
+ {
+-	free(_iconsole_history[ICON_HISTORY_SIZE - 1]);
++	free(_iconsole_history[_icon_history_size - 1]);
+ 
+-	memmove(&_iconsole_history[1], &_iconsole_history[0], sizeof(_iconsole_history[0]) * (ICON_HISTORY_SIZE - 1));
++	memmove(&_iconsole_history[1], &_iconsole_history[0], sizeof(_iconsole_history[0]) * (_icon_history_size - 1));
+ 	_iconsole_history[0] = strdup(cmd);
+ 	IConsoleResetHistoryPos();
+ }
+@@ -357,8 +372,8 @@
+ 	int i = _iconsole_historypos + direction;
+ 
+ 	/* watch out for overflows, just wrap around */
+-	if (i < 0) i = ICON_HISTORY_SIZE - 1;
+-	if (i >= ICON_HISTORY_SIZE) i = 0;
++	if (i < 0) i = _icon_history_size - 1;
++	if (i >= _icon_history_size) i = 0;
+ 
+ 	if (direction > 0)
+ 		if (_iconsole_history[i] == NULL) i = 0;
+@@ -370,7 +385,7 @@
+ 	_iconsole_historypos = i;
+ 	IConsoleClearCommand();
+ 	/* copy history to 'command prompt / bash' */
+-	assert(_iconsole_history[i] != NULL && IsInsideMM(i, 0, ICON_HISTORY_SIZE));
++	assert(_iconsole_history[i] != NULL && IsInsideMM(i, 0, _icon_history_size));
+ 	ttd_strlcpy(_iconsole_cmdline.buf, _iconsole_history[i], _iconsole_cmdline.maxlength);
+ 	UpdateTextBufferSize(&_iconsole_cmdline);
+ }
+@@ -412,13 +427,13 @@
+ 	/* move up all the strings in the buffer one place and do the same for colour
+ 	 * to accomodate for the new command/message */
+ 	free(_iconsole_buffer[0]);
+-	memmove(&_iconsole_buffer[0], &_iconsole_buffer[1], sizeof(_iconsole_buffer[0]) * ICON_BUFFER);
+-	_iconsole_buffer[ICON_BUFFER] = str;
++	memmove(&_iconsole_buffer[0], &_iconsole_buffer[1], sizeof(_iconsole_buffer[0]) * _icon_buffer_size);
++	_iconsole_buffer[_icon_buffer_size] = str;
+ 
+-	memmove(&_iconsole_cbuffer[0], &_iconsole_cbuffer[1], sizeof(_iconsole_cbuffer[0]) * ICON_BUFFER);
+-	_iconsole_cbuffer[ICON_BUFFER] = color_code;
++	memmove(&_iconsole_cbuffer[0], &_iconsole_cbuffer[1], sizeof(_iconsole_cbuffer[0]) * _icon_buffer_size);
++	_iconsole_cbuffer[_icon_buffer_size] = color_code;
+ 
+-	IConsoleWriteToLogFile(_iconsole_buffer[ICON_BUFFER]);
++	IConsoleWriteToLogFile(_iconsole_buffer[_icon_buffer_size]);
+ 
+ 	SetWindowDirty(FindWindowById(WC_CONSOLE, 0));
+ }
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 11832)
++++ src/settings_type.h	(working copy)
+@@ -226,6 +226,9 @@
+ 	bool give_money;         ///< allow giving other players money
+ 
+ 	bool enable_signal_gui;  ///< Show the signal GUI when the signal button is pressed
++
++	int32 console_buffer_lines;  // Number of lines in console scrollback buffer
++	int32 console_history_lines; // Number of lines in console history
+ };
+ 
+ extern Patches _patches;

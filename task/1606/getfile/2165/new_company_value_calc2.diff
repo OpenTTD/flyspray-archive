@@ -1,0 +1,358 @@
+Index: src/console_cmds.cpp
+===================================================================
+--- src/console_cmds.cpp	(revision 11722)
++++ src/console_cmds.cpp	(arbetskopia)
+@@ -1235,6 +1235,7 @@
+ 		return true;
+ 	}
+ 	NetworkPopulateCompanyInfo();
++	CalculateCompanyValues();
+ 
+ 	FOR_ALL_PLAYERS(p) {
+ 		char buffer[512];
+@@ -1245,7 +1246,7 @@
+ 
+ 		GetString(buffer, STR_00D1_DARK_BLUE + _player_colors[p->index], lastof(buffer));
+ 		IConsolePrintF(8, "#:%d(%s) Company Name: '%s'  Year Founded: %d  Money: %" OTTD_PRINTF64 "d  Loan: %" OTTD_PRINTF64 "d  Value: %" OTTD_PRINTF64 "d  (T:%d, R:%d, P:%d, S:%d) %sprotected",
+-			p->index + 1, buffer, npi->company_name, p->inaugurated_year, (int64)p->player_money, (int64)p->current_loan, (int64)CalculateCompanyValue(p),
++			p->index + 1, buffer, npi->company_name, p->inaugurated_year, (int64)p->player_money, (int64)p->current_loan, (int64)p->company_value,
+ 			/* trains      */ npi->num_vehicle[0],
+ 			/* lorry + bus */ npi->num_vehicle[1] + npi->num_vehicle[2],
+ 			/* planes      */ npi->num_vehicle[3],
+Index: src/unmovable_cmd.cpp
+===================================================================
+--- src/unmovable_cmd.cpp	(revision 11722)
++++ src/unmovable_cmd.cpp	(arbetskopia)
+@@ -51,7 +51,8 @@
+ 	}
+ 
+ 	/* cost of relocating company is 1% of company value */
+-	return CommandCost(CalculateCompanyValue(p) / 100);
++	CalculateCompanyValues();
++	return CommandCost(p->company_value / 100);
+ }
+ 
+ void UpdateCompanyHQ(Player *p, uint score)
+Index: src/economy.cpp
+===================================================================
+--- src/economy.cpp	(revision 11722)
++++ src/economy.cpp	(arbetskopia)
+@@ -96,10 +96,9 @@
+ uint16 _cargo_payment_rates_frac[NUM_CARGO];
+ Money _additional_cash_required;
+ 
+-Money CalculateCompanyValue(const Player* p)
++Money CalculateCompanyBaseValue(const Player* p)
+ {
+ 	PlayerID owner = p->index;
+-	/* Do a little nasty by using CommandCost, so we can use the "overflow" protection of CommandCost */
+ 	Money value = 0;
+ 
+ 	Station *st;
+@@ -127,9 +126,217 @@
+ 	value -= p->current_loan;
+ 	value += p->player_money;
+ 
+-	return max(value, (Money)1);
++	return value;
+ }
+ 
++/* Fraction helper class for Gauss-eliminator code that solves the linear
++ * equation system that comes up for calculating company values.
++ */
++class Fraction {
++public:
++	int64 n, d; // numerator and denominator
++	// default constructor -- handles pretty much everything we'd ever want
++	// to do, including initialising from integers. :-)
++	Fraction (int64 na = 1, int64 da = 1) {
++		n = na;
++		d = da;
++		// make sure that the fraction is simplified. (do this at the end of
++		// every function to make sure every fraction is always simplified,
++		// unless somebody's been touching our naughty bits.)
++		simplify();
++	}
++	Fraction &operator+=(const Fraction &rhs) {
++		// add two fractions.
++		//  a     c     ad     cb      ad + bc
++		// --- + --- = ---- + ---- == ---------
++		//  b     d     bd     bd        bd
++
++		// add the numerators, cross multiplying with the other denominator
++		n = n*rhs.d + rhs.n*d;
++		// multiply the denominators together
++		d *= rhs.d;
++		// find the smallest common denominator after multiplication
++		simplify();
++		return *this;
++	}
++	Fraction &operator-=(const Fraction &rhs) {
++		// subtracts two fractions. works analogously to operator+=.
++		n = n*rhs.d - rhs.n*d;
++		d *= rhs.d;
++		simplify();
++		return *this;
++	}
++	Fraction &operator*=(const Fraction &rhs) {
++		// multiply two fractions. this one's easy. :-)
++		n *= rhs.n;
++		d *= rhs.d;
++		simplify();
++		return *this;
++	}
++	Fraction &operator/=(const Fraction &rhs) {
++		// this one is almost as easy as multiplication. just turn the
++		// right hand side value upside down.
++		n *= rhs.d;
++		d *= rhs.n;
++		simplify();
++		return *this;
++	}
++	// those were the assignment style operators. implement the simple
++	// calculation operators as simple stubs calling the assignment style ones.
++	Fraction operator+(const Fraction &rhs) { return Fraction(*this) += rhs; }
++	Fraction operator-(const Fraction &rhs) { return Fraction(*this) -= rhs; }
++	Fraction operator*(const Fraction &rhs) { return Fraction(*this) *= rhs; }
++	Fraction operator/(const Fraction &rhs) { return Fraction(*this) /= rhs; }
++	bool operator==(const Fraction &rhs) {
++		// check for equality. normally, everything should be simplified, so
++		// we could just compare the numerators and denominators, but that'd
++		// be lazy. Instead we check it like this:
++		// a/b == c/d <==> ad == bc
++		return (n*rhs.d == d*rhs.n);
++	}
++	bool operator!=(const Fraction &rhs) {
++		// check for inequality. analogous to operator==.
++		return (n*rhs.d != d*rhs.n);
++	}
++	int64 gcd(int64 a, int64 b)
++	{
++		// implementation of Euclid's algorithm for finding the greatest common
++		// denominator. don't ask me how it works. all i know is that it's
++		// worked for at least 2300 years, and it's bound to work here too. ;-)
++		
++		// take care of any negative numbers. the algo doesn't like them.
++		// but returning a negative GCD can be quite useful if both are
++		// negative
++		int sign = 1;
++		if (a < 0) a = -a, sign = -sign;
++		if (b < 0) b = -b, sign = -sign;
++		
++		int64 t;
++		while (b > 0) {
++			t = a % b;
++			a = b;
++			b = t;
++		}
++		return sign*a;
++	}
++	void simplify()
++	{
++		int64 the_gcd = gcd(n, d);
++		n /= the_gcd;
++		d /= the_gcd;
++	}
++	int64 getTruncatedInt()
++	{
++		return n / d;
++	}
++};
++
++class LinearEquationSolver {
++public:
++	Fraction matrix[MAX_PLAYERS][MAX_PLAYERS];
++	Fraction vector[MAX_PLAYERS];
++
++	void row_sub(int a, int b, Fraction k) {
++		int i;
++		for (i = 0; i < MAX_PLAYERS; i++)
++			matrix[a][i] -= k*matrix[b][i];
++		vector[a] -= k*vector[b];
++	}
++
++	void row_div(int a, Fraction d) {
++		int i;
++		for (i = 0; i < MAX_PLAYERS; i++)
++			matrix[a][i] /= d;
++		vector[a] /= d;
++	}
++	void solve() {
++		int i, j;
++		// Normally in a Gauss elimination we'd perform some stuff to make sure
++		// the matrix rows are in a sensible order. Now, however, we already
++		// know that the significant elements are on the correct rows, so no
++		// further row swapping will be neccessary.
++		
++		// Begin by triangularizing and normalizing the matrix. That is, make sure
++		// that there are only zeroes to the left of the identity column, and then
++		// make sure the identity column still is 1.
++		// We needn't bother with the first row, since it's already correct in
++		// these respects.
++		for (i = 1; i < MAX_PLAYERS; i++) {
++			// triangularize
++			for (j = i; j < MAX_PLAYERS; j++)
++				if (matrix[j][i-1] != Fraction(0))
++					row_sub(j, i-1, matrix[j][i-1]);
++			// normalize
++			row_div(i, matrix[i][i]);
++		}
++		// Now that we have a triangular matrix with normalized diagonal, we can
++		// easilly perform our gaussian elimination
++		for (i = 0; i < MAX_PLAYERS - 1; i++) {
++			for (j = i + 1; j < MAX_PLAYERS; j++)
++				if (matrix[i][j] != Fraction(0))
++					row_sub(i, j, matrix[i][j]);
++		}
++	}
++};
++
++void CalculateCompanyValues()
++{
++	// to calculate company values, we begin with the company base value
++	// this is the company value due to owned property and money.
++	// to add on owned shares, we need to solve a linear equation system.
++	// we can't simply just add the value of the owned shares to the company
++	// value -- that'd cause circular references. instead an equation system
++	// is put up like this (in matrix notation):
++	//
++	// V = B + S*V
++	//
++	// Where V is a column matrix of the company values, B is a column matrix
++	// of the company property values, and S is a square matrix containing
++	// information about how much of other companies is owned. (In this matrix,
++	// the company doesn't own its own shares -- they're set as zeroes.)
++	//
++	// In our case, V is an unknown, but B and S are known. So, we need to
++	// solve for V.
++	//
++	// V - S*V = B
++	// (I-S)*V = B
++	//
++	// Where I is the identity matrix. I-S is known, and B is known.
++	// We can then use gaussian elimination to calculate V.
++
++	// This is equivalent to I-S in the comments above.
++	LinearEquationSolver solver;
++	int i, j, m;
++	// Construct I-S.
++	for (i = 0; i < MAX_PLAYERS; i++) {
++		for (j = 0; j < MAX_PLAYERS; j++) {
++			if (i == j)
++				// A company cannot own shares in itself in openttd, so on
++				// these cells on the diagonal, we just fill with the ones
++				// from the identity matrix.
++				solver.matrix[i][j] = Fraction(1);
++			else {
++				// Fill in how much of company j is owned by company i. XXX
++				solver.matrix[i][j] = Fraction(0);
++				for (m = 0; m < 4; m++)
++					if (_players[j].share_owners[m] == i)
++						solver.matrix[i][j] -= Fraction(1, 4);
++			}
++		}
++		// Initialise the vector. At the start of the algorithm
++		// this is equal to B -- at the end, it will have been transformed into
++		// V.
++		solver.vector[i] = Fraction(CalculateCompanyBaseValue(&_players[i]));//XXX
++	}
++	solver.solve(); // runs the solver
++	// populate company_value
++	Player *p;
++	FOR_ALL_PLAYERS(p) {
++		p->company_value = solver.vector[p->index].getTruncatedInt();
++		if (p->company_value <= 0) p->company_value = 1;
++	}
++}
++
+ /** if update is set to true, the economy is updated with this score
+  *  (also the house is updated, should only be true in the on-tick event)
+  * @param update the economy with calculated score
+@@ -263,7 +470,8 @@
+ 	if (update) {
+ 		p->old_economy[0].performance_history = score;
+ 		UpdateCompanyHQ(p, score);
+-		p->old_economy[0].company_value = CalculateCompanyValue(p);
++		CalculateCompanyValues();
++		p->old_economy[0].company_value = p->company_value;
+ 	}
+ 
+ 	InvalidateWindow(WC_PERFORMANCE_DETAIL, 0);
+@@ -496,9 +704,9 @@
+ 
+ 			/* Check if the company has any value.. if not, declare it bankrupt
+ 			 *  right now */
+-			Money val = CalculateCompanyValue(p);
+-			if (val > 0) {
+-				p->bankrupt_value = val;
++			CalculateCompanyValues();
++			if (p->company_value > 0) {
++				p->bankrupt_value = p->company_value;
+ 				p->bankrupt_asked = 1 << owner; // Don't ask the owner
+ 				p->bankrupt_timeout = 0;
+ 				break;
+@@ -1800,7 +2008,8 @@
+ 		owner->current_loan += p->current_loan;
+ 	}
+ 
+-	value = CalculateCompanyValue(p) >> 2;
++	CalculateCompanyValues();
++	value = p->company_value >> 2;
+ 	PlayerID old_player = _current_player;
+ 	for (i = 0; i != 4; i++) {
+ 		if (p->share_owners[i] != PLAYER_SPECTATOR) {
+@@ -1850,7 +2059,8 @@
+ 	/* We can not buy out a real player (temporarily). TODO: well, enable it obviously */
+ 	if (GetAmountOwnedBy(p, PLAYER_SPECTATOR) == 1 && !p->is_ai) return cost;
+ 
+-	cost.AddCost(CalculateCompanyValue(p) >> 2);
++	CalculateCompanyValues();
++	cost.AddCost(p->company_value >> 2);
+ 	if (flags & DC_EXEC) {
+ 		PlayerByte* b = p->share_owners;
+ 		int i;
+@@ -1896,7 +2106,8 @@
+ 	if (GetAmountOwnedBy(p, _current_player) == 0) return CommandCost();
+ 
+ 	/* adjust it a little to make it less profitable to sell and buy */
+-	cost = CalculateCompanyValue(p) >> 2;
++	CalculateCompanyValues();
++	cost = p->company_value >> 2;
+ 	cost = -(cost - (cost >> 7));
+ 
+ 	if (flags & DC_EXEC) {
+Index: src/player.h
+===================================================================
+--- src/player.h	(revision 11722)
++++ src/player.h	(arbetskopia)
+@@ -171,6 +171,7 @@
+ 
+ 	Money player_money;
+ 	Money current_loan;
++	Money company_value;
+ 
+ 	byte player_color;
+ 	Livery livery[LS_END];
+@@ -215,7 +216,7 @@
+ 
+ void ChangeOwnershipOfPlayerItems(PlayerID old_player, PlayerID new_player);
+ void GetNameOfOwner(Owner owner, TileIndex tile);
+-Money CalculateCompanyValue(const Player *p);
++void CalculateCompanyValues();
+ void InvalidatePlayerWindows(const Player *p);
+ void SetLocalPlayer(PlayerID new_player);
+ #define FOR_ALL_PLAYERS(p) for (p = _players; p != endof(_players); p++)
+Index: src/player_gui.cpp
+===================================================================
+--- src/player_gui.cpp	(revision 11722)
++++ src/player_gui.cpp	(arbetskopia)
+@@ -1130,7 +1130,8 @@
+ 			DrawPlayerVehiclesAmount((PlayerID)w->window_number);
+ 
+ 			/* "Company value:" */
+-			SetDParam(0, CalculateCompanyValue(p));
++			CalculateCompanyValues();
++			SetDParam(0, p->company_value);
+ 			DrawString(110, 106, STR_7076_COMPANY_VALUE, TC_FROMSTRING);
+ 
+ 			/* Shares list */

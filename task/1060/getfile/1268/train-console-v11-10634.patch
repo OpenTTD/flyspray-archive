@@ -1,0 +1,1126 @@
+Index: src/console_cmds.cpp
+===================================================================
+--- src/console_cmds.cpp	(revision 10634)
++++ src/console_cmds.cpp	(working copy)
+@@ -7,6 +7,8 @@
+ #include "console.h"
+ #include "debug.h"
+ #include "engine.h"
++#include "gui.h"
++#include "train.h"
+ #include "functions.h"
+ #include "landscape.h"
+ #include "saveload.h"
+@@ -20,13 +22,20 @@
+ #include "settings.h"
+ #include "fios.h"
+ #include "fileio.h"
++#include "depot.h"
+ #include "vehicle.h"
++#include "vehicle_gui.h"
+ #include "station.h"
+ #include "strings.h"
+ #include "screenshot.h"
+ #include "genworld.h"
++#include "cargotype.h"
+ #include "date.h"
+ #include "network/network.h"
++#ifdef ENABLE_NETWORK
++	#include "table/strings.h"
++#endif /* ENABLE_NETWORK */
++#include "group.h"
+ 
+ // ** scriptfile handling ** //
+ static FILE *_script_file;
+@@ -96,11 +105,25 @@
+ 
+ #endif /* ENABLE_NETWORK */
+ 
++/** Print string as command help in console */
+ static void IConsoleHelp(const char *str)
+ {
+ 	IConsolePrintF(_icolour_warn, "- %s", str);
+ }
+ 
++/** Print string as command help in console, using printf-like formatting */
++void CDECL IConsoleHelpF(const char *s, ...)
++{
++	va_list va;
++	char buf[ICON_MAX_STREAMSIZE];
++
++	va_start(va, s);
++	vsnprintf(buf, sizeof(buf), s, va);
++	va_end(va);
++
++	IConsoleHelp(buf);
++}
++
+ DEF_CONSOLE_CMD(ConResetEngines)
+ {
+ 	if (argc == 0) {
+@@ -1226,10 +1249,6 @@
+ 	return true;
+ }
+ 
+-#ifdef ENABLE_NETWORK
+-	#include "table/strings.h"
+-#endif /* ENABLE_NETWORK */
+-
+ DEF_CONSOLE_CMD(ConPlayers)
+ {
+ 	Player *p;
+@@ -1444,6 +1463,901 @@
+ 	return true;
+ }
+ 
++/** Identifier of alias for matches and commands*/
++const int LIST_ALIAS = -1;
++
++/**
++ Vehicle command ID
++*/
++enum VehicleCommand {
++	COMMAND_ALIAS = LIST_ALIAS,
++	VEHICLE_INVALID_COMMAND = 0,
++	VEHICLE_CENTER,
++	VEHICLE_CLONE,
++	VEHICLE_CLONE_SHARED,
++	VEHICLE_DEPOT,
++	TRAIN_IGNORE,
++	TRAIN_WAGON_INFO,
++	TRAIN_SELL_WAGON,
++	VEHICLE_INFO,
++	VEHICLE_LEAVE_STATION,
++	VEHICLE_OPEN,
++	VEHICLE_SELL,
++	VEHICLE_SERVICE,
++	VEHICLE_SKIP_ORDER,
++	VEHICLE_START,
++	VEHICLE_STOP,
++	VEHICLE_TURN,
++	VEHICLE_INTERVAL,
++	VEHICLE_COUNT
++};
++
++/**
++ Type of match for vehicle commands
++*/
++enum MatchType {
++	MATCH_ALIAS = LIST_ALIAS,
++	MATCH_INVALID = 0,
++	MATCH_GENERIC,
++	MATCH_GROUP,
++	MATCH_CRASHED,
++	MATCH_LENGTH,
++	MATCH_WAGONS,
++	MATCH_ORDERS,
++	MATCH_SPEED,
++	MATCH_AGE,
++	MATCH_MAXSPEED,
++	MATCH_PROFIT,
++	MATCH_PROFIT_THIS,
++	MATCH_PROFIT_LAST,
++	MATCH_SERVICE,
++	MATCH_IN_DEPOT,
++	MATCH_ALL
++};
++
++/**
++ Subtype of match for vehicle commands
++*/
++enum MatchSubtype {
++	MATCH_NONE,
++	MATCH_NOT_EQUAL,
++	MATCH_EQUAL,
++	MATCH_LESS,
++	MATCH_LESS_OR_EQUAL,
++	MATCH_GREATER_OR_EQUAL,
++	MATCH_GREATER
++};
++
++// Bitmask for VehicleCommandInfo.req
++const int FOR_TRAIN     = 0x01; //Command for train
++const int FOR_ROAD      = 0x02; //Command for road vehicle
++const int FOR_SHIP      = 0x04; //Command for ship
++const int FOR_AIRCRAFT  = 0x08; //Command for plane
++const int NOT_CRASHED   = 0x10; //Target must not be crashed
++const int IN_DEPOT      = 0x20; //Target must be in depot
++const int STOPPED       = 0x40; //Target must be stopped
++const int IS_ALIAS      = 0x80; //Internal flag for command alias
++
++const int FOR_ANY       = FOR_TRAIN | FOR_ROAD | FOR_SHIP | FOR_AIRCRAFT; //Command for any vehicle
++
++/**
++ Structure mapping one command or match type to it's ID
++*/
++template<typename T> struct StringInfo {
++ /** ID of command or match */
++ T id;
++ /** Name of command or match */
++ const char *name;
++ /** Number of required parameters */
++ int params;
++ /** Requirements for target vehicle */
++ int req;
++ /** Help text */
++ const char *help;
++};
++
++/**
++ List of all command names.
++ All aliases must be listed right before their commands
++ */
++const StringInfo<VehicleCommand> veh_commands[] = {
++	{ COMMAND_ALIAS,         "centre",              0, 0, "" },
++	{ VEHICLE_CENTER,        "center",              0, FOR_ANY,
++	                         "Center main view on vehicle's location" },
++	{ VEHICLE_CLONE,         "clone",               0, FOR_ANY | IN_DEPOT,
++	                         "Clone vehicle, if it is in depot" },
++	{ VEHICLE_CLONE_SHARED,  "clone_shared",        0, FOR_ANY | IN_DEPOT,
++	                         "Same as clone, but with shared orders"  },
++	{ VEHICLE_COUNT,         "count",               0, FOR_ANY,
++	                         "Count vehicles matching given criteria" },
++	{ VEHICLE_DEPOT,         "depot",               0, FOR_ANY | NOT_CRASHED,
++	                         "Send to depot" },
++	{ TRAIN_IGNORE,          "ignore",              0, FOR_TRAIN | NOT_CRASHED,
++	                         "Ignore signals" },
++	{ VEHICLE_INFO,          "info",                0, FOR_ANY,
++	                         "Show vehicle info on console" },
++	{ VEHICLE_INTERVAL,      "interval",            1, FOR_ANY | NOT_CRASHED,
++	                         "Set servicing interval. Parameter specifies new interval in days/percent" },
++	{ VEHICLE_LEAVE_STATION, "leave",               0, FOR_ANY | NOT_CRASHED,
++	                         "Leave station by skipping to next order" },
++	{ COMMAND_ALIAS,         "show",                0, 0, "" },
++	{ VEHICLE_OPEN,          "open",                0, FOR_ANY,
++	                         "Open vehicle window" },
++	{ VEHICLE_SELL,          "sell",                0, FOR_ANY | STOPPED | IN_DEPOT,
++	                         "Sell vehicle, if it is stopped in depot" },
++	{ VEHICLE_SERVICE,       "service",             0, FOR_ANY | NOT_CRASHED,
++	                         "Send for servicing" },
++	{ VEHICLE_SKIP_ORDER,    "skip",                0, FOR_ANY | NOT_CRASHED,
++	                         "Skip to next order. Optional parameter specifies how many orders to skip ('r' = skip to random order, default is 1)" },
++	{ COMMAND_ALIAS,         "go",                  0, 0, ""},
++	{ VEHICLE_START,         "start",               0, FOR_ANY | NOT_CRASHED,
++	                         "Start vehicle" },
++	{ VEHICLE_STOP,          "stop",                0, FOR_ANY | NOT_CRASHED,
++	                         "Stop vehicle" },
++	{ COMMAND_ALIAS,         "reverse",             0, 0, "" },
++	{ VEHICLE_TURN,          "turn",                0, FOR_TRAIN | FOR_ROAD | NOT_CRASHED,
++	                         "Turn around" },
++	{ TRAIN_WAGON_INFO,      "winfo",               0, FOR_TRAIN,
++	                         "Show info about train wagons on console" },
++	{ TRAIN_SELL_WAGON,      "wsell",               1, FOR_TRAIN | STOPPED | IN_DEPOT,
++	                         "Sell train wagons(s). If one parameter is given, single wagon will be sold. If two parameters are given, they will specify range of wagons to sell." },
++};
++
++/**
++ List of all match names.
++ All aliases must be listed right before their commands
++ */
++const StringInfo<MatchType> match_info[] = {
++	{ MATCH_AGE,         "age",         0, FOR_ANY,
++	                     "=[value] for matching age (in years)" },
++	{ MATCH_LENGTH,      "len",         0, FOR_TRAIN,
++	                     "=[value] for matching train length (in tiles)" },
++	{ MATCH_MAXSPEED,    "maxspeed",    0, FOR_ANY,
++	                     "=[value] for matching maximum speed (in km/h)" },
++	{ MATCH_ORDERS,      "orders",      0, FOR_ANY,
++	                     "=[value] for matching number of orders" },
++	{ MATCH_GROUP,       "group",       0, FOR_ANY,
++	                     "=[name] for matching group by name" },
++	{ MATCH_PROFIT,      "profit",      0, FOR_ANY,
++	                     "=[value] for matching sum of this and last year's profit (in pounds)" },
++	{ MATCH_PROFIT_THIS, "profit_this", 0, FOR_ANY,
++	                     "=[value] for matching this year's profit (in pounds)" },
++	{ MATCH_PROFIT_LAST, "profit_last", 0, FOR_ANY,
++	                     "=[value] for matching last year's profit (in pounds)" },
++	{ MATCH_SERVICE,     "service",     0, FOR_ANY,
++	                     "=[value] for matching service interval (in days/percent)" },
++	{ MATCH_SPEED,       "speed",       0, FOR_ANY,
++	                     "=[value] for matching current speed (in km/h)" },
++	{ MATCH_WAGONS,      "wagons",      0, FOR_TRAIN,
++	                     "=[value] for matching number of train wagons" }
++};
++
++/** Invalid command */
++const StringInfo<VehicleCommand> INVALID_COMMAND = { VEHICLE_INVALID_COMMAND, "", 0, 0, "" };
++
++/** Invalid match */
++const StringInfo<MatchType> INVALID_MATCH = { MATCH_INVALID, "", 0, 0, "" };
++
++/**
++ * Change a string into its monetary representation.
++ * @param *value the variable a successfull conversion will be put in
++ * @param *arg the string to be converted
++ * @return Return true on success or false on failure
++ */
++bool GetArgumentMoney(Money *value, const char *arg)
++{
++	//TODO: preform conversion between currencies
++	char *endptr;
++
++	*value = strtoull(arg, &endptr, 0);
++	return arg != endptr;
++}
++
++/**
++ Generic numeric match template subroutine,
++ compare original value with target value using given compare type
++ @param value Original value
++ @param subtype Type of match
++ @param target_value Value to compare with
++ @return true in succesful match, false otherwise
++*/
++template<class X> bool NumericMatch (const X value, MatchSubtype subtype, const X target_value)
++{
++	switch (subtype) {
++		case MATCH_EQUAL: return (value == target_value);
++		case MATCH_NOT_EQUAL: return (value != target_value);
++		case MATCH_LESS: return (value < target_value);
++		case MATCH_LESS_OR_EQUAL: return (value <= target_value);
++		case MATCH_GREATER_OR_EQUAL: return (value >= target_value);
++		case MATCH_GREATER: return (value > target_value);
++		default: NOT_REACHED(); break;
++	}
++	return false;
++}
++
++/**
++ Perform numeric match, compare original value with target value using given compare type
++ @param value Original value
++ @param subtype Type of match
++ @param target_value_str Value to compare with, in string form
++*/
++bool NumericValueSubMatch (uint32 value, MatchSubtype subtype, const char *target_value_str)
++{
++	uint32 target_value;
++	if (!GetArgumentInteger(&target_value, target_value_str)) return false;
++	return NumericMatch(value, subtype, target_value);
++}
++
++/**
++ Perform money match, compare original value with target value using given compare type
++ @param value Original value
++ @param subtype Type of match
++ @param target_value_str Value to compare with, in string form
++*/
++bool MoneyValueSubMatch (Money value, MatchSubtype subtype, const char *target_value_str)
++{
++	Money target_value;
++	if (!GetArgumentMoney(&target_value, target_value_str)) return false;
++	return NumericMatch(value, subtype, target_value);
++}
++
++/**
++ Perform lexicographical case insensitive string match,
++ compare original value with target value using given compare type
++ @param value Original value
++ @param subtype Type of match
++ @param target_value_str Value to compare with
++*/
++bool StringValueSubMatch (const char *value, MatchSubtype subtype, const char *target_value)
++{
++	int res = strcasecmp(value, target_value);
++	return NumericMatch(res, subtype, 0);
++}
++
++/**
++ Return number of wagons in train.
++ Engine is algo counted as wagon and for multi-part wagons or engines, each part is counted.
++ @param v Train to examine
++*/
++int CountWagons(const Vehicle *v) {
++	int num = 0;
++	while (v) {
++		num++;
++		v = v->next;
++	}
++	return num;
++}
++
++/**
++ Check if vehicle ID matches the given vehicle
++ Vehicle ID can be:
++  all - any vehicle matches
++  number - Vehicle with matching number will match
++ @param v Vehicle to check
++ @param type Match type
++ @param subtype Subtype of the match
++ @param id Id to check
++*/
++bool VehicleIdMatches(const Vehicle *v, MatchType type, MatchSubtype subtype, const char *id)
++{
++	switch (type) {
++		case MATCH_CRASHED: return (v->vehstatus & VS_CRASHED);
++		case MATCH_IN_DEPOT: return IsVehicleInDepot(v);
++		case MATCH_ALL: return true;
++		case MATCH_SERVICE: return NumericValueSubMatch(v->service_interval, subtype, id);
++		case MATCH_SPEED: return NumericValueSubMatch(v->cur_speed, subtype, id);
++		case MATCH_ORDERS: return NumericValueSubMatch(v->num_orders, subtype, id);
++		case MATCH_AGE: return NumericValueSubMatch(v->age / 365, subtype, id);
++		case MATCH_MAXSPEED: {
++			if (v->type == VEH_TRAIN) {
++				return NumericValueSubMatch(v->u.rail.cached_max_speed, subtype, id);
++			} else {
++				return NumericValueSubMatch(v->max_speed, subtype, id);
++			}
++		}
++		case MATCH_LENGTH: return NumericValueSubMatch((v->u.rail.cached_total_length + 15) / 16, subtype, id);
++		case MATCH_WAGONS: {
++			assert(v->type == VEH_TRAIN);
++			int num_wagons = CountWagons(v);
++			return NumericValueSubMatch(num_wagons, subtype, id);
++		}
++		case MATCH_GENERIC: return NumericValueSubMatch(v->unitnumber, MATCH_EQUAL, id);
++		case MATCH_PROFIT: return MoneyValueSubMatch(v->profit_this_year + v->profit_last_year, subtype, id);
++		case MATCH_PROFIT_THIS: return MoneyValueSubMatch(v->profit_this_year, subtype, id);
++		case MATCH_PROFIT_LAST: return MoneyValueSubMatch(v->profit_last_year, subtype, id);
++		case MATCH_GROUP: {
++			if (!IsValidGroupID(v->group_id)) return false; //No group
++			char buf[ICON_MAX_STREAMSIZE];
++
++			//Get string (name) from group
++			const Group *g = GetGroup(v->group_id);
++			assert(g);
++			SetDParam(0, g->index);
++			GetString(buf, STR_GROUP_NAME, lastof(buf));
++
++			return StringValueSubMatch(buf, subtype, id);
++		}
++		default: NOT_REACHED(); break;
++	}
++	return false;
++}
++
++/**
++ Perform command on given vehicle
++ @param v Target vehicle of command
++ @param command Command to make
++ @param argc Number of extra parameters to command
++ @param argv Extra command parameters, if any
++*/
++int DoVehicleCommand(const Vehicle *v, VehicleCommand command, int argc, char **argv)
++{
++	int cmd_code = 0;
++	int32 num_orders = 1;
++	switch (command) {
++		// Count vehicles
++		case VEHICLE_COUNT: return 1;
++		// Open vehicle window
++		case VEHICLE_OPEN: {
++			switch (v->type) {
++				case VEH_TRAIN: ShowTrainViewWindow(v); break;
++				case VEH_ROAD: ShowRoadVehViewWindow(v); break;
++				case VEH_SHIP: ShowShipViewWindow(v); break;
++				case VEH_AIRCRAFT: ShowAircraftViewWindow(v); break;
++				default: NOT_REACHED(); break;
++			}
++			ShowTrainViewWindow(v);
++			return 1;
++		}
++		// Set service interval
++		case VEHICLE_INTERVAL: {
++			int32 new_interval;
++			assert(argc);
++			if (!GetArgumentSignedInteger(&new_interval, argv[0])) return 0;
++			new_interval = GetServiceIntervalClamped(new_interval);
++			if (new_interval == v->service_interval) return 0; // No change
++			DoCommandP(v->tile, v->index, new_interval, NULL, CMD_CHANGE_SERVICE_INT | CMD_MSG(STR_018A_CAN_T_CHANGE_SERVICING));
++			return 1;
++		}
++		// Center view on vehicle
++		case VEHICLE_CENTER: {
++			ScrollMainWindowTo(v->x_pos, v->y_pos);
++			return 1;
++		}
++		// Print train wagon info on console
++		case TRAIN_WAGON_INFO: {
++			assert(v->type == VEH_TRAIN);
++			IConsolePrintF(_icolour_def, "Train #%4d wagons", v->unitnumber);
++			const Vehicle *w = v;
++			int i = 0;
++			while (w) {
++				int cargo = w->cargo_type;
++				char cargo_name[512];
++				i++;
++				const CargoSpec *cs = GetCargo(cargo);
++				GetString(cargo_name, cs->name, lastof(cargo_name));
++
++				IConsolePrintF(_icolour_def, "%2d,  Cargo capacity: %d (%s),  Max speed: %d km/h %s",
++					i, w->cargo_cap, cargo_name, w->max_speed, IsTrainWagon(w) ? "" : " (engine)");
++				w = w->next;
++			}
++			return 1;
++		}
++		// Print vehicle info on console
++		case VEHICLE_INFO: {
++			IConsolePrintF(_icolour_def, "#%4d, Location: [%d, %d, %d]%s%s%s", v->unitnumber, v->x_pos, v->y_pos, v->z_pos,
++					(v->vehstatus & VS_STOPPED) ? " (STOPPED)" : "",
++					(v->vehstatus & VS_CRASHED) ? " (CRASHED)" : "",
++					IsVehicleInDepot(v) ? " (IN DEPOT)" : "");
++			IConsolePrintF(_icolour_def, "      Age: %d/%d years", v->age / 365, v->max_age / 365);
++			if (v->type == VEH_TRAIN) {
++				IConsolePrintF(_icolour_def, "      Speed: %d/%d km/h, Orders: %d", v->cur_speed, v->u.rail.cached_max_speed, v->num_orders);
++				IConsolePrintF(_icolour_def, "      Length: %d tiles, Power: %d hp,  Weight: %d t", (v->u.rail.cached_total_length+15)/16, v->u.rail.cached_power, v->u.rail.cached_weight);
++			} else {
++				int speed_factor = 1;
++				if (v->type != VEH_AIRCRAFT) speed_factor = 2;
++				IConsolePrintF(_icolour_def, "      Speed: %d/%d km/h, Orders: %d", v->cur_speed / speed_factor, v->max_speed / speed_factor, v->num_orders);
++			}
++			IConsolePrintF(_icolour_def, "      Service interval: %d days/%%, Breakdowns: %d (reliability %d%%)", v->service_interval, v->breakdowns_since_last_service, (100 * (v->reliability>>8) >> 8));
++			return 1;
++		}
++		// Skip to next order(s)
++		case VEHICLE_SKIP_ORDER: {
++			if (argc) {
++				if (tolower(argv[0][0]) == 'r') {
++					num_orders = Random(); // Modulo later will correct this
++				} else if (!GetArgumentSignedInteger(&num_orders, argv[0])) {
++					num_orders = 1;
++				}
++			}
++			//No break or return here, fall through
++		}
++		// Skip to next order if vehicle is stopped in station
++		// (Or fall through from generic skip order)
++		case VEHICLE_LEAVE_STATION: {
++			if (command == VEHICLE_LEAVE_STATION && v->current_order.type != OT_LOADING) return 0;
++			if (num_orders == 0) return 0; // Skip 0 orders
++			int new_order = (v->cur_order_index + num_orders) % v->num_orders;
++			if (new_order < 0) new_order += v->num_orders; //If skipped before first, go to last
++			assert (new_order >= 0);
++			DoCommandP(v->tile, v->index, new_order, NULL, CMD_SKIP_TO_ORDER | CMD_MSG(STR_CAN_T_SKIP_ORDER));
++			return 1;
++		}
++		// Ignore signals
++		case TRAIN_IGNORE: {
++			DoCommandP(v->tile, v->index, 0, NULL, CMD_FORCE_TRAIN_PROCEED | CMD_MSG(STR_8862_CAN_T_MAKE_TRAIN_PASS_SIGNAL));
++			return 1;
++		}
++		// Turn vehicle around
++		case VEHICLE_TURN: {
++			switch (v->type) {
++				case VEH_TRAIN:    cmd_code = CMD_REVERSE_TRAIN_DIRECTION | CMD_MSG(STR_8869_CAN_T_REVERSE_DIRECTION); break;
++				case VEH_ROAD:     cmd_code = CMD_TURN_ROADVEH | CMD_MSG(STR_9033_CAN_T_MAKE_VEHICLE_TURN); break;
++				default: NOT_REACHED(); break;
++			}
++			DoCommandP(v->tile, v->index, 0, NULL, cmd_code);
++			return 1;
++		}
++		// Stop vehicle
++		case VEHICLE_STOP:
++		// Start vehicle
++		case VEHICLE_START: {
++			if ((command == VEHICLE_STOP) && (v->vehstatus & VS_STOPPED)) return 0;
++			if ((command == VEHICLE_START) && !(v->vehstatus & VS_STOPPED)) return 0;
++			switch (v->type) {
++				case VEH_TRAIN:    cmd_code = CMD_START_STOP_TRAIN; break;
++				case VEH_ROAD:     cmd_code = CMD_START_STOP_ROADVEH; break;
++				case VEH_SHIP:     cmd_code = CMD_START_STOP_SHIP; break;
++				case VEH_AIRCRAFT: cmd_code = CMD_START_STOP_AIRCRAFT; break;
++				default: NOT_REACHED(); break;
++			}
++			DoCommandP(v->tile, v->index, 0, NULL, cmd_code);
++			return 1;
++		}
++		// Send vehicle to depot
++		case VEHICLE_DEPOT:
++		// Send vehicle for servicing
++		case VEHICLE_SERVICE: {
++			if ((v->vehstatus & VS_STOPPED) && IsVehicleInDepot(v)) return 0; //Already in depot
++			switch (v->type) {
++				case VEH_TRAIN:    cmd_code = CMD_SEND_TRAIN_TO_DEPOT | CMD_NO_TEST_IF_IN_NETWORK | CMD_MSG(STR_8830_CAN_T_SEND_TRAIN_TO_DEPOT); break;
++				case VEH_ROAD:     cmd_code = CMD_SEND_ROADVEH_TO_DEPOT | CMD_MSG(STR_9018_CAN_T_SEND_VEHICLE_TO_DEPOT); break;
++				case VEH_SHIP:     cmd_code = CMD_SEND_SHIP_TO_DEPOT | CMD_MSG(STR_9819_CAN_T_SEND_SHIP_TO_DEPOT); break;
++				case VEH_AIRCRAFT: cmd_code = CMD_SEND_AIRCRAFT_TO_HANGAR | CMD_MSG(STR_A012_CAN_T_SEND_AIRCRAFT_TO); break;
++				default: NOT_REACHED(); break;
++			}
++			DoCommandP(v->tile, v->index, (command == VEHICLE_SERVICE) ? DEPOT_SERVICE : 0, NULL, cmd_code);
++			return 1;
++		}
++
++		// Clone vehicle
++		case VEHICLE_CLONE:
++		// Clone vehicle with shared orders
++		case VEHICLE_CLONE_SHARED: {
++			DoCommandP(v->tile, v->index, (command == VEHICLE_CLONE_SHARED) ? 1 : 0, NULL, CMD_CLONE_VEHICLE);
++			return 1;
++		}
++		// Sell one or more train wagons. Wagons are indexed from 1 (0 is head engine). Articulated parts are not counted
++		case TRAIN_SELL_WAGON: {
++			assert(v->type == VEH_TRAIN);
++			assert(argc);
++			uint32 min;
++			if (!GetArgumentInteger(&min, argv[0])) return 0;
++			uint32 max = min;
++			if (argc >= 2) {
++				if (!GetArgumentInteger(&max, argv[1])) return 0;
++				if (max < min) return 0;
++			}
++
++			const Vehicle *w = v;
++
++			// Note: if maximal number of wagons in train is raised, this should be raised too.
++			// If neglecting, crashes will not happedn, but it will be impossible to sell more
++			// than 100 wagons at once
++			VehicleID to_be_sold[100];
++			uint num_to_sell = 0;
++
++			for (uint i = 0; i <= max; i++) {
++				// Skip articulated parts
++				while (v && IsArticulatedPart(v)) v = v->next;
++				// End of train
++				if (!v) break;
++				// Check if this is one to sell
++				if (i >= min) {
++					// Add to sell list
++					to_be_sold[num_to_sell] = v->index;
++					num_to_sell++;
++					if (num_to_sell>=lengthof(to_be_sold)) break;
++				}
++				v = v->next;
++			}
++
++			// Sell all vehicles in sell list
++			for (uint i = 0; i < num_to_sell; i++) {
++				DoCommandP(w->tile, to_be_sold[i], 0, NULL, CMD_SELL_RAIL_WAGON | CMD_MSG(STR_8839_CAN_T_SELL_RAILROAD_VEHICLE));
++			}
++
++			return 1;
++		}
++		// Sell vehicle
++		case VEHICLE_SELL: {
++			switch (v->type) {
++				case VEH_TRAIN:    cmd_code = CMD_SELL_RAIL_WAGON | CMD_MSG(STR_8839_CAN_T_SELL_RAILROAD_VEHICLE); break;
++				case VEH_ROAD:     cmd_code = CMD_SELL_ROAD_VEH | CMD_MSG(STR_9014_CAN_T_SELL_ROAD_VEHICLE);       break;
++				case VEH_SHIP:     cmd_code = CMD_SELL_SHIP | CMD_MSG(STR_980C_CAN_T_SELL_SHIP);                   break;
++				case VEH_AIRCRAFT: cmd_code = CMD_SELL_AIRCRAFT | CMD_MSG(STR_A01C_CAN_T_SELL_AIRCRAFT);           break;
++				default: NOT_REACHED(); break;
++			}
++			DoCommandP(v->tile, v->index, (v->type == VEH_TRAIN) ? 1 : 0, NULL, cmd_code);
++			return 1;
++		}
++		default: NOT_REACHED(); break;
++	}
++	return 0;
++}
++
++/**
++ Return true, if first string is a prefix (case insensitive) of second string
++ @param s1 first string
++ @param s2 second string
++*/
++bool str_isprefix(const char *s1, const char *s2)
++{
++	int len = 0;
++	while (s1[len] && s2[len] && (tolower(s1[len]) == tolower(s2[len]))) {
++		len++;
++	}
++
++	if (!s2[len] && s1[len]) return false; //Second string is prefix for first
++	if (len>0 && !s1[len]) return true;    //First string is prefix for (or equal to) second
++	return false;
++}
++
++/**
++ Get vehicle command or match type based on it's ID or INVALID_COMMAND if ID not recognized
++ @param id string to look for
++ @param invalid_value what to return if match not found
++ @param string_array where to look
++ @param array_length length of array
++*/
++template<typename T> const StringInfo<T> GetStringInfo(const char *id,
++ const StringInfo<T> &invalid_value, const StringInfo<T> *string_array, size_t array_length)
++{
++	StringInfo<T> cmd = invalid_value;
++	bool unique_prefix = true;
++	for (uint i = 0; i < array_length; i++) {
++		int real_i = i;
++		//Skip through alias(es) until reaching the command
++		while (string_array[real_i].id == LIST_ALIAS) real_i++;
++		if (stricmp(id, string_array[i].name) == 0) {
++			return string_array[real_i];
++		}
++		/*
++		 * If same command as already found, skip match
++		 * (to avoid 'disambiguating' between 'center' and 'centre')
++		 */
++		if (str_isprefix(id, string_array[i].name) && string_array[real_i].id != cmd.id) {
++			// Case-insensitive prefix match
++			if (cmd.id) unique_prefix = false; //Ambiguous case-insensitive prefix match
++			cmd = string_array[real_i];
++			continue;
++		}
++	}
++	if (cmd.id && unique_prefix) return cmd;
++	return invalid_value;
++}
++
++/**
++ Get vehicle command based on it's ID or INVALID_COMMAND if ID not recognized
++ @param id string to look for
++*/
++const StringInfo<VehicleCommand> GetVehicleCommand(const char *id) {
++ return GetStringInfo<VehicleCommand>(id,INVALID_COMMAND,veh_commands,lengthof(veh_commands));
++}
++
++/**
++ Get match type based on it's ID or INVALID_MATCH if ID not recognized
++ @param id string to look for
++*/
++const StringInfo<MatchType> GetMatchType(const char *id) {
++ return GetStringInfo<MatchType>(id,INVALID_MATCH,match_info,lengthof(match_info));
++}
++
++/**
++ Given name of the group, return pointer to it, or return NULL if group is not found or is owned by someone else.
++ First it tries to match case sensitively, if it fails,
++ it tries case-insensitive match and return it only if the match is unambigous.
++ For example, matching of 'XYZ' against group 'xyz' and 'Xyz' will fail.
++ @param name Name of the group
++*/
++const Group* GetGroupByName(const char *name)
++{
++	const Group *g;
++	const Group *nocase_g = NULL;
++	const Group *prefix_g = NULL;
++	bool unique_nocase = true;
++	bool unique_prefix = true;
++	char buf[512];
++
++	FOR_ALL_GROUPS(g) {
++		if (g->owner == _local_player) {
++			SetDParam(0, g->index);
++			GetString(buf, STR_GROUP_NAME, lastof(buf));
++		}
++		if (strcmp(buf, name) == 0) return g;           // Case-sensitive match
++		if (stricmp(buf, name) == 0) {                  // Case-insensitive match
++			if (nocase_g) unique_nocase = false;    // Ambiguous case-insensitive match
++			nocase_g = g;
++			continue;
++		}
++		if (str_isprefix(name, buf)) {                  // Case-insensitive prefix match
++			if (prefix_g) unique_prefix = false;    //Ambiguous case-insensitive prefix match
++			prefix_g = g;
++			continue;
++		}
++	}
++
++	if (nocase_g && unique_nocase) return nocase_g;
++	if (prefix_g && unique_prefix) return prefix_g;
++	return NULL;
++}
++
++/**
++ Perform a vehicle command
++ @param argc Number of arguments
++ @param argv Arguments
++ @param vtype Vehicle type to run this command against
++ @param argv0 Name of the command (selfreference for printing help, etc ..)
++ @param recursive If true, this is recursive call from across-all-vehicles command and suppress some errors
++*/
++bool ConVehicleCommand(int argc, char **argv, VehicleType vtype, const char *argv0/*, bool recursive*/)
++{
++	int mask;
++	const char *vehicle_name;
++	switch (vtype) {
++		case VEH_TRAIN:    mask = FOR_TRAIN;    vehicle_name = "train";        break;
++		case VEH_ROAD:     mask = FOR_ROAD;     vehicle_name = "road vehicle"; break;
++		case VEH_SHIP:     mask = FOR_SHIP;     vehicle_name = "ship";         break;
++		case VEH_AIRCRAFT: mask = FOR_AIRCRAFT; vehicle_name = "aircraft";     break;
++		case VEH_INVALID:  mask = FOR_ANY;      vehicle_name = "vehicle";      break;
++		default: NOT_REACHED(); return false;
++	}
++
++	if (argc == 0) {
++		IConsoleHelpF("Invoke command on specified %s(s). Usage: '%s <identifier> <command> [<optional command parameters...>]'",vehicle_name,argv0);
++		IConsoleHelp("Command can be:");
++
++		// Help for commands
++		char alias[ICON_MAX_STREAMSIZE];
++		alias[0] = 0;
++		for (uint i = 0; i < lengthof(veh_commands); i++) {
++
++			if (veh_commands[i].id == COMMAND_ALIAS) {
++				if (!alias[0]) {
++					strcpy(alias," (Aliases: ");
++				} else {
++					strcat(alias,", ");
++				}
++				strcat(alias,veh_commands[i].name);
++			} else {
++				if (!(veh_commands[i].req & mask)) {
++					// Not for this vehicle type. Reset list of aliases
++					alias[0] = 0;
++					continue;
++				}
++				if (alias[0]) {
++					strcat(alias, ")");
++				}
++				IConsoleHelpF(" %-15s %s%s", veh_commands[i].name,veh_commands[i].help, alias[0] ? alias : "");
++				alias[0] = 0;
++			}
++		}
++
++		IConsoleHelp ("Identifier can be:");
++		IConsoleHelpF(" 'all' or '*' for all %ss", vehicle_name);
++		IConsoleHelpF(" 'crashed' for all crashed %ss", vehicle_name);
++		IConsoleHelpF(" 'depot' for all %ss in depot", vehicle_name);
++		IConsoleHelpF(" name of group for all %ss from specified group. Can accept unique prefix of group name", vehicle_name);
++		IConsoleHelpF(" %s number for specific %s", vehicle_name, vehicle_name);
++		IConsoleHelp ("Operators < > <= >= and <> can be used instead of = for following matches:");
++
++		// Help for match types
++		for (uint mi = 0; mi < lengthof(match_info); mi++) {
++			if (!(match_info[mi].req & mask)) {
++				// Not for this vehicle type.
++				continue;
++			}
++			IConsoleHelpF(" %s%s", match_info[mi].name, match_info[mi].help);
++		}
++		return true;
++	}
++
++	if (!IsValidPlayer(_local_player)) {
++		IConsoleError("You have to own a company to make use of this command.");
++		return true;
++	}
++
++	if (argc < 3) return false;
++
++	//Parse command string and get command identifier
++	StringInfo<VehicleCommand> cmd = GetVehicleCommand(argv[2]);
++
++	if (!cmd.id) {
++		IConsoleError("You have specified invalid command.");
++		return false;
++	}
++
++	// Safety check for correct vehicle type
++	if (!(cmd.req & mask)) {
++		IConsoleError("You have specified invalid command for this type of vehicle.");
++		return true;
++	}
++
++	if (argc < 3 + cmd.params) {
++		IConsoleError("This command requires additional parameter(s).");
++		return true;
++	}
++
++	assert(!(cmd.req & IS_ALIAS));
++
++	int affected = 0;
++	int matched = 0;
++
++	const Vehicle **sort_list = NULL;
++	uint16 length_of_sort_list = 0;
++
++	int object_id = 0;
++	int list_type = VLW_STANDARD;
++
++	const char *match_id = argv[1];
++
++	const char *id = match_id;
++
++	MatchType match_type = MATCH_GENERIC;
++	MatchSubtype match_subtype = MATCH_NONE;
++
++	// Check for criteria in form of key=value, key<value, key>=value, etc ...
++	size_t keylen = strcspn(match_id,"<>=");
++	if (match_id[keylen] == '=') {
++		// Key=value
++		id = match_id + keylen + 1;
++		match_subtype = MATCH_EQUAL;
++	}
++	if (match_id[keylen] == '<') {
++		// Key<value or Key<=value
++		id = match_id + keylen + 1;
++		if (match_id[keylen+1] == '=') {
++			match_subtype = MATCH_LESS_OR_EQUAL;
++			id++;
++		} else if (match_id[keylen+1] == '>') {
++			match_subtype = MATCH_NOT_EQUAL;
++			id++;
++		} else {
++			match_subtype = MATCH_LESS;
++		}
++	}
++	if (match_id[keylen] == '>') {
++		// Key>value or Key>=value
++		id = match_id + keylen + 1;
++		if (match_id[keylen+1] == '=') {
++			match_subtype = MATCH_GREATER_OR_EQUAL;
++			id++;
++		} else {
++			match_subtype = MATCH_GREATER;
++		}
++	}
++
++	if (keylen) {
++		// Criteria in form of key=value, key<value, key>=value .... was specified
++		char match_key[ICON_MAX_STREAMSIZE];
++		strncpy(match_key, match_id, keylen);
++		match_key[keylen] = 0;
++
++		StringInfo<MatchType> match = GetMatchType(match_key);
++
++		// Found some match
++		if (match.id) {
++			// Safety check for correct vehicle type
++			if (!(match.req & mask)) {
++				IConsoleError("You have specified invalid match type for this type of vehicle.");
++				return true;
++			}
++			match_type = match.id;
++		}
++	}
++
++	// Special match - crashed vehicles
++	if (stricmp(match_id, "crashed") == 0) {
++		match_type = MATCH_CRASHED;
++	}
++
++	// Special match - vehicles in depot
++	if (stricmp(match_id, "depot") == 0) {
++		match_type = MATCH_IN_DEPOT;
++	}
++
++	// Special match - all vehicles
++	if (stricmp(match_id, "all") == 0 || stricmp(id, "*") == 0) {
++		match_type = MATCH_ALL;
++	}
++
++	// No specific match recognized - try matching group name
++	if (match_type == MATCH_GENERIC) {
++		id = match_id;
++		const Group *g = GetGroupByName(id);
++		if (g) {
++			list_type = VLW_GROUP_LIST;
++			object_id = g->index;
++			// Match all, as the input is already filtered
++			match_type = MATCH_ALL;
++		}
++	}
++
++	// Generate list of vehicles
++	int list_len = GenerateVehicleSortList(&sort_list, &length_of_sort_list, vtype, _local_player, object_id, list_type);
++
++	for (int vi = 0; vi < list_len;vi++ ) {  // For each vehicle in list
++		const Vehicle *v = sort_list[vi];
++		if (VehicleIdMatches(v, match_type, match_subtype, id)) {
++			// Vehicle matches criteria
++			matched++;
++
++			// Check specific command requirements if necessary:
++
++			// Check for "not crashed"
++			if ((cmd.req & NOT_CRASHED) && (v->vehstatus & VS_CRASHED)) continue;
++			// Check for "is stopped"
++			if ((cmd.req & STOPPED) && !(v->vehstatus & VS_STOPPED)) continue;
++			// Check for "is in depot"
++			if ((cmd.req & IN_DEPOT) && !IsVehicleInDepot(v)) continue;
++
++			 //Check vehicle type in case of commands for multiple vehicle types
++			switch (v->type) {
++				case VEH_TRAIN: if (!(cmd.req & FOR_TRAIN)) continue; break;
++				case VEH_ROAD: if (!(cmd.req & FOR_ROAD)) continue; break;
++				case VEH_SHIP: if (!(cmd.req & FOR_SHIP)) continue; break;
++				case VEH_AIRCRAFT: if (!(cmd.req & FOR_AIRCRAFT)) continue; break;
++				default: NOT_REACHED(); break;
++			}
++			// Pass rest of parameters to command
++			affected += DoVehicleCommand(v, cmd.id, argc - 3, argv + 3);
++		}
++	}
++
++	IConsolePrintF(_icolour_def, "Number of %ss matched: %d, affected: %d", vehicle_name, matched, affected);
++
++	return true;
++}
++
++DEF_CONSOLE_CMD(ConTrain)
++{
++	// Call generic vehicle command with "train" specialization
++	return ConVehicleCommand(argc, argv, VEH_TRAIN, "train");
++}
++
++DEF_CONSOLE_CMD(ConRoad)
++{
++	// Call generic vehicle command with "road vehicle" specialization
++	return ConVehicleCommand(argc, argv, VEH_ROAD, "road");
++}
++
++DEF_CONSOLE_CMD(ConShip)
++{
++	// Call generic vehicle command with "ship" specialization
++	return ConVehicleCommand(argc, argv, VEH_SHIP, "ship");
++}
++
++DEF_CONSOLE_CMD(ConAircraft)
++{
++	// Call generic vehicle command with "aircraft" specialization
++	return ConVehicleCommand(argc, argv, VEH_AIRCRAFT, "aircraft");
++}
++
++DEF_CONSOLE_CMD(ConVehicle)
++{
++	// Call generic vehicle command with "all vehicles" specialization
++	return ConVehicleCommand(argc, argv, VEH_INVALID, "vehicle");
++}
++
+ DEF_CONSOLE_CMD(ConListDumpVariables)
+ {
+ 	const IConsoleVar *var;
+@@ -1527,12 +2441,18 @@
+ 	IConsoleCmdRegister("clear",        ConClearBuffer);
+ 	IConsoleCmdRegister("patch",        ConPatch);
+ 	IConsoleCmdRegister("list_patches", ConListPatches);
++	IConsoleCmdRegister("train",        ConTrain);
++	IConsoleCmdRegister("aircraft",     ConAircraft);
++	IConsoleCmdRegister("road",         ConRoad);
++	IConsoleCmdRegister("ship",         ConShip);
++	IConsoleCmdRegister("vehicle",      ConVehicle);
+ 
+ 	IConsoleAliasRegister("dir",      "ls");
+ 	IConsoleAliasRegister("del",      "rm %+");
+ 	IConsoleAliasRegister("newmap",   "newgame");
+ 	IConsoleAliasRegister("new_map",  "newgame");
+ 	IConsoleAliasRegister("new_game", "newgame");
++	IConsoleAliasRegister("plane",    "aircraft %+");
+ 
+ 
+ 	IConsoleVarRegister("developer", &_stdlib_developer, ICONSOLE_VAR_BYTE, "Redirect debugging output from the console/command line to the ingame console (value 2). Default value: 1");
+Index: src/newgrf.cpp
+===================================================================
+--- src/newgrf.cpp	(revision 10634)
++++ src/newgrf.cpp	(working copy)
+@@ -2155,7 +2155,7 @@
+ 				break;
+ 		}
+ 
+-		if (ignoring) grfmsg(2, "FeatureChangeInfo: Ignoring property 0x%02X (not implemented)", prop);
++		if (ignoring) grfmsg(1, "FeatureChangeInfo: Ignoring property 0x%02X of feature 0x%02X (not implemented)", prop, feature);
+ 	}
+ }
+ 
+Index: src/vehicle.h
+===================================================================
+--- src/vehicle.h	(revision 10634)
++++ src/vehicle.h	(working copy)
+@@ -513,7 +513,7 @@
+ Vehicle *ForceAllocateSpecialVehicle();
+ void VehiclePositionChanged(Vehicle *v);
+ void AfterLoadVehicles();
+-Vehicle *GetLastVehicleInChain(Vehicle *v);
++Vehicle *GetLastVehicleInChain(const Vehicle *v);
+ Vehicle *GetPrevVehicleInChain(const Vehicle *v);
+ Vehicle *GetFirstVehicleInChain(const Vehicle *v);
+ uint CountVehiclesInChain(const Vehicle* v);
+Index: src/console.cpp
+===================================================================
+--- src/console.cpp	(revision 10634)
++++ src/console.cpp	(working copy)
+@@ -484,6 +484,30 @@
+ 	return arg != endptr;
+ }
+ 
++/**
++ * Change a string into its number representation, using signed integer. Supports
++ * decimal and hexadecimal numbers as well as 'on'/'off' 'true'/'false'
++ * @param *value the variable a successfull conversion will be put in
++ * @param *arg the string to be converted
++ * @return Return true on success or false on failure
++ */
++bool GetArgumentSignedInteger(int32 *value, const char *arg)
++{
++	char *endptr;
++
++	if (strcmp(arg, "on") == 0 || strcmp(arg, "true") == 0) {
++		*value = 1;
++		return true;
++	}
++	if (strcmp(arg, "off") == 0 || strcmp(arg, "false") == 0) {
++		*value = 0;
++		return true;
++	}
++
++	*value = strtol(arg, &endptr, 0);
++	return arg != endptr;
++}
++
+ /*  * *************************
+     * hooking code            *
+     * *************************/
+Index: src/console.h
+===================================================================
+--- src/console.h	(revision 10634)
++++ src/console.h	(working copy)
+@@ -156,4 +156,6 @@
+ 
+ /* Supporting functions */
+ bool GetArgumentInteger(uint32 *value, const char *arg);
++bool GetArgumentSignedInteger(int32 *value, const char *arg);
++
+ #endif /* CONSOLE_H */
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 10634)
++++ src/vehicle.cpp	(working copy)
+@@ -569,10 +569,10 @@
+ 	ResetVehiclePosHash();
+ }
+ 
+-Vehicle *GetLastVehicleInChain(Vehicle *v)
++Vehicle *GetLastVehicleInChain(const Vehicle *v)
+ {
+ 	while (v->next != NULL) v = v->next;
+-	return v;
++	return (Vehicle*)v;
+ }
+ 
+ /** Finds the previous vehicle in a chain, by a brute force search.
+@@ -2094,7 +2094,7 @@
+ /**
+ * @param sort_list list to store the list in. Either NULL or the length length_of_array tells
+ * @param length_of_array informs the length allocated for sort_list. This is not the same as the number of vehicles in the list. Needs to be 0 when sort_list is NULL
+-* @param type type of vehicle
++* @param type type of vehicle. Specifying VEH_INVALID type will return list with all types of vehicles
+ * @param owner PlayerID of owner to generate a list for
+ * @param index This parameter has different meanings depending on window_type
+     <ul>
+@@ -2115,7 +2115,7 @@
+ 	switch (window_type) {
+ 		case VLW_STATION_LIST: {
+ 			FOR_ALL_VEHICLES(v) {
+-				if (v->type == type && v->IsPrimaryVehicle()) {
++				if ((v->type == type || type == VEH_INVALID) && v->IsPrimaryVehicle()) {
+ 					const Order *order;
+ 
+ 					FOR_VEHICLE_ORDERS(v, order) {
+@@ -2148,7 +2148,7 @@
+ 
+ 		case VLW_STANDARD: {
+ 			FOR_ALL_VEHICLES(v) {
+-				if (v->type == type && v->owner == owner && v->IsPrimaryVehicle()) {
++				if ((v->type == type || type == VEH_INVALID) && v->owner == owner && v->IsPrimaryVehicle()) {
+ 					/* TODO find a better estimate on the total number of vehicles for current player */
+ 					if (n == *length_of_array) ExtendVehicleListSize(sort_list, length_of_array, GetNumVehicles()/4);
+ 					(*sort_list)[n++] = v;
+@@ -2159,7 +2159,7 @@
+ 
+ 		case VLW_DEPOT_LIST: {
+ 			FOR_ALL_VEHICLES(v) {
+-				if (v->type == type && v->IsPrimaryVehicle()) {
++				if ((v->type == type || type == VEH_INVALID) && v->IsPrimaryVehicle()) {
+ 					const Order *order;
+ 
+ 					FOR_VEHICLE_ORDERS(v, order) {
+@@ -2176,7 +2176,7 @@
+ 
+  		case VLW_GROUP_LIST:
+ 			FOR_ALL_VEHICLES(v) {
+-				if (v->type == type && v->IsPrimaryVehicle() &&
++				if ((v->type == type || type == VEH_INVALID) && v->IsPrimaryVehicle() &&
+ 						v->owner == owner && v->group_id == index) {
+ 					if (n == *length_of_array) ExtendVehicleListSize(sort_list, length_of_array, GetNumVehicles() / 4);
+ 

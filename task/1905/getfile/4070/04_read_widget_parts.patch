@@ -1,0 +1,177 @@
+diff -r 3f949a4f2928 src/widget.cpp
+--- a/src/widget.cpp	Sat Mar 07 19:08:30 2009 +0100
++++ b/src/widget.cpp	Sat Mar 07 19:27:02 2009 +0100
+@@ -6,6 +6,7 @@
+ #include "company_func.h"
+ #include "gfx_func.h"
+ #include "window_gui.h"
++#include "debug.h"
+ 
+ #include "table/sprites.h"
+ #include "table/strings.h"
+@@ -1385,6 +1386,46 @@
+ 	return widgets;
+ }
+ 
++/**
++ * Compare two widget arrays with each other, and report differences.
++ * @param orig Pointer to original widget array.
++ * @param gen  Pointer to generated widget array (from the nested widgets).
++ * @param report Report differences to stdout.
++ * @return Both widget arrays are equal.
++ */
++bool CompareWidgetArrays(const Widget *orig, const Widget *gen, bool report)
++{
++	int idx = 0;
++	bool same = true;
++
++	for(;;) {
++		const Widget *ow = orig + idx;
++		const Widget *gw = gen + idx;
++
++#define CHECK(var, prn) \
++	if (ow->var != gw->var) { \
++		same = false; \
++		if (report) DEBUG(misc, 1, "index %d, \"" #var "\" field: orig " prn ", gen " prn "\n", idx, ow->var, gw->var); \
++	}
++		CHECK(type, "%d")
++		CHECK(display_flags, "0x%x")
++		CHECK(colour, "%d")
++		CHECK(left, "%d")
++		CHECK(right, "%d")
++		CHECK(top, "%d")
++		CHECK(bottom, "%d")
++		CHECK(data, "%u")
++		CHECK(tooltips, "%u")
++#undef CHECK
++
++		if (ow->type == WWT_LAST || gw->type == WWT_LAST) break;
++
++		idx++;
++	}
++
++	return same;
++}
++
+ /* == Conversion code from NWidgetPart array to NWidgetBase* tree == */
+ 
+ /**
+diff -r 3f949a4f2928 src/widget_type.h
+--- a/src/widget_type.h	Sat Mar 07 19:08:30 2009 +0100
++++ b/src/widget_type.h	Sat Mar 07 19:27:02 2009 +0100
+@@ -259,6 +259,7 @@
+ };
+ 
+ Widget *InitializeNWidgets(NWidgetBase *nwid, bool rtl = false);
++bool CompareWidgetArrays(const Widget *orig, const Widget *gen, bool report = true);
+ 
+ /* == Nested widget parts == */
+ 
+diff -r 3f949a4f2928 src/window.cpp
+--- a/src/window.cpp	Sat Mar 07 19:08:30 2009 +0100
++++ b/src/window.cpp	Sat Mar 07 19:27:02 2009 +0100
+@@ -54,7 +54,7 @@
+ 
+ /** Window description constructor. */
+ WindowDesc::WindowDesc(int16 lft, int16 ptop, int16 min_width, int16 min_height, int16 def_width, int16 def_height,
+-			WindowClass wc, WindowClass pc, uint32 flgs, const Widget *widgs)
++			WindowClass wc, WindowClass pc, uint32 flgs, const Widget *widgs, const NWidgetPart *nwp, int16 nwl)
+ {
+ 	this->left = lft;
+ 	this->top = ptop;
+@@ -66,8 +66,45 @@
+ 	this->parent_cls = pc;
+ 	this->flags = flgs;
+ 	this->widgets = widgs;
++	this->nwid_parts = nwp;
++	this->nwid_length = nwl;
++	this->new_widgets = NULL;
+ }
+ 
++/** Get widget array of the window description. */
++const Widget *WindowDesc::GetWidgets() const
++{
++	const bool RTL = false; // Direction of the language is left-to-right
++
++	/* If nested widgets are present, convert them to a widget array. */
++	if (this->nwid_parts != NULL && nwid_length > 0 && this->new_widgets == NULL) {
++		NWidgetContainer *nwid = MakeNWidgets(this->nwid_parts, this->nwid_length);
++		this->new_widgets = InitializeNWidgets(nwid, RTL);
++		delete nwid;
++	}
++
++	if (!RTL && this->widgets != NULL && this->new_widgets != NULL) {
++		/* There are two descriptions, compare them.
++		 * Comparing only makes sense when using a left-to-right language.
++		 */
++		bool ok = CompareWidgetArrays(this->widgets, this->new_widgets, false);
++		if (ok) {
++			DEBUG(misc, 1, "Nested widgets are equal");
++		} else {
++			DEBUG(misc, 0, "Nested widgets give different results");
++			CompareWidgetArrays(this->widgets, this->new_widgets, true);
++		}
++	}
++
++	const Widget *widgets = (this->widgets != NULL) ? this->widgets : this->new_widgets;
++	assert(widgets != NULL);
++	return widgets;
++}
++
++WindowDesc::~WindowDesc()
++{
++	if (this->new_widgets) free(this->new_widgets);
++}
+ 
+ /**
+  * Set the window that has the focus
+@@ -1157,7 +1194,7 @@
+ Window::Window(const WindowDesc *desc, WindowNumber window_number)
+ {
+ 	Point pt = LocalGetWindowPlacement(desc, window_number);
+-	this->Initialize(pt.x, pt.y, desc->minimum_width, desc->minimum_height, desc->cls, desc->widgets, window_number);
++	this->Initialize(pt.x, pt.y, desc->minimum_width, desc->minimum_height, desc->cls, desc->GetWidgets(), window_number);
+ 	this->desc_flags = desc->flags;
+ }
+ 
+diff -r 3f949a4f2928 src/window_gui.h
+--- a/src/window_gui.h	Sat Mar 07 19:08:30 2009 +0100
++++ b/src/window_gui.h	Sat Mar 07 19:27:02 2009 +0100
+@@ -41,18 +41,26 @@
+ struct WindowDesc : ZeroedMemoryAllocator {
+ 
+ 	WindowDesc(int16 lft, int16 top, int16 min_width, int16 min_height, int16 def_width, int16 def_height,
+-			WindowClass wc, WindowClass pc, uint32 flgs, const Widget *widgs);
++			WindowClass wc, WindowClass pc, uint32 flgs, const Widget *widgs,
++			const NWidgetPart *nwp = NULL, int16 nwl = 0);
+ 
+-	int16 left;             ///< Prefered x position of left edge of the window, @see WindowDefaultPosition()
+-	int16 top;              ///< Prefered y position of the top of the window, @see WindowDefaultPosition()
+-	int16 minimum_width;    ///< Minimal width of the window
+-	int16 minimum_height;   ///< Minimal height of the window
+-	int16 default_width;    ///< Prefered initial width of the window
+-	int16 default_height;   ///< Prefered initial height of the window
+-	WindowClass cls;        ///< Class of the window, @see WindowClass
+-	WindowClass parent_cls; ///< Class of the parent window, @see WindowClass
+-	uint32 flags;           ///< Flags, @see WindowDefaultFlags
+-	const Widget *widgets;  ///< List of widgets with their position and size for the window
++	~WindowDesc();
++
++	int16 left;                    ///< Prefered x position of left edge of the window. @see WindowDefaultPosition()
++	int16 top;                     ///< Prefered y position of the top of the window. @see WindowDefaultPosition()
++	int16 minimum_width;           ///< Minimal width of the window.
++	int16 minimum_height;          ///< Minimal height of the window.
++	int16 default_width;           ///< Prefered initial width of the window.
++	int16 default_height;          ///< Prefered initial height of the window.
++	WindowClass cls;               ///< Class of the window, @see WindowClass.
++	WindowClass parent_cls;        ///< Class of the parent window. @see WindowClass
++	uint32 flags;                  ///< Flags. @see WindowDefaultFlag.
++	const Widget *widgets;         ///< List of widgets with their position and size for the window.
++	const NWidgetPart *nwid_parts; ///< Nested widget parts describing the window.
++	int16 nwid_length;             ///< Length of the #nwid_parts array.
++	mutable Widget *new_widgets;   ///< Widgets generated from #nwid_parts.
++
++	const Widget *GetWidgets() const;
+ };
+ 
+ /**

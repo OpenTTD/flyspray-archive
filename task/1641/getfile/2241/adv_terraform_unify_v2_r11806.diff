@@ -1,0 +1,155 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 11806)
++++ src/lang/english.txt	(working copy)
+@@ -1591,6 +1591,7 @@
+ STR_0807_ESTIMATED_INCOME                                       :{WHITE}Estimated Income: {CURRENCY}
+ STR_0808_CAN_T_RAISE_LAND_HERE                                  :{WHITE}Can't raise land here...
+ STR_0809_CAN_T_LOWER_LAND_HERE                                  :{WHITE}Can't lower land here...
++STR_CAN_T_LEVEL_LAND_HERE                                       :{WHITE}Can't level land here...
+ STR_080A_ROCKS                                                  :Rocks
+ STR_080B_ROUGH_LAND                                             :Rough land
+ STR_080C_BARE_LAND                                              :Bare land
+@@ -1605,6 +1606,7 @@
+ STR_1002_EXCAVATION_WOULD_DAMAGE                                :{WHITE}Excavation would damage tunnel
+ STR_1003_ALREADY_AT_SEA_LEVEL                                   :{WHITE}Already at sea-level
+ STR_1004_TOO_HIGH                                               :{WHITE}Too high
++STR_ALREADY_FLAT                                                :{WHITE}Already flat
+ STR_1005_NO_SUITABLE_RAILROAD_TRACK                             :{WHITE}No suitable railway track
+ STR_1007_ALREADY_BUILT                                          :{WHITE}...already built
+ STR_1008_MUST_REMOVE_RAILROAD_TRACK                             :{WHITE}Must remove railway track first
+Index: src/terraform_cmd.cpp
+===================================================================
+--- src/terraform_cmd.cpp	(revision 11806)
++++ src/terraform_cmd.cpp	(working copy)
+@@ -214,7 +214,6 @@
+ 			}
+ 		}
+ 	}
+-
+ 	return total_cost;
+ }
+ 
+@@ -271,6 +270,7 @@
+ 	{
+ 		int count;
+ 		TileIndex *ti = ts.tile_table;
++		const bool curr_gen = _generating_world;
+ 
+ 		for (count = ts.tile_table_count; count != 0; count--, ti++) {
+ 			TileIndex tile = *ti;
+@@ -304,13 +304,16 @@
+ 				return_cmd_error(STR_1002_EXCAVATION_WOULD_DAMAGE);
+ 			}
+ 			/* Check tiletype-specific things, and add extra-cost */
++			if(_game_mode == GM_EDITOR) _generating_world = true; // used to create green terraformed land
+ 			CommandCost cost = _tile_type_procs[GetTileType(tile)]->terraform_tile_proc(tile, flags | DC_AUTO, z_min * TILE_HEIGHT, (Slope) tileh);
++			if(_game_mode == GM_EDITOR) _generating_world = curr_gen;
+ 			if (CmdFailed(cost)) {
+ 				_terraform_err_tile = tile;
+ 				return cost;
+ 			}
+ 			total_cost.AddCost(cost);
+ 		}
++
+ 	}
+ 
+ 	if (flags & DC_EXEC) {
+@@ -357,6 +360,8 @@
+ 	CommandCost money;
+ 	CommandCost ret;
+ 	CommandCost cost(EXPENSES_CONSTRUCTION);
++	bool change = false;
++	bool succeed = false;
+ 
+ 	if (p1 >= MapSize()) return CMD_ERROR;
+ 
+@@ -382,26 +387,29 @@
+ 	size_y = ey - sy + 1;
+ 
+ 	money.AddCost(GetAvailableMoneyForCommand());
++	_additional_cash_required = 0;
+ 
+ 	BEGIN_TILE_LOOP(tile2, size_x, size_y, tile) {
+ 		curh = TileHeight(tile2);
+ 		while (curh != h) {
++			change = true;
+ 			ret = DoCommand(tile2, SLOPE_N, (curh > h) ? 0 : 1, flags & ~DC_EXEC, CMD_TERRAFORM_LAND);
+ 			if (CmdFailed(ret)) break;
+ 
+-			if (flags & DC_EXEC) {
+-				money.AddCost(-ret.GetCost());
+-				if (money.GetCost() < 0) {
+-					_additional_cash_required = ret.GetCost();
+-					return cost;
+-				}
+-				DoCommand(tile2, SLOPE_N, (curh > h) ? 0 : 1, flags, CMD_TERRAFORM_LAND);
++			succeed = true;
++
++			money.AddCost(-ret.GetCost());
++			if ((flags & DC_EXEC) && money.GetCost() < 0) {
++				_additional_cash_required += ret.GetCost();
++			} else {
++				cost.AddCost(ret);
++				if (flags & DC_EXEC) DoCommand(tile2, SLOPE_N, (curh > h) ? 0 : 1, flags, CMD_TERRAFORM_LAND);
+ 			}
+-
+-			cost.AddCost(ret);
+ 			curh += (curh > h) ? -1 : 1;
+ 		}
+ 	} END_TILE_LOOP(tile2, size_x, size_y, tile)
+ 
+-	return (cost.GetCost() == 0) ? CMD_ERROR : cost;
++	if (!change) return_cmd_error(STR_ALREADY_FLAT);
++	if (succeed) return cost;
++	return CMD_ERROR;
+ }
+Index: src/terraform_gui.cpp
+===================================================================
+--- src/terraform_gui.cpp	(revision 11806)
++++ src/terraform_gui.cpp	(working copy)
+@@ -118,7 +118,7 @@
+ 			DoCommandP(end_tile, start_tile, (uint32)-1, CcTerraform, CMD_LEVEL_LAND | CMD_MSG(STR_0809_CAN_T_LOWER_LAND_HERE));
+ 			break;
+ 		case DDSP_LEVEL_AREA:
+-			DoCommandP(end_tile, start_tile, 0, CcPlaySound10, CMD_LEVEL_LAND);
++			DoCommandP(end_tile, start_tile, 0, CcTerraform, CMD_LEVEL_LAND | CMD_MSG(STR_CAN_T_LEVEL_LAND_HERE));
+ 			break;
+ 		case DDSP_CREATE_ROCKS:
+ 			GenerateRockyArea(end_tile, start_tile);
+@@ -321,14 +321,9 @@
+ 	int sizex, sizey;
+ 	uint h;
+ 
+-	_generating_world = true; // used to create green terraformed land
+-
+-	if (_terraform_size == 1) {
+-		StringID msg =
+-			mode ? STR_0808_CAN_T_RAISE_LAND_HERE : STR_0809_CAN_T_LOWER_LAND_HERE;
+-
+-		DoCommandP(tile, SLOPE_N, (uint32)mode, CcTerraform, CMD_TERRAFORM_LAND | CMD_MSG(msg));
+-	} else {
++	if (_terraform_size == 1)
++		VpStartPlaceSizing(tile, VPM_X_AND_Y, mode ? DDSP_RAISE_AND_LEVEL_AREA : DDSP_LOWER_AND_LEVEL_AREA);
++	else {
+ 		SndPlayTileFx(SND_1F_SPLAT, tile);
+ 
+ 		assert(_terraform_size != 0);
+@@ -358,8 +353,6 @@
+ 			}
+ 		} END_TILE_LOOP(tile2, sizex, sizey, tile)
+ 	}
+-
+-	_generating_world = false;
+ }
+ 
+ static void PlaceProc_RaiseBigLand(TileIndex tile)
+@@ -443,6 +436,8 @@
+ /**
+  * @todo Merge with terraform_gui.cpp (move there) after I have cooled down at its braindeadness
+  * and changed OnButtonClick to include the widget as well in the function declaration. Post 0.4.0 - Darkvater
++ * 
++ * been there, done that (at least the moving, rest will follow) - Roujin
+  */
+ static void EditorTerraformClick_Dynamite(Window *w)
+ {

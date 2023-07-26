@@ -1,0 +1,137 @@
+Index: smallmap_gui.cpp
+===================================================================
+--- smallmap_gui.cpp	(revision 11485)
++++ smallmap_gui.cpp	(working copy)
+@@ -802,10 +802,6 @@ static void SmallMapWindowProc(Window *w
+ 			uint diff;
+ 			DrawPixelInfo new_dpi;
+ 
+-			/* Hide Enable all/Disable all buttons if is not industry type small map*/
+-			SetWindowWidgetHiddenState(w, SM_WIDGET_ENABLEINDUSTRIES, _smallmap_type != SMT_INDUSTRY);
+-			SetWindowWidgetHiddenState(w, SM_WIDGET_DISABLEINDUSTRIES, _smallmap_type != SMT_INDUSTRY);
+-
+ 			/* draw the window */
+ 			SetDParam(0, STR_00E5_CONTOURS + _smallmap_type);
+ 			DrawWindowWidgets(w);
+@@ -844,6 +840,8 @@ static void SmallMapWindowProc(Window *w
+ 
+ 				tbl += 1;
+ 				i++;
++				if (_smallmap_type == SMT_INDUSTRY) 
++					y+=2; //alltogether 8!
+ 				y += 6;
+ 
+ 				if (tbl->end) { // end of the list
+@@ -884,6 +882,7 @@ static void SmallMapWindowProc(Window *w
+ 					SetWindowDirty(w);
+ 				} break;
+ 
++
+ 				case SM_WIDGET_CONTOUR:    // Show land contours
+ 				case SM_WIDGET_VEHICLES:   // Show vehicles
+ 				case SM_WIDGET_INDUSTRIES: // Show industries
+@@ -894,6 +893,12 @@ static void SmallMapWindowProc(Window *w
+ 					_smallmap_type = e->we.click.widget - SM_WIDGET_CONTOUR;
+ 					LowerWindowWidget(w, _smallmap_type + SM_WIDGET_CONTOUR);
+ 
++					/* Hide Enable all/Disable all buttons if is not industry type small map*/
++					SetWindowWidgetHiddenState(w, SM_WIDGET_ENABLEINDUSTRIES, _smallmap_type != SMT_INDUSTRY);
++					SetWindowWidgetHiddenState(w, SM_WIDGET_DISABLEINDUSTRIES, _smallmap_type != SMT_INDUSTRY);
++					for (int i=0; i<_smallmap_industry_count;i++)
++						SetWindowWidgetHiddenState(w, SM_WIDGET_RESIZEBOX + i + 1, _smallmap_type != SMT_INDUSTRY);
++
+ 					SetWindowDirty(w);
+ 					SndPlayFx(SND_15_BEEP);
+ 					break;
+@@ -948,6 +953,7 @@ static void SmallMapWindowProc(Window *w
+ 				case SM_WIDGET_ENABLEINDUSTRIES: // Enable all industries
+ 					for (int i = 0; i != _smallmap_industry_count; i++) {
+ 						_legend_from_industries[i].show_on_map = true;
++						SetWindowWidgetLoweredState(w, SM_WIDGET_RESIZEBOX + i + 1, true);
+ 					}
+ 					/* toggle appeareance indicating the choice */
+ 					LowerWindowWidget(w, SM_WIDGET_ENABLEINDUSTRIES);
+@@ -958,13 +964,22 @@ static void SmallMapWindowProc(Window *w
+ 				case SM_WIDGET_DISABLEINDUSTRIES: // disable all industries
+ 					for (int i = 0; i != _smallmap_industry_count; i++) {
+ 						_legend_from_industries[i].show_on_map = false;
++						SetWindowWidgetLoweredState(w, SM_WIDGET_RESIZEBOX + i + 1, false);
+ 					}
+ 					/* toggle appeareance indicating the choice */
+ 					RaiseWindowWidget(w, SM_WIDGET_ENABLEINDUSTRIES);
+ 					LowerWindowWidget(w, SM_WIDGET_DISABLEINDUSTRIES);
+ 					SetWindowDirty(w);
+ 					break;
++				default:
++					if (e->we.click.widget > SM_WIDGET_RESIZEBOX) {
++						int industry_pos = e->we.click.widget - SM_WIDGET_RESIZEBOX - 1;
++						_legend_from_industries[industry_pos].show_on_map = !_legend_from_industries[industry_pos].show_on_map;
++						ToggleWidgetLoweredState(w, e->we.click.widget);
++						SetWindowDirty(w);
++					}
+ 				}
++
+ 			break;
+ 
+ 		case WE_RCLICK:
+@@ -1059,6 +1074,42 @@ void ShowSmallMap()
+ 	w = AllocateWindowDescFront(&_smallmap_desc, 0);
+ 	if (w == NULL) return;
+ 
++	w->widget_count += _smallmap_industry_count;
++	w->widget = ReallocT(w->widget, w->widget_count + _smallmap_industry_count);
++	w->widget[w->widget_count].type = WWT_LAST;
++
++	int y_org = w->widget[SM_WIDGET_LEGEND].top;
++	int y = y_org;
++	int x = 0;
++
++	int i = 0;
++	const LegendAndColour *tbl;
++	tbl = _legend_table[SMT_INDUSTRY];
++	while (!tbl->end) {
++		Widget *wi = &w->widget[SM_WIDGET_RESIZEBOX + i + 1];
++		wi->type     = WWT_PANEL;
++		wi->display_flags = RESIZE_TB;
++		wi->color    = 12;
++		wi->left     = 2 + x * 121;
++		wi->right    = wi->left + 110;
++		wi->top      = y;
++		wi->bottom   = y + 8;
++		wi->data     = 0;
++		wi->tooltips = STR_USE_CTRL_TO_SELECT_MORE;
++
++		SetWindowWidgetHiddenState(w, SM_WIDGET_RESIZEBOX + i + 1, true);
++		SetWindowWidgetLoweredState(w, SM_WIDGET_RESIZEBOX + i + 1, true);
++
++		tbl ++;
++		i++;
++		y += 8;
++
++		if (tbl->col_break) {
++			x++;
++			y = y_org;
++		}
++	}
++
+ 	/* Resize the window to fit industries list */
+ 	if (_industries_per_column > BASE_NB_PER_COLUMN) {
+ 		uint diff = ((_industries_per_column - BASE_NB_PER_COLUMN) * BASE_NB_PER_COLUMN) + 1;
+@@ -1077,13 +1128,16 @@ void ShowSmallMap()
+ 		 * - disable all industry
+ 		 * - resize window button
+ 		 */
+-		for (uint i = SM_WIDGET_BOTTOMPANEL; i <= SM_WIDGET_RESIZEBOX; i++) {
++		for (uint i = SM_WIDGET_BOTTOMPANEL; i <= SM_WIDGET_RESIZEBOX+1; i++) {
+ 			wi           = &w->widget[i];
+ 			wi->top      = wi->top + diff;
+ 			wi->bottom   = wi->bottom + diff;
+ 		}
+ 	}
+ 
++	SetWindowWidgetHiddenState(w, SM_WIDGET_ENABLEINDUSTRIES, _smallmap_type != SMT_INDUSTRY);
++	SetWindowWidgetHiddenState(w, SM_WIDGET_DISABLEINDUSTRIES, _smallmap_type != SMT_INDUSTRY);
++
+ 	LowerWindowWidget(w, _smallmap_type + SMT_OWNER);
+ 	SetWindowWidgetLoweredState(w, SM_WIDGET_TOGGLETOWNNAME, _smallmap_show_towns);
+ 

@@ -1,0 +1,142 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 12099)
++++ src/lang/english.txt	(working copy)
+@@ -3337,14 +3337,14 @@
+ STR_DRIVE_THROUGH_ERROR_DIRECTION                               :{WHITE}...road facing in the wrong direction
+ 
+ STR_TRANSPARENCY_TOOLB                                          :{WHITE}Transparency Options
+-STR_TRANSPARENT_SIGNS_DESC                                      :{BLACK}Toggle transparency for station signs
+-STR_TRANSPARENT_TREES_DESC                                      :{BLACK}Toggle transparency for trees
+-STR_TRANSPARENT_HOUSES_DESC                                     :{BLACK}Toggle transparency for houses
+-STR_TRANSPARENT_INDUSTRIES_DESC                                 :{BLACK}Toggle transparency for industries
+-STR_TRANSPARENT_BUILDINGS_DESC                                  :{BLACK}Toggle transparency for buildables like stations, depots, waypoints and catenary
+-STR_TRANSPARENT_BRIDGES_DESC                                    :{BLACK}Toggle transparency for bridges
+-STR_TRANSPARENT_STRUCTURES_DESC                                 :{BLACK}Toggle transparency for structures like lighthouses and antennas, maybe in future for eyecandy
+-STR_TRANSPARENT_LOADING_DESC                                    :{BLACK}Toggle transparency for loading indicators
++STR_TRANSPARENT_SIGNS_DESC                                      :{BLACK}Toggle transparency for station signs. CTRL-click to lock.
++STR_TRANSPARENT_TREES_DESC                                      :{BLACK}Toggle transparency for trees. CTRL-click to lock.
++STR_TRANSPARENT_HOUSES_DESC                                     :{BLACK}Toggle transparency for houses. CTRL-click to lock.
++STR_TRANSPARENT_INDUSTRIES_DESC                                 :{BLACK}Toggle transparency for industries. CTRL-click to lock.
++STR_TRANSPARENT_BUILDINGS_DESC                                  :{BLACK}Toggle transparency for buildables like stations, depots, waypoints and catenary. CTRL-click to lock.
++STR_TRANSPARENT_BRIDGES_DESC                                    :{BLACK}Toggle transparency for bridges. CTRL-click to lock.
++STR_TRANSPARENT_STRUCTURES_DESC                                 :{BLACK}Toggle transparency for structures like lighthouses and antennas. CTRL-click to lock.
++STR_TRANSPARENT_LOADING_DESC                                    :{BLACK}Toggle transparency for loading indicators. CTRL-click to lock.
+ 
+ STR_PERCENT_UP_SMALL                                            :{TINYFONT}{WHITE}{NUM}%{UPARROW}
+ STR_PERCENT_UP                                                  :{WHITE}{NUM}%{UPARROW}
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 12099)
++++ src/settings.cpp	(working copy)
+@@ -1283,6 +1283,7 @@
+ 	  SDTG_VAR("sprite_cache_size",SLE_UINT, S, 0, _sprite_cache_size,     4, 1, 64, 0, STR_NULL, NULL),
+ 	  SDTG_VAR("player_face",    SLE_UINT32, S, 0, _player_face,      0,0,0xFFFFFFFF,0, STR_NULL, NULL),
+ 	  SDTG_VAR("transparency_options", SLE_UINT8, S, 0, _transparency_opt, 0, 0,0xFF,0, STR_NULL, NULL),
++	  SDTG_VAR("transparency_locks", SLE_UINT8, S, 0, _transparency_lock, 0, 0,0xFF,0, STR_NULL, NULL),
+ 	  SDTG_END()
+ };
+ 
+Index: src/transparency.h
+===================================================================
+--- src/transparency.h	(revision 12099)
++++ src/transparency.h	(working copy)
+@@ -28,6 +28,7 @@
+ 
+ typedef byte TransparencyOptionBits; ///< transparency option bits
+ extern TransparencyOptionBits _transparency_opt;
++extern TransparencyOptionBits _transparency_lock;
+ 
+ /**
+  * Check if the transparency option bit is set
+@@ -43,26 +44,33 @@
+ /**
+  * Toggle the transparency option bit
+  *
+- * @param to the structure which transparency option is toggle
++ * @param to the transparency option to be toggled
+  */
+ static inline void ToggleTransparency(TransparencyOption to)
+ {
+ 	ToggleBit(_transparency_opt, to);
+ }
+ 
+-/** Toggle all transparency options (except signs) or restore the stored transparencies */
++/**
++ * Toggle the transparency lock bit
++ *
++ * @param to the transparency option to be locked or unlocked
++ */
++static inline void ToggleTransparencyLock(TransparencyOption to)
++{
++	ToggleBit(_transparency_lock, to);
++}
++
++/** Set or clear all non-locked transparency options */
+ static inline void ResetRestoreAllTransparency()
+ {
+-	/* backup of the original transparencies or if all transparencies false toggle them to true */
+-	static TransparencyOptionBits trans_opt = ~0;
+-
+-	if (_transparency_opt == 0) {
+-		/* no structure is transparent, so restore the old transparency if present otherwise set all true */
+-		_transparency_opt = trans_opt;
++	/* if none of the non-locked options are set */
++	if ((_transparency_opt & ~_transparency_lock) == 0) {
++		/* set all non-locked options */
++		_transparency_opt |= ~_transparency_lock;
+ 	} else {
+-		/* any structure is transparent, so store current transparency settings and reset it */
+-		trans_opt = _transparency_opt;
+-		_transparency_opt = 0;
++		/* clear all non-locked options */
++		_transparency_opt &= _transparency_lock;
+ 	}
+ 
+ 	MarkWholeScreenDirty();
+Index: src/transparency_gui.cpp
+===================================================================
+--- src/transparency_gui.cpp	(revision 12099)
++++ src/transparency_gui.cpp	(working copy)
+@@ -12,12 +12,10 @@
+ #include "table/strings.h"
+ 
+ TransparencyOptionBits _transparency_opt;
++TransparencyOptionBits _transparency_lock;
+ 
+ enum TransparencyToolbarWidgets{
+-	/* Widgets not toggled when pressing the X key */
+ 	TTW_WIDGET_SIGNS = 3,    ///< Make signs background transparent
+-
+-	/* Widgets toggled when pressing the X key */
+ 	TTW_WIDGET_TREES,        ///< Make trees transparent
+ 	TTW_WIDGET_HOUSES,       ///< Make houses transparent
+ 	TTW_WIDGET_INDUSTRIES,   ///< Make Industries transparent
+@@ -39,14 +37,23 @@
+ 			}
+ 
+ 			DrawWindowWidgets(w);
++			for (uint i = TO_SIGNS; i < TO_END; i++) {
++				if (GB(_transparency_lock, i, 1)) DrawSprite(SPR_LOCK, PAL_NONE, w->widget[TTW_WIDGET_SIGNS + i].left + 1, w->widget[TTW_WIDGET_SIGNS + i].top + 1);
++			}
+ 			break;
+ 
+ 		case WE_CLICK:
+ 			if (e->we.click.widget >= TTW_WIDGET_SIGNS) {
+-				/* toggle the bit of the transparencies variable when clicking on a widget, and play a sound */
+-				ToggleTransparency((TransparencyOption)(e->we.click.widget - TTW_WIDGET_SIGNS));
+-				SndPlayFx(SND_15_BEEP);
+-				MarkWholeScreenDirty();
++				if (_ctrl_pressed) {
++					/* toggle the bit of the transparencies lock variable */
++					ToggleTransparencyLock((TransparencyOption)(e->we.click.widget - TTW_WIDGET_SIGNS));
++					SetWindowDirty(w);
++				} else {
++					/* toggle the bit of the transparencies variable and play a sound */
++					ToggleTransparency((TransparencyOption)(e->we.click.widget - TTW_WIDGET_SIGNS));
++					SndPlayFx(SND_15_BEEP);
++					MarkWholeScreenDirty();
++				}
+ 			}
+ 			break;
+ 	}

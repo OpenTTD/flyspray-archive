@@ -1,0 +1,767 @@
+Index: src/autoreplace_gui.cpp
+===================================================================
+--- src/autoreplace_gui.cpp	(revision 25732)
++++ src/autoreplace_gui.cpp	(working copy)
+@@ -14,11 +14,14 @@
+ #include "vehicle_gui.h"
+ #include "newgrf_engine.h"
+ #include "rail.h"
++#include "string_func.h"
+ #include "strings_func.h"
+ #include "window_func.h"
+ #include "autoreplace_func.h"
++#include "articulated_vehicles.h"
+ #include "company_func.h"
+ #include "engine_base.h"
++#include "engine_func.h"
+ #include "window_gui.h"
+ #include "engine_gui.h"
+ #include "settings_func.h"
+@@ -32,14 +35,450 @@
+ uint GetEngineListHeight(VehicleType type);
+ void DrawEngineList(VehicleType type, int x, int r, int y, const GUIEngineList *eng_list, uint16 min, uint16 max, EngineID selected_id, bool show_count, GroupID selected_group);
+ 
++/** Special cargo filter criteria */
++static const CargoID CF_ANY  = CT_NO_REFIT; ///< Show all vehicles independent of carried cargo (i.e. no filtering)
++static const CargoID CF_NONE = CT_INVALID;  ///< Show only vehicles which do not carry cargo (e.g. train engines)
++
++/* Globals for sorting potential vehicle replacements list */
++static bool _internal_sort_order;           ///< false = descending, true = ascending
++static byte _last_sort_criteria[]      = {0, 0, 0, 0};
++static bool _last_sort_order[]         = {false, false, false, false};
++static CargoID _last_filter_criteria[] = {CF_ANY, CF_ANY, CF_ANY, CF_ANY};
++
++/**
++ * Determines order of engines by engineID
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
+ static int CDECL EngineNumberSorter(const EngineID *a, const EngineID *b)
+ {
+ 	int r = Engine::Get(*a)->list_position - Engine::Get(*b)->list_position;
+ 
+-	return r;
++	return _internal_sort_order ? -r : r;
+ }
+ 
+ /**
++ * Determines order of engines by introduction date
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL EngineIntroDateSorter(const EngineID *a, const EngineID *b)
++{
++	const int va = Engine::Get(*a)->intro_date;
++	const int vb = Engine::Get(*b)->intro_date;
++	const int r = va - vb;
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++/**
++ * Determines order of engines by name
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL EngineNameSorter(const EngineID *a, const EngineID *b)
++{
++	static EngineID last_engine[2] = { INVALID_ENGINE, INVALID_ENGINE };
++	static char     last_name[2][64] = { "\0", "\0" };
++
++	const EngineID va = *a;
++	const EngineID vb = *b;
++
++	if (va != last_engine[0]) {
++		last_engine[0] = va;
++		SetDParam(0, va);
++		GetString(last_name[0], STR_ENGINE_NAME, lastof(last_name[0]));
++	}
++
++	if (vb != last_engine[1]) {
++		last_engine[1] = vb;
++		SetDParam(0, vb);
++		GetString(last_name[1], STR_ENGINE_NAME, lastof(last_name[1]));
++	}
++
++	int r = strnatcmp(last_name[0], last_name[1]); // Sort by name (natural sorting).
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++/**
++ * Determines order of engines by reliability
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL EngineReliabilitySorter(const EngineID *a, const EngineID *b)
++{
++	const int va = Engine::Get(*a)->reliability;
++	const int vb = Engine::Get(*b)->reliability;
++	const int r = va - vb;
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++/**
++ * Determines order of engines by purchase cost
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL EngineCostSorter(const EngineID *a, const EngineID *b)
++{
++	Money va = Engine::Get(*a)->GetCost();
++	Money vb = Engine::Get(*b)->GetCost();
++	int r = ClampToI32(va - vb);
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++/**
++ * Determines order of engines by speed
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL EngineSpeedSorter(const EngineID *a, const EngineID *b)
++{
++	int va = Engine::Get(*a)->GetDisplayMaxSpeed();
++	int vb = Engine::Get(*b)->GetDisplayMaxSpeed();
++	int r = va - vb;
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++/**
++ * Determines order of engines by power
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL EnginePowerSorter(const EngineID *a, const EngineID *b)
++{
++	int va = Engine::Get(*a)->GetPower();
++	int vb = Engine::Get(*b)->GetPower();
++	int r = va - vb;
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++/**
++ * Determines order of engines by tractive effort
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL EngineTractiveEffortSorter(const EngineID *a, const EngineID *b)
++{
++	int va = Engine::Get(*a)->GetDisplayMaxTractiveEffort();
++	int vb = Engine::Get(*b)->GetDisplayMaxTractiveEffort();
++	int r = va - vb;
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++/**
++ * Determines order of engines by running costs
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL EngineRunningCostSorter(const EngineID *a, const EngineID *b)
++{
++	Money va = Engine::Get(*a)->GetRunningCost();
++	Money vb = Engine::Get(*b)->GetRunningCost();
++	int r = ClampToI32(va - vb);
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++/**
++ * Determines order of engines by running costs
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL EnginePowerVsRunningCostSorter(const EngineID *a, const EngineID *b)
++{
++	const Engine *e_a = Engine::Get(*a);
++	const Engine *e_b = Engine::Get(*b);
++
++	/* Here we are using a few tricks to get the right sort.
++	 * We want power/running cost, but since we usually got higher running cost than power and we store the result in an int,
++	 * we will actually calculate cunning cost/power (to make it more than 1).
++	 * Because of this, the return value have to be reversed as well and we return b - a instead of a - b.
++	 * Another thing is that both power and running costs should be doubled for multiheaded engines.
++	 * Since it would be multiplying with 2 in both numerator and denominator, it will even themselves out and we skip checking for multiheaded. */
++	Money va = (e_a->GetRunningCost()) / max(1U, (uint)e_a->GetPower());
++	Money vb = (e_b->GetRunningCost()) / max(1U, (uint)e_b->GetPower());
++	int r = ClampToI32(vb - va);
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++/* Train sorting functions */
++
++/**
++ * Determines order of train engines by capacity
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL TrainEngineCapacitySorter(const EngineID *a, const EngineID *b)
++{
++	const RailVehicleInfo *rvi_a = RailVehInfo(*a);
++	const RailVehicleInfo *rvi_b = RailVehInfo(*b);
++
++	int va = GetTotalCapacityOfArticulatedParts(*a) * (rvi_a->railveh_type == RAILVEH_MULTIHEAD ? 2 : 1);
++	int vb = GetTotalCapacityOfArticulatedParts(*b) * (rvi_b->railveh_type == RAILVEH_MULTIHEAD ? 2 : 1);
++	int r = va - vb;
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++/**
++ * Determines order of train engines by engine / wagon
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL TrainEnginesThenWagonsSorter(const EngineID *a, const EngineID *b)
++{
++	int val_a = (RailVehInfo(*a)->railveh_type == RAILVEH_WAGON ? 1 : 0);
++	int val_b = (RailVehInfo(*b)->railveh_type == RAILVEH_WAGON ? 1 : 0);
++	int r = val_a - val_b;
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++/* Road vehicle sorting functions */
++
++/**
++ * Determines order of road vehicles by capacity
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL RoadVehEngineCapacitySorter(const EngineID *a, const EngineID *b)
++{
++	int va = GetTotalCapacityOfArticulatedParts(*a);
++	int vb = GetTotalCapacityOfArticulatedParts(*b);
++	int r = va - vb;
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++/* Ship vehicle sorting functions */
++
++/**
++ * Determines order of ships by capacity
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL ShipEngineCapacitySorter(const EngineID *a, const EngineID *b)
++{
++	const Engine *e_a = Engine::Get(*a);
++	const Engine *e_b = Engine::Get(*b);
++
++	int va = e_a->GetDisplayDefaultCapacity();
++	int vb = e_b->GetDisplayDefaultCapacity();
++	int r = va - vb;
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++/* Aircraft sorting functions */
++
++/**
++ * Determines order of aircraft by cargo
++ * @param *a first engine to compare
++ * @param *b second engine to compare
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal
++ */
++static int CDECL AircraftEngineCargoSorter(const EngineID *a, const EngineID *b)
++{
++	const Engine *e_a = Engine::Get(*a);
++	const Engine *e_b = Engine::Get(*b);
++
++	uint16 mail_a, mail_b;
++	int va = e_a->GetDisplayDefaultCapacity(&mail_a);
++	int vb = e_b->GetDisplayDefaultCapacity(&mail_b);
++	int r = va - vb;
++
++	if (r == 0) {
++		/* The planes have the same passenger capacity. Check mail capacity instead */
++		r = mail_a - mail_b;
++
++		if (r == 0) {
++			/* Use EngineID to sort instead since we want consistent sorting */
++			return EngineNumberSorter(a, b);
++		}
++	}
++	return _internal_sort_order ? -r : r;
++}
++
++/**
++ * Determines order of aircraft by range.
++ * @param *a first engine to compare.
++ * @param *b second engine to compare.
++ * @return for descending order: returns < 0 if a < b and > 0 for a > b. Vice versa for ascending order and 0 for equal.
++ */
++static int CDECL AircraftRangeSorter(const EngineID *a, const EngineID *b)
++{
++	uint16 r_a = Engine::Get(*a)->GetRange();
++	uint16 r_b = Engine::Get(*b)->GetRange();
++
++	int r = r_a - r_b;
++
++	/* Use EngineID to sort instead since we want consistent sorting */
++	if (r == 0) return EngineNumberSorter(a, b);
++	return _internal_sort_order ? -r : r;
++}
++
++static EngList_SortTypeFunction * const _sorter[][11] = {{
++	/* Trains */
++	&EngineNumberSorter,
++	&EngineCostSorter,
++	&EngineSpeedSorter,
++	&EnginePowerSorter,
++	&EngineTractiveEffortSorter,
++	&EngineIntroDateSorter,
++	&EngineNameSorter,
++	&EngineRunningCostSorter,
++	&EnginePowerVsRunningCostSorter,
++	&EngineReliabilitySorter,
++	&TrainEngineCapacitySorter,
++}, {
++	/* Road vehicles */
++	&EngineNumberSorter,
++	&EngineCostSorter,
++	&EngineSpeedSorter,
++	&EnginePowerSorter,
++	&EngineTractiveEffortSorter,
++	&EngineIntroDateSorter,
++	&EngineNameSorter,
++	&EngineRunningCostSorter,
++	&EnginePowerVsRunningCostSorter,
++	&EngineReliabilitySorter,
++	&RoadVehEngineCapacitySorter,
++}, {
++	/* Ships */
++	&EngineNumberSorter,
++	&EngineCostSorter,
++	&EngineSpeedSorter,
++	&EngineIntroDateSorter,
++	&EngineNameSorter,
++	&EngineRunningCostSorter,
++	&EngineReliabilitySorter,
++	&ShipEngineCapacitySorter,
++}, {
++	/* Aircraft */
++	&EngineNumberSorter,
++	&EngineCostSorter,
++	&EngineSpeedSorter,
++	&EngineIntroDateSorter,
++	&EngineNameSorter,
++	&EngineRunningCostSorter,
++	&EngineReliabilitySorter,
++	&AircraftEngineCargoSorter,
++	&AircraftRangeSorter,
++}};
++
++static const StringID _sort_listing[][12] = {{
++	/* Trains */
++	STR_SORT_BY_ENGINE_ID,
++	STR_SORT_BY_COST,
++	STR_SORT_BY_MAX_SPEED,
++	STR_SORT_BY_POWER,
++	STR_SORT_BY_TRACTIVE_EFFORT,
++	STR_SORT_BY_INTRO_DATE,
++	STR_SORT_BY_NAME,
++	STR_SORT_BY_RUNNING_COST,
++	STR_SORT_BY_POWER_VS_RUNNING_COST,
++	STR_SORT_BY_RELIABILITY,
++	STR_SORT_BY_CARGO_CAPACITY,
++	INVALID_STRING_ID
++}, {
++	/* Road vehicles */
++	STR_SORT_BY_ENGINE_ID,
++	STR_SORT_BY_COST,
++	STR_SORT_BY_MAX_SPEED,
++	STR_SORT_BY_POWER,
++	STR_SORT_BY_TRACTIVE_EFFORT,
++	STR_SORT_BY_INTRO_DATE,
++	STR_SORT_BY_NAME,
++	STR_SORT_BY_RUNNING_COST,
++	STR_SORT_BY_POWER_VS_RUNNING_COST,
++	STR_SORT_BY_RELIABILITY,
++	STR_SORT_BY_CARGO_CAPACITY,
++	INVALID_STRING_ID
++}, {
++	/* Ships */
++	STR_SORT_BY_ENGINE_ID,
++	STR_SORT_BY_COST,
++	STR_SORT_BY_MAX_SPEED,
++	STR_SORT_BY_INTRO_DATE,
++	STR_SORT_BY_NAME,
++	STR_SORT_BY_RUNNING_COST,
++	STR_SORT_BY_RELIABILITY,
++	STR_SORT_BY_CARGO_CAPACITY,
++	INVALID_STRING_ID
++}, {
++	/* Aircraft */
++	STR_SORT_BY_ENGINE_ID,
++	STR_SORT_BY_COST,
++	STR_SORT_BY_MAX_SPEED,
++	STR_SORT_BY_INTRO_DATE,
++	STR_SORT_BY_NAME,
++	STR_SORT_BY_RUNNING_COST,
++	STR_SORT_BY_RELIABILITY,
++	STR_SORT_BY_CARGO_CAPACITY,
++	STR_SORT_BY_RANGE,
++	INVALID_STRING_ID
++}};
++
++/** Cargo filter functions */
++static bool CDECL CargoFilter(const EngineID *eid, const CargoID cid)
++{
++	if (cid == CF_ANY) return true;
++	uint32 refit_mask = GetUnionOfArticulatedRefitMasks(*eid, true) & _standard_cargo_mask;
++	return (cid == CF_NONE ? refit_mask == 0 : HasBit(refit_mask, cid));
++}
++
++static GUIEngineList::FilterFunction * const _filter_funcs[] = {
++	&CargoFilter,
++};
++
++/**
+  * Rebuild the left autoreplace list if an engine is removed or added
+  * @param e Engine to check if it is removed or added
+  * @param id_g The group the engine belongs to
+@@ -78,13 +517,19 @@
+  * Window for the autoreplacing of vehicles.
+  */
+ class ReplaceVehicleWindow : public Window {
+-	EngineID sel_engine[2];       ///< Selected engine left and right.
+-	GUIEngineList engines[2];     ///< Left and right list of engines.
+-	bool replace_engines;         ///< If \c true, engines are replaced, if \c false, wagons are replaced (only for trains).
+-	bool reset_sel_engine;        ///< Also reset #sel_engine while updating left and/or right (#update_left and/or #update_right) and no valid engine selected.
+-	GroupID sel_group;            ///< Group selected to replace.
+-	int details_height;           ///< Minimal needed height of the details panels (found so far).
+-	RailType sel_railtype;        ///< Type of rail tracks selected.
++	EngineID sel_engine[2];                     ///< Selected engine left and right.
++	GUIEngineList engines[2];                   ///< Left and right list of engines.
++	bool replace_engines;                       ///< If \c true, engines are replaced, if \c false, wagons are replaced (only for trains).
++	bool reset_sel_engine;                      ///< Also reset #sel_engine while updating left and/or right (#update_left and/or #update_right) and no valid engine selected.
++	GroupID sel_group;                          ///< Group selected to replace.
++	int details_height;                         ///< Minimal needed height of the details panels (found so far).
++	RailType sel_railtype;                      ///< Type of rail tracks selected.
++	bool descending_sort_order;                 ///< For sorting list of potential replacement vehicles.
++	VehicleType vehicle_type;                   ///< Tracking settings for vehicle type.
++	byte sort_criteria;                         ///< Criteria for choosing sorting method of potential replacement vehicles.
++	CargoID cargo_filter[NUM_CARGO + 2];        ///< Available cargo filters; CargoID or CF_ANY or CF_NONE
++	StringID cargo_filter_texts[NUM_CARGO + 3]; ///< Texts for filter_cargo, terminated by INVALID_STRING_ID
++	byte cargo_filter_criteria;                 ///< Selected cargo filter
+ 	Scrollbar *vscroll[2];
+ 
+ 	/**
+@@ -143,6 +588,66 @@
+ 		EngList_Sort(list, &EngineNumberSorter);
+ 	}
+ 
++	/** Populate the filter list and set the cargo filter criteria. */
++	void SetCargoFilterArray()
++	{
++		uint filter_items = 0;
++
++		/* Add item for disabling filtering. */
++		this->cargo_filter[filter_items] = CF_ANY;
++		this->cargo_filter_texts[filter_items] = STR_PURCHASE_INFO_ALL_TYPES;
++		filter_items++;
++
++		/* Add item for vehicles not carrying anything, e.g. train engines.
++		 * This could also be useful for eyecandy vehicles of other types, but is likely too confusing for joe, */
++		if (this->vehicle_type == VEH_TRAIN) {
++			this->cargo_filter[filter_items] = CF_NONE;
++			this->cargo_filter_texts[filter_items] = STR_LAND_AREA_INFORMATION_LOCAL_AUTHORITY_NONE;
++			filter_items++;
++		}
++
++		/* Collect available cargo types for filtering. */
++		const CargoSpec *cs;
++		FOR_ALL_SORTED_STANDARD_CARGOSPECS(cs) {
++			this->cargo_filter[filter_items] = cs->Index();
++			this->cargo_filter_texts[filter_items] = cs->name;
++			filter_items++;
++		}
++
++		/* Terminate the filter list. */
++		this->cargo_filter_texts[filter_items] = INVALID_STRING_ID;
++
++		/* If not found, the cargo criteria will be set to all cargoes. */
++		this->cargo_filter_criteria = 0;
++
++		/* Find the last cargo filter criteria. */
++		for (uint i = 0; i < filter_items; i++) {
++			if (this->cargo_filter[i] == _last_filter_criteria[this->vehicle_type]) {
++				this->cargo_filter_criteria = i;
++				break;
++			}
++		}
++
++		this->engines[1].SetFilterFuncs(_filter_funcs);
++		this->engines[1].SetFilterState(this->cargo_filter[this->cargo_filter_criteria] != CF_ANY);
++	}
++
++	void OnInit()
++	{
++		this->SetCargoFilterArray();
++	}
++
++	/** Filter the engine list against the currently selected cargo filter */
++	void FilterEngineList()
++	{
++		this->engines[1].Filter(this->cargo_filter[this->cargo_filter_criteria]);
++		if (0 == this->engines[1].Length()) { // no engine passed through the filter, invalidate the previously selected engine
++			this->sel_engine[1] = INVALID_ENGINE;
++		} else if (!this->engines[1].Contains(this->sel_engine[1])) { // previously selected engine didn't pass the filter, select the first engine of the list
++			this->sel_engine[1] = this->engines[1][0];
++		}
++	}
++
+ 	/** Generate the lists */
+ 	void GenerateLists()
+ 	{
+@@ -170,6 +675,11 @@
+ 					this->sel_engine[1] = this->engines[1][0];
+ 				}
+ 			}
++
++			this->FilterEngineList();
++
++			_internal_sort_order = this->descending_sort_order;
++			EngList_Sort(&this->engines[1], _sorter[this->vehicle_type][this->sort_criteria]);
+ 		}
+ 		/* Reset the flags about needed updates */
+ 		this->engines[0].RebuildDone();
+@@ -191,6 +701,7 @@
+ public:
+ 	ReplaceVehicleWindow(WindowDesc *desc, VehicleType vehicletype, GroupID id_g) : Window(desc)
+ 	{
++		vehicle_type = vehicletype;
+ 		if (vehicletype == VEH_TRAIN) {
+ 			/* For rail vehicles find the most used vehicle type, which is usually
+ 			 * better than 'just' the first/previous vehicle type. */
+@@ -209,6 +720,9 @@
+ 			}
+ 		}
+ 
++		this->sort_criteria         = _last_sort_criteria[vehicletype];
++		this->descending_sort_order = _last_sort_order[vehicletype];
++
+ 		this->replace_engines  = true; // start with locomotives (all other vehicles will not read this bool)
+ 		this->engines[0].ForceRebuild();
+ 		this->engines[1].ForceRebuild();
+@@ -240,6 +754,14 @@
+ 				size->height = this->details_height;
+ 				break;
+ 
++			case WID_RV_SORT_ASSENDING_DESCENDING: {
++				Dimension d = GetStringBoundingBox(this->GetWidget<NWidgetCore>(widget)->widget_data);
++				d.width += padding.width + WD_SORTBUTTON_ARROW_WIDTH * 2; // Doubled since the string is centred and it also looks better.
++				d.height += padding.height;
++				*size = maxdim(*size, d);
++				break;
++			}
++
+ 			case WID_RV_TRAIN_WAGONREMOVE_TOGGLE: {
+ 				StringID str = this->GetWidget<NWidgetCore>(widget)->widget_data;
+ 				SetDParam(0, STR_CONFIG_SETTING_ON);
+@@ -323,6 +845,14 @@
+ 				}
+ 				break;
+ 
++			case WID_RV_SORT_DROPDOWN:
++				SetDParam(0, _sort_listing[this->vehicle_type][this->sort_criteria]);
++				break;
++
++			case WID_RV_CARGO_FILTER_DROPDOWN:
++				SetDParam(0, this->cargo_filter_texts[this->cargo_filter_criteria]);
++				break;
++
+ 			case WID_RV_TRAIN_WAGONREMOVE_TOGGLE: {
+ 				const Company *c = Company::Get(_local_company);
+ 				SetDParam(0, c->settings.renew_keep_length ? STR_CONFIG_SETTING_ON : STR_CONFIG_SETTING_OFF);
+@@ -357,6 +887,10 @@
+ 				break;
+ 			}
+ 
++			case WID_RV_SORT_ASSENDING_DESCENDING:
++				this->DrawSortButtonState(WID_RV_SORT_ASSENDING_DESCENDING, this->descending_sort_order ? SBS_DOWN : SBS_UP);
++				break;
++
+ 			case WID_RV_LEFT_MATRIX:
+ 			case WID_RV_RIGHT_MATRIX: {
+ 				int side = (widget == WID_RV_LEFT_MATRIX) ? 0 : 1;
+@@ -432,6 +966,35 @@
+ 				this->SetDirty();
+ 				break;
+ 
++			case WID_RV_SORT_ASSENDING_DESCENDING:
++				this->descending_sort_order ^= true;
++				_last_sort_order[this->vehicle_type] = this->descending_sort_order;
++				this->engines[1].ForceRebuild();
++				this->SetDirty();
++				break;
++
++			case WID_RV_SORT_DROPDOWN: { // Select sorting criteria dropdown menu
++				uint32 hidden_mask = 0;
++				/* Disable sorting by power or tractive effort when the original acceleration model for road vehicles is being used. */
++				if (this->vehicle_type == VEH_ROAD &&
++						_settings_game.vehicle.roadveh_acceleration_model == AM_ORIGINAL) {
++					SetBit(hidden_mask, 3); // power
++					SetBit(hidden_mask, 4); // tractive effort
++					SetBit(hidden_mask, 8); // power by running costs
++				}
++				/* Disable sorting by tractive effort when the original acceleration model for trains is being used. */
++				if (this->vehicle_type == VEH_TRAIN &&
++						_settings_game.vehicle.train_acceleration_model == AM_ORIGINAL) {
++					SetBit(hidden_mask, 4); // tractive effort
++				}
++				ShowDropDownMenu(this, _sort_listing[this->vehicle_type], this->sort_criteria, WID_RV_SORT_DROPDOWN, 0, hidden_mask);
++				break;
++			}
++
++			case WID_RV_CARGO_FILTER_DROPDOWN: // Select cargo filtering criteria dropdown menu
++				ShowDropDownMenu(this, this->cargo_filter_texts, this->cargo_filter_criteria, WID_RV_CARGO_FILTER_DROPDOWN, 0, 0);
++				break;
++
+ 			case WID_RV_TRAIN_RAILTYPE_DROPDOWN: // Railtype selection dropdown menu
+ 				ShowDropDownList(this, GetRailTypeDropDownList(true), sel_railtype, WID_RV_TRAIN_RAILTYPE_DROPDOWN);
+ 				break;
+@@ -495,14 +1058,32 @@
+ 				this->engines[0].ForceRebuild();
+ 				this->engines[1].ForceRebuild();
+ 				this->reset_sel_engine = true;
+-				this->SetDirty();
+ 				break;
+ 			}
+ 
++			case WID_RV_SORT_DROPDOWN:
++				if (this->sort_criteria != index) {
++					this->sort_criteria = index;
++					_last_sort_criteria[this->vehicle_type] = this->sort_criteria;
++					this->engines[1].ForceRebuild();
++				}
++				break;
++
++			case WID_RV_CARGO_FILTER_DROPDOWN: // Select a cargo filter criteria
++				if (this->cargo_filter_criteria != index) {
++					this->cargo_filter_criteria = index;
++					_last_filter_criteria[this->vehicle_type] = this->cargo_filter[this->cargo_filter_criteria];
++					/* deactivate filter if criteria is 'Show All', activate it otherwise */
++					this->engines[1].SetFilterState(this->cargo_filter[this->cargo_filter_criteria] != CF_ANY);
++					this->engines[1].ForceRebuild();
++				}
++				break;
++
+ 			case WID_RV_START_REPLACE:
+ 				this->ReplaceClick_StartReplace(index != 0);
+ 				break;
+ 		}
++		this->SetDirty();
+ 	}
+ 
+ 	virtual void OnResize()
+@@ -538,7 +1119,21 @@
+ 	NWidget(NWID_HORIZONTAL, NC_EQUALSIZE),
+ 		NWidget(WWT_MATRIX, COLOUR_GREY, WID_RV_LEFT_MATRIX), SetMinimalSize(216, 0), SetFill(1, 1), SetMatrixDataTip(1, 0, STR_REPLACE_HELP_LEFT_ARRAY), SetResize(1, 1), SetScrollbar(WID_RV_LEFT_SCROLLBAR),
+ 		NWidget(NWID_VSCROLLBAR, COLOUR_GREY, WID_RV_LEFT_SCROLLBAR),
+-		NWidget(WWT_MATRIX, COLOUR_GREY, WID_RV_RIGHT_MATRIX), SetMinimalSize(216, 0), SetFill(1, 1), SetMatrixDataTip(1, 0, STR_REPLACE_HELP_RIGHT_ARRAY), SetResize(1, 1), SetScrollbar(WID_RV_RIGHT_SCROLLBAR),
++			NWidget(WWT_PANEL, COLOUR_GREY),
++			NWidget(NWID_VERTICAL),
++				NWidget(NWID_HORIZONTAL),
++					NWidget(NWID_VERTICAL),
++						NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_RV_SORT_ASSENDING_DESCENDING), SetDataTip(STR_BUTTON_SORT_BY, STR_TOOLTIP_SORT_ORDER), SetFill(1, 0),
++						NWidget(NWID_SPACER), SetFill(1, 1),
++					EndContainer(),
++					NWidget(NWID_VERTICAL),
++						NWidget(WWT_DROPDOWN, COLOUR_GREY, WID_RV_SORT_DROPDOWN), SetResize(1, 0), SetFill(1, 0), SetDataTip(STR_JUST_STRING, STR_TOOLTIP_SORT_CRITERIA),
++						NWidget(WWT_DROPDOWN, COLOUR_GREY, WID_RV_CARGO_FILTER_DROPDOWN), SetResize(1, 0), SetFill(1, 0), SetDataTip(STR_JUST_STRING, STR_TOOLTIP_FILTER_CRITERIA),
++					EndContainer(),
++				EndContainer(),
++				NWidget(WWT_MATRIX, COLOUR_GREY, WID_RV_RIGHT_MATRIX), SetMinimalSize(216, 0), SetFill(1, 1), SetMatrixDataTip(1, 0, STR_REPLACE_HELP_RIGHT_ARRAY), SetResize(1, 1), SetScrollbar(WID_RV_RIGHT_SCROLLBAR),
++			EndContainer(),
++		EndContainer(),
+ 		NWidget(NWID_VSCROLLBAR, COLOUR_GREY, WID_RV_RIGHT_SCROLLBAR),
+ 	EndContainer(),
+ 	NWidget(NWID_HORIZONTAL, NC_EQUALSIZE),
+@@ -579,7 +1174,21 @@
+ 	NWidget(NWID_HORIZONTAL, NC_EQUALSIZE),
+ 		NWidget(WWT_MATRIX, COLOUR_GREY, WID_RV_LEFT_MATRIX), SetMinimalSize(216, 0), SetFill(1, 1), SetMatrixDataTip(1, 0, STR_REPLACE_HELP_LEFT_ARRAY), SetResize(1, 1), SetScrollbar(WID_RV_LEFT_SCROLLBAR),
+ 		NWidget(NWID_VSCROLLBAR, COLOUR_GREY, WID_RV_LEFT_SCROLLBAR),
+-		NWidget(WWT_MATRIX, COLOUR_GREY, WID_RV_RIGHT_MATRIX), SetMinimalSize(216, 0), SetFill(1, 1), SetMatrixDataTip(1, 0, STR_REPLACE_HELP_RIGHT_ARRAY), SetResize(1, 1), SetScrollbar(WID_RV_RIGHT_SCROLLBAR),
++			NWidget(WWT_PANEL, COLOUR_GREY),
++			NWidget(NWID_VERTICAL),
++				NWidget(NWID_HORIZONTAL),
++					NWidget(NWID_VERTICAL),
++						NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_RV_SORT_ASSENDING_DESCENDING), SetDataTip(STR_BUTTON_SORT_BY, STR_TOOLTIP_SORT_ORDER), SetFill(1, 0),
++						NWidget(NWID_SPACER), SetFill(1, 1),
++					EndContainer(),
++					NWidget(NWID_VERTICAL),
++						NWidget(WWT_DROPDOWN, COLOUR_GREY, WID_RV_SORT_DROPDOWN), SetResize(1, 0), SetFill(1, 0), SetDataTip(STR_JUST_STRING, STR_TOOLTIP_SORT_CRITERIA),
++						NWidget(WWT_DROPDOWN, COLOUR_GREY, WID_RV_CARGO_FILTER_DROPDOWN), SetResize(1, 0), SetFill(1, 0), SetDataTip(STR_JUST_STRING, STR_TOOLTIP_FILTER_CRITERIA),
++					EndContainer(),
++				EndContainer(),
++				NWidget(WWT_MATRIX, COLOUR_GREY, WID_RV_RIGHT_MATRIX), SetMinimalSize(216, 0), SetFill(1, 1), SetMatrixDataTip(1, 0, STR_REPLACE_HELP_RIGHT_ARRAY), SetResize(1, 1), SetScrollbar(WID_RV_RIGHT_SCROLLBAR),
++			EndContainer(),
++		EndContainer(),
+ 		NWidget(NWID_VSCROLLBAR, COLOUR_GREY, WID_RV_RIGHT_SCROLLBAR),
+ 	EndContainer(),
+ 	NWidget(NWID_HORIZONTAL, NC_EQUALSIZE),
+Index: src/widgets/autoreplace_widget.h
+===================================================================
+--- src/widgets/autoreplace_widget.h	(revision 25732)
++++ src/widgets/autoreplace_widget.h	(working copy)
+@@ -24,6 +24,10 @@
+ 	WID_RV_LEFT_DETAILS,             ///< Details of the entry on the left.
+ 	WID_RV_RIGHT_DETAILS,            ///< Details of the entry on the right.
+ 
++	WID_RV_SORT_ASSENDING_DESCENDING, ///< Sort direction.
++	WID_RV_SORT_DROPDOWN,             ///< Criteria of sorting dropdown.
++	WID_RV_CARGO_FILTER_DROPDOWN,     ///< Dropdown to sort potential vehicles by cargo type
++
+ 	/* Button row. */
+ 	WID_RV_START_REPLACE,            ///< Start Replacing button.
+ 	WID_RV_INFO_TAB,                 ///< Info tab.

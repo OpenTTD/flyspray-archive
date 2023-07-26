@@ -1,0 +1,168 @@
+Index: src/viewport_func.h
+===================================================================
+--- src/viewport_func.h	(revision 12737)
++++ src/viewport_func.h	(working copy)
+@@ -12,7 +12,6 @@
+ 
+ void SetSelectionRed(bool);
+ 
+-void InitViewports();
+ void DeleteWindowViewport(Window *w);
+ void AssignWindowViewport(Window *w, int x, int y, int width, int height, uint32 follow_flags, ZoomLevel zoom);
+ ViewPort *IsPtInWindowViewport(const Window *w, int x, int y);
+Index: src/window_gui.h
+===================================================================
+--- src/window_gui.h	(revision 12737)
++++ src/window_gui.h	(working copy)
+@@ -409,6 +409,7 @@
+ 	int32 scrollpos_y;
+ 	int32 dest_scrollpos_x;
+ 	int32 dest_scrollpos_y;
++	ViewPort vp_data;          ///< Screen position and zoom of the viewport
+ };
+ assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(vp_d));
+ 
+Index: src/window.cpp
+===================================================================
+--- src/window.cpp	(revision 12737)
++++ src/window.cpp	(working copy)
+@@ -1037,7 +1037,6 @@
+ 	IConsoleClose();
+ 
+ 	_last_z_window = _z_windows;
+-	InitViewports();
+ 	_no_scroll = 0;
+ }
+ 
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 12737)
++++ src/viewport.cpp	(working copy)
+@@ -1,6 +1,22 @@
+ /* $Id$ */
+ 
+-/** @file viewport.cpp */
++/** @file viewport.cpp
++ *
++ * \verbatim
++ * The in-game coordinate system looks like this *
++ *                                               *
++ *                    ^ Z                        *
++ *                    |                          *
++ *                    |                          *
++ *                    |                          *
++ *                    |                          *
++ *                 /     \                       *
++ *              /           \                    *
++ *           /                 \                 *
++ *        /                       \              *
++ *   X <                             > Y         *
++ * \endverbatim
++ */
+ 
+ #include "stdafx.h"
+ #include "openttd.h"
+@@ -42,39 +58,6 @@
+ Point _tile_fract_coords;
+ ZoomLevel _saved_scrollpos_zoom;
+ 
+-/**
+- * The maximum number of viewports depends on the maximum number
+- * of windows. Technically is could be the maximum number of
+- * windows, but there is always at least one window that does
+- * not need a viewport. Not having 'support' for that viewport
+- * saves some time and memory.
+- * For the introduction GUI and create game GUIs there is no
+- * need for more than one viewport, however in the normal game
+- * and scenario editor one can make a lot of viewports. For the
+- * normal game one always has a main toolbar and a status bar,
+- * however the statusbar does not exist on the scenario editor.
+- *
+- * This means that we can only safely assume that there is one
+- * window without viewport.
+- */
+-static ViewPort _viewports[MAX_NUMBER_OF_WINDOWS - 1];
+-static uint32 _active_viewports;    ///< bitmasked variable where each bit signifies if a viewport is in use or not
+-assert_compile(lengthof(_viewports) < sizeof(_active_viewports) * 8);
+-
+-/* The in-game coordiante system looks like this *
+- *                                               *
+- *                    ^ Z                        *
+- *                    |                          *
+- *                    |                          *
+- *                    |                          *
+- *                    |                          *
+- *                 /     \                       *
+- *              /           \                    *
+- *           /                 \                 *
+- *        /                       \              *
+- *   X <                             > Y         *
+- */
+-
+ struct StringSpriteToDraw {
+ 	uint16 string;
+ 	uint16 color;
+@@ -178,15 +161,8 @@
+ 	return p;
+ }
+ 
+-void InitViewports()
+-{
+-	memset(_viewports, 0, sizeof(_viewports));
+-	_active_viewports = 0;
+-}
+-
+ void DeleteWindowViewport(Window *w)
+ {
+-	ClrBit(_active_viewports, w->viewport - _viewports);
+ 	w->viewport->width = 0;
+ 	w->viewport = NULL;
+ }
+@@ -194,15 +170,9 @@
+ void AssignWindowViewport(Window *w, int x, int y,
+ 	int width, int height, uint32 follow_flags, ZoomLevel zoom)
+ {
+-	ViewPort *vp;
+-	Point pt;
+-	uint32 bit;
++	assert(w->viewport == NULL);
+ 
+-	for (vp = _viewports, bit = 0; ; vp++, bit++) {
+-		assert(vp != endof(_viewports));
+-		if (vp->width == 0) break;
+-	}
+-	SetBit(_active_viewports, bit);
++	ViewPort *vp = &(WP(w, vp_d).vp_data);
+ 
+ 	vp->left = x + w->left;
+ 	vp->top = y + w->top;
+@@ -214,6 +184,8 @@
+ 	vp->virtual_width = ScaleByZoom(width, zoom);
+ 	vp->virtual_height = ScaleByZoom(height, zoom);
+ 
++	Point pt;
++
+ 	if (follow_flags & 0x80000000) {
+ 		const Vehicle *veh;
+ 
+@@ -1699,14 +1671,15 @@
+ 
+ void MarkAllViewportsDirty(int left, int top, int right, int bottom)
+ {
+-	const ViewPort *vp = _viewports;
+-	uint32 act = _active_viewports;
+-	do {
+-		if (act & 1) {
++	Window **wz;
++
++	FOR_ALL_WINDOWS(wz) {
++		ViewPort *vp = (*wz)->viewport;
++		if (vp != NULL) {
+ 			assert(vp->width != 0);
+ 			MarkViewportDirty(vp, left, top, right, bottom);
+ 		}
+-	} while (vp++,act>>=1);
++	}
+ }
+ 
+ void MarkTileDirtyByTile(TileIndex tile)

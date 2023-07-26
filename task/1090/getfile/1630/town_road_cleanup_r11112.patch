@@ -1,0 +1,454 @@
+=== src/road.h
+==================================================================
+--- src/road.h	(/trunk)	(revision 438)
++++ src/road.h	(/branch/town_cleanup)	(revision 438)
+@@ -116,6 +116,36 @@
+ }
+ 
+ /**
++ * Calculate the mirrored RoadBits
++ *
++ * Simply move the bits to their new position.
++ *
++ * @param r The given RoadBits value
++ * @return the mirrored
++ */
++static inline RoadBits MirrorRoadBits(RoadBits r)
++{
++	return (RoadBits)(GB(r, 0, 2) << 2 | GB(r,2,2));
++}
++
++/**
++ * Calculate rotated RoadBits
++ *
++ * Move the Roadbits clockwise til they are in their final position.
++ *
++ * @param r The given RoadBits value
++ * @param rot The given Rotation angle
++ * @return the rotated
++ */
++static inline RoadBits RotateRoadBits(RoadBits r, DiagDirDiff rot)
++{
++	for (; rot > (DiagDirDiff)0; rot--){
++		r = (RoadBits)(GB(r,0,1) << 3 | GB(r,1,3));
++	}
++	return r;
++}
++
++/**
+  * Create the road-part which belongs to the given DiagDirection
+  *
+  * This function returns a RoadBits value which belongs to
+@@ -130,6 +160,16 @@
+ }
+ 
+ /**
++ * Return if the tile is a valid tile for a crossing.
++ *
++ * @note function is overloaded
++ * @param tile the curent tile
++ * @param ax the axis of the road over the rail
++ * @return true if it is a valid tile
++ */
++bool IsPossibleCrossing(const TileIndex tile, Axis ax);
++
++/**
+  * Checks whether the trackdir means that we are reversing.
+  * @param dir the trackdir to check
+  * @return true if it is a reversing road trackdir
+@@ -150,6 +190,14 @@
+ }
+ 
+ /**
++ * Clean up unneccesary RoadBits of a planed tile.
++ * @param tile current tile
++ * @param org_rb planed RoadBits
++ * @return optimised RoadBits
++ */
++RoadBits CleanUpRoadBits(const TileIndex tile, RoadBits org_rb);
++
++/**
+  * Is it allowed to remove the given road bits from the given tile?
+  * @param tile      the tile to remove the road from
+  * @param remove    the roadbits that are going to be removed
+=== src/town_cmd.cpp
+==================================================================
+--- src/town_cmd.cpp	(/trunk)	(revision 438)
++++ src/town_cmd.cpp	(/branch/town_cleanup)	(revision 438)
+@@ -133,18 +133,6 @@
+ }
+ 
+ /**
+- * Move a TileIndex into a diagonal direction.
+- *
+- * @param tile The current tile
+- * @param dir The direction in which we want to step
+- * @return the moved tile
+- */
+-static inline TileIndex AddDiagDirToTileIndex(TileIndex tile, DiagDirection dir)
+-{
+-	return TILE_ADD(tile, TileOffsByDiagDir(dir));
+-}
+-
+-/**
+  * House Tile drawing handler.
+  * Part of the tile loop process
+  * @param ti TileInfo of the tile to draw
+@@ -832,7 +820,7 @@
+ 		case SLOPE_STEEP_S:
+ 		case SLOPE_STEEP_E:
+ 		case SLOPE_STEEP_N:
+-			rb_template = (dir == DIAGDIR_NE || dir == DIAGDIR_SW) ? ROAD_X : ROAD_Y;
++			rb_template = ROAD_NONE;
+ 			break;
+ 	}
+ 
+@@ -859,8 +847,8 @@
+ 	}
+ 
+ 	/* Check the tiles E,N,W and S of the current tile. */
+-	for (DiagDirection i = DIAGDIR_BEGIN; i < DIAGDIR_END; i++) {
+-		if (IsTileType(AddDiagDirToTileIndex(tile, i), MP_HOUSE)) {
++	for (DiagDirection dir = DIAGDIR_BEGIN; dir < DIAGDIR_END; dir++) {
++		if (IsTileType(TileAddDiagDir(tile, dir), MP_HOUSE)) {
+ 			counter++;
+ 		}
+ 
+@@ -930,14 +918,14 @@
+ 					do target_dir = RandomDiagDir(); while (target_dir == source_dir);
+ 				}
+ 
+-				if (!IsRoadAllowedHere(AddDiagDirToTileIndex(tile, target_dir), target_dir)) {
++				if (!IsRoadAllowedHere(TileAddDiagDir(tile, target_dir), target_dir)) {
+ 					/* A road is not allowed to continue the randomized road,
+ 					 *  return if the road we're trying to build is curved. */
+ 					if (target_dir != ReverseDiagDir(source_dir)) return;
+ 
+ 					/* Return if neither side of the new road is a house */
+-					if (!IsTileType(AddDiagDirToTileIndex(tile, ChangeDiagDir(target_dir, DIAGDIRDIFF_90RIGHT)), MP_HOUSE) &&
+-							!IsTileType(AddDiagDirToTileIndex(tile, ChangeDiagDir(target_dir, DIAGDIRDIFF_90LEFT)), MP_HOUSE)) {
++					if (!IsTileType(TileAddDiagDir(tile, ChangeDiagDir(target_dir, DIAGDIRDIFF_90RIGHT)), MP_HOUSE) &&
++							!IsTileType(TileAddDiagDir(tile, ChangeDiagDir(target_dir, DIAGDIRDIFF_90LEFT)), MP_HOUSE)) {
+ 						return;
+ 					}
+ 
+@@ -991,7 +979,7 @@
+ 		if (cur_rb & DiagDirToRoadBits(target_dir)) return;
+ 
+ 		/* This is the tile we will reach if we extend to this direction. */
+-		tmptile = AddDiagDirToTileIndex(tile, target_dir);
++		tmptile = TileAddDiagDir(tile, target_dir);
+ 
+ 		/* Don't walk into water. */
+ 		if (IsClearWaterTile(tmptile)) return;
+@@ -1005,7 +993,7 @@
+ 
+ 			case TL_3X3_GRID: /* Use 2x2 grid afterwards! */
+ 				/* Fill gap if house has enougth neighbors */
+-				tmptile2 = AddDiagDirToTileIndex(tmptile, target_dir);
++				tmptile2 = TileAddDiagDir(tmptile, target_dir);
+ 				if (AreNeighborsHouseTiles(tmptile2) && BuildTownHouse(t1, tmptile2)) {
+ 					_grow_town_result = -1;
+ 				}
+@@ -1017,7 +1005,7 @@
+ 
+ 			case TL_BETTER_ROADS: /* Use original afterwards! */
+ 				/* Fill gap if house has enougth neighbors */
+-				tmptile2 = AddDiagDirToTileIndex(tmptile, target_dir);
++				tmptile2 = TileAddDiagDir(tmptile, target_dir);
+ 				if (AreNeighborsHouseTiles(tmptile2) && BuildTownHouse(t1, tmptile2)) {
+ 					_grow_town_result = -1;
+ 				}
+@@ -1051,6 +1039,10 @@
+ 	/* Return if a water tile */
+ 	if (IsClearWaterTile(tile)) return;
+ 
++	/* Make the roads look nicer */
++	rcmd = CleanUpRoadBits(tile, rcmd);
++	if (rcmd == ROAD_NONE) return;
++
+ 	DiagDirection bridge_dir; ///< The direction of a bridge we maybe want to build
+ 	/* Determine direction of slope,
+ 	 *  and build a road if not a special slope. */
+@@ -1145,7 +1137,7 @@
+ 		/* Select a random bit from the blockmask, walk a step
+ 		 * and continue the search from there. */
+ 		do target_dir = RandomDiagDir(); while (!(cur_rb & DiagDirToRoadBits(target_dir)));
+-		tile = AddDiagDirToTileIndex(tile, target_dir);
++		tile = TileAddDiagDir(tile, target_dir);
+ 
+ 		if (IsTileType(tile, MP_ROAD)) {
+ 			/* Don't allow building over roads of other cities */
+=== src/map.h
+==================================================================
+--- src/map.h	(/trunk)	(revision 438)
++++ src/map.h	(/branch/town_cleanup)	(revision 438)
+@@ -390,6 +390,18 @@
+ }
+ 
+ /**
++ * Adds a DiagDir to a tile.
++ *
++ * @param tile The current tile
++ * @param dir The direction in which we want to step
++ * @return the moved tile
++ */
++static inline TileIndex TileAddDiagDir(TileIndex tile, DiagDirection dir)
++{
++	return TILE_ADD(tile, TileOffsByDiagDir(dir));
++}
++
++/**
+  * A callback function type for searching tiles.
+  *
+  * @param tile The tile to test
+=== src/road.cpp
+==================================================================
+--- src/road.cpp	(/trunk)	(revision 438)
++++ src/road.cpp	(/branch/town_cleanup)	(revision 438)
+@@ -0,0 +1,143 @@
++#include "stdafx.h"
++#include "openttd.h"
++#include "functions.h"
++#include "rail_map.h"
++#include "road.h"
++#include "road_map.h"
++#include "water_map.h"
++#include "macros.h"
++
++bool IsPossibleCrossing(const TileIndex tile, Axis ax)
++{
++	return (IsTileType(tile, MP_RAILWAY) &&
++		!HasSignals(tile) &&
++		GetTrackBits(tile) == (ax == AXIS_X ?  TRACK_BIT_Y : TRACK_BIT_X) &&
++		GetTileSlope(tile, NULL) == SLOPE_FLAT);
++}
++
++RoadBits CleanUpRoadBits(const TileIndex tile, RoadBits org_rb)
++{
++	RoadBits prefered_rb = ROAD_NONE;
++
++	for (DiagDirection dir = DIAGDIR_BEGIN ; dir < DIAGDIR_END ; dir++) {
++		const TileIndex neighbor_tile = TileAddDiagDir(tile, dir);
++
++		/* Get the Roadbit pointing to the neighbor_tile */
++		const RoadBits target_rb = DiagDirToRoadBits(dir);
++
++		/* If the roadbit is in the current plan */
++		if (org_rb & target_rb) {
++			bool connective = false;
++			const RoadBits mirrored_rb = MirrorRoadBits(target_rb);
++
++			switch (GetTileType(neighbor_tile)) {
++				/* Allways connective ones */
++				case MP_CLEAR: case MP_TREES:
++					connective = true;
++					break;
++
++				/* The conditionaly connective ones */
++				case MP_TUNNELBRIDGE:
++				case MP_STATION:
++				case MP_ROAD: {
++					const RoadBits neighbor_rb_road = GetAnyRoadBits(neighbor_tile, ROADTYPE_ROAD);
++					const RoadBits neighbor_rb_tram = GetAnyRoadBits(neighbor_tile, ROADTYPE_TRAM);
++
++					/* Accept only connective tiles */
++					connective = (neighbor_rb_road | neighbor_rb_tram) & mirrored_rb || COUNTBITS(neighbor_rb_road | neighbor_rb_tram) == 1;
++					/* Prefer road */
++					if (neighbor_rb_road & mirrored_rb) prefered_rb |= target_rb;
++
++				} break;
++
++				case MP_RAILWAY:
++					connective = IsPossibleCrossing(neighbor_tile, DiagDirToAxis(dir));
++					break;
++
++				case MP_WATER:
++					/* Check for real water tile */
++					connective = !IsWater(neighbor_tile);
++					break;
++
++				/* The defentetly not connective ones */
++				default: break;
++			}
++
++			/* If the neighbor tile is inconnective remove the planed road connection to it */
++			if (!connective) org_rb ^= target_rb;
++
++		}
++	}
++
++	/* Optimise the Roadbits for slopes */
++	RoadBits slope_rb[3]; ///< recommended RoadBits
++	switch (GetTileSlope(tile, NULL)) {
++		default:
++			/* No further calculation needed cause all
++			 *  directions are nice at such slopes. */
++			return org_rb;
++			break;
++
++		case SLOPE_N:
++			slope_rb[0] = ROAD_NW | ROAD_NE;
++			slope_rb[1] = ROAD_X;
++			slope_rb[2] = ROAD_Y;
++			break;
++
++		case SLOPE_W:
++			slope_rb[0] = ROAD_NW | ROAD_SW;
++			slope_rb[1] = ROAD_X;
++			slope_rb[2] = ROAD_Y;
++			break;
++
++		case SLOPE_S:
++			slope_rb[0] = ROAD_SW | ROAD_SE;
++			slope_rb[1] = ROAD_X;
++			slope_rb[2] = ROAD_Y;
++			break;
++
++		case SLOPE_E:
++			slope_rb[0] = ROAD_SE | ROAD_NE;
++			slope_rb[1] = ROAD_X;
++			slope_rb[2] = ROAD_Y;
++			break;
++
++		case SLOPE_NW:
++			slope_rb[0] = ROAD_X | ROAD_NW;
++			slope_rb[1] = ROAD_Y;
++			slope_rb[2] = ROAD_NONE;
++			break;
++
++		case SLOPE_SW:
++			slope_rb[0] = ROAD_Y | ROAD_SW;
++			slope_rb[1] = ROAD_X;
++			slope_rb[2] = ROAD_NONE;
++			break;
++
++		case SLOPE_SE:
++			slope_rb[0] = ROAD_X | ROAD_SE;
++			slope_rb[1] = ROAD_Y;
++			slope_rb[2] = ROAD_NONE;
++			break;
++
++		case SLOPE_NE:
++			slope_rb[0] = ROAD_Y | ROAD_NE;
++			slope_rb[1] = ROAD_X;
++			slope_rb[2] = ROAD_NONE;
++			break;
++	}
++
++	for (uint cur = 0; cur < 3; cur++) {
++
++		if (slope_rb[cur] == ROAD_ALL)
++			return org_rb;
++
++		if (slope_rb[cur] == ROAD_NONE && cur > 0)
++			return org_rb & slope_rb[cur - 1];
++
++		if (prefered_rb & slope_rb[cur])
++			return prefered_rb & slope_rb[cur];
++	}
++
++	return ROAD_NONE;
++}
+=== src/road_cmd.cpp
+==================================================================
+--- src/road_cmd.cpp	(/trunk)	(revision 438)
++++ src/road_cmd.cpp	(/branch/town_cleanup)	(revision 438)
+@@ -1182,8 +1182,8 @@
+ 
+ 	if (GetRoadTileType(tile) == ROAD_TILE_DEPOT) return;
+ 
++	const Town* t = ClosestTownFromTile(tile, (uint)-1);
+ 	if (!HasRoadWorks(tile)) {
+-		const Town* t = ClosestTownFromTile(tile, (uint)-1);
+ 		int grp = 0;
+ 
+ 		if (t != NULL) {
+@@ -1192,8 +1192,8 @@
+ 			/* Show an animation to indicate road work */
+ 			if (t->road_build_months != 0 &&
+ 					(DistanceManhattan(t->xy, tile) < 8 || grp != 0) &&
+-					GetRoadTileType(tile) == ROAD_TILE_NORMAL && (GetAllRoadBits(tile) == ROAD_X || GetAllRoadBits(tile) == ROAD_Y)) {
+-				if (GetTileSlope(tile, NULL) == SLOPE_FLAT && EnsureNoVehicleOnGround(tile) && CHANCE16(1, 20)) {
++					GetRoadTileType(tile) == ROAD_TILE_NORMAL && COUNTBITS(GetAllRoadBits(tile)) > 1 ) {
++				if (GetTileSlope(tile, NULL) == SLOPE_FLAT && EnsureNoVehicleOnGround(tile) && CHANCE16(1, 40)) {
+ 					StartRoadWorks(tile);
+ 
+ 					SndPlayTileFx(SND_21_JACKHAMMER, tile);
+@@ -1231,6 +1231,15 @@
+ 		}
+ 	} else if (IncreaseRoadWorksCounter(tile)) {
+ 		TerminateRoadWorks(tile);
++
++		/* Generate a nicer town surface */
++		const RoadBits old_rb = GetAnyRoadBits(tile, ROADTYPE_ROAD);
++		const RoadBits new_rb = CleanUpRoadBits(tile, old_rb);
++
++		if (old_rb != new_rb) {
++			DoCommand(tile, (old_rb ^ new_rb), t->index, DC_EXEC | DC_AUTO | DC_NO_WATER, CMD_REMOVE_ROAD);
++		}
++
+ 		MarkTileDirtyByTile(tile);
+ 	}
+ }
+=== src/direction.h
+==================================================================
+--- src/direction.h	(/trunk)	(revision 438)
++++ src/direction.h	(/branch/town_cleanup)	(revision 438)
+@@ -165,6 +165,9 @@
+ 	DIAGDIRDIFF_90LEFT  = 3         ///< 90 degrees left
+ };
+ 
++/** Allow incrementing of DiagDirDiff variables */
++DECLARE_POSTFIX_INCREMENT(DiagDirDiff);
++
+ /**
+  * Applies a difference on a DiagDirection
+  *
+=== projects/openttd.vcproj
+==================================================================
+--- projects/openttd.vcproj	(/trunk)	(revision 438)
++++ projects/openttd.vcproj	(/branch/town_cleanup)	(revision 438)
+@@ -327,6 +327,9 @@
+ 				RelativePath=".\..\src\rev.cpp">
+ 			</File>
+ 			<File
++				RelativePath=".\..\src\road.cpp">
++			</File>
++			<File
+ 				RelativePath=".\..\src\saveload.cpp">
+ 			</File>
+ 			<File
+=== projects/openttd_vs80.vcproj
+==================================================================
+--- projects/openttd_vs80.vcproj	(/trunk)	(revision 438)
++++ projects/openttd_vs80.vcproj	(/branch/town_cleanup)	(revision 438)
+@@ -668,6 +668,10 @@
+ 				>
+ 			</File>
+ 			<File
++				RelativePath=".\..\src\road.cpp"
++				>
++			</File>
++			<File
+ 				RelativePath=".\..\src\saveload.cpp"
+ 				>
+ 			</File>
+=== source.list
+==================================================================
+--- source.list	(/trunk)	(revision 438)
++++ source.list	(/branch/town_cleanup)	(revision 438)
+@@ -58,6 +58,7 @@
+ queue.cpp
+ rail.cpp
+ rev.cpp
++road.cpp
+ saveload.cpp
+ screenshot.cpp
+ #if SDL
+
+Property changes on: 
+___________________________________________________________________
+Name: svk:merge
+ +6aa0318a-3be1-0310-93fa-89fd2396df07:/trunk:11112
+

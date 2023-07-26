@@ -1,0 +1,647 @@
+Index: wlistitem2b/src/widgets/dropdown.cpp
+===================================================================
+--- wlistitem2b/src/widgets/dropdown.cpp	(revision 12790)
++++ wlistitem2b/src/widgets/dropdown.cpp	(working copy)
+@@ -354,7 +354,8 @@
+  */
+ void HideDropDownMenu(Window *pw)
+ {
+-	Window **wz;
++	WindowListItem wz;
++
+ 	FOR_ALL_WINDOWS(wz) {
+ 		if ((*wz)->window_class != WC_DROPDOWN_MENU) continue;
+ 
+Index: wlistitem2b/src/sound.cpp
+===================================================================
+--- wlistitem2b/src/sound.cpp	(revision 12790)
++++ wlistitem2b/src/sound.cpp	(working copy)
+@@ -217,7 +217,7 @@
+  */
+ static void SndPlayScreenCoordFx(SoundFx sound, int left, int right, int top, int bottom)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	if (msf.effect_vol == 0) return;
+ 
+Index: wlistitem2b/src/window_gui.h
+===================================================================
+--- wlistitem2b/src/window_gui.h	(revision 12790)
++++ wlistitem2b/src/window_gui.h	(working copy)
+@@ -5,6 +5,7 @@
+ #ifndef WINDOW_GUI_H
+ #define WINDOW_GUI_H
+ 
++#include <list>
+ #include "core/bitmath_func.hpp"
+ #include "vehicle_type.h"
+ #include "viewport_type.h"
+@@ -12,11 +13,6 @@
+ #include "strings_type.h"
+ #include "core/alloc_type.hpp"
+ 
+-/**
+- * The maximum number of windows that can be opened.
+- */
+-static const int MAX_NUMBER_OF_WINDOWS = 25;
+-
+ typedef void WindowProc(Window *w, WindowEvent *e);
+ 
+ /* How the resize system works:
+@@ -590,10 +586,16 @@
+ 
+ 
+ /* window.cpp */
+-extern Window *_z_windows[];
+-extern Window **_last_z_window;
+-#define FOR_ALL_WINDOWS(wz) for (wz = _z_windows; wz != _last_z_window; wz++)
++typedef std::list<Window*> WindowList;
++typedef WindowList::iterator WindowListItem;              ///< Iterating item in window list (from bottom to top)
++typedef WindowList::const_iterator WindowListItem_const;  ///< Constant iterating item in window list (from bottom to top)
++#define WindowListItem_BOTTOM() (_window_list.begin())
++#define WindowListItem_TOP()    (_window_list.end())
++#define FOR_ALL_WINDOWS(wz)     for (wz = WindowListItem_BOTTOM(); wz != WindowListItem_TOP(); wz++)
+ 
++extern WindowList _window_list;
++
++
+ extern Point _cursorpos_drag_start;
+ 
+ extern int _scrollbar_start_pos;
+@@ -617,7 +619,7 @@
+ void DeleteAllNonVitalWindows();
+ void HideVitalWindows();
+ void ShowVitalWindows();
+-Window **FindWindowZPosition(const Window *w);
++WindowListItem FindWindowZPosition(const Window *w);
+ 
+ void ScrollbarClickHandler(Window *w, const Widget *wi, int x, int y);
+ 
+Index: wlistitem2b/src/station_gui.cpp
+===================================================================
+--- wlistitem2b/src/station_gui.cpp	(revision 12790)
++++ wlistitem2b/src/station_gui.cpp	(working copy)
+@@ -189,7 +189,7 @@
+  */
+ static void SetStationListsFlag(StationListFlags sl_flag)
+ {
+-	Window *const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		Window *w = *wz;
+Index: wlistitem2b/src/window.cpp
+===================================================================
+--- wlistitem2b/src/window.cpp	(revision 12790)
++++ wlistitem2b/src/window.cpp	(working copy)
+@@ -27,12 +27,15 @@
+ static Window *_mouseover_last_w = NULL; ///< Window of the last MOUSEOVER event
+ 
+ /**
++ * The maximum number of windows that can be opened.
++ */
++static const unsigned int MAX_NUMBER_OF_WINDOWS = 25;
++
++/**
+  * List of windows opened at the screen.
+- * Uppermost window is at  _z_windows[_last_z_window - 1],
+- * bottom window is at _z_windows[0]
++ * Uppermost window is at _window_list.back(), bottom window is at _window_list.front().
+  */
+-Window *_z_windows[MAX_NUMBER_OF_WINDOWS];
+-Window **_last_z_window; ///< always points to the next free space in the z-array
++WindowList _window_list;
+ 
+ Point _cursorpos_drag_start;
+ 
+@@ -261,12 +264,12 @@
+  * @param right Right edge of the rectangle that should be repainted
+  * @param bottom Bottom edge of the rectangle that should be repainted
+  */
+-static void DrawOverlappedWindow(Window* const *wz, int left, int top, int right, int bottom)
++static void DrawOverlappedWindow(WindowListItem_const wz, int left, int top, int right, int bottom)
+ {
+-	Window* const *vz = wz;
++	WindowListItem_const vz = wz;
+ 
+-	while (++vz != _last_z_window) {
+-		const Window *v = *vz;
++	while (++vz != WindowListItem_TOP()) {
++		const Window *v = *vz;  // Window v is more to front in stack than window *wz
+ 
+ 		if (right > v->left &&
+ 				bottom > v->top &&
+@@ -325,7 +328,7 @@
+  */
+ void DrawOverlappedWindowForAll(int left, int top, int right, int bottom)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 	DrawPixelInfo bk;
+ 	_cur_dpi = &bk;
+ 
+@@ -371,7 +374,7 @@
+  * @return a Window pointer that is the child of w, or NULL otherwise */
+ static Window *FindChildWindow(const Window *w)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		Window *v = *wz;
+@@ -384,11 +387,12 @@
+ /** Find the z-value of a window. A window must already be open
+  * or the behaviour is undefined but function should never fail
+  * @param w window to query Z Position
+- * @return Pointer into the window-list at the position of \a w
++ * @return WindowListItem in the window-list at the position of \a w,
++ *         or WindowListItem_TOP if window not found
+  */
+-Window **FindWindowZPosition(const Window *w)
++WindowListItem FindWindowZPosition(const Window *w)
+ {
+-	Window **wz;
++	WindowListItem wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		if (*wz == w) return wz;
+@@ -396,7 +400,7 @@
+ 
+ 	DEBUG(misc, 3, "Window (cls %d, number %d) is not open, probably removed by recursive calls",
+ 		w->window_class, w->window_number);
+-	return NULL;
++	return WindowListItem_TOP();
+ }
+ 
+ /**
+@@ -429,12 +433,8 @@
+ 	/* Prevent Mouseover() from resetting mouse-over coordinates on a non-existing window */
+ 	if (_mouseover_last_w == w) _mouseover_last_w = NULL;
+ 
+-	/* Find the window in the z-array, and effectively remove it
+-	 * by moving all windows after it one to the left */
+-	Window **wz = FindWindowZPosition(w);
+-	if (wz == NULL) return;
+-	memmove(wz, wz + 1, (byte*)_last_z_window - (byte*)wz);
+-	_last_z_window--;
++	WindowListItem wz = FindWindowZPosition(w);  // Find and remove window from the window list
++	_window_list.erase(wz);
+ 
+ 	delete w;
+ }
+@@ -447,7 +447,7 @@
+  */
+ Window *FindWindowById(WindowClass cls, WindowNumber number)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		Window *w = *wz;
+@@ -473,7 +473,7 @@
+  */
+ void DeleteWindowByClass(WindowClass cls)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ restart_search:
+ 	/* When we find the window to delete, we need to restart the search
+@@ -494,7 +494,7 @@
+  * @param id PlayerID player identifier */
+ void DeletePlayerWindows(PlayerID id)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ restart_search:
+ 	/* When we find the window to delete, we need to restart the search
+@@ -519,7 +519,7 @@
+  * @param new_player PlayerID of the new owner of the window */
+ void ChangeWindowOwner(PlayerID old_player, PlayerID new_player)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		Window *w = *wz;
+@@ -575,21 +575,20 @@
+  */
+ static void BringWindowToFront(const Window *w)
+ {
+-	Window *tempz;
+-	Window **wz = FindWindowZPosition(w);
+-	Window **vz = _last_z_window;
++	WindowListItem wz = FindWindowZPosition(w);
++	WindowListItem vz = WindowListItem_TOP();
+ 
+ 	/* Bring the window just below the vital windows */
+ 	do {
+-		if (--vz < _z_windows) return;
++		if (vz == WindowListItem_BOTTOM()) return;
++		vz--;
+ 	} while (IsVitalWindow(*vz));
+ 
+ 	if (wz == vz) return; // window is already in the right position
+-	assert(wz < vz);
+ 
+-	tempz = *wz;
+-	memmove(wz, wz + 1, (byte*)vz - (byte*)wz);
+-	*vz = tempz;
++	vz++;
++	_window_list.insert(vz, *wz);  // Insert *wz just before vz
++	_window_list.erase(wz);
+ 
+ 	SetWindowDirty(w);
+ }
+@@ -603,7 +602,7 @@
+  */
+ static Window *FindDeletableWindow()
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		Window *w = *wz;
+@@ -623,7 +622,7 @@
+  */
+ static Window *ForceFindDeletableWindow()
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		Window *w = *wz;
+@@ -681,8 +680,8 @@
+ {
+ 	Window *w;
+ 
+-	/* We have run out of windows, close one and use that as the place for our new one */
+-	if (_last_z_window == endof(_z_windows)) {
++	/* We have too many open windows, close one first */
++	if (_window_list.size() >= MAX_NUMBER_OF_WINDOWS) {
+ 		w = FindDeletableWindow();
+ 		if (w == NULL) w = ForceFindDeletableWindow();
+ 		DeleteWindow(w);
+@@ -707,7 +706,7 @@
+ 	w->window_number = window_number;
+ 
+ 	{
+-		Window **wz = _last_z_window;
++		WindowListItem wz = WindowListItem_TOP();
+ 
+ 		/* Hacky way of specifying always-on-top windows. These windows are
+ 		 * always above other windows because they are moved below them.
+@@ -717,18 +716,28 @@
+ 		 * XXX - Yes, ugly, probably needs something like w->always_on_top flag
+ 		 * to implement correctly, but even then you need some kind of distinction
+ 		 * between on-top of chat/news and status windows, because these conflict */
+-		if (wz != _z_windows && w->window_class != WC_SEND_NETWORK_MSG && w->window_class != WC_HIGHSCORE && w->window_class != WC_ENDSCREEN) {
+-			if (FindWindowById(WC_MAIN_TOOLBAR, 0)     != NULL) wz--;
+-			if (FindWindowById(WC_STATUS_BAR, 0)       != NULL) wz--;
+-			if (FindWindowById(WC_NEWS_WINDOW, 0)      != NULL) wz--;
+-			if (FindWindowById(WC_SEND_NETWORK_MSG, 0) != NULL) wz--;
+-
+-			assert(wz >= _z_windows);
+-			if (wz != _last_z_window) memmove(wz + 1, wz, (byte*)_last_z_window - (byte*)wz);
++		if (wz != WindowListItem_BOTTOM() &&
++					w->window_class != WC_SEND_NETWORK_MSG &&
++					w->window_class != WC_HIGHSCORE &&
++					w->window_class != WC_ENDSCREEN) {
++			if (FindWindowById(WC_MAIN_TOOLBAR, 0)     != NULL) {
++				assert(wz != WindowListItem_BOTTOM());
++				wz--;
++			}
++			if (FindWindowById(WC_STATUS_BAR, 0)       != NULL) {
++				assert(wz != WindowListItem_BOTTOM());
++				wz--;
++			}
++			if (FindWindowById(WC_NEWS_WINDOW, 0)      != NULL) {
++				assert(wz != WindowListItem_BOTTOM());
++				wz--;
++			}
++			if (FindWindowById(WC_SEND_NETWORK_MSG, 0) != NULL) {
++				assert(wz != WindowListItem_BOTTOM());
++				wz--;
++			}
+ 		}
+-
+-		*wz = w;
+-		_last_z_window++;
++		_window_list.insert(wz, w);
+ 	}
+ 
+ 	WindowEvent e;
+@@ -813,7 +822,7 @@
+ 
+ static bool IsGoodAutoPlace1(int left, int top, int width, int height, Point &pos)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	int right  = width + left;
+ 	int bottom = height + top;
+@@ -841,7 +850,7 @@
+ 
+ static bool IsGoodAutoPlace2(int left, int top, int width, int height, Point &pos)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	if (left < -(width>>2) || left > _screen.width - (width>>1)) return false;
+ 	if (top < 22 || top > _screen.height - (height>>2)) return false;
+@@ -866,7 +875,7 @@
+ 
+ static Point GetAutoPlacePosition(int width, int height)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 	Point pt;
+ 
+ 	if (IsGoodAutoPlace1(0, 24, width, height, pt)) return pt;
+@@ -1021,7 +1030,7 @@
+  * @return a pointer to the found window if any, NULL otherwise */
+ Window *FindWindowFromPt(int x, int y)
+ {
+-	for (Window * const *wz = _last_z_window; wz != _z_windows;) {
++	for (WindowListItem_const wz = WindowListItem_TOP(); wz != WindowListItem_BOTTOM();) {
+ 		Window *w = *--wz;
+ 		if (IsInsideBS(x, w->left, w->width) && IsInsideBS(y, w->top, w->height)) {
+ 			return w;
+@@ -1038,7 +1047,7 @@
+ {
+ 	IConsoleClose();
+ 
+-	_last_z_window = _z_windows;
++	_window_list.clear();
+ 	_mouseover_last_w = NULL;
+ 	_no_scroll = 0;
+ }
+@@ -1048,7 +1057,7 @@
+  */
+ void UnInitWindowSystem()
+ {
+-	Window **wz;
++	WindowListItem wz;
+ 
+ restart_search:
+ 	/* Delete all windows, reset z-array.
+@@ -1061,7 +1070,7 @@
+ 		goto restart_search;
+ 	}
+ 
+-	assert(_last_z_window == _z_windows);
++	assert(_window_list.empty());
+ }
+ 
+ /**
+@@ -1080,9 +1089,9 @@
+ static void DecreaseWindowCounters()
+ {
+ 	Window *w;
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+-	for (wz = _last_z_window; wz != _z_windows;) {
++	for (wz = WindowListItem_TOP(); wz != WindowListItem_BOTTOM();) {
+ 		w = *--wz;
+ 		/* Unclick scrollbar buttons if they are pressed. */
+ 		if (w->flags4 & (WF_SCROLL_DOWN | WF_SCROLL_UP)) {
+@@ -1092,7 +1101,7 @@
+ 		CallWindowEventNP(w, WE_MOUSELOOP);
+ 	}
+ 
+-	for (wz = _last_z_window; wz != _z_windows;) {
++	for (wz = WindowListItem_TOP(); wz != WindowListItem_BOTTOM();) {
+ 		w = *--wz;
+ 
+ 		if (w->flags4&WF_TIMEOUT_MASK && !(--w->flags4&WF_TIMEOUT_MASK)) {
+@@ -1269,7 +1278,7 @@
+ 
+ static bool HandleWindowDragging()
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 	/* Get out immediately if no window is being dragged at all. */
+ 	if (!_dragging_window) return true;
+ 
+@@ -1299,7 +1308,7 @@
+ 			ny = y;
+ 
+ 			if (_patches.window_snap_radius != 0) {
+-				Window* const *vz;
++				WindowListItem_const vz;
+ 
+ 				int hsnap = _patches.window_snap_radius;
+ 				int vsnap = _patches.window_snap_radius;
+@@ -1501,7 +1510,7 @@
+ 
+ static bool HandleScrollbarScrolling()
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 	int i;
+ 	int pos;
+ 	Scrollbar *sb;
+@@ -1606,7 +1615,7 @@
+ static bool MaybeBringWindowToFront(const Window *w)
+ {
+ 	bool bring_to_front = false;
+-	Window * const *wz;
++	WindowListItem_const wz;
+ 
+ 	if (w->window_class == WC_MAIN_WINDOW ||
+ 			IsVitalWindow(w) ||
+@@ -1616,7 +1625,7 @@
+ 	}
+ 
+ 	wz = FindWindowZPosition(w);
+-	for (Window * const *uz = wz; ++uz != _last_z_window;) {
++	for (WindowListItem_const uz = wz; ++uz != WindowListItem_TOP();) {
+ 		Window *u = *uz;
+ 
+ 		/* A modal child will prevent the activation of the parent window */
+@@ -1688,7 +1697,7 @@
+  */
+ void SendWindowMessageClass(WindowClass wnd_class, int msg, int wparam, int lparam)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		if ((*wz)->window_class == wnd_class) SendWindowMessageW(*wz, msg, wparam, lparam);
+@@ -1748,7 +1757,7 @@
+ 	}
+ 
+ 	/* Call the event, start with the uppermost window. */
+-	for (Window* const *wz = _last_z_window; wz != _z_windows;) {
++	for (WindowListItem_const wz = WindowListItem_TOP(); wz != WindowListItem_BOTTOM();) {
+ 		Window *w = *--wz;
+ 
+ 		/* if a query window is open, only call the event for certain window types */
+@@ -1783,7 +1792,7 @@
+ 	e.we.ctrl.cont = true;
+ 
+ 	/* Call the event, start with the uppermost window. */
+-	for (Window* const *wz = _last_z_window; wz != _z_windows;) {
++	for (WindowListItem_const wz = WindowListItem_TOP(); wz != WindowListItem_BOTTOM();) {
+ 		Window *w = *--wz;
+ 		w->wndproc(w, &e);
+ 		if (!e.we.ctrl.cont) break;
+@@ -2012,19 +2021,19 @@
+  */
+ void UpdateWindows()
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 	static int we4_timer = 0;
+ 	int t = we4_timer + 1;
+ 
+ 	if (t >= 100) {
+-		for (wz = _last_z_window; wz != _z_windows;) {
++		for (wz = WindowListItem_TOP(); wz != WindowListItem_BOTTOM();) {
+ 			CallWindowEventNP(*--wz, WE_4);
+ 		}
+ 		t = 0;
+ 	}
+ 	we4_timer = t;
+ 
+-	for (wz = _last_z_window; wz != _z_windows;) {
++	for (wz = WindowListItem_TOP(); wz != WindowListItem_BOTTOM();) {
+ 		Window *w = *--wz;
+ 		if (w->flags4 & WF_WHITE_BORDER_MASK) {
+ 			w->flags4 -= WF_WHITE_BORDER_ONE;
+@@ -2071,7 +2080,7 @@
+  */
+ void InvalidateWindow(WindowClass cls, WindowNumber number)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		const Window *w = *wz;
+@@ -2087,7 +2096,7 @@
+  */
+ void InvalidateWindowWidget(WindowClass cls, WindowNumber number, byte widget_index)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		const Window *w = *wz;
+@@ -2103,7 +2112,7 @@
+  */
+ void InvalidateWindowClasses(WindowClass cls)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		if ((*wz)->window_class == cls) SetWindowDirty(*wz);
+@@ -2127,7 +2136,7 @@
+  */
+ void InvalidateWindowData(WindowClass cls, WindowNumber number)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		Window *w = *wz;
+@@ -2141,7 +2150,7 @@
+  */
+ void InvalidateWindowClassesData(WindowClass cls)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		if ((*wz)->window_class == cls) InvalidateThisWindowData(*wz);
+@@ -2153,7 +2162,7 @@
+  */
+ void CallWindowTickEvent()
+ {
+-	for (Window * const *wz = _last_z_window; wz != _z_windows;) {
++	for (WindowListItem_const wz = WindowListItem_TOP(); wz != WindowListItem_BOTTOM();) {
+ 		CallWindowEventNP(*--wz, WE_TICK);
+ 	}
+ }
+@@ -2166,7 +2175,7 @@
+  */
+ void DeleteNonVitalWindows()
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ restart_search:
+ 	/* When we find the window to delete, we need to restart the search
+@@ -2195,7 +2204,7 @@
+  * that standard windows (status bar, etc.) are not stickied, so these aren't affected */
+ void DeleteAllNonVitalWindows()
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	/* Delete every window except for stickied ones, then sticky ones as well */
+ 	DeleteNonVitalWindows();
+@@ -2249,7 +2258,7 @@
+  */
+ void RelocateAllWindows(int neww, int newh)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		Window *w = *wz;
+Index: wlistitem2b/src/vehicle_gui.cpp
+===================================================================
+--- wlistitem2b/src/vehicle_gui.cpp	(revision 12790)
++++ wlistitem2b/src/vehicle_gui.cpp	(working copy)
+@@ -108,7 +108,7 @@
+  */
+ static void SetVehicleListsFlag(SortListFlags sl_flag)
+ {
+-	Window* const *wz;
++	WindowListItem_const wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		Window *w = *wz;
+Index: wlistitem2b/src/viewport.cpp
+===================================================================
+--- wlistitem2b/src/viewport.cpp	(revision 12790)
++++ wlistitem2b/src/viewport.cpp	(working copy)
+@@ -215,10 +215,9 @@
+ 
+ static Point _vp_move_offs;
+ 
+-static void DoSetViewportPosition(Window* const *wz, int left, int top, int width, int height)
++static void DoSetViewportPosition(WindowListItem_const wz, int left, int top, int width, int height)
+ {
+-
+-	for (; wz != _last_z_window; wz++) {
++	for (; wz != WindowListItem_TOP(); wz++) {
+ 		const Window *w = *wz;
+ 
+ 		if (left + width > w->left &&
+@@ -332,7 +331,11 @@
+ 		i = top + height - _screen.height;
+ 		if (i >= 0) height -= i;
+ 
+-		if (height > 0) DoSetViewportPosition(FindWindowZPosition(w) + 1, left, top, width, height);
++		if (height > 0) {
++			WindowListItem_const wz = FindWindowZPosition(w);
++			wz++;
++			DoSetViewportPosition(wz, left, top, width, height);
++		}
+ 	}
+ }
+ 
+@@ -1652,7 +1655,7 @@
+  */
+ void MarkAllViewportsDirty(int left, int top, int right, int bottom)
+ {
+-	Window **wz;
++	WindowListItem wz;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		ViewPort *vp = (*wz)->viewport;

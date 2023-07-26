@@ -1,0 +1,569 @@
+=== modified file 'src/industry_cmd.cpp'
+--- src/industry_cmd.cpp	2007-10-07 10:36:12 +0000
++++ src/industry_cmd.cpp	2007-10-10 18:41:46 +0000
+@@ -13,6 +13,7 @@
+ #include "table/sprites.h"
+ #include "map.h"
+ #include "tile.h"
++#include "train.h"
+ #include "landscape.h"
+ #include "viewport.h"
+ #include "command.h"
+@@ -1851,6 +1852,116 @@
+ 	return (indspec->behaviour & INDUSTRYBEH_CANCLOSE_LASTINSTANCE && GetIndustryTypeCount(type) <= 1);
+ }
+ 
++/**
++* Can given cargo type be accepted or produced by the industry?
++* @param cargo: Cargo type
++* @param i: Industry
++* @param *c_accepts: Pointer to boolean for acceptance of cargo
++* @param *c_produces: Pointer to boolean for production of cargo
++* @return: \c *c_accepts is set when industry accepts the cargo type,
++*          \c *c_produces is set when the industry produces the cargo type
++*/
++static void CanCargoServiceIndustry(CargoID cargo, const Industry *i, bool *c_accepts, bool *c_produces)
++{
++	for (uint j = 0; j < lengthof(i->accepts_cargo) && i->accepts_cargo[j] != CT_INVALID; j++) {
++		if (cargo == i->accepts_cargo[j]) {
++			*c_accepts = true; break;
++		}
++	}
++
++	for (uint j = 0; j < lengthof(i->produced_cargo) && i->produced_cargo[j] != CT_INVALID; j++) {
++		if (cargo == i->produced_cargo[j]) {
++			*c_produces = true; break;
++		}
++	}
++}
++
++/**
++* Compute who can service the industry.
++*
++* Here, 'can service' means that he/she has trains and stations close enough
++* to the industry with the right cargo type and the right orders (ie has the
++* technical means).
++*
++* @return: 0 if nobody can service the industry, 2 if the local player can
++* service the industry, and 1 otherwise (only competitors can service the
++* industry)
++*/
++int WhoCanServiceIndustry(const Industry* i)
++{
++	const Station *stations[64]; // 64 is a arbitrary probably high enough number to fit all stations in
++
++	// Find all stations within reach of the industry
++	uint num_found = FindStationsAroundTile(i->xy, i->width, i->height,
++						stations, lengthof(stations));
++	if (num_found == 0) return 0; // No stations found at all => nobody services
++
++	const Vehicle *v;
++	int result = 0;
++	FOR_ALL_VEHICLES(v) {
++		// Is it worthwhile to try this vehicle?
++		if (v->owner != _local_player && result != 0) continue;
++
++		// Check whether it accepts the right kind of cargo
++		bool c_accepts = false;
++		bool c_produces = false;
++		if (v->type == VEH_TRAIN && IsFrontEngine(v)) {
++			const Vehicle *u = v;
++			BEGIN_ENUM_WAGONS(u)
++				CanCargoServiceIndustry(u->cargo_type, i, &c_accepts, &c_produces);
++			END_ENUM_WAGONS(u)
++		} else if (v->type == VEH_ROAD || v->type == VEH_SHIP || v->type == VEH_AIRCRAFT) {
++			CanCargoServiceIndustry(v->cargo_type, i, &c_accepts, &c_produces);
++		} else {
++			continue;
++		}
++		if(!c_accepts && !c_produces) continue;	// Wrong cargo
++
++		// Check orders of the vehicle.
++		// We cannot check the first of shared orders only, since the first vehicle in such a chain
++		// may have a different cargo type (if never, uncomment the following line:)
++		// if (v->prev_shared != NULL) continue;
++		const Order *o;
++		FOR_VEHICLE_ORDERS(v, o) {
++			if (o->type == OT_GOTO_STATION && !HASBIT(o->flags, OFB_TRANSFER)) {
++				// Vehicle visits a station to load or unload
++				const Station *st = GetStation(o->dest);
++				assert(st != NULL);
++
++				// Same cargo produced by industry is dropped here => not serviced by vehicle v
++				if (HASBIT(o->flags, OFB_UNLOAD) && !c_accepts) break;
++
++				if (IsStationInList(stations, num_found, st)) {
++					if (v->owner == _local_player) return 2; // player services industry
++					result = 1; // Competitor services industry
++				}
++			}
++		}
++	}
++	return result;
++}
++
++/** Report news that industry production has changed significantly */
++static void ReportNewsProductionChangeIndustry(const Industry *i, CargoID type, int percent)
++{
++	NewsType nt;
++
++	switch (WhoCanServiceIndustry(i)) {
++		case 0: nt = NT_INDUSTRY_NOBODY; break;
++		case 1: nt = NT_INDUSTRY_OTHER;  break;
++		case 2: nt = NT_INDUSTRY_PLAYER; break;
++		default: NOT_REACHED(); break;
++	}
++	SetDParam(2, abs(percent));
++	SetDParam(0, GetCargo(type)->name);
++	SetDParam(1, i->index);
++	AddNewsItem(
++		percent >= 0 ? STR_INDUSTRY_PROD_GOUP : STR_INDUSTRY_PROD_GODOWN,
++		NEWS_FLAGS(NM_THIN, NF_VIEWPORT | NF_TILE, nt, 0),
++		i->xy + TileDiffXY(1, 1), 0
++	);
++}
++
+ /** Change industry production or do closure
+  * @param i Industry for which changes are performed
+  * @param monthly true if it's the monthly call, false if it's the random call
+@@ -1904,7 +2015,6 @@
+ 			for (byte j = 0; j < 2 && i->produced_cargo[j] != CT_INVALID; j++){
+ 				uint32 r = Random();
+ 				int old_prod, new_prod, percent;
+-				int mag;
+ 
+ 				new_prod = old_prod = i->production_rate[j];
+ 
+@@ -1927,16 +2037,8 @@
+ 				/* Close the industry when it has the lowest possible production rate */
+ 				if (new_prod > 1) closeit = false;
+ 
+-				mag = abs(percent);
+-				if (mag >= 10) {
+-					SetDParam(2, mag);
+-					SetDParam(0, GetCargo(i->produced_cargo[j])->name);
+-					SetDParam(1, i->index);
+-					AddNewsItem(
+-						percent >= 0 ? STR_INDUSTRY_PROD_GOUP : STR_INDUSTRY_PROD_GODOWN,
+-						NEWS_FLAGS(NM_THIN, NF_VIEWPORT | NF_TILE, NT_ECONOMY, 0),
+-						i->xy + TileDiffXY(1, 1), 0
+-					);
++				if (abs(percent) >= 10) {
++					ReportNewsProductionChangeIndustry(i, i->produced_cargo[j], percent);
+ 				}
+ 			}
+ 		} else {
+@@ -1984,9 +2086,20 @@
+ 	}
+ 
+ 	if (!suppress_message && str != STR_NULL) {
++		NewsType nt;
++		if(closeit) {
++			nt = NT_OPENCLOSE;
++		} else {
++			switch (WhoCanServiceIndustry(i)) {
++				case 0: nt = NT_INDUSTRY_NOBODY; break;
++				case 1: nt = NT_INDUSTRY_OTHER;  break;
++				case 2: nt = NT_INDUSTRY_PLAYER; break;
++				default: NOT_REACHED(); break;
++			}
++		}
+ 		SetDParam(0, i->index);
+ 		AddNewsItem(str,
+-			NEWS_FLAGS(NM_THIN, NF_VIEWPORT | NF_TILE, closeit ? NT_OPENCLOSE : NT_ECONOMY, 0),
++			NEWS_FLAGS(NM_THIN, NF_VIEWPORT | NF_TILE, nt, 0),
+ 			i->xy + TileDiffXY(1, 1), 0);
+ 	}
+ }
+
+=== modified file 'src/lang/english.txt'
+--- src/lang/english.txt	2007-10-07 10:35:42 +0000
++++ src/lang/english.txt	2007-10-10 18:39:46 +0000
+@@ -594,6 +594,9 @@
+ STR_0209_COMPANY_INFORMATION                                    :{YELLOW}Company information
+ STR_NEWS_OPEN_CLOSE                                             :{YELLOW}Open / close of industries
+ STR_020A_ECONOMY_CHANGES                                        :{YELLOW}Economy changes
++STR_INDUSTRY_CHANGES_SERVED_BY_PLAYER                           :{YELLOW}Production changes of industries served by the player
++STR_INDUSTRY_CHANGES_SERVED_BY_OTHER                            :{YELLOW}Production changes of industries served by competitor(s)
++STR_OTHER_INDUSTRY_PRODUCTION_CHANGES                           :{YELLOW}Other industry production changes
+ STR_020B_ADVICE_INFORMATION_ON_PLAYER                           :{YELLOW}Advice / information on player's vehicles
+ STR_020C_NEW_VEHICLES                                           :{YELLOW}New vehicles
+ STR_020D_CHANGES_OF_CARGO_ACCEPTANCE                            :{YELLOW}Changes to cargo acceptance
+
+=== modified file 'src/news.h'
+--- src/news.h	2007-09-19 19:02:17 +0000
++++ src/news.h	2007-10-10 18:28:27 +0000
+@@ -53,6 +53,9 @@
+ 	NT_COMPANY_INFO,    ///< Company info (new companies, bankrupcy messages)
+ 	NT_OPENCLOSE,       ///< Opening and closing of industries
+ 	NT_ECONOMY,         ///< Economic changes (recession, industry up/dowm)
++	NT_INDUSTRY_PLAYER, ///< Production changes of industry serviced by local player
++	NT_INDUSTRY_OTHER,  ///< Production changes of industry serviced by competitor(s)
++	NT_INDUSTRY_NOBODY, ///< Other industry production changes
+ 	NT_ADVICE,          ///< Bits of news about vehicles of the player
+ 	NT_NEW_VEHICLES,    ///< New vehicle has become available
+ 	NT_ACCEPTANCE,      ///< A type of cargo is (no longer) accepted
+
+=== modified file 'src/news_gui.cpp'
+--- src/news_gui.cpp	2007-09-19 19:02:17 +0000
++++ src/news_gui.cpp	2007-10-10 18:39:52 +0000
+@@ -340,6 +340,9 @@
+ 	60,  ///< NT_COMPANY_INFO
+ 	90,  ///< NT_OPENCLOSE
+ 	30,  ///< NT_ECONOMY
++	30,  ///< NT_INDUSTRY_PLAYER
++	30,  ///< NT_INDUSTRY_OTHER
++	30,  ///< NT_INDUSTRY_NOBODY
+ 	150, ///< NT_ADVICE
+ 	30,  ///< NT_NEW_VEHICLES
+ 	90,  ///< NT_ACCEPTANCE
+@@ -393,17 +396,20 @@
+ };
+ 
+ static const SoundFx _news_sounds[NT_END] = {
+-	SND_1D_APPLAUSE,
+-	SND_1D_APPLAUSE,
+-	SND_BEGIN,
+-	SND_BEGIN,
+-	SND_BEGIN,
+-	SND_BEGIN,
+-	SND_BEGIN,
+-	SND_1E_OOOOH,
+-	SND_BEGIN,
+-	SND_BEGIN,
+-	SND_BEGIN,
++	SND_1D_APPLAUSE,	///< NT_ARRIVAL_PLAYER
++	SND_1D_APPLAUSE,	///< NT_ARRIVAL_OTHER
++	SND_BEGIN,		///< NT_ACCIDENT
++	SND_BEGIN,		///< NT_COMPANY_INFO
++	SND_BEGIN,		///< NT_OPENCLOSE
++	SND_BEGIN,		///< NT_ECONOMY
++	SND_BEGIN,		///< NT_INDUSTRY_PLAYER
++	SND_BEGIN,		///< NT_INDUSTRY_OTHER
++	SND_BEGIN,		///< NT_INDUSTRY_NOBODY
++	SND_BEGIN,		///< NT_ADVICE
++	SND_1E_OOOOH,		///< NT_NEW_VEHICLES
++	SND_BEGIN,		///< NT_ACCEPTANCE
++	SND_BEGIN,		///< NT_SUBSIDIES
++	SND_BEGIN,		///< NT_GENERAL
+ };
+ 
+ const char *_news_display_name[NT_END] = {
+@@ -413,6 +419,9 @@
+ 	"company_info",
+ 	"openclose",
+ 	"economy",
++	"production_player",
++	"production_other",
++	"production_nobody",
+ 	"advice",
+ 	"new_vehicles",
+ 	"acceptance",
+@@ -880,82 +889,97 @@
+ }
+ 
+ static const Widget _message_options_widgets[] = {
+-{   WWT_CLOSEBOX,   RESIZE_NONE,    13,     0,   10,     0,    13, STR_00C5,                              STR_018B_CLOSE_WINDOW},
+-{    WWT_CAPTION,   RESIZE_NONE,    13,    11,  409,     0,    13, STR_0204_MESSAGE_OPTIONS,              STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{      WWT_PANEL,   RESIZE_NONE,    13,     0,  409,    14,   196, 0x0,                                   STR_NULL},
++{   WWT_CLOSEBOX, RESIZE_NONE,  13,   0,  10,         0,        13, STR_00C5,                              STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION, RESIZE_NONE,  13,  11, 409,         0,        13, STR_0204_MESSAGE_OPTIONS,              STR_018C_WINDOW_TITLE_DRAG_THIS},
++{      WWT_PANEL, RESIZE_NONE,  13,   0, 409,        14,  76+13*12, 0x0,                                   STR_NULL},
+ 
+ /* Text at the top of the main panel, in black */
+-{      WWT_LABEL,   RESIZE_NONE,    13,     0,  409,    13,    26, STR_0205_MESSAGE_TYPES,                STR_NULL},
++{      WWT_LABEL, RESIZE_NONE,  13,   0, 409,        13,        26, STR_0205_MESSAGE_TYPES,                STR_NULL},
+ 
+ /* General drop down and sound button */
+-{      WWT_PANEL,   RESIZE_NONE,     3,     4,   86,   166,   177, 0x0,                                   STR_NULL},
+-{    WWT_TEXTBTN,   RESIZE_NONE,     3,    87,   98,   166,   177, STR_0225,                              STR_NULL},
+-{       WWT_TEXT,   RESIZE_NONE,     3,    103, 409,   167,   179, STR_MESSAGES_ALL,                      STR_NULL},
++{      WWT_PANEL, RESIZE_NONE,   3,   4,  86,  46+13*12,  57+13*12, 0x0,                                   STR_NULL},
++{    WWT_TEXTBTN, RESIZE_NONE,   3,  87,  98,  46+13*12,  57+13*12, STR_0225,                              STR_NULL},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  47+13*12,  59+13*12, STR_MESSAGES_ALL,                      STR_NULL},
+ 
+-{  WWT_TEXTBTN_2,   RESIZE_NONE,     3,     4,   98,   178,   189, STR_02DB_OFF,                          STR_NULL},
+-{       WWT_TEXT,   RESIZE_NONE,     3,    103, 409,   179,   191, STR_MESSAGE_SOUND,                     STR_NULL},
++{  WWT_TEXTBTN_2, RESIZE_NONE,   3,   4,  98,  58+13*12,  69+13*12, STR_02DB_OFF,                          STR_NULL},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  59+13*12,  71+13*12, STR_MESSAGE_SOUND,                     STR_NULL},
+ 
+ /* Each four group is composed of the buttons [<] [..] [>] and the descriptor of the setting */
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,     4,   12,    26,    37, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,     3,    13,   89,    26,    37, STR_EMPTY,                             STR_NULL},
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,    90,   98,    26,    37, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
+-{       WWT_TEXT,   RESIZE_NONE,     3,    103, 409,    27,    39, STR_0206_ARRIVAL_OF_FIRST_VEHICLE,     STR_NULL},
+-
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,     4,   12,    38,    49, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,     3,    13,   89,    38,    49, STR_EMPTY,                             STR_NULL},
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,    90,   98,    38,    49, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
+-{       WWT_TEXT,   RESIZE_NONE,     3,    103, 409,    39,    51, STR_0207_ARRIVAL_OF_FIRST_VEHICLE,     STR_NULL},
+-
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,     4,   12,    50,    61, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,     3,    13,   89,    50,    61, STR_EMPTY,                             STR_NULL},
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,    90,   98,    50,    61, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
+-{       WWT_TEXT,   RESIZE_NONE,     3,    103, 409,    51,    63, STR_0208_ACCIDENTS_DISASTERS,          STR_NULL},
+-
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,     4,   12,    62,    73, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,     3,    13,   89,    62,    73, STR_EMPTY,                             STR_NULL},
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,    90,   98,    62,    73, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
+-{       WWT_TEXT,   RESIZE_NONE,     3,    103, 409,    63,    75, STR_0209_COMPANY_INFORMATION,          STR_NULL},
+-
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,     4,   12,    74,    85, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,     3,    13,   89,    74,    85, STR_EMPTY,                             STR_NULL},
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,    90,   98,    74,    85, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
+-{       WWT_TEXT,   RESIZE_NONE,     3,    103, 409,    75,    87, STR_NEWS_OPEN_CLOSE,                   STR_NULL},
+-
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,     4,   12,    86,    97, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,     3,    13,   89,    86,    97, STR_EMPTY,                             STR_NULL},
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,    90,   98,    86,    97, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
+-{       WWT_TEXT,   RESIZE_NONE,     3,    103, 409,    87,    99, STR_020A_ECONOMY_CHANGES,              STR_NULL},
+-
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,     4,   12,    98,   109, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,     3,    13,   89,    98,   109, STR_EMPTY,                             STR_NULL},
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,    90,   98,    98,   109, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
+-{       WWT_TEXT,   RESIZE_NONE,     3,    103, 409,    99,   111, STR_020B_ADVICE_INFORMATION_ON_PLAYER, STR_NULL},
+-
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,     4,   12,   110,   121, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,     3,    13,   89,   110,   121, STR_EMPTY,                             STR_NULL},
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,    90,   98,   110,   121, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
+-{       WWT_TEXT,   RESIZE_NONE,     3,    103, 409,   111,   123, STR_020C_NEW_VEHICLES,                 STR_NULL},
+-
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,     4,   12,   122,   133, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,     3,    13,   89,   122,   133, STR_EMPTY,                             STR_NULL},
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,    90,   98,   122,   133, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
+-{       WWT_TEXT,   RESIZE_NONE,     3,    103, 409,   123,   135, STR_020D_CHANGES_OF_CARGO_ACCEPTANCE,  STR_NULL},
+-
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,     4,   12,   134,   145, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,     3,    13,   89,   134,   145, STR_EMPTY,                             STR_NULL},
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,    90,   98,   134,   145, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
+-{       WWT_TEXT,   RESIZE_NONE,     3,    103, 409,   135,   147, STR_020E_SUBSIDIES,                    STR_NULL},
+-
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,     4,   12,   146,   157, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,     3,    13,   89,   146,   157, STR_EMPTY,                             STR_NULL},
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,     3,    90,   98,   146,   157, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
+-{       WWT_TEXT,   RESIZE_NONE,     3,    103, 409,   147,   159, STR_020F_GENERAL_INFORMATION,          STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+ 0*12,  37+ 0*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+ 0*12,  37+ 0*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+ 0*12,  37+ 0*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+ 0*12,  39+ 0*12, STR_0206_ARRIVAL_OF_FIRST_VEHICLE,     STR_NULL},
++
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+ 1*12,  37+ 1*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+ 1*12,  37+ 1*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+ 1*12,  37+ 1*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+ 1*12,  39+ 1*12, STR_0207_ARRIVAL_OF_FIRST_VEHICLE,     STR_NULL},
++
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+ 2*12,  37+ 2*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+ 2*12,  37+ 2*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+ 2*12,  37+ 2*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+ 2*12,  39+ 2*12, STR_0208_ACCIDENTS_DISASTERS,          STR_NULL},
++
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+ 3*12,  37+ 3*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+ 3*12,  37+ 3*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+ 3*12,  37+ 3*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+ 3*12,  39+ 3*12, STR_0209_COMPANY_INFORMATION,          STR_NULL},
++
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+ 4*12,  37+ 4*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+ 4*12,  37+ 4*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+ 4*12,  37+ 4*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+ 4*12,  39+ 4*12, STR_NEWS_OPEN_CLOSE,                   STR_NULL},
++
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+ 5*12,  37+ 5*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+ 5*12,  37+ 5*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+ 5*12,  37+ 5*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+ 5*12,  39+ 5*12, STR_020A_ECONOMY_CHANGES,              STR_NULL},
++
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+ 6*12,  37+ 6*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+ 6*12,  37+ 6*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+ 6*12,  37+ 6*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+ 6*12,  39+ 6*12, STR_INDUSTRY_CHANGES_SERVED_BY_PLAYER, STR_NULL},
++
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+ 7*12,  37+ 7*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+ 7*12,  37+ 7*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+ 7*12,  37+ 7*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+ 7*12,  39+ 7*12, STR_INDUSTRY_CHANGES_SERVED_BY_OTHER,  STR_NULL},
++
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+ 8*12,  37+ 8*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+ 8*12,  37+ 8*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+ 8*12,  37+ 8*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+ 8*12,  39+ 8*12, STR_OTHER_INDUSTRY_PRODUCTION_CHANGES, STR_NULL},
++
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+ 9*12,  37+ 9*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+ 9*12,  37+ 9*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+ 9*12,  37+ 9*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+ 9*12,  39+ 9*12, STR_020B_ADVICE_INFORMATION_ON_PLAYER, STR_NULL},
++
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+10*12,  37+10*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+10*12,  37+10*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+10*12,  37+10*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+10*12,  39+10*12, STR_020C_NEW_VEHICLES,                 STR_NULL},
++
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+11*12,  37+11*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+11*12,  37+11*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+11*12,  37+11*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+11*12,  39+11*12, STR_020D_CHANGES_OF_CARGO_ACCEPTANCE,  STR_NULL},
++
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+12*12,  37+12*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+12*12,  37+12*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+12*12,  37+12*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+12*12,  39+12*12, STR_020E_SUBSIDIES,                    STR_NULL},
++
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,   4,  12,  26+13*12,  37+13*12, SPR_ARROW_LEFT,                        STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN, RESIZE_NONE,   3,  13,  89,  26+13*12,  37+13*12, STR_EMPTY,                             STR_NULL},
++{ WWT_PUSHIMGBTN, RESIZE_NONE,   3,  90,  98,  26+13*12,  37+13*12, SPR_ARROW_RIGHT,                       STR_HSCROLL_BAR_SCROLLS_LIST},
++{       WWT_TEXT, RESIZE_NONE,   3, 103, 409,  27+13*12,  39+13*12, STR_020F_GENERAL_INFORMATION,          STR_NULL},
+ 
+ {   WIDGETS_END},
+ };
+ 
+ static const WindowDesc _message_options_desc = {
+-	270, 22, 410, 197, 410, 197,
++	270,  22,  410,  77+13*12,  410,  77+13*12,
+ 	WC_GAME_OPTIONS, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS,
+ 	_message_options_widgets,
+
+=== modified file 'src/station.h'
+--- src/station.h	2007-09-12 09:09:26 +0000
++++ src/station.h	2007-10-10 18:26:43 +0000
+@@ -239,8 +239,14 @@
+ 	MAX_CATCHMENT      = 10, ///< Airports have a catchment up to this number.
+ };
+ 
++/** Max number of stations looked for when finding stations to move goods to */
++static const int MAXIMUM_MOVE_GOODS_DESTINATIONS = 8;
++
+ void ModifyStationRatingAround(TileIndex tile, PlayerID owner, int amount, uint radius);
+ 
++bool IsStationInList(const Station **st_list, uint num_st, const Station *st);
++uint FindStationsAroundTile(TileIndex tile, int w, int h, const Station **st_list, uint num_st);
++
+ void ShowStationViewWindow(StationID station);
+ void UpdateAllStationVirtCoord();
+ 
+
+=== modified file 'src/station_cmd.cpp'
+--- src/station_cmd.cpp	2007-10-07 10:36:11 +0000
++++ src/station_cmd.cpp	2007-10-10 19:33:36 +0000
+@@ -414,7 +414,7 @@
+ 	AddNewsItem(msg, NEWS_FLAGS(NM_SMALL, NF_VIEWPORT | NF_TILE, NT_ACCEPTANCE, 0), st->xy, 0);
+ }
+ 
+-// Get a list of the cargo types being produced around the tile.
++/** Get a list of the cargo types being produced around the tile. */
+ void GetProductionAroundTiles(AcceptedCargo produced, TileIndex tile,
+ 	int w, int h, int rad)
+ {
+@@ -458,7 +458,7 @@
+ 	}
+ }
+ 
+-// Get a list of the cargo types that are accepted around the tile.
++/** Get a list of the cargo types that are accepted around the tile. */
+ void GetAcceptanceAroundTiles(AcceptedCargo accepts, TileIndex tile,
+ 	int w, int h, int rad)
+ {
+@@ -511,8 +511,9 @@
+ 	if (rect->max_y < y) rect->max_y = y;
+ }
+ 
+-// Update the acceptance for a station.
+-// show_msg controls whether to display a message that acceptance was changed.
++/** Update the acceptance for a station.
++* \a show_msg controls whether to display a message that acceptance was changed.
++*/
+ static void UpdateStationAcceptance(Station *st, bool show_msg)
+ {
+ 	// Don't update acceptance for a buoy
+@@ -2585,10 +2586,77 @@
+ 	return CommandCost();
+ }
+ 
++/**
++* Decide whether or not a new station is in a list of stations.
++* @param st_list: External array of \c Station* pointers with available stations.
++* @param num_st: Number of stations in the list.
++* @param st: Station looked for in the list
++* @return: \c true if \a st is in the list, \c false if not.
++*/
++bool IsStationInList(const Station **st_list, uint num_st, const Station *st)
++{
++	for (uint j = 0; j < num_st ; j++) {
++		if (st_list[j] == st) return true;
++	}
++	return false;
++}
++
++/**
++* Find all (non-buoy) stations around a tile
++* @param tile: Center tile to search from
++* @param w: Width of the search area
++* @param h: Height of the search area
++* @param st_list: External array of \c Station* pointers to store found stations in
++* @param num_st: Length of the external array (maximal number of stations that can be 'found')
++*
++* @return: External array is updated with pointers to nearby stations. Unused
++*	entries are set to \c NULL. Also, the number of found stations is returned.
++*/
++uint FindStationsAroundTile(TileIndex tile, int w, int h, const Station **st_list, uint num_st)
++{
++	uint num_found = 0;	// number of stations found so far
++
++	for (uint i = 0; i < num_st; i++) st_list[i] = NULL;
++
++	int w_prod; // width and height of the "producer" of the cargo
++	int h_prod;
++	int max_rad;
++	if (_patches.modified_catchment) {
++		w_prod = w;
++		h_prod = h;
++		w += 2 * MAX_CATCHMENT;
++		h += 2 * MAX_CATCHMENT;
++		max_rad = MAX_CATCHMENT;
++	} else {
++		w_prod = 0;
++		h_prod = 0;
++		w += 8;
++		h += 8;
++		max_rad = 4;
++	}
++
++	BEGIN_TILE_LOOP(cur_tile, w, h, tile - TileDiffXY(max_rad, max_rad))
++		cur_tile = TILE_MASK(cur_tile);
++		if (!IsTileType(cur_tile, MP_STATION)) continue;
++
++		Station *st = GetStationByTile(cur_tile);
++
++		if (st->IsBuoy()) continue; // bouys don't accept cargo
++
++		// is it a new station?
++		if (IsStationInList(st_list, num_found, st)) continue;
++
++
++		st_list[num_found] = st;
++		num_found++;
++		if (num_found == num_st) return num_found; // Array full
++	END_TILE_LOOP(cur_tile, w, h, tile - TileDiffXY(max_rad, max_rad))
++	return num_found;
++}
+ 
+ uint MoveGoodsToStation(TileIndex tile, int w, int h, CargoID type, uint amount)
+ {
+-	Station* around[8];
++	Station* around[MAXIMUM_MOVE_GOODS_DESTINATIONS];
+ 
+ 	for (uint i = 0; i < lengthof(around); i++) around[i] = NULL;
+ 
+
+=== modified file 'src/train.h'
+--- src/train.h	2007-09-12 09:09:26 +0000
++++ src/train.h	2007-10-09 20:52:07 +0000
+@@ -29,7 +29,7 @@
+  * @param v vehicle to check
+  * @return Returns true if vehicle is a front engine
+  */
+-static inline bool IsFrontEngine(const Vehicle *v)
++inline bool IsFrontEngine(const Vehicle *v)
+ {
+ 	assert(v->type == VEH_TRAIN);
+ 	return HASBIT(v->subtype, Train_Front);
+

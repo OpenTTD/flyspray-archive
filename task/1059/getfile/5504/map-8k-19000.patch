@@ -1,0 +1,314 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 19000)
++++ src/lang/english.txt	(working copy)
+@@ -2277,6 +2277,7 @@
+ STR_MAPGEN_HEIGHTMAP_NAME                                       :{BLACK}Heightmap name:
+ STR_MAPGEN_HEIGHTMAP_SIZE_LABEL                                 :{BLACK}Size:
+ STR_MAPGEN_HEIGHTMAP_SIZE                                       :{ORANGE}{NUM} * {NUM}
++STR_MAPGEN_TOO_MANY_TILES_MESSAGE                               :{YELLOW}Too many tiles in map. Maximum number of tiles is {NUM}, you have selected {NUM}
+ 
+ STR_MAPGEN_RANDOM_SEED_OSKTITLE                                 :{BLACK}Enter a random seed
+ STR_MAPGEN_SNOW_LINE_QUERY_CAPT                                 :{WHITE}Change snow line height
+@@ -4077,6 +4078,7 @@
+ STR_TINY_GROUP                                                  :{TINYFONT}{GROUP}
+ STR_BLACK_INT                                                   :{BLACK}{NUM}
+ STR_ORANGE_INT                                                  :{ORANGE}{NUM}
++STR_RED_INT                                                     :{RED}{NUM}
+ STR_WHITE_SIGN                                                  :{WHITE}{SIGN}
+ STR_TINY_BLACK_STATION                                          :{TINYFONT}{BLACK}{STATION}
+ STR_BLACK_STRING                                                :{BLACK}{STRING}
+Index: src/genworld_gui.cpp
+===================================================================
+--- src/genworld_gui.cpp	(revision 19000)
++++ src/genworld_gui.cpp	(working copy)
+@@ -23,6 +23,7 @@
+ #include "sound_func.h"
+ #include "fios.h"
+ #include "string_func.h"
++#include "gui.h"
+ #include "widgets/dropdown_type.h"
+ #include "widgets/dropdown_func.h"
+ #include "landscape_type.h"
+@@ -319,12 +320,37 @@
+ 	if (confirmed) StartGeneratingLandscape((GenenerateLandscapeWindowMode)w->window_number);
+ }
+ 
+-static DropDownList *BuildMapsizeDropDown()
++/**
++ * Check if map size set lies in allowed boundaries.
++ * @param print_warning If set to true, messagebox with warning is printed out if size is outside limits.
++ * @return true if size is ok, false otherwise.
++ */
++static bool CheckMapSize(bool print_warning = true)
+ {
++	uint64 tiles = 1ULL << (_settings_newgame.game_creation.map_x + _settings_newgame.game_creation.map_y);
++
++	if (_settings_newgame.game_creation.map_x + _settings_newgame.game_creation.map_y > MAX_MAP_TILES_BITS) {
++		if (print_warning) {
++			SetDParam(0, MAX_MAP_TILES);
++			SetDParam(1, tiles);
++			ShowErrorMessage(STR_MAPGEN_TOO_MANY_TILES_MESSAGE, INVALID_STRING_ID, 0, 0);
++		}
++		return false;
++	}
++	return true;
++}
++
++/**
++ * Build dropdown list with map sizes
++ * Dimension selected in the other dropdown is used to suggest which choices are 'valid'
++ * @param other_dimension Dimension specified by the second dropdown.
++ */
++static DropDownList *BuildMapsizeDropDown(int other_dimension)
++{
+ 	DropDownList *list = new DropDownList();
+ 
+ 	for (uint i = MIN_MAP_SIZE_BITS; i <= MAX_MAP_SIZE_BITS; i++) {
+-		DropDownListParamStringItem *item = new DropDownListParamStringItem(STR_JUST_INT, i, false);
++		DropDownListParamStringItem *item = new DropDownListParamStringItem((i + other_dimension > MAX_MAP_TILES_BITS) ? STR_RED_INT : STR_JUST_INT, i, false);
+ 		item->SetParam(0, 1 << i);
+ 		list->push_back(item);
+ 	}
+@@ -349,6 +375,14 @@
+ 	char name[64];
+ 	GenenerateLandscapeWindowMode mode;
+ 
++	void SetDropDownColor()
++	{
++		/* Draw sizes in mapsize selection dropdowns in red if too large size is selected */
++		bool mapsize_valid = CheckMapSize(false);
++		this->GetWidget<NWidgetCore>(GLAND_MAPSIZE_X_PULLDOWN)->widget_data = mapsize_valid ? STR_JUST_INT : STR_RED_INT;
++		this->GetWidget<NWidgetCore>(GLAND_MAPSIZE_Y_PULLDOWN)->widget_data = mapsize_valid ? STR_JUST_INT : STR_RED_INT;
++	}
++
+ 	GenerateLandscapeWindow(const WindowDesc *desc, WindowNumber number = 0) : QueryStringBaseWindow(11)
+ 	{
+ 		this->InitNested(desc, number);
+@@ -363,6 +397,7 @@
+ 		this->afilter = CS_NUMERAL;
+ 
+ 		this->mode = (GenenerateLandscapeWindowMode)this->window_number;
++		SetDropDownColor();
+ 	}
+ 
+ 
+@@ -531,11 +566,11 @@
+ 				break;
+ 
+ 			case GLAND_MAPSIZE_X_PULLDOWN: // Mapsize X
+-				ShowDropDownList(this, BuildMapsizeDropDown(), _settings_newgame.game_creation.map_x, GLAND_MAPSIZE_X_PULLDOWN);
++				ShowDropDownList(this, BuildMapsizeDropDown(_settings_newgame.game_creation.map_y), _settings_newgame.game_creation.map_x, GLAND_MAPSIZE_X_PULLDOWN);
+ 				break;
+ 
+ 			case GLAND_MAPSIZE_Y_PULLDOWN: // Mapsize Y
+-				ShowDropDownList(this, BuildMapsizeDropDown(), _settings_newgame.game_creation.map_y, GLAND_MAPSIZE_Y_PULLDOWN);
++				ShowDropDownList(this, BuildMapsizeDropDown(_settings_newgame.game_creation.map_x), _settings_newgame.game_creation.map_y, GLAND_MAPSIZE_Y_PULLDOWN);
+ 				break;
+ 
+ 			case GLAND_TOWN_PULLDOWN: // Number of towns
+@@ -554,6 +589,7 @@
+ 				break;
+ 
+ 			case GLAND_GENERATE_BUTTON: // Generate
++				if (!CheckMapSize()) break;
+ 				MakeNewgameSettingsLive();
+ 
+ 				if (mode == GLWM_HEIGHTMAP &&
+@@ -690,8 +726,16 @@
+ 	virtual void OnDropdownSelect(int widget, int index)
+ 	{
+ 		switch (widget) {
+-			case GLAND_MAPSIZE_X_PULLDOWN:     _settings_newgame.game_creation.map_x = index; break;
+-			case GLAND_MAPSIZE_Y_PULLDOWN:     _settings_newgame.game_creation.map_y = index; break;
++			case GLAND_MAPSIZE_X_PULLDOWN:
++				_settings_newgame.game_creation.map_x = index;
++				SetDropDownColor();
++				break;
++
++			case GLAND_MAPSIZE_Y_PULLDOWN:
++				_settings_newgame.game_creation.map_y = index; 
++				SetDropDownColor();
++				break;
++
+ 			case GLAND_TREE_PULLDOWN:          _settings_newgame.game_creation.tree_placer = index; break;
+ 			case GLAND_SMOOTHNESS_PULLDOWN:    _settings_newgame.game_creation.tgen_smoothness = index;  break;
+ 			case GLAND_VARIETY_PULLDOWN:       _settings_newgame.game_creation.variety = index; break;
+@@ -727,6 +771,7 @@
+ 				break;
+ 			}
+ 		}
++
+ 		this->SetDirty();
+ 	}
+ 
+@@ -853,10 +898,19 @@
+ {
+ 	uint widget_id;
+ 
++	void SetDropDownColor()
++	{
++		/* Draw sizes in mapsize selection dropdowns in red if too large size is selected */
++		bool mapsize_valid = CheckMapSize(false);
++		this->GetWidget<NWidgetCore>(CSCEN_MAPSIZE_X_PULLDOWN)->widget_data = mapsize_valid ? STR_JUST_INT : STR_RED_INT;
++		this->GetWidget<NWidgetCore>(CSCEN_MAPSIZE_Y_PULLDOWN)->widget_data = mapsize_valid ? STR_JUST_INT : STR_RED_INT;
++	}
++
+ 	CreateScenarioWindow(const WindowDesc *desc, WindowNumber window_number) : Window()
+ 	{
+ 		this->InitNested(desc, window_number);
+ 		this->LowerWidget(_settings_newgame.game_creation.landscape + CSCEN_TEMPERATE);
++		SetDropDownColor();
+ 	}
+ 
+ 	virtual void SetStringParameters(int widget) const
+@@ -880,6 +934,8 @@
+ 		}
+ 	}
+ 
++
++
+ 	virtual void OnPaint()
+ 	{
+ 		this->SetWidgetDisabledState(CSCEN_START_DATE_DOWN,       _settings_newgame.game_creation.starting_year <= MIN_YEAR);
+@@ -933,18 +989,20 @@
+ 				break;
+ 
+ 			case CSCEN_MAPSIZE_X_PULLDOWN: // Mapsize X
+-				ShowDropDownList(this, BuildMapsizeDropDown(), _settings_newgame.game_creation.map_x, CSCEN_MAPSIZE_X_PULLDOWN);
++				ShowDropDownList(this, BuildMapsizeDropDown(_settings_newgame.game_creation.map_y), _settings_newgame.game_creation.map_x, CSCEN_MAPSIZE_X_PULLDOWN);
+ 				break;
+ 
+ 			case CSCEN_MAPSIZE_Y_PULLDOWN: // Mapsize Y
+-				ShowDropDownList(this, BuildMapsizeDropDown(), _settings_newgame.game_creation.map_y, CSCEN_MAPSIZE_Y_PULLDOWN);
++				ShowDropDownList(this, BuildMapsizeDropDown(_settings_newgame.game_creation.map_x), _settings_newgame.game_creation.map_y, CSCEN_MAPSIZE_Y_PULLDOWN);
+ 				break;
+ 
+ 			case CSCEN_EMPTY_WORLD: // Empty world / flat world
++				if (!CheckMapSize()) break;
+ 				StartGeneratingLandscape(GLWM_SCENARIO);
+ 				break;
+ 
+ 			case CSCEN_RANDOM_WORLD: // Generate
++				if (!CheckMapSize()) break;
+ 				ShowGenerateLandscape();
+ 				break;
+ 
+@@ -1003,6 +1061,8 @@
+ 			case CSCEN_MAPSIZE_X_PULLDOWN: _settings_newgame.game_creation.map_x = index; break;
+ 			case CSCEN_MAPSIZE_Y_PULLDOWN: _settings_newgame.game_creation.map_y = index; break;
+ 		}
++		SetDropDownColor();
++
+ 		this->SetDirty();
+ 	}
+ 
+Index: src/map_type.h
+===================================================================
+--- src/map_type.h	(revision 19000)
++++ src/map_type.h	(working copy)
+@@ -59,10 +59,12 @@
+ 
+ /** Minimal and maximal map width and height */
+ enum {
+-	MIN_MAP_SIZE_BITS = 6,                      ///< Minimal size of map is equal to 2 ^ MIN_MAP_SIZE_BITS
+-	MAX_MAP_SIZE_BITS = 11,                     ///< Maximal size of map is equal to 2 ^ MAX_MAP_SIZE_BITS
+-	MIN_MAP_SIZE      = 1 << MIN_MAP_SIZE_BITS, ///< Minimal map size = 64
+-	MAX_MAP_SIZE      = 1 << MAX_MAP_SIZE_BITS, ///< Maximal map size = 2048
++	MIN_MAP_SIZE_BITS  = 6,                       ///< Minimal size of map is equal to 2 ^ MIN_MAP_SIZE_BITS
++	MAX_MAP_SIZE_BITS  = 13,                      ///< Maximal size of map is equal to 2 ^ MAX_MAP_SIZE_BITS
++	MAX_MAP_TILES_BITS = 22,                      ///< Maximal number of tiles in a map is equal to 2 ^ MAX_MAP_TILES_BITS. */
++	MIN_MAP_SIZE       = 1 << MIN_MAP_SIZE_BITS,  ///< Minimal map size = 64
++	MAX_MAP_SIZE       = 1 << MAX_MAP_SIZE_BITS,  ///< Maximal map size = 8192
++	MAX_MAP_TILES      = 1 << MAX_MAP_TILES_BITS, ///< Maximal number of tiles in a map = 2048 * 2048
+ };
+ 
+ /**
+Index: src/map.cpp
+===================================================================
+--- src/map.cpp	(revision 19000)
++++ src/map.cpp	(working copy)
+@@ -38,16 +38,18 @@
+  */
+ void AllocateMap(uint size_x, uint size_y)
+ {
++	DEBUG(map, 2, "Min/max map size %d/%d, max map tiles %d", MIN_MAP_SIZE, MAX_MAP_SIZE, MAX_MAP_TILES);
++	DEBUG(map, 1, "Allocating map of size %dx%d", size_x, size_y);
++
+ 	/* Make sure that the map size is within the limits and that
+ 	 * size of both axes is a power of 2. */
+-	if (!IsInsideMM(size_x, MIN_MAP_SIZE, MAX_MAP_SIZE + 1) ||
+-			!IsInsideMM(size_y, MIN_MAP_SIZE, MAX_MAP_SIZE + 1) ||
++	if (size_x * size_y > MAX_MAP_TILES ||
++			size_x < MIN_MAP_SIZE ||
++			size_y < MIN_MAP_SIZE ||
+ 			(size_x & (size_x - 1)) != 0 ||
+ 			(size_y & (size_y - 1)) != 0)
+ 		error("Invalid map size");
+ 
+-	DEBUG(map, 1, "Allocating map of size %dx%d", size_x, size_y);
+-
+ 	_map_log_x = FindFirstBit(size_x);
+ 	_map_log_y = FindFirstBit(size_y);
+ 	_map_size_x = size_x;
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 19000)
++++ src/openttd.cpp	(working copy)
+@@ -825,6 +825,24 @@
+ 	MarkWholeScreenDirty();
+ }
+ 
++/*
++ * Too large size may be stored in settings (especially if switching between between OpenTTD
++ * versions with different map size limits), we have to check if it is valid before generating world.
++ * Simple separate checking of X and Y map sizes is not enough, as their sum is what counts for the limit.
++ * Check the size and decrease the larger of the sizes till the size is in limit.
++ */
++static void FixConfigMapSize()
++{
++	while (_settings_game.game_creation.map_x + _settings_game.game_creation.map_y > MAX_MAP_TILES_BITS) {
++		/* Repeat reducing larger of X/Y dimensions until the map size is within allowable limits */
++		if (_settings_game.game_creation.map_x > _settings_game.game_creation.map_y) {
++			_settings_game.game_creation.map_x--;
++		} else {
++			_settings_game.game_creation.map_y--;
++		}
++	}
++}
++
+ static void MakeNewGame(bool from_heightmap, bool reset_settings)
+ {
+ 	_game_mode = GM_NORMAL;
+@@ -833,6 +851,7 @@
+ 	InitializeDynamicVariables();
+ 
+ 	GenerateWorldSetCallback(&MakeNewGameDone);
++	FixConfigMapSize();
+ 	GenerateWorld(from_heightmap ? GWM_HEIGHTMAP : GWM_NEWGAME, 1 << _settings_game.game_creation.map_x, 1 << _settings_game.game_creation.map_y, reset_settings);
+ }
+ 
+@@ -848,6 +867,7 @@
+ 	ResetGRFConfig(true);
+ 
+ 	GenerateWorldSetCallback(&MakeNewEditorWorldDone);
++	FixConfigMapSize();
+ 	GenerateWorld(GWM_EMPTY, 1 << _settings_game.game_creation.map_x, 1 << _settings_game.game_creation.map_y);
+ }
+ 
+@@ -1033,6 +1053,7 @@
+ 		case SM_LOAD_HEIGHTMAP: // Load heightmap from scenario editor
+ 			SetLocalCompany(OWNER_NONE);
+ 
++			FixConfigMapSize();
+ 			GenerateWorld(GWM_HEIGHTMAP, 1 << _settings_game.game_creation.map_x, 1 << _settings_game.game_creation.map_y);
+ 			MarkWholeScreenDirty();
+ 			break;
+@@ -1066,6 +1087,7 @@
+ 
+ 		case SM_GENRANDLAND: // Generate random land within scenario editor
+ 			SetLocalCompany(OWNER_NONE);
++			FixConfigMapSize();
+ 			GenerateWorld(GWM_RANDOM, 1 << _settings_game.game_creation.map_x, 1 << _settings_game.game_creation.map_y);
+ 			/* XXX: set date */
+ 			MarkWholeScreenDirty();

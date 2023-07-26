@@ -1,0 +1,120 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 12954)
++++ src/settings.cpp	(working copy)
+@@ -1456,6 +1456,7 @@
+ 	 SDT_VAR(Patches, servint_aircraft,  SLE_UINT16, 0,D0,   100,     5,     800, 0, STR_CONFIG_PATCHES_SERVINT_AIRCRAFT,     InValidateDetailsWindow),
+ 	SDT_BOOL(Patches, no_servicing_if_no_breakdowns, 0, 0, false,                    STR_CONFIG_PATCHES_NOSERVICE,            NULL),
+ 	SDT_BOOL(Patches, wagon_speed_limits,            0,NN,  true,                    STR_CONFIG_PATCHES_WAGONSPEEDLIMITS,     UpdateConsists),
++	SDT_BOOL(Patches, quickgoto,                     S, 0,  true,                    STR_CONFIG_PATCHES_QUICKGOTO,            NULL),
+ 	SDT_CONDBOOL(Patches, disable_elrails, 38, SL_MAX_VERSION, 0, NN, false,         STR_CONFIG_PATCHES_DISABLE_ELRAILS,      SettingsDisableElrail),
+ 	SDT_CONDVAR(Patches, freight_trains, SLE_UINT8, 39, SL_MAX_VERSION, 0,NN, 1, 1, 255, 1, STR_CONFIG_PATCHES_FREIGHT_TRAINS, NULL),
+ 	SDT_CONDBOOL(Patches, timetabling,              67, SL_MAX_VERSION, 0, 0, true,  STR_CONFIG_PATCHES_TIMETABLE_ALLOW,      NULL),
+Index: src/lang/german.txt
+===================================================================
+--- src/lang/german.txt	(revision 12954)
++++ src/lang/german.txt	(working copy)
+@@ -1121,6 +1121,7 @@
+ STR_CONFIG_PATCHES_LOADING_INDICATORS_ALL                       :Alle Firmen
+ STR_CONFIG_PATCHES_TIMETABLE_ALLOW                              :{LTBLUE}Fahrpläne für Fahrzeuge aktivieren: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_TIMETABLE_IN_TICKS                           :{LTBLUE}Zeitpläne in Ticks anstatt in Tagen anzeigen: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_QUICKGOTO                                    :{LTBLUE}Schnelles erstellen von Fahrzeugaufträgen: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_DEFAULT_RAIL_TYPE                            :{LTBLUE}Standard-Gleistyp (bei Spielbeginn/geladenem Spiel): {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_DEFAULT_RAIL_TYPE_RAIL                       :normales Gleis
+ STR_CONFIG_PATCHES_DEFAULT_RAIL_TYPE_ELRAIL                     :elektrifiziertes Gleis
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 12954)
++++ src/lang/english.txt	(working copy)
+@@ -1123,6 +1123,7 @@
+ STR_CONFIG_PATCHES_LOADING_INDICATORS_ALL                       :All companies
+ STR_CONFIG_PATCHES_TIMETABLE_ALLOW                              :{LTBLUE}Enable timetabling for vehicles: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_TIMETABLE_IN_TICKS                           :{LTBLUE}Show timetable in ticks rather than days: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_QUICKGOTO                                    :{LTBLUE}Quick creation of vehicle orders: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_DEFAULT_RAIL_TYPE                            :{LTBLUE}Default rail type (after new game/game load): {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_DEFAULT_RAIL_TYPE_RAIL                       :Normal Rail
+ STR_CONFIG_PATCHES_DEFAULT_RAIL_TYPE_ELRAIL                     :Electrified Rail
+Index: src/lang/english_US.txt
+===================================================================
+--- src/lang/english_US.txt	(revision 12954)
++++ src/lang/english_US.txt	(working copy)
+@@ -1116,6 +1116,7 @@
+ STR_CONFIG_PATCHES_LOADING_INDICATORS_ALL                       :All companies
+ STR_CONFIG_PATCHES_TIMETABLE_ALLOW                              :{LTBLUE}Enable timetabling for vehicles: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_TIMETABLE_IN_TICKS                           :{LTBLUE}Show timetable in ticks rather than days: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_QUICKGOTO                                    :{LTBLUE}Quick creation of vehicle orders: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_DEFAULT_RAIL_TYPE                            :{LTBLUE}Default rail type (after new game/game load): {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_DEFAULT_RAIL_TYPE_RAIL                       :Normal Rail
+ STR_CONFIG_PATCHES_DEFAULT_RAIL_TYPE_ELRAIL                     :Electrified Rail
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 12954)
++++ src/settings_gui.cpp	(working copy)
+@@ -819,6 +819,7 @@
+ 	"freight_trains",
+ 	"plane_speed",
+ 	"timetabling",
++	"quickgoto",
+ 	"dynamic_engines",
+ };
+ 
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 12954)
++++ src/settings_type.h	(working copy)
+@@ -224,6 +224,8 @@
+ 	bool timetabling;            ///< Whether to allow timetabling.
+ 	bool timetable_in_ticks;     ///< Whether to show the timetable in ticks rather than days.
+ 
++	bool quickgoto;              ///< Allow quick goto button in vehicle orders window
++	
+ 	bool autoslope;              ///< Allow terraforming under things.
+ 
+ 	bool mod_road_rebuild;       ///< Roadworks remove unneccesary RoadBits
+Index: src/order_gui.cpp
+===================================================================
+--- src/order_gui.cpp	(revision 12954)
++++ src/order_gui.cpp	(working copy)
+@@ -498,6 +498,7 @@
+ 			(facil = FACIL_TRUCK_STOP, 1);
+ 			if (st->facilities & facil) {
+ 				order.MakeGoToStation(st_index);
++				if (_ctrl_pressed) order.SetLoadType(OLFB_FULL_LOAD);
+ 				if (_patches.new_nonstop && (v->type == VEH_TRAIN || v->type == VEH_ROAD)) order.SetNonStopType(ONSF_NO_STOP_AT_INTERMEDIATE_STATIONS);
+ 				return order;
+ 			}
+@@ -542,7 +543,8 @@
+ 
+ 	if (DoCommandP(v->tile, v->index + (OrderGetSel(w) << 16), cmd.Pack(), NULL, CMD_INSERT_ORDER | CMD_MSG(STR_8833_CAN_T_INSERT_NEW_ORDER))) {
+ 		if (WP(w, order_d).sel != -1) WP(w, order_d).sel++;
+-		ResetObjectToPlace();
++		/* quickgoto: GoTo button stays active */
++		if (!_patches.quickgoto) ResetObjectToPlace();
+ 	}
+ }
+ 
+@@ -1194,5 +1196,24 @@
+ 		w->vscroll.cap = 6;
+ 		w->resize.step_height = 10;
+ 		WP(w, order_d).sel = -1;
++
++		if (_patches.quickgoto) {
++
++			/*
++			 *  on order window popup:
++			 *  if only 1 or 2 station order entries -> goto button is active
++			 */
++
++			int n_st = 0;
++			const Order *order;
++			FOR_VEHICLE_ORDERS(v, order) {
++				if (order->IsType(OT_GOTO_STATION)) {
++					n_st++;
++				}
++			}
++			if (n_st < 2) {
++				OrderClick_Goto(w, v, 0);
++			}
++		}
+ 	}
+ }

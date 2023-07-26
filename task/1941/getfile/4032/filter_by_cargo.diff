@@ -1,0 +1,253 @@
+diff -r e966217f30e6 src/build_vehicle_gui.cpp
+--- src/build_vehicle_gui.cpp	Fri Feb 27 21:00:17 2009 +0100
++++ src/build_vehicle_gui.cpp	Fri Feb 27 21:00:55 2009 +0100
+@@ -31,6 +31,7 @@
+ 	BUILD_VEHICLE_WIDGET_CAPTION,
+ 	BUILD_VEHICLE_WIDGET_SORT_ASSENDING_DESCENDING,
+ 	BUILD_VEHICLE_WIDGET_SORT_DROPDOWN,
++	BUILD_VEHICLE_WIDGET_CARGO_DROPDOWN,
+ 	BUILD_VEHICLE_WIDGET_LIST,
+ 	BUILD_VEHICLE_WIDGET_SCROLLBAR,
+ 	BUILD_VEHICLE_WIDGET_PANEL,
+@@ -42,19 +43,24 @@
+ 
+ static const Widget _build_vehicle_widgets[] = {
+ 	{   WWT_CLOSEBOX,   RESIZE_NONE,  COLOUR_GREY,     0,    10,     0,    13, STR_00C5,                STR_018B_CLOSE_WINDOW },
+-	{    WWT_CAPTION,  RESIZE_RIGHT,  COLOUR_GREY,    11,   239,     0,    13, 0x0,                     STR_018C_WINDOW_TITLE_DRAG_THIS },
+-	{ WWT_PUSHTXTBTN,   RESIZE_NONE,  COLOUR_GREY,     0,    80,    14,    25, STR_SORT_BY,             STR_SORT_ORDER_TIP},
+-	{   WWT_DROPDOWN,  RESIZE_RIGHT,  COLOUR_GREY,    81,   239,    14,    25, 0x0,                     STR_SORT_CRITERIA_TIP},
+-	{     WWT_MATRIX,     RESIZE_RB,  COLOUR_GREY,     0,   227,    26,    39, 0x101,                   STR_NULL },
+-	{  WWT_SCROLLBAR,    RESIZE_LRB,  COLOUR_GREY,   228,   239,    26,    39, 0x0,                     STR_0190_SCROLL_BAR_SCROLLS_LIST },
+-	{      WWT_PANEL,    RESIZE_RTB,  COLOUR_GREY,     0,   239,    40,   161, 0x0,                     STR_NULL },
++	{    WWT_CAPTION,  RESIZE_RIGHT,  COLOUR_GREY,    11,   293,     0,    13, 0x0,                     STR_018C_WINDOW_TITLE_DRAG_THIS },
++	{ WWT_PUSHTXTBTN,   RESIZE_NONE,  COLOUR_GREY,     0,    60,    14,    25, STR_SORT_BY,             STR_SORT_ORDER_TIP},
++	{   WWT_DROPDOWN,   RESIZE_NONE,  COLOUR_GREY,    61,   190,    14,    25, 0x0,                     STR_SORT_CRITERIA_TIP},
++	{   WWT_DROPDOWN,  RESIZE_RIGHT,  COLOUR_GREY,   191,   293,    14,    25, 0x0,                     STR_SORT_CRITERIA_TIP},
++	{     WWT_MATRIX,     RESIZE_RB,  COLOUR_GREY,     0,   281,    26,    39, 0x101,                   STR_NULL },
++	{  WWT_SCROLLBAR,    RESIZE_LRB,  COLOUR_GREY,   282,   293,    26,    39, 0x0,                     STR_0190_SCROLL_BAR_SCROLLS_LIST },
++	{      WWT_PANEL,    RESIZE_RTB,  COLOUR_GREY,     0,   293,    40,   161, 0x0,                     STR_NULL },
+ 
+-	{ WWT_PUSHTXTBTN,     RESIZE_TB,  COLOUR_GREY,     0,   114,   162,   173, 0x0,                     STR_NULL },
+-	{ WWT_PUSHTXTBTN,    RESIZE_RTB,  COLOUR_GREY,   115,   227,   162,   173, 0x0,                     STR_NULL },
+-	{  WWT_RESIZEBOX,   RESIZE_LRTB,  COLOUR_GREY,   228,   239,   162,   173, 0x0,                     STR_RESIZE_BUTTON },
++	{ WWT_PUSHTXTBTN,     RESIZE_TB,  COLOUR_GREY,     0,   114,   162,   173, 0x0,                         STR_NULL },
++	{ WWT_PUSHTXTBTN,    RESIZE_RTB,  COLOUR_GREY,   115,   281,   162,   173, 0x0,                         STR_NULL },
++	{  WWT_RESIZEBOX,   RESIZE_LRTB,  COLOUR_GREY,   282,   293,   162,   173, 0x0,                         STR_RESIZE_BUTTON },
+ 	{   WIDGETS_END},
+ };
+ 
++enum cargo_filter {
++	CF_SHOW_ALL = -1
++};
++
+ static bool _internal_sort_order; // descending/ascending
+ static byte _last_sort_criteria[]    = {0, 0, 0, 0};
+ static bool _last_sort_order[]       = {false, false, false, false};
+@@ -781,6 +787,12 @@
+ 		AirportFTAClass::Flags flags;
+ 		RoadTypes roadtypes;
+ 	} filter;
++	int cargo_filter_train;
++	int cargo_filter_road;
++	int cargo_filter_ship;
++	int cargo_filter_aircraft;
++	StringID cargos_name_list[NUM_CARGO + 1];
++	int cargos_dropdown_pos[NUM_CARGO + 1];
+ 	bool descending_sort_order;
+ 	byte sort_criteria;
+ 	bool regenerate_list;
+@@ -807,6 +819,26 @@
+ 		this->sel_engine      = INVALID_ENGINE;
+ 		this->regenerate_list = false;
+ 
++		this->cargo_filter_train = CF_SHOW_ALL;
++		this->cargo_filter_road = CF_SHOW_ALL;
++		this->cargo_filter_ship = CF_SHOW_ALL;
++		this->cargo_filter_aircraft = CF_SHOW_ALL;
++		
++		/* Create cargo filter list  */
++		this->cargos_name_list[0] = STR_PURCHASE_INFO_ALL_TYPES;
++		this->cargos_dropdown_pos[CF_SHOW_ALL] = 0;
++
++		uint i = 1;
++		for (CargoID c = 0; c < NUM_CARGO; c++) {
++			if (!GetCargo(c)->IsValid()) continue;
++
++			this->cargos_name_list[i] = GetCargo(c)->name;
++			this->cargos_dropdown_pos[c] = i;
++
++			i++;
++		}
++		this->cargos_name_list[i] = INVALID_STRING_ID;
++
+ 		this->sort_criteria         = _last_sort_criteria[type];
+ 		this->descending_sort_order = _last_sort_order[type];
+ 
+@@ -911,6 +943,8 @@
+ 			if (this->filter.railtype != RAILTYPE_END && !HasPowerOnRail(rvi->railtype, this->filter.railtype)) continue;
+ 			if (!IsEngineBuildable(eid, VEH_TRAIN, _local_company)) continue;
+ 
++			uint32 cmask = EngInfo(eid)->refit_mask;
++			if (!((this->cargo_filter_train == rvi->cargo_type && rvi->capacity > 0) || (HasBit(cmask, this->cargo_filter_train))) && (this->cargo_filter_train > CF_SHOW_ALL )) continue;
+ 			*this->eng_list.Append() = eid;
+ 
+ 			if (rvi->railveh_type != RAILVEH_WAGON) {
+@@ -946,8 +980,11 @@
+ 		const Engine *e;
+ 		FOR_ALL_ENGINES_OF_TYPE(e, VEH_ROAD) {
+ 			EngineID eid = e->index;
++			const RoadVehicleInfo *rvi = RoadVehInfo(eid);
+ 			if (!IsEngineBuildable(eid, VEH_ROAD, _local_company)) continue;
+ 			if (!HasBit(this->filter.roadtypes, HasBit(EngInfo(eid)->misc_flags, EF_ROAD_TRAM) ? ROADTYPE_TRAM : ROADTYPE_ROAD)) continue;
++			uint32 cmask = EngInfo(eid)->refit_mask;
++			if (!((this->cargo_filter_road == rvi->cargo_type && rvi->capacity > 0) || (HasBit(cmask, this->cargo_filter_road))) && (this->cargo_filter_road > CF_SHOW_ALL )) continue;
+ 			*this->eng_list.Append() = eid;
+ 
+ 			if (eid == this->sel_engine) sel_id = eid;
+@@ -964,7 +1001,10 @@
+ 		const Engine *e;
+ 		FOR_ALL_ENGINES_OF_TYPE(e, VEH_SHIP) {
+ 			EngineID eid = e->index;
++			const ShipVehicleInfo *svi = ShipVehInfo(eid);
+ 			if (!IsEngineBuildable(eid, VEH_SHIP, _local_company)) continue;
++			uint32 cmask = EngInfo(eid)->refit_mask;
++			if (!((this->cargo_filter_ship == svi->cargo_type && svi->capacity > 0) || (HasBit(cmask, this->cargo_filter_ship))) && (this->cargo_filter_ship > CF_SHOW_ALL )) continue;
+ 			*this->eng_list.Append() = eid;
+ 
+ 			if (eid == this->sel_engine) sel_id = eid;
+@@ -988,10 +1028,13 @@
+ 		const Engine *e;
+ 		FOR_ALL_ENGINES_OF_TYPE(e, VEH_AIRCRAFT) {
+ 			EngineID eid = e->index;
++ 			const AircraftVehicleInfo *avi = AircraftVehInfo(eid);
+ 			if (!IsEngineBuildable(eid, VEH_AIRCRAFT, _local_company)) continue;
+ 			/* First VEH_END window_numbers are fake to allow a window open for all different types at once */
+ 			if (!this->listview_mode && !CanVehicleUseStation(eid, st)) continue;
+ 
++ 			uint32 cmask = EngInfo(eid)->refit_mask;
++			if (!((this->cargo_filter_aircraft == CT_PASSENGERS && avi->passenger_capacity > 0) || (this->cargo_filter_aircraft == CT_MAIL && avi->mail_capacity > 0) || (HasBit(cmask, this->cargo_filter_aircraft))) && (this->cargo_filter_aircraft > CF_SHOW_ALL )) continue;
+ 			*this->eng_list.Append() = eid;
+ 			if (eid == this->sel_engine) sel_id = eid;
+ 		}
+@@ -1043,27 +1086,45 @@
+ 				ShowDropDownMenu(this, _sort_listing[this->vehicle_type], this->sort_criteria, BUILD_VEHICLE_WIDGET_SORT_DROPDOWN, 0, 0);
+ 				break;
+ 
++			case BUILD_VEHICLE_WIDGET_CARGO_DROPDOWN: { // Select cargo filter
++				int cargo_filter = CF_SHOW_ALL;
++				switch (this->vehicle_type) {
++					default: NOT_REACHED();
++					case VEH_TRAIN:    cargo_filter = this->cargo_filter_train;    break;
++					case VEH_ROAD:     cargo_filter = this->cargo_filter_road;     break;
++					case VEH_SHIP:     cargo_filter = this->cargo_filter_ship;     break;
++					case VEH_AIRCRAFT: cargo_filter = this->cargo_filter_aircraft; break;
++				}
++				ShowDropDownMenu(this, this->cargos_name_list, this->cargos_dropdown_pos[cargo_filter], BUILD_VEHICLE_WIDGET_CARGO_DROPDOWN, 0, 0);
++				break;
++			}
++
+ 			case BUILD_VEHICLE_WIDGET_BUILD: {
+ 				EngineID sel_eng = this->sel_engine;
+ 				if (sel_eng != INVALID_ENGINE) {
++//					int refit_command = 0;
+ 					switch (this->vehicle_type) {
+ 						default: NOT_REACHED();
+ 						case VEH_TRAIN:
+ 							DoCommandP(this->window_number, sel_eng, 0,
+ 									CMD_BUILD_RAIL_VEHICLE | CMD_MSG(STR_882B_CAN_T_BUILD_RAILROAD_VEHICLE),
+ 									(RailVehInfo(sel_eng)->railveh_type == RAILVEH_WAGON) ? CcBuildWagon : CcBuildLoco);
++//							refit_command = CMD_REFIT_RAIL_VEHICLE | CMD_MSG(STR_RAIL_CAN_T_REFIT_VEHICLE);
+ 							break;
+ 						case VEH_ROAD:
+ 							DoCommandP(this->window_number, sel_eng, 0, CMD_BUILD_ROAD_VEH | CMD_MSG(STR_9009_CAN_T_BUILD_ROAD_VEHICLE), CcBuildRoadVeh);
++//							refit_command = CMD_REFIT_ROAD_VEH     | CMD_MSG(STR_REFIT_ROAD_VEHICLE_CAN_T);
+ 							break;
+ 						case VEH_SHIP:
+ 							DoCommandP(this->window_number, sel_eng, 0, CMD_BUILD_SHIP | CMD_MSG(STR_980D_CAN_T_BUILD_SHIP), CcBuildShip);
++//							refit_command = CMD_REFIT_SHIP         | CMD_MSG(STR_9841_CAN_T_REFIT_SHIP);
+ 							break;
+ 						case VEH_AIRCRAFT:
+ 							DoCommandP(this->window_number, sel_eng, 0, CMD_BUILD_AIRCRAFT | CMD_MSG(STR_A008_CAN_T_BUILD_AIRCRAFT), CcBuildAircraft);
++//							refit_command = CMD_REFIT_AIRCRAFT     | CMD_MSG(STR_A042_CAN_T_REFIT_AIRCRAFT);
+ 							break;
+ 					}
+-				}
++				}		
+ 				break;
+ 			}
+ 
+@@ -1115,6 +1176,18 @@
+ 		/* Set text of sort by dropdown */
+ 		this->widget[BUILD_VEHICLE_WIDGET_SORT_DROPDOWN].data = _sort_listing[this->vehicle_type][this->sort_criteria];
+ 
++		/*Get selected cargo by vehicle type*/
++		int cargo_filter = CF_SHOW_ALL;
++		switch (this->vehicle_type) {
++			default: NOT_REACHED();
++			case VEH_TRAIN:    cargo_filter = this->cargo_filter_train;    break;
++			case VEH_ROAD:     cargo_filter = this->cargo_filter_road;     break;
++			case VEH_SHIP:     cargo_filter = this->cargo_filter_ship;     break;
++			case VEH_AIRCRAFT: cargo_filter = this->cargo_filter_aircraft; break;
++		}
++		/* Set text of cargo filter dropdown */
++		this->widget[BUILD_VEHICLE_WIDGET_CARGO_DROPDOWN].data = this->cargos_name_list[this->cargos_dropdown_pos[cargo_filter]];
++		
+ 		this->DrawWidgets();
+ 
+ 		DrawEngineList(this->vehicle_type, this->widget[BUILD_VEHICLE_WIDGET_LIST].left + 2, this->widget[BUILD_VEHICLE_WIDGET_LIST].right, this->widget[BUILD_VEHICLE_WIDGET_LIST].top + 1, &this->eng_list, this->vscroll.pos, max, this->sel_engine, 0, DEFAULT_GROUP);
+@@ -1158,11 +1231,41 @@
+ 
+ 	virtual void OnDropdownSelect(int widget, int index)
+ 	{
+-		if (this->sort_criteria != index) {
+-			this->sort_criteria = index;
+-			_last_sort_criteria[this->vehicle_type] = this->sort_criteria;
+-			this->regenerate_list = true;
+-		}
++		switch (widget) {
++			case BUILD_VEHICLE_WIDGET_SORT_DROPDOWN:
++				if (this->sort_criteria != index) {
++					this->sort_criteria = index;
++					_last_sort_criteria[this->vehicle_type] = this->sort_criteria;
++				}
++				break;
++
++			case BUILD_VEHICLE_WIDGET_CARGO_DROPDOWN:
++				CargoID c;
++				int cargo_filter;
++
++				if (index > 0) {
++					int i = 1;
++					for (c = 0; c < NUM_CARGO; c++) {
++						if (!GetCargo(c)->IsValid()) continue;
++						if (index == i) break;
++						i++;
++					}
++					cargo_filter = c;
++				}
++				else {
++					cargo_filter = CF_SHOW_ALL;
++				}
++
++				switch (this->vehicle_type) {
++					default: NOT_REACHED();
++					case VEH_TRAIN:    this->cargo_filter_train = cargo_filter;    break;
++					case VEH_ROAD:     this->cargo_filter_road = cargo_filter;     break;
++					case VEH_SHIP:     this->cargo_filter_ship = cargo_filter;     break;
++					case VEH_AIRCRAFT: this->cargo_filter_aircraft = cargo_filter; break;
++				}				
++				break;
++		}	
++		this->regenerate_list = true;
+ 		this->SetDirty();
+ 	}
+ 
+@@ -1179,7 +1282,7 @@
+ };
+ 
+ static const WindowDesc _build_vehicle_desc = {
+-	WDP_AUTO, WDP_AUTO, 240, 174, 240, 256,
++	WDP_AUTO, WDP_AUTO, 294, 174, 294, 256,
+ 	WC_BUILD_VEHICLE, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_RESIZABLE | WDF_CONSTRUCTION,
+ 	_build_vehicle_widgets,

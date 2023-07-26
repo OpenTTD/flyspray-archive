@@ -1,0 +1,263 @@
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(Revision 10989)
++++ src/town_cmd.cpp	(Arbeitskopie)
+@@ -834,9 +834,7 @@
+ 	uint counter = 0; ///< counts the house neighbor tiles
+ 
+ 	/* We can't look further than that. */
+-	if (TileX(tile) < 1 || TileY(tile) < 1) {
+-		return false;
+-	}
++	if (TileX(tile) < 2 || TileY(tile) < 2 || MapMaxX() <= TileX(tile) || MapMaxY() <= TileY(tile)) return false;
+ 
+ 	/* Check the tiles E,N,W and S of the current tile. */
+ 	for (uint i = 0; i < 4; i++) {
+@@ -866,24 +864,19 @@
+  * 	@li TL_NO_ROADS
+  *
+  * @param tile_ptr current tile
+- * @param mask current tiles RoadBits
+- * @param block road block
++ * @param start_tile_rb current tiles RoadBits
++ * @param target_dir direction to the next planed tile
+  * @param t1 current town
+  */
+-static void GrowTownInTile(TileIndex* tile_ptr, RoadBits mask, int block, Town* t1)
++static void GrowTownInTile(TileIndex* tile_ptr, RoadBits start_tile_rb, int target_dir, Town* t1)
+ {
+ 	RoadBits rcmd;
+ 	TileIndex tmptile;
+-	DiagDirection i;
+-	int j;
+ 	TileIndex tile = *tile_ptr;
+ 
+ 	TILE_ASSERT(tile);
+ 
+-	if (mask == 0) {
+-		int a;
+-		int b;
+-
++	if (start_tile_rb == ROAD_NONE) {
+ 		/* Tile has no road. First reset the status counter
+ 		 * to say that this is the last iteration. */
+ 		_grow_town_result = 0;
+@@ -908,29 +901,29 @@
+ 
+ 			case TL_BETTER_ROADS:
+ 			case TL_ORIGINAL:
+-				if (!IsRoadAllowedHere(tile, block)) {
++				if (!IsRoadAllowedHere(tile, target_dir)) {
+ 					return;
+ 				}
+ 
+ 				/* Randomize new road block numbers */
+-				a = block;
+-				b = block ^ 2;
++				int rb_dir_a = target_dir;
++				int rb_dir_b = target_dir ^ 2;
+ 				if (CHANCE16(1, 4)) {
+ 					do {
+-						a = GB(Random(), 0, 2);
+-					} while (a == b);
++						rb_dir_a = GB(Random(), 0, 2);
++					} while (rb_dir_a == rb_dir_b);
+ 				}
+ 
+-				if (!IsRoadAllowedHere(TILE_ADD(tile, ToTileIndexDiff(_roadblock_tileadd[a])), a)) {
++				if (!IsRoadAllowedHere(TILE_ADD(tile, ToTileIndexDiff(_roadblock_tileadd[rb_dir_a])), rb_dir_a)) {
+ 					/* A road is not allowed to continue the randomized road,
+ 					 *   return if the road we're trying to build is curved. */
+-					if (a != (b ^ 2)) {
++					if (rb_dir_a != (rb_dir_b ^ 2)) {
+ 						return;
+ 					}
+ 
+ 					/* Return if neither side of the new road is a house */
+-					if (!IsTileType(TILE_ADD(tile, ToTileIndexDiff(_roadblock_tileadd[a + 1])), MP_HOUSE) &&
+-							!IsTileType(TILE_ADD(tile, ToTileIndexDiff(_roadblock_tileadd[a + 3])), MP_HOUSE)) {
++					if (!IsTileType(TILE_ADD(tile, ToTileIndexDiff(_roadblock_tileadd[rb_dir_a + 1])), MP_HOUSE) &&
++							!IsTileType(TILE_ADD(tile, ToTileIndexDiff(_roadblock_tileadd[rb_dir_a + 3])), MP_HOUSE)) {
+ 						return;
+ 					}
+ 
+@@ -938,11 +931,11 @@
+ 					 *  at any side of the new road. */
+ 				}
+ 
+-				rcmd = (RoadBits)((1 << a) + (1 << b));
++				rcmd = (RoadBits)((ROAD_NW << rb_dir_a) + (ROAD_NW << rb_dir_b));
+ 				break;
+ 		}
+ 
+-	} else if (block < 5 && !HASBIT(mask, block ^ 2)) {
++	} else if (target_dir < 5 && !HASBIT(start_tile_rb, target_dir ^ 2)) {
+ 		/* Continue building on a partial road.
+ 		 * Always OK. */
+ 		_grow_town_result = 0;
+@@ -960,11 +953,10 @@
+ 
+ 			case TL_BETTER_ROADS:
+ 			case TL_ORIGINAL:
+-				rcmd = (RoadBits)(1 << (block ^ 2));
++				rcmd = (RoadBits)(ROAD_NW << (target_dir ^ 2));
+ 				break;
+ 		}
+ 	} else {
+-		int i;
+ 		bool allow_house = false;
+ 		TileIndex tmptile2;
+ 
+@@ -980,11 +972,11 @@
+ 
+ 		/* Possibly extend the road in a direction.
+ 		 * Randomize a direction and if it has a road, bail out. */
+-		i = GB(Random(), 0, 2);
+-		if (HASBIT(mask, i)) return;
++		int new_target_dir = GB(Random(), 0, 2);
++		if (HASBIT(start_tile_rb, new_target_dir)) return;
+ 
+ 		/* This is the tile we will reach if we extend to this direction. */
+-		tmptile = TILE_ADD(tile, ToTileIndexDiff(_roadblock_tileadd[i]));
++		tmptile = TILE_ADD(tile, ToTileIndexDiff(_roadblock_tileadd[new_target_dir]));
+ 
+ 		/* Don't do it if it reaches to water. */
+ 		if (IsClearWaterTile(tmptile)) return;
+@@ -998,7 +990,7 @@
+ 
+ 			case TL_3X3_GRID: /* Use 2x2 grid afterwards! */
+ 				/* Fill gap if house has enougth neighbors */
+-				tmptile2 = TILE_ADD(tmptile, ToTileIndexDiff(_roadblock_tileadd[i]));
++				tmptile2 = TILE_ADD(tmptile, ToTileIndexDiff(_roadblock_tileadd[new_target_dir]));
+ 				if (NeighborsAreHouseTiles(tmptile2) && BuildTownHouse(t1, tmptile2)) {
+ 					_grow_town_result = -1;
+ 				}
+@@ -1010,7 +1002,7 @@
+ 
+ 			case TL_BETTER_ROADS: /* Use original afterwards! */
+ 				/* Fill gap if house has enougth neighbors */
+-				tmptile2 = TILE_ADD(tmptile, ToTileIndexDiff(_roadblock_tileadd[i]));
++				tmptile2 = TILE_ADD(tmptile, ToTileIndexDiff(_roadblock_tileadd[new_target_dir]));
+ 				if (NeighborsAreHouseTiles(tmptile2) && BuildTownHouse(t1, tmptile2)) {
+ 					_grow_town_result = -1;
+ 				}
+@@ -1018,7 +1010,7 @@
+ 			case TL_ORIGINAL:
+ 				 /* Allow a house at the edge. 60% chance or
+ 				  * always ok if no road allowed. */
+-				allow_house = (!IsRoadAllowedHere(tmptile, i) || CHANCE16(6, 10));
++				allow_house = (!IsRoadAllowedHere(tmptile, new_target_dir) || CHANCE16(6, 10));
+ 				break;
+ 		}
+ 
+@@ -1039,19 +1031,20 @@
+ 		}
+ 
+ 		_grow_town_result = 0;
+-		rcmd = (RoadBits)(1 << i);
++		rcmd = (RoadBits)(ROAD_NW << new_target_dir);
+ 	}
+ 
+ 	/* Return if a water tile */
+ 	if (IsClearWaterTile(tile)) return;
+ 
++	DiagDirection bridge_dir;
+ 	/* Determine direction of slope,
+ 	 *  and build a road if not a special slope. */
+ 	switch (GetTileSlope(tile, NULL)) {
+-		case SLOPE_SW: i = DIAGDIR_NE; break;
+-		case SLOPE_SE: i = DIAGDIR_NW; break;
+-		case SLOPE_NW: i = DIAGDIR_SE; break;
+-		case SLOPE_NE: i = DIAGDIR_SW; break;
++		case SLOPE_SW: bridge_dir = DIAGDIR_NE; break;
++		case SLOPE_SE: bridge_dir = DIAGDIR_NW; break;
++		case SLOPE_NW: bridge_dir = DIAGDIR_SE; break;
++		case SLOPE_NE: bridge_dir = DIAGDIR_SW; break;
+ 
+ 		default:
+ build_road_and_exit:
+@@ -1062,27 +1055,30 @@
+ 	}
+ 
+ 	/* Check if the bridge is in the right direction */
+-	if ((rcmd == ROAD_X && (i == DIAGDIR_NW || i == DIAGDIR_SE)) ||
+-			(rcmd == ROAD_Y && (i == DIAGDIR_NE || i == DIAGDIR_SW))) {
++	if ((rcmd == ROAD_X && (bridge_dir == DIAGDIR_NW || bridge_dir == DIAGDIR_SE)) ||
++			(rcmd == ROAD_Y && (bridge_dir == DIAGDIR_NE || bridge_dir == DIAGDIR_SW))) {
+ 		goto build_road_and_exit;
+ 	}
+ 
+ 	tmptile = tile;
+ 
+ 	/* Now it contains the direction of the slope */
+-	j = -11; // max 11 tile long bridges
++	int bridge_length = 0;
+ 	do {
+-		if (++j == 0)
++		if (++bridge_length >= 11) {
++			/* max 11 tile long bridges */
+ 			goto build_road_and_exit;
+-		tmptile = TILE_MASK(tmptile + TileOffsByDiagDir(i));
++		}
++		tmptile = TILE_MASK(tmptile + TileOffsByDiagDir(bridge_dir));
+ 	} while (IsClearWaterTile(tmptile));
+ 
+-	/* no water tiles in between? */
+-	if (j == -10)
++	if (bridge_length <= 1) {
++		/* no water tiles in between! */
+ 		goto build_road_and_exit;
++	}
+ 
+ 	/* Quit if it selecting an appropiate bridge type fails a large number of times. */
+-	j = 22;
++	bridge_length = 22;
+ 	{
+ 		int32 bridge_len = GetBridgeLength(tile, tmptile);
+ 		do {
+@@ -1094,7 +1090,7 @@
+ 				/* obviously, if building any bridge would fail, there is no need to try other bridge-types */
+ 				return;
+ 			}
+-		} while (--j != 0);
++		} while (--bridge_length != 0);
+ 	}
+ }
+ 
+@@ -1105,7 +1101,7 @@
+  */
+ static int GrowTownAtRoad(Town *t, TileIndex tile)
+ {
+-	int block = 5; // special case
++	int target_dir = 5; // special case
+ 
+ 	TILE_ASSERT(tile);
+ 
+@@ -1129,21 +1125,21 @@
+ 
+ 	do {
+ 		/* Get a bitmask of the road blocks on a tile */
+-		RoadBits mask = GetTownRoadMask(tile);
++		RoadBits start_tile_rb = GetTownRoadMask(tile);
+ 
+ 		/* Try to grow the town from this point */
+-		GrowTownInTile(&tile, mask, block, t);
++		GrowTownInTile(&tile, start_tile_rb, target_dir, t);
+ 
+ 		/* Exclude the source position from the bitmask
+ 		 * and return if no more road blocks available */
+-		ClrBitT(mask, (block ^ 2));
+-		if (mask == 0)
++		ClrBitT(start_tile_rb, (target_dir ^ 2));
++		if (start_tile_rb == ROAD_NONE)
+ 			return _grow_town_result;
+ 
+ 		/* Select a random bit from the blockmask, walk a step
+ 		 * and continue the search from there. */
+-		do block = Random() & 3; while (!HASBIT(mask, block));
+-		tile += ToTileIndexDiff(_roadblock_tileadd[block]);
++		do target_dir = Random() & 3; while (!HASBIT(start_tile_rb, target_dir));
++		tile += ToTileIndexDiff(_roadblock_tileadd[target_dir]);
+ 
+ 		if (IsTileType(tile, MP_ROAD)) {
+ 			/* Don't allow building over roads of other cities */

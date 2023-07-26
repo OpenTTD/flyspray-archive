@@ -1,0 +1,75 @@
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 5082)
++++ vehicle.c	(working copy)
+@@ -1748,6 +1748,7 @@
+ 	}
+ 
+ 	for (;;) {
++		uint length = 0;
+ 		cost = 0;
+ 		w = v;
+ 		do {
+@@ -1756,21 +1757,29 @@
+ 				continue;
+ 			}
+ 
+-			// check if the vehicle should be replaced
+-			if (!p->engine_renew ||
+-					w->age - w->max_age < (p->engine_renew_months * 30) || // replace if engine is too old
+-					w->max_age == 0) { // rail cars got a max age of 0
+-				if (!EngineHasReplacementForPlayer(p, w->engine_type)) // updates to a new model
+-					continue;
+-			}
+-
+-			if (w->type == VEH_Train && IsTrainWagon(w)) {
+-				EngineID e = EngineReplacementForPlayer(p, w->engine_type);
++			if (!EngineHasReplacementForPlayer(p, w->engine_type)) {
++				if (w->type == VEH_Train) {
++					length += RailVehInfo(w->engine_type)->flags & RVI_MULTIHEAD ? 2 : 1;
++				}
+ 
+-				if (w->cargo_type != RailVehInfo(e)->cargo_type && !CanRefitTo(e, w->cargo_type)) {
+-					// we can't replace this wagon since the cargo type is incorrent, and we can't refit it
++				/* This engine/wagon has no replacement model, so check if it
++				 * is to be replaced due to age. */
++				if (!p->engine_renew || w->max_age == 0 ||
++						w->age - w->max_age < (p->engine_renew_months * 30)) {
+ 					continue;
+ 				}
++			} else {
++				if (w->type == VEH_Train) {
++					EngineID e = EngineReplacementForPlayer(p, w->engine_type);
++
++					/* Add number of engines & wagons to the total length */
++					length += RailVehInfo(e)->flags & RVI_MULTIHEAD ? 2 : 1;
++
++					if (IsTrainWagon(w) && w->cargo_type != RailVehInfo(e)->cargo_type && !CanRefitTo(e, w->cargo_type)) {
++						// we can't replace this wagon since the cargo type is incorrent, and we can't refit it
++						continue;
++					}
++				}
+ 			}
+ 
+ 			/* Now replace the vehicle */
+@@ -1790,6 +1799,20 @@
+ 			}
+ 		} while (w->type == VEH_Train && (w = GetNextVehicle(w)) != NULL);
+ 
++		/* Check if the new length would exceed the maximum number of wagons */
++		if (v->type == VEH_Train && length > (_patches.mammoth_trains ? 100 : 9)) {
++			/* Send a news message to the train's owner */
++			if (_local_player == v->owner) {
++				SetDParam(0, v->unitnumber);
++				AddNewsItem(STR_TRAIN_TOO_LONG_AFTER_REPLACEMENT, NEWS_FLAGS(NM_SMALL, NF_VIEWPORT|NF_VEHICLE, NT_ADVICE, 0), v->index, 0);
++			}
++
++			/* Send the train on its way */
++			if (stopped) v->vehstatus &= ~VS_STOPPED;
++			_current_player = OWNER_NONE;
++			return;
++		}
++
+ 		if (p->money64 < (int32)(cost + p->engine_renew_money) || cost == 0) {
+ 			if (p->money64 < (int32)(cost + p->engine_renew_money) && ( _local_player == v->owner ) && cost != 0) {
+ 				StringID message;

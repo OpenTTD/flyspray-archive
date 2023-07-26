@@ -1,0 +1,138 @@
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(Revision 10980)
++++ src/town_cmd.cpp	(Arbeitskopie)
+@@ -563,20 +563,23 @@
+ 	/* not used */
+ }
+ 
++static TileIndex TileByDiagDirAndDist(TileIndex tile, int diag_dir, int dist) {
++	return (tile + dist * TileOffsByDiagDir((DiagDirection)diag_dir));
++}
+ 
+-static const TileIndexDiffC _roadblock_tileadd[] = {
+-	{ 0, -1},
+-	{ 1,  0},
+-	{ 0,  1},
+-	{-1,  0},
++static TileIndex TileByDiagDir(TileIndex tile, int diag_dir) {
++	return TileByDiagDirAndDist(tile, diag_dir, 1);
++}
+ 
+-	/* Store the first 3 elements again.
+-	 * Lets us rotate without using &3. */
+-	{ 0, -1},
+-	{ 1,  0},
+-	{ 0,  1}
+-};
++static TileIndex TileByMirroredDiagDirAndDist(TileIndex tile, int mirrored_diag_dir, int dist) {
++	mirrored_diag_dir = 3 - (mirrored_diag_dir % 4);
++	return TileByDiagDirAndDist(tile, mirrored_diag_dir, dist);
++}
+ 
++static TileIndex TileByMirroredDiagDir(TileIndex tile, int mirrored_diag_dir) {
++	return TileByMirroredDiagDirAndDist(tile, mirrored_diag_dir, 1);
++}
++
+ /**
+  * Distance multiplyer
+  * Defines the possible distances between 2 road tiles
+@@ -647,12 +650,13 @@
+  * @return true if one of the neighboring tiles at the
+  *  given distance is a road tile else
+  */
+-static bool NeighborIsRoadTile(TileIndex tile, int dir, RoadBlockTitleDistance dist_multi)
++static bool IsNeighborRoadTile(TileIndex tile, int dir, RoadBlockTitleDistance dist_multi)
+ {
+-	return (HASBIT(GetTownRoadMask(TILE_ADD(tile, dist_multi * ToTileIndexDiff(_roadblock_tileadd[dir + 1]))), dir ^ 2) ||
+-			HASBIT(GetTownRoadMask(TILE_ADD(tile, dist_multi * ToTileIndexDiff(_roadblock_tileadd[dir + 3]))), dir ^ 2) ||
+-			HASBIT(GetTownRoadMask(TILE_ADD(tile, dist_multi * (ToTileIndexDiff(_roadblock_tileadd[dir + 1]) + ToTileIndexDiff(_roadblock_tileadd[dir + 2])))), dir) ||
+-			HASBIT(GetTownRoadMask(TILE_ADD(tile, dist_multi * (ToTileIndexDiff(_roadblock_tileadd[dir + 3]) + ToTileIndexDiff(_roadblock_tileadd[dir + 2])))), dir));
++	const TileIndex dummy = TileByMirroredDiagDirAndDist(tile, dir + 2, dist_multi);
++	return (HASBIT(GetTownRoadMask(TileByMirroredDiagDirAndDist(tile, dir + 1, dist_multi)), dir ^ 2) ||
++			HASBIT(GetTownRoadMask(TileByMirroredDiagDirAndDist(tile, dir + 3, dist_multi)), dir ^ 2) ||
++			HASBIT(GetTownRoadMask(TileByMirroredDiagDirAndDist(dummy, dir + 1, dist_multi)), dir) ||
++			HASBIT(GetTownRoadMask(TileByMirroredDiagDirAndDist(dummy, dir + 3, dist_multi)), dir));
+ }
+ 
+ static bool IsRoadAllowedHere(TileIndex tile, int dir)
+@@ -685,11 +689,11 @@
+ 				default: NOT_REACHED();
+ 
+ 				case TL_ORIGINAL: /* Disallow the road if any neighboring tile has a road (distance: 1) */
+-					return !NeighborIsRoadTile(tile, dir, RB_TILE_DIST1);
++					return !IsNeighborRoadTile(tile, dir, RB_TILE_DIST1);
+ 
+ 				case TL_BETTER_ROADS: /* Disallow the road if any neighboring tile has a road (distance: 1 and 2). */
+-					return !(NeighborIsRoadTile(tile, dir, RB_TILE_DIST1) ||
+-							NeighborIsRoadTile(tile, dir, RB_TILE_DIST2));
++					return !(IsNeighborRoadTile(tile, dir, RB_TILE_DIST1) ||
++							IsNeighborRoadTile(tile, dir, RB_TILE_DIST2));
+ 			}
+ 		}
+ 
+@@ -840,7 +844,7 @@
+ 
+ 	/* Check the tiles E,N,W and S of the current tile. */
+ 	for (uint i = 0; i < 4; i++) {
+-		if (IsTileType(TILE_ADD(tile, ToTileIndexDiff(_roadblock_tileadd[i])), MP_HOUSE)) {
++		if (IsTileType(TileByMirroredDiagDir(tile, i), MP_HOUSE)) {
+ 			counter++;
+ 		}
+ 
+@@ -921,7 +925,7 @@
+ 					} while (a == b);
+ 				}
+ 
+-				if (!IsRoadAllowedHere(TILE_ADD(tile, ToTileIndexDiff(_roadblock_tileadd[a])), a)) {
++				if (!IsRoadAllowedHere(TileByMirroredDiagDir(tile, a), a)) {
+ 					/* A road is not allowed to continue the randomized road,
+ 					 *   return if the road we're trying to build is curved. */
+ 					if (a != (b ^ 2)) {
+@@ -929,8 +933,8 @@
+ 					}
+ 
+ 					/* Return if neither side of the new road is a house */
+-					if (!IsTileType(TILE_ADD(tile, ToTileIndexDiff(_roadblock_tileadd[a + 1])), MP_HOUSE) &&
+-							!IsTileType(TILE_ADD(tile, ToTileIndexDiff(_roadblock_tileadd[a + 3])), MP_HOUSE)) {
++					if (!IsTileType(TileByMirroredDiagDir(tile, a + 1), MP_HOUSE) &&
++							!IsTileType(TileByMirroredDiagDir(tile, a + 3), MP_HOUSE)) {
+ 						return;
+ 					}
+ 
+@@ -984,7 +988,7 @@
+ 		if (HASBIT(mask, i)) return;
+ 
+ 		/* This is the tile we will reach if we extend to this direction. */
+-		tmptile = TILE_ADD(tile, ToTileIndexDiff(_roadblock_tileadd[i]));
++		tmptile = TileByMirroredDiagDir(tile, i);
+ 
+ 		/* Don't do it if it reaches to water. */
+ 		if (IsClearWaterTile(tmptile)) return;
+@@ -998,7 +1002,7 @@
+ 
+ 			case TL_3X3_GRID: /* Use 2x2 grid afterwards! */
+ 				/* Fill gap if house has enougth neighbors */
+-				tmptile2 = TILE_ADD(tmptile, ToTileIndexDiff(_roadblock_tileadd[i]));
++				tmptile2 = TileByMirroredDiagDir(tmptile, i);
+ 				if (NeighborsAreHouseTiles(tmptile2) && BuildTownHouse(t1, tmptile2)) {
+ 					_grow_town_result = -1;
+ 				}
+@@ -1010,7 +1014,7 @@
+ 
+ 			case TL_BETTER_ROADS: /* Use original afterwards! */
+ 				/* Fill gap if house has enougth neighbors */
+-				tmptile2 = TILE_ADD(tmptile, ToTileIndexDiff(_roadblock_tileadd[i]));
++				tmptile2 = TileByMirroredDiagDir(tmptile, i);
+ 				if (NeighborsAreHouseTiles(tmptile2) && BuildTownHouse(t1, tmptile2)) {
+ 					_grow_town_result = -1;
+ 				}
+@@ -1143,7 +1147,7 @@
+ 		/* Select a random bit from the blockmask, walk a step
+ 		 * and continue the search from there. */
+ 		do block = Random() & 3; while (!HASBIT(mask, block));
+-		tile += ToTileIndexDiff(_roadblock_tileadd[block]);
++		tile = TileByMirroredDiagDir(tile, block);
+ 
+ 		if (IsTileType(tile, MP_ROAD)) {
+ 			/* Don't allow building over roads of other cities */

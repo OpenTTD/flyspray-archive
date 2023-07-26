@@ -1,0 +1,75 @@
+Index: src/network/network_udp.cpp
+===================================================================
+--- src/network/network_udp.cpp	(revision 11719)
++++ src/network/network_udp.cpp	(arbetskopia)
+@@ -19,7 +19,6 @@
+ #include "network_udp.h"
+ #include "../variables.h"
+ #include "../newgrf_config.h"
+-#include "../core/endian_func.hpp"
+ 
+ #include "core/udp.h"
+ 
+@@ -334,14 +333,21 @@
+ 	/* packet begins with the protocol version (uint8)
+ 	 * then an uint16 which indicates how many
+ 	 * ip:port pairs are in this packet, after that
+-	 * an uint32 (ip) and an uint16 (port) for each pair
++	 * an uint32 (ip, network byte order) and an uint16
++	 * (port, little-endian) for each pair
+ 	 */
+ 
+ 	ver = p->Recv_uint8();
+ 
+ 	if (ver == 1) {
+ 		for (i = p->Recv_uint16(); i != 0 ; i--) {
+-			ip.s_addr = TO_LE32(p->Recv_uint32());
++			/* the ip adress is sent in the network byte order on
++			 * the wire, even though everything else is sent as
++			 * little-endian. using Recv_uint32_noswap() here
++			 * therefore gives us network byte order, which is what
++			 * should be stored in ip.s_addr.
++			 */
++			ip.s_addr = p->Recv_uint32_noswap();
+ 			port = p->Recv_uint16();
+ 
+ 			/* Somehow we reached the end of the packet */
+Index: src/network/core/packet.cpp
+===================================================================
+--- src/network/core/packet.cpp	(revision 11719)
++++ src/network/core/packet.cpp	(arbetskopia)
+@@ -219,6 +219,22 @@
+ 	return n;
+ }
+ 
++/** Reads a 32-bit integer from the wire, and returns it in the same byte order
++ * that it was sent on the wire. Useful for receiving fields that are sent in
++ * network byte order without extra head-spinning byte swaps.
++ */
++uint32 Packet::Recv_uint32_noswap()
++{
++	uint32 n;
++
++	if (!this->CanReadFromPacket(sizeof(n))) return 0;
++
++	memcpy(&n, &this->buffer[this->pos], sizeof(n));
++	this->pos += sizeof(n);
++
++	return n;
++}
++
+ uint64 Packet::Recv_uint64()
+ {
+ 	uint64 n;
+Index: src/network/core/packet.h
+===================================================================
+--- src/network/core/packet.h	(revision 11719)
++++ src/network/core/packet.h	(arbetskopia)
+@@ -61,6 +61,7 @@
+ 	uint8  Recv_uint8 ();
+ 	uint16 Recv_uint16();
+ 	uint32 Recv_uint32();
++	uint32 Recv_uint32_noswap();
+ 	uint64 Recv_uint64();
+ 	void   Recv_string(char* buffer, size_t size);
+ };

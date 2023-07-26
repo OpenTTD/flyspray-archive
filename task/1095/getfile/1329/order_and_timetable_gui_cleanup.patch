@@ -1,0 +1,488 @@
+=== src/timetable_gui.cpp
+==================================================================
+--- src/timetable_gui.cpp	(/trunk)	(revision 140)
++++ src/timetable_gui.cpp	(/branch/order_gui)	(revision 140)
+@@ -9,7 +9,6 @@
+ #include "table/strings.h"
+ #include "strings.h"
+ #include "command.h"
+-#include "date.h"
+ #include "engine.h"
+ #include "gui.h"
+ #include "string.h"
+@@ -17,34 +16,8 @@
+ #include "vehicle.h"
+ #include "cargotype.h"
+ #include "depot.h"
++#include "order_gui.h"
+ 
+-static int GetOrderFromTimetableWndPt(Window *w, int y, const Vehicle *v)
+-{
+-	/*
+-	 * Calculation description:
+-	 * 15 = 14 (w->widget[ORDER_WIDGET_ORDER_LIST].top) + 1 (frame-line)
+-	 * 10 = order text hight
+-	 */
+-	int sel = (y - 15) / 10;
+-
+-	if ((uint)sel >= w->vscroll.cap) return INVALID_ORDER;
+-
+-	sel += w->vscroll.pos;
+-
+-	return (sel <= v->num_orders * 2 && sel >= 0) ? sel : INVALID_ORDER;
+-}
+-
+-static inline void SetTimetableParams(int param1, int param2, uint32 time)
+-{
+-	if (_patches.timetable_in_ticks) {
+-		SetDParam(param1, STR_TIMETABLE_TICKS);
+-		SetDParam(param2, time);
+-	} else {
+-		SetDParam(param1, STR_TIMETABLE_DAYS);
+-		SetDParam(param2, time / DAY_TICKS);
+-	}
+-}
+-
+ static void DrawTimetableWindow(Window *w)
+ {
+ 	const Vehicle *v = GetVehicle(w->window_number);
+@@ -92,66 +65,21 @@
+ 		/* Don't draw anything if it extends past the end of the window. */
+ 		if (i - w->vscroll.pos >= w->vscroll.cap) break;
+ 
++		const byte colour = (i == selected) ? 0xC : 0x10;
++
+ 		if (i % 2 == 0) {
+ 			SetDParam(2, STR_EMPTY);
+-
+-			switch (order->type) {
+-				case OT_DUMMY:
+-					SetDParam(0, STR_INVALID_ORDER);
+-					break;
+-
+-				case OT_GOTO_STATION:
+-					SetDParam(0, (order->flags & OF_NON_STOP) ? STR_880C_GO_NON_STOP_TO : STR_8806_GO_TO);
+-					SetDParam(1, order->dest);
+-
+-					if (order->wait_time > 0) {
+-						SetDParam(2, STR_TIMETABLE_STAY_FOR);
+-						SetTimetableParams(3, 4, order->wait_time);
+-					}
+-
+-					break;
+-
+-				case OT_GOTO_DEPOT: {
+-					StringID string = STR_EMPTY;
+-
+-					if (v->type == VEH_AIRCRAFT) {
+-						string = STR_GO_TO_AIRPORT_HANGAR;
+-						SetDParam(1, order->dest);
+-					} else {
+-						SetDParam(1, GetDepot(order->dest)->town_index);
+-
+-						switch (v->type) {
+-							case VEH_TRAIN: string = (order->flags & OF_NON_STOP) ? STR_880F_GO_NON_STOP_TO_TRAIN_DEPOT : STR_GO_TO_TRAIN_DEPOT; break;
+-							case VEH_ROAD:  string = STR_9038_GO_TO_ROADVEH_DEPOT; break;
+-							case VEH_SHIP:  string = STR_GO_TO_SHIP_DEPOT; break;
+-							default: break;
+-						}
+-					}
+-
+-					if (order->flags & OF_FULL_LOAD) string++; // Service at orders
+-
+-					SetDParam(0, string);
+-				} break;
+-
+-				case OT_GOTO_WAYPOINT:
+-					SetDParam(0, (order->flags & OF_NON_STOP) ? STR_GO_NON_STOP_TO_WAYPOINT : STR_GO_TO_WAYPOINT);
+-					SetDParam(1, order->dest);
+-					break;
+-
+-				default: break;
+-			}
+-
+-			const byte colour = (i == selected) ? 0xC : 0x10;
++			SetOrderStringParams(v, order, 0, OWT_TIMETABLE_WINDOW);
+ 			DrawString(2, y, STR_TIMETABLE_GO_TO, colour);
+ 
+ 			order_id++;
+-
+ 			if (order_id >= v->num_orders) {
+ 				order = GetVehicleOrder(v, 0);
+ 				final_order = true;
+ 			} else {
+ 				order = order->next;
+ 			}
++
+ 		} else {
+ 			StringID string;
+ 
+@@ -161,8 +89,6 @@
+ 				SetTimetableParams(0, 1, order->travel_time);
+ 				string = STR_TIMETABLE_TRAVEL_FOR;
+ 			}
+-
+-			const byte colour = (i == selected) ? 0xC : 0x10;
+ 			DrawString(12, y, string, colour);
+ 
+ 			if (final_order) break;
+@@ -221,7 +147,7 @@
+ 
+ 			switch (we->we.click.widget) {
+ 				case 3: { /* Main panel. */
+-					int selected = GetOrderFromTimetableWndPt(w, we->we.click.pt.y, v);
++					int selected = GetOrderFromWndPt(w, we->we.click.pt.y, v, OWT_TIMETABLE_WINDOW);
+ 
+ 					if (selected == INVALID_ORDER || selected == WP(w,order_d).sel) {
+ 						/* Deselect clicked order */
+=== src/order_gui.cpp
+==================================================================
+--- src/order_gui.cpp	(/trunk)	(revision 140)
++++ src/order_gui.cpp	(/branch/order_gui)	(revision 140)
+@@ -27,6 +27,7 @@
+ #include "vehicle_gui.h"
+ #include "timetable.h"
+ #include "cargotype.h"
++#include "order_gui.h"
+ 
+ enum OrderWindowWidgets {
+ 	ORDER_WIDGET_CLOSEBOX = 0,
+@@ -62,51 +63,6 @@
+ 	return (num >= 0 && num < v->num_orders) ? num : v->num_orders;
+ }
+ 
+-/**
+- * Calculate the selected order.
+- * The calculation is based on the relative (to the window) y click position and
+- *  the position of the scrollbar.
+- *
+- * @param w current window
+- * @param y Y-value of the click relative to the window origin
+- * @param v current vehicle
+- * @return the new selected order if the order is valid else return that
+- *  an invalid one has been selected.
+- */
+-static int GetOrderFromOrderWndPt(Window *w, int y, const Vehicle *v)
+-{
+-	/*
+-	 * Calculation description:
+-	 * 15 = 14 (w->widget[ORDER_WIDGET_ORDER_LIST].top) + 1 (frame-line)
+-	 * 10 = order text hight
+-	 */
+-	int sel = (y - 15) / 10;
+-
+-	if ((uint)sel >= w->vscroll.cap) return INVALID_ORDER;
+-
+-	sel += w->vscroll.pos;
+-
+-	return (sel <= v->num_orders && sel >= 0) ? sel : INVALID_ORDER;
+-}
+-
+-static StringID StationOrderStrings[] = {
+-	STR_8806_GO_TO,
+-	STR_8807_GO_TO_TRANSFER,
+-	STR_8808_GO_TO_UNLOAD,
+-	STR_8809_GO_TO_TRANSFER_UNLOAD,
+-	STR_880A_GO_TO_LOAD,
+-	STR_880B_GO_TO_TRANSFER_LOAD,
+-	STR_NULL,
+-	STR_NULL,
+-	STR_880C_GO_NON_STOP_TO,
+-	STR_880D_GO_TO_NON_STOP_TRANSFER,
+-	STR_880E_GO_NON_STOP_TO_UNLOAD,
+-	STR_880F_GO_TO_NON_STOP_TRANSFER_UNLOAD,
+-	STR_8810_GO_NON_STOP_TO_LOAD,
+-	STR_8811_GO_TO_NON_STOP_TRANSFER_LOAD,
+-	STR_NULL
+-};
+-
+ static void DrawOrdersWindow(Window *w)
+ {
+ 	const Vehicle *v;
+@@ -188,58 +144,12 @@
+ 		SetDParam(3, STR_EMPTY);
+ 
+ 		if (i - w->vscroll.pos < w->vscroll.cap) {
+-			SetDParam(1, 6);
+-
+-			switch (order->type) {
+-				case OT_DUMMY:
+-					SetDParam(1, STR_INVALID_ORDER);
+-					SetDParam(2, order->dest);
+-					break;
+-
+-				case OT_GOTO_STATION:
+-					SetDParam(1, StationOrderStrings[order->flags]);
+-					SetDParam(2, order->dest);
+-					break;
+-
+-				case OT_GOTO_DEPOT: {
+-					StringID s = STR_NULL;
+-
+-					if (v->type == VEH_AIRCRAFT) {
+-						s = STR_GO_TO_AIRPORT_HANGAR;
+-						SetDParam(2, order->dest);
+-					} else {
+-						SetDParam(2, GetDepot(order->dest)->town_index);
+-
+-						switch (v->type) {
+-							case VEH_TRAIN: s = (order->flags & OF_NON_STOP) ? STR_880F_GO_NON_STOP_TO_TRAIN_DEPOT : STR_GO_TO_TRAIN_DEPOT; break;
+-							case VEH_ROAD:  s = STR_9038_GO_TO_ROADVEH_DEPOT; break;
+-							case VEH_SHIP:  s = STR_GO_TO_SHIP_DEPOT; break;
+-							default: break;
+-						}
+-					}
+-
+-					if (order->flags & OF_FULL_LOAD) s++; /* service at */
+-
+-					SetDParam(1, s);
+-					if (order->refit_cargo < NUM_CARGO) {
+-						SetDParam(3, STR_REFIT_ORDER);
+-						SetDParam(4, GetCargo(order->refit_cargo)->name);
+-					} else {
+-						SetDParam(3, STR_EMPTY);
+-					}
+-					break;
+-				}
+-
+-				case OT_GOTO_WAYPOINT:
+-					SetDParam(1, (order->flags & OF_NON_STOP) ? STR_GO_NON_STOP_TO_WAYPOINT : STR_GO_TO_WAYPOINT);
+-					SetDParam(2, order->dest);
+-					break;
+-
+-				default: break;
+-			}
+-
+ 			const byte colour = (i == WP(w,order_d).sel) ? 0xC : 0x10;
++
++			SetDParam(1, 6);
++			SetOrderStringParams(v, order, 1, OWT_ORDER_WINDOW);
+ 			SetDParam(0, i + 1);
++
+ 			DrawString(2, y, str, colour);
+ 
+ 			y += 10;
+@@ -560,7 +470,7 @@
+ 		case ORDER_WIDGET_ORDER_LIST: {
+ 			ResetObjectToPlace();
+ 
+-			int sel = GetOrderFromOrderWndPt(w, e->we.click.pt.y, v);
++			int sel = GetOrderFromWndPt(w, e->we.click.pt.y, v, OWT_ORDER_WINDOW);
+ 
+ 			if (sel == INVALID_ORDER) {
+ 				/* This was a click on an empty part of the orders window, so
+@@ -648,7 +558,7 @@
+ 		switch (e->we.click.widget) {
+ 			case ORDER_WIDGET_ORDER_LIST: {
+ 				int from_order = OrderGetSel(w);
+-				int to_order = GetOrderFromOrderWndPt(w, e->we.dragdrop.pt.y, v);
++				int to_order = GetOrderFromWndPt(w, e->we.dragdrop.pt.y, v, OWT_ORDER_WINDOW);
+ 
+ 				if (!(from_order == to_order || from_order == INVALID_ORDER || from_order > v->num_orders || to_order == INVALID_ORDER || to_order > v->num_orders) &&
+ 						DoCommandP(v->tile, v->index, from_order | (to_order << 16), NULL, CMD_MOVE_ORDER | CMD_MSG(STR_CAN_T_MOVE_THIS_ORDER))) {
+=== src/order_gui.h
+==================================================================
+--- src/order_gui.h	(/trunk)	(revision 140)
++++ src/order_gui.h	(/branch/order_gui)	(revision 140)
+@@ -0,0 +1,154 @@
++
++/** @file order_gui.h */
++
++#ifndef ORDER_GUI_H
++#define ORDER_GUI_H
++
++#include "date.h"
++#include "vehicle.h"
++#include "window.h"
++
++/**
++ * Enum to differ the needs of the dependent GUI's
++ */
++enum OrderWindowType {
++	OWT_ORDER_WINDOW     = 1, ///< order_gui
++	OWT_TIMETABLE_WINDOW = 2, ///< timetable_gui
++};
++
++/**
++ * Calculate the selected order.
++ * The calculation is based on the relative (to the window) y click position and
++ *  the position of the scrollbar.
++ *
++ * @param w current window
++ * @param y Y-value of the click relative to the window origin
++ * @param v current vehicle
++ * @param multi multiplicator for the different GUI needs
++ * @return the new selected order if the order is valid else return that
++ *  an invalid one has been selected.
++ */
++static int GetOrderFromWndPt(Window *w, int y, const Vehicle *v, const OrderWindowType multi)
++{
++	/*
++	 * Calculation description:
++	 * 15 = 14 (w->widget[ORDER_WIDGET_ORDER_LIST].top) + 1 (frame-line)
++	 * 10 = order text hight
++	 */
++	int sel = (y - 15) / 10;
++
++	if ((uint)sel >= w->vscroll.cap) return INVALID_ORDER;
++
++	sel += w->vscroll.pos;
++
++	return (sel <= v->num_orders * multi && sel >= 0) ? sel : INVALID_ORDER;
++}
++
++/* Lookup table for the station order strings */
++static StringID StationOrderStrings[] = {
++	STR_8806_GO_TO,
++	STR_8807_GO_TO_TRANSFER,
++	STR_8808_GO_TO_UNLOAD,
++	STR_8809_GO_TO_TRANSFER_UNLOAD,
++	STR_880A_GO_TO_LOAD,
++	STR_880B_GO_TO_TRANSFER_LOAD,
++	STR_NULL,
++	STR_NULL,
++	STR_880C_GO_NON_STOP_TO,
++	STR_880D_GO_TO_NON_STOP_TRANSFER,
++	STR_880E_GO_NON_STOP_TO_UNLOAD,
++	STR_880F_GO_TO_NON_STOP_TRANSFER_UNLOAD,
++	STR_8810_GO_NON_STOP_TO_LOAD,
++	STR_8811_GO_TO_NON_STOP_TRANSFER_LOAD,
++	STR_NULL
++};
++
++/**
++ * Generate the timetable dependent strings
++ *
++ * @param pos1 The position of the first string
++ * @param pos2 The position of the second string
++ * @param time The time in ticks
++ */
++static void SetTimetableParams(int pos1, int pos2, uint32 time)
++{
++	if (_patches.timetable_in_ticks) {
++		SetDParam(pos1, STR_TIMETABLE_TICKS);
++		SetDParam(pos2, time);
++	} else {
++		SetDParam(pos1, STR_TIMETABLE_DAYS);
++		SetDParam(pos2, time / DAY_TICKS);
++	}
++}
++
++/**
++ * Generate the order string
++ *
++ * @param v current vehicle
++ * @param order current order
++ * @param str_pos current SetDParam pos
++ * @param owt The GUI for which the string is requested
++ * @return current position of SetDParam
++ */
++static int SetOrderStringParams(const Vehicle *v, const Order *order, int str_pos, const OrderWindowType owt) {
++	switch (order->type) {
++		case OT_DUMMY:
++			SetDParam(str_pos, STR_INVALID_ORDER);
++			SetDParam(str_pos + 1, order->dest);
++			str_pos += 2;
++			break;
++
++		case OT_GOTO_WAYPOINT:
++			SetDParam(str_pos, (order->flags & OF_NON_STOP) ? STR_GO_NON_STOP_TO_WAYPOINT : STR_GO_TO_WAYPOINT);
++			SetDParam(str_pos + 1, order->dest);
++			str_pos += 2;
++			break;
++
++		case OT_GOTO_DEPOT: {
++			StringID str_dep = STR_NULL;
++
++			if (v->type == VEH_AIRCRAFT) {
++				str_dep = STR_GO_TO_AIRPORT_HANGAR;
++				SetDParam(str_pos + 1, order->dest);
++			} else {
++				switch (v->type) {
++					case VEH_TRAIN: str_dep = (order->flags & OF_NON_STOP) ? STR_880F_GO_NON_STOP_TO_TRAIN_DEPOT : STR_GO_TO_TRAIN_DEPOT; break;
++					case VEH_ROAD:  str_dep = STR_9038_GO_TO_ROADVEH_DEPOT; break;
++					case VEH_SHIP:  str_dep = STR_GO_TO_SHIP_DEPOT; break;
++					default: break;
++				}
++				SetDParam(str_pos + 1, GetDepot(order->dest)->town_index);
++			}
++
++			if (order->flags & OF_FULL_LOAD) str_dep++; ///< service at
++
++			SetDParam(str_pos, str_dep);
++			str_pos += 2;
++		} break;
++
++		case OT_GOTO_STATION:
++			switch (owt) {
++				case OWT_ORDER_WINDOW:
++					SetDParam(str_pos, StationOrderStrings[order->flags]);
++					break;
++				case OWT_TIMETABLE_WINDOW:
++					SetDParam(str_pos, (order->flags & OF_NON_STOP) ? STR_880C_GO_NON_STOP_TO : STR_8806_GO_TO);
++					if (order->wait_time > 0) {
++						SetDParam(str_pos + 2, STR_TIMETABLE_STAY_FOR);
++						SetTimetableParams(str_pos + 3, str_pos + 4, order->wait_time);
++						str_pos += 3;
++					}
++					break;
++				default: NOT_REACHED(); break;
++			}
++			SetDParam(str_pos + 1, order->dest);
++			str_pos += 2;
++			break;
++
++		default: break;
++	}
++
++	return str_pos;
++}
++
++#endif /* ORDER_GUI_H */
+=== projects/openttd.vcproj
+==================================================================
+--- projects/openttd.vcproj	(/trunk)	(revision 140)
++++ projects/openttd.vcproj	(/branch/order_gui)	(revision 140)
+@@ -591,6 +591,9 @@
+ 				RelativePath=".\..\src\openttd.h">
+ 			</File>
+ 			<File
++				RelativePath=".\..\src\order_gui.h">
++			</File>
++			<File
+ 				RelativePath=".\..\src\pathfind.h">
+ 			</File>
+ 			<File
+=== projects/openttd_vs80.vcproj
+==================================================================
+--- projects/openttd_vs80.vcproj	(/trunk)	(revision 140)
++++ projects/openttd_vs80.vcproj	(/branch/order_gui)	(revision 140)
+@@ -1016,6 +1016,10 @@
+ 				>
+ 			</File>
+ 			<File
++				RelativePath=".\..\src\order_gui.h"
++				>
++			</File>
++			<File
+ 				RelativePath=".\..\src\pathfind.h"
+ 				>
+ 			</File>
+=== source.list
+==================================================================
+--- source.list	(/trunk)	(revision 140)
++++ source.list	(/branch/order_gui)	(revision 140)
+@@ -164,6 +164,7 @@
+ video/null_v.h
+ oldpool.h
+ openttd.h
++order_gui.h
+ pathfind.h
+ player.h
+ player_face.h
+
+Property changes on: 
+___________________________________________________________________
+Name: svk:merge
+ +6aa0318a-3be1-0310-93fa-89fd2396df07:/trunk:10734
+

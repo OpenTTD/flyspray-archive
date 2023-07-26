@@ -1,0 +1,234 @@
+Index: src/window_type.h
+===================================================================
+--- src/window_type.h	(revision 12656)
++++ src/window_type.h	(working copy)
+@@ -7,6 +7,9 @@
+ 
+ #include "core/enum_type.hpp"
+ 
++/**
++ * Window classes
++ */
+ enum WindowClass {
+ 	WC_NONE,
+ 	WC_MAIN_WINDOW = WC_NONE,
+@@ -93,7 +96,7 @@
+ 	WC_OSK,
+ };
+ 
+-struct Window;
++class Window;
+ struct WindowEvent;
+ typedef int32 WindowNumber;
+ 
+Index: src/window_gui.h
+===================================================================
+--- src/window_gui.h	(revision 12656)
++++ src/window_gui.h	(working copy)
+@@ -289,7 +289,12 @@
+ /**
+  * Data structure for an opened window
+  */
+-struct Window {
++class Window
++{
++public:
++	Window();
++	~Window();
++
+ 	uint16 flags4;              ///< Window flags, @see WindowFlags
+ 	WindowClass window_class;   ///< Window class
+ 	WindowNumber window_number; ///< Window number within the window class
+@@ -307,7 +312,7 @@
+ 	byte caption_color; ///< Background color of the window caption, contains PlayerID
+ 
+ 	WindowProc *wndproc;   ///< Event handler function for the window
+-	ViewPort *viewport;    ///< Pointer to viewport, if present (structure is part of derived class)
++	ViewPort *viewport;    ///< Pointer to viewport, if present
+ 	const Widget *original_widget; ///< Original widget layout, copied from WindowDesc
+ 	Widget *widget;        ///< Widgets of the window
+ 	uint widget_count;     ///< Number of widgets of the window
+Index: src/window.cpp
+===================================================================
+--- src/window.cpp	(revision 12656)
++++ src/window.cpp	(working copy)
+@@ -22,8 +22,8 @@
+ 
+ #include "table/sprites.h"
+ 
+-/** delta between mouse cursor and upper left corner of dragged window */
+-static Point _drag_delta;
++static Point _drag_delta; //< delta between mouse cursor and upper left corner of dragged window
++static Window *_mouseover_last_w = NULL; ///< Window of the last MOUSEOVER event
+ 
+ static Window _windows[MAX_NUMBER_OF_WINDOWS];
+ 
+@@ -47,7 +47,14 @@
+ 
+ byte _special_mouse_mode;
+ 
++Window::Window()
++{
++}
+ 
++Window::~Window()
++{
++}
++
+ void CDECL Window::SetWidgetsDisabledState(bool disab_stat, int widgets, ...)
+ {
+ 	va_list wdg_list;
+@@ -250,34 +257,7 @@
+ 	}
+ }
+ 
+-static void DrawOverlappedWindow(Window* const *wz, int left, int top, int right, int bottom);
+-
+ /**
+- * From a rectangle that needs redrawing, find the windows that intersect with the rectangle.
+- * These windows should be re-painted.
+- * @param left Left edge of the rectangle that should be repainted
+- * @param top Top edge of the rectangle that should be repainted
+- * @param right Right edge of the rectangle that should be repainted
+- * @param bottom Bottom edge of the rectangle that should be repainted
+- */
+-void DrawOverlappedWindowForAll(int left, int top, int right, int bottom)
+-{
+-	Window* const *wz;
+-	DrawPixelInfo bk;
+-	_cur_dpi = &bk;
+-
+-	FOR_ALL_WINDOWS(wz) {
+-		const Window *w = *wz;
+-		if (right > w->left &&
+-				bottom > w->top &&
+-				left < w->left + w->width &&
+-				top < w->top + w->height) {
+-			DrawOverlappedWindow(wz, left, top, right, bottom);
+-		}
+-	}
+-}
+-
+-/**
+  * Generate repaint events for the visible part of window *wz within the rectangle.
+  *
+  * The function goes recursively upwards in the window stack, and splits the rectangle
+@@ -288,8 +268,6 @@
+  * @param top Top edge of the rectangle that should be repainted
+  * @param right Right edge of the rectangle that should be repainted
+  * @param bottom Bottom edge of the rectangle that should be repainted
+- *
+- * @todo Swap this function to above DrawOverlappedWindowForAll() to eliminate the forward declaration
+  */
+ static void DrawOverlappedWindow(Window* const *wz, int left, int top, int right, int bottom)
+ {
+@@ -347,6 +325,31 @@
+ }
+ 
+ /**
++ * From a rectangle that needs redrawing, find the windows that intersect with the rectangle.
++ * These windows should be re-painted.
++ * @param left Left edge of the rectangle that should be repainted
++ * @param top Top edge of the rectangle that should be repainted
++ * @param right Right edge of the rectangle that should be repainted
++ * @param bottom Bottom edge of the rectangle that should be repainted
++ */
++void DrawOverlappedWindowForAll(int left, int top, int right, int bottom)
++{
++	Window* const *wz;
++	DrawPixelInfo bk;
++	_cur_dpi = &bk;
++
++	FOR_ALL_WINDOWS(wz) {
++		const Window *w = *wz;
++		if (right > w->left &&
++				bottom > w->top &&
++				left < w->left + w->width &&
++				top < w->top + w->height) {
++			DrawOverlappedWindow(wz, left, top, right, bottom);
++		}
++	}
++}
++
++/**
+  * Dispatch an event to a possibly non-existing window.
+  * If the window pointer w is \c NULL, the event is not dispatched
+  * @param w Window to dispatch the event to, may be \c NULL
+@@ -430,6 +433,13 @@
+ 	w->widget_count = 0;
+ 	w->parent = NULL;
+ 
++	if (_mouseover_last_w == w) {
++		/* Prevent Mouseover() from resetting mouse-over coordinates on a
++		 * non-existing window
++		 */
++		_mouseover_last_w = NULL;
++	}
++
+ 	/* Find the window in the z-array, and effectively remove it
+ 	 * by moving all windows after it one to the left */
+ 	Window **wz = FindWindowZPosition(w);
+@@ -719,6 +729,7 @@
+ 	w->width = min_width;
+ 	w->height = min_height;
+ 	w->wndproc = proc;
++	w->widget = NULL; // w->widget must be initialized before calling AssignWidgetToWindow()
+ 	AssignWidgetToWindow(w, widget);
+ 	w->resize.width = min_width;
+ 	w->resize.height = min_height;
+@@ -1053,6 +1064,9 @@
+ 	return NULL;
+ }
+ 
++/**
++ * (re)initialize the windowing system
++ */
+ void InitWindowSystem()
+ {
+ 	IConsoleClose();
+@@ -1063,6 +1077,9 @@
+ 	_no_scroll = 0;
+ }
+ 
++/**
++ * Close down the windowing system
++ */
+ void UnInitWindowSystem()
+ {
+ 	Window **wz;
+@@ -1081,6 +1098,9 @@
+ 	assert(_last_z_window == _z_windows);
+ }
+ 
++/**
++ * Reset the windowing system, by means of shutting it down followed by re-initialization
++ */
+ void ResetWindowSystem()
+ {
+ 	UnInitWindowSystem();
+@@ -1197,18 +1217,21 @@
+ {
+ 	Window *w;
+ 	WindowEvent e;
+-	static Window *last_w = NULL;
+ 
+ 	w = FindWindowFromPt(_cursor.pos.x, _cursor.pos.y);
+ 
+ 	/* We changed window, put a MOUSEOVER event to the last window */
+-	if (last_w != NULL && last_w != w) {
++	if (_mouseover_last_w != NULL && _mouseover_last_w != w) {
++		/* Reset mouse-over coordinates of previous window */
+ 		e.event = WE_MOUSEOVER;
+ 		e.we.mouseover.pt.x = -1;
+ 		e.we.mouseover.pt.y = -1;
+-		if (last_w->wndproc) last_w->wndproc(last_w, &e);
++		if (_mouseover_last_w->wndproc != NULL) {
++			_mouseover_last_w->wndproc(_mouseover_last_w, &e);
++		}
+ 	}
+-	last_w = w;
++	_mouseover_last_w = w;
++	/* In DeleteWindow(), _mouseover_last_w will get reset when the window is deleted */
+ 
+ 	if (w != NULL) {
+ 		/* send an event in client coordinates. */
