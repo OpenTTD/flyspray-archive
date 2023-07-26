@@ -1,0 +1,613 @@
+Index: docs/landscape.html
+===================================================================
+--- docs/landscape.html	(revision 17607)
++++ docs/landscape.html	(working copy)
+@@ -450,7 +450,12 @@
+          </table>
+        </li>
+        <li>m2 bit 11: opposite track is reserved, too</li>
+-      </ul>
++       <li>m2 bit 15 set = with extended signals
++         <ul>
++           <li>m7 bits 7..0 and m6 bits 2..6 and m2 bits 12..14:  the 15-bit SignalExID </li>
++         </ul>
++       </li>
++       </ul>
+      </li>
+      <li>m5 bit 7 set, bit 6 set: railway depot
+       <ul>
+Index: docs/landscape_grid.html
+===================================================================
+--- docs/landscape_grid.html	(revision 17607)
++++ docs/landscape_grid.html	(working copy)
+@@ -101,12 +101,12 @@
+       <td class="caption">rail with signals</td>
+       <td class="bits">-inherit-</td>
+       <td class="bits">-inherit-</td>
+-      <td class="bits"><span class="free">OOOO</span> XXXX XXXX XXXX</td>
++      <td class="bits"><span class="used">X</span><span class="abuse">XXX</span> XXXX XXXX XXXX</td>
+       <td class="bits">XXXX <span class="option">~~</span>XX</td>
+       <td class="bits">XXXX XXXX</td>
+       <td class="bits">-inherit-</td>
+-      <td class="bits">XX<span class="free">OO OO</span>XX</td>
+-      <td class="bits"><span class="free">OOOO OOOO</span></td>
++      <td class="bits">XX<span class="abuse">XX XX</span>XX</td>
++      <td class="bits"><span class="abuse">XXXX XXXX</span></td>
+     </tr>
+     <tr>
+       <td class="caption">depot</td>
+Index: source.list
+===================================================================
+--- source.list	(revision 17607)
++++ source.list	(working copy)
+@@ -61,6 +61,7 @@
+ #end
+ settings.cpp
+ signal.cpp
++signalex.cpp
+ signs.cpp
+ sound.cpp
+ spritecache.cpp
+@@ -250,6 +251,9 @@
+ ship.h
+ signal_func.h
+ signal_type.h
++signalex_base.h
++signalex_map.h
++signalex_type.h
+ signs_base.h
+ signs_func.h
+ signs_type.h
+@@ -464,6 +468,7 @@
+ saveload/saveload.cpp
+ saveload/saveload.h
+ saveload/saveload_internal.h
++saveload/signalex_sl.cpp
+ saveload/signs_sl.cpp
+ saveload/station_sl.cpp
+ saveload/strings_sl.cpp
+Index: src/misc.cpp
+===================================================================
+--- src/misc.cpp	(revision 17607)
++++ src/misc.cpp	(working copy)
+@@ -59,6 +59,7 @@
+ void InitializeCheats();
+ void InitializeNPF();
+ void InitializeOldNames();
++void InitializeSignalEx();
+ 
+ void InitializeGame(uint size_x, uint size_y, bool reset_date, bool reset_settings)
+ {
+@@ -108,6 +109,7 @@
+ 	InitializeCargoPackets();
+ 	InitializeIndustries();
+ 	InitializeBuildingCounts();
++	InitializeSignalEx();
+ 
+ 	InitializeNPF();
+ 
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 17607)
++++ src/openttd.cpp	(working copy)
+@@ -63,6 +63,7 @@
+ #include "thread/thread.h"
+ #include "station_base.h"
+ #include "crashlog.h"
++#include "signalex_base.h"
+ 
+ #include "newgrf_commons.h"
+ 
+@@ -345,6 +346,7 @@
+ 	_cargopacket_pool.CleanPool();
+ 	_engine_pool.CleanPool();
+ 	_company_pool.CleanPool();
++	_signalex_pool.CleanPool();
+ 
+ 	free(_config_file);
+ 
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(revision 17607)
++++ src/rail_cmd.cpp	(working copy)
+@@ -35,6 +35,7 @@
+ #include "functions.h"
+ #include "elrail_func.h"
+ #include "town.h"
++#include "signalex_base.h"
+ 
+ #include "table/strings.h"
+ #include "table/railtypes.h"
+@@ -971,6 +972,13 @@
+ 			uint mask = GetPresentSignals(tile) & SignalOnTrack(track);
+ 			SetSignalStates(tile, (GetSignalStates(tile) & ~mask) | ((HasBit(GetRailReservationTrackBits(tile), track) ? UINT_MAX : 0) & mask));
+ 		}
++		
++		/* at this point the tile has a signal. If it's an extended signal, update it */ 
++		if(SignalExMap::IsEnabled(tile)) { SignalEx::UpdateFromTile(tile); }
++#ifdef _ALL_SIGNALS_EXTENDED 
++		else { SignalEx::Update(SignalEx::Create(tile)); }
++#endif
++
+ 		MarkTileDirtyByTile(tile);
+ 		AddTrackToSignalBuffer(tile, track, _current_company);
+ 		YapfNotifyTrackLayoutChange(tile, track);
+@@ -1220,9 +1228,15 @@
+ 
+ 		/* removed last signal from tile? */
+ 		if (GetPresentSignals(tile) == 0) {
++			/* destroy the extended signal if the tile has one */
++			if(SignalExMap::IsEnabled(tile)) {
++				SignalEx::Destroy(tile); // perform before the tile type is changed from RAIL_TILE_SIGNALS
++			}
+ 			SetSignalStates(tile, 0);
+ 			SetHasSignals(tile, false);
+ 			SetSignalVariant(tile, INVALID_TRACK, SIG_ELECTRIC); // remove any possible semaphores
++		} else {
++			SignalEx::UpdateFromTile(tile); // inform SignalEx object its tile signals have been updated
+ 		}
+ 
+ 		AddTrackToSignalBuffer(tile, track, GetTileOwner(tile));
+Index: src/rail_map.h
+===================================================================
+--- src/rail_map.h	(revision 17607)
++++ src/rail_map.h	(working copy)
+@@ -19,6 +19,7 @@
+ #include "track_func.h"
+ #include "tile_map.h"
+ #include "signal_type.h"
++#include "signalex_type.h"
+ 
+ 
+ /** Different types of Rail-related tiles */
+Index: src/saveload/afterload.cpp
+===================================================================
+--- src/saveload/afterload.cpp	(revision 17607)
++++ src/saveload/afterload.cpp	(working copy)
+@@ -42,6 +42,7 @@
+ #include "../animated_tile_func.h"
+ #include "../subsidy_base.h"
+ #include "../subsidy_func.h"
++#include "../signalex_base.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -1959,6 +1960,18 @@
+ 		}
+ 	}
+ 
++	/**
++	 *Clear flag bit used by signalex from the RAIL_TILE_SIGNALS signals on older save game versions
++	 *@todo actually needed?
++	 */
++	if (CheckSavegameVersion(128)) {
++		for (TileIndex t = 0; t < map_size; t++) {
++			if(IsTileType(t, MP_RAILWAY)) 
++				if(GetRailTileType(t) == RAIL_TILE_SIGNALS)
++					SignalExMap::SetBitsFlag(t,0);
++		}
++	}
++
+ 	AfterLoadLabelMaps();
+ 
+ 	GamelogPrintDebug(1);
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 17607)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -48,7 +48,7 @@
+ 
+ #include "saveload_internal.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 127;
++extern const uint16 SAVEGAME_VERSION = 128;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+@@ -1446,6 +1446,7 @@
+ extern const ChunkHandler _cargopacket_chunk_handlers[];
+ extern const ChunkHandler _autoreplace_chunk_handlers[];
+ extern const ChunkHandler _labelmaps_chunk_handlers[];
++extern const ChunkHandler _signalex_chunk_handlers[];
+ 
+ static const ChunkHandler * const _chunk_handlers[] = {
+ 	_gamelog_chunk_handlers,
+@@ -1473,6 +1474,7 @@
+ 	_cargopacket_chunk_handlers,
+ 	_autoreplace_chunk_handlers,
+ 	_labelmaps_chunk_handlers,
++	_signalex_chunk_handlers,
+ 	NULL,
+ };
+ 
+Index: src/saveload/signalex_sl.cpp
+===================================================================
+--- src/saveload/signalex_sl.cpp	(revision 0)
++++ src/saveload/signalex_sl.cpp	(revision 0)
+@@ -0,0 +1,36 @@
++/** @file signalex_sl.cpp Code handling saving and loading of extended signals */
++
++#include "../stdafx.h"
++#include "saveload_internal.h"
++#include "../signalex_base.h"
++#include <map>
++
++static const SaveLoad _signalex_desc[] = {
++	SLE_VAR(SignalEx, flags,			SLE_UINT32),
++	SLE_VAR(SignalEx, tile_id,			SLE_UINT32),
++	SLE_END()
++};
++
++static void Save_SGEX()
++{
++	SignalEx *s;
++
++	FOR_ALL_SIGNALEX(s) {
++		SlSetArrayIndex(s->index);
++		SlObject(s, _signalex_desc);
++	}
++}
++
++static void Load_SGEX()
++{
++	int index;
++
++	while ((index = SlIterateArray()) != -1) {
++		SignalEx *s = new (index) SignalEx();
++		SlObject(s, _signalex_desc);
++	}
++}
++
++extern const ChunkHandler _signalex_chunk_handlers[] = {
++	{ 'SGEX', Save_SGEX, Load_SGEX, NULL, CH_ARRAY | CH_LAST},
++};
+Index: src/signalex.cpp
+===================================================================
+--- src/signalex.cpp	(revision 0)
++++ src/signalex.cpp	(revision 0)
+@@ -0,0 +1,58 @@
++/** @file signalex.cpp Base for all extended signal handling. */
++
++#include "stdafx.h"
++#include "debug.h"
++#include "core/pool_func.hpp"
++#include "signalex_base.h"
++
++SignalExPool _signalex_pool("SignalEx");
++INSTANTIATE_POOL_METHODS(SignalEx)
++
++SignalEx::SignalEx() : flags(0), tile_id(0)
++{
++}
++SignalEx::SignalEx(TileIndex t) : flags(0), tile_id(t)
++{
++}
++SignalEx::~SignalEx()
++{
++}
++
++SignalEx* SignalEx::Create(TileIndex t)
++{
++	/* Ensure tile has signals */
++	assert(GetRailTileType(t) == RAIL_TILE_SIGNALS);
++	/* Ensure tile doesn't already have signalsEx */
++	assert(!SignalExMap::IsEnabled(t));
++
++	SignalEx* sx = new SignalEx(t);
++	SignalExID id = sx->index;
++
++	SignalExMap::Enable(t);
++	SignalExMap::SetID(t, id);
++
++	return sx;
++}
++
++void SignalEx::Destroy(TileIndex t)
++{
++	/* Ensure tile has signalsEx */
++	assert(SignalExMap::IsEnabled(t));
++	
++	SignalEx* sx = SignalEx::GetByTile(t);
++
++	SignalExMap::SetID(t, 0);
++	SignalExMap::Disable(t);
++	
++	delete sx;
++}
++
++void SignalEx::Update(SignalEx* sx)
++{
++	//Add in update routines for extensions, signal checks etc.  
++}
++
++void InitializeSignalEx()
++{
++	_signalex_pool.CleanPool();
++}
+\ No newline at end of file
+Index: src/signalex_base.h
+===================================================================
+--- src/signalex_base.h	(revision 0)
++++ src/signalex_base.h	(revision 0)
+@@ -0,0 +1,114 @@
++/** @file signalex_base.h Types, classes and variables related to extended signals. */
++
++#ifndef SIGNALEXTENDED_BASE_H
++#define SIGNALEXTENDED_BASE_H
++
++#ifdef _DEBUG
++	#define _ALL_SIGNALS_EXTENDED 
++#endif
++
++#include "core\bitmath_func.hpp"
++#include "core/pool_type.hpp"
++#include "signal_type.h"
++#include "signalex_map.h"
++#include "signalex_type.h"
++
++typedef Pool<SignalEx, SignalExID, 512, 32768> SignalExPool;
++extern SignalExPool _signalex_pool;
++
++/**
++ * Defines signal extentions for a single tile.
++ * Stores additional information for signal extensions 
++ * seperatly from the tile array. All 4 posible signals
++ * can have seperate extensions. All extensions can be 
++ * active at the same time. 
++ *
++ * flags - @see SignalExFeature
++ *	flags: bit 7-0: Features in use for signal 0, 
++ *  flags: bit 15-8: Features in use for signal 1
++ *	flags: bit 23-16: Features in use for signal 2
++ *	flags: bit 32-24: Features in use for signal 3
++ *
++ * @warning Update the SaveLoad if adding variables to SignalEx. @see saveload\signalex_sl.cpp
++ */
++struct SignalEx : SignalExPool::PoolItem<&_signalex_pool> {
++	uint32 flags;		///< specifies what features are in-use for each signal.
++	TileIndex tile_id;	///< the tile location of this signalex (for reverse lookup)
++
++private:	
++	friend SignalExPool;
++	friend void Load_SGEX();	
++	
++	/** 
++	 * Forbidden to create or destroy SignalEx objects directly.
++	 * To create extended signals for a tile use Create(t) or
++	 * Destroy(t) to remove them. Loading and Pool management 
++	 * are exceptions.  
++	 */
++	SignalEx();
++	SignalEx(TileIndex t);
++	~SignalEx();
++
++public:
++	/** Get the SignalEx object from the pool using its ID 
++	*/
++	static FORCEINLINE SignalEx* GetByID(SignalExID id){
++		return _signalex_pool.Get(id);
++	}
++
++	/** Get the SignalEx object from the pool using a TileIndex 
++	 * @pre: SignalExMap::IsEnabled(t)
++	 */
++	static FORCEINLINE SignalEx* GetByTile(TileIndex t){
++		assert(SignalExMap::IsEnabled(t));
++		return _signalex_pool.Get(SignalExMap::GetID(t));
++	}
++
++	/** Update the SignalEx object bound to a given a tile
++	 * @param t - the tile to look up
++	 * @pre SignalExMap::IsEnabled(t)
++	 */
++	static FORCEINLINE void UpdateFromTile(TileIndex t){
++		/* Ensure tile has signalsEx */
++		assert(SignalExMap::IsEnabled(t));
++		SignalEx::Update(SignalEx::GetByTile(t));
++	}
++
++	/**
++	 * Instantiates a SignalEx object for a given tile
++	 * Enables SignalEx on the tile and stores the 
++	 * SignalExID in the tile as well. 
++	 * 
++	 * @param t - tile index to create SignalEx for
++	 * @return pointer to the new SignalEx object;
++	 *
++	 * @pre GetRailTileType(t) == RAIL_TILE_SIGNALS
++	 * @pre !SignalExMap::IsEnabled(t)
++	 */
++	static SignalEx* Create(TileIndex t);
++
++	/**
++	 * Destroys a SignalEx object for a given tile.
++	 * Disables SignalEx on the tile and clears the 
++	 * SignalExID from the tile as well. Called automatically 
++	 * just prior to the removal of the last signal from a tile.
++	 * @param t - tile index to remove SignalEx from
++	 * @pre SignalExMap::IsEnabled(t)
++	 */
++    static void	Destroy(TileIndex t);
++
++	/**
++	 * Update a SignalEx object after a tile alteration.
++	 * When the arrangment of signals on a tile is altered,
++	 * this function is called. Will not be called if the tile
++	 * loses all its signals. 
++	 * @param sx - the SignalEx object to update. 
++	 * @pre SignalExMap::IsEnabled(t)
++	 */
++	static void Update(SignalEx* sx);
++};
++
++#define FOR_ALL_SIGNALEX_FROM(var, start) FOR_ALL_ITEMS_FROM(SignalEx, signalex_index, var, start)
++#define FOR_ALL_SIGNALEX(var) FOR_ALL_SIGNALEX_FROM(var, 0)
++
++#endif /* SIGNALEXTENDED_BASE_H */
+Index: src/signalex_map.h
+===================================================================
+--- src/signalex_map.h	(revision 0)
++++ src/signalex_map.h	(revision 0)
+@@ -0,0 +1,119 @@
++/** @file signalex_map.h Hides the direct accesses to the map array with map accessors */
++
++#ifndef SIGNALEXTENDED_MAP_H
++#define SIGNALEXTENDED_MAP_H
++
++#include "core\bitmath_func.hpp"
++#include "rail_map.h"
++
++/**
++ * Tile SignalEx bit manipulation
++ */
++struct SignalExMap
++{
++private:
++	friend bool AfterLoadGame(); ///< Allow the afterloader to clear the flag bit directly on older savegames. 
++	static FORCEINLINE bool GetBitsFlag(TileIndex t)
++	{
++		return (GB(_m[t].m2, 15, 1) == 1U);
++	}
++
++	static FORCEINLINE void SetBitsFlag(TileIndex t, bool flag)
++	{
++		SB(_m[t].m2, 15, 1,(uint8)flag);
++	}
++
++	static FORCEINLINE SignalExID GetBitsID(TileIndex t)
++	{
++		return (SignalExID)((_me[t].m7) + (GB(_m[t].m6, 2,  4) << 8) + (GB(_m[t].m2, 12, 3) << 12));
++	}
++
++	static FORCEINLINE void SetBitsID(TileIndex t, SignalExID id)
++	{
++		SB(_me[t].m7, 0,  8, GB(id, 0,  8));
++		SB(_m[t].m6,  2,  4, GB(id, 8,  4));
++		SB(_m[t].m2,  12, 3, GB(id, 12, 3));
++	}
++	
++public:
++
++	/**
++	 * Returns whether the tile index has extended signals.
++	 * @param t the tile
++	 * @pre: GetRailTileType(t) == RAIL_TILE_SIGNALS
++	 * @return true if signalex enabled, false otherwise
++	 */
++	static FORCEINLINE bool IsEnabled(TileIndex t)
++	{
++		/* Ensure tile has signals */
++		assert(GetRailTileType(t) == RAIL_TILE_SIGNALS);
++		return (SignalExMap::GetBitsFlag(t) == 1);
++	}
++	/**
++	 * Get the index of the extended signal that is attached to the tile.
++	 * @param t the tile
++	 * @return SignalExID
++	 * @pre GetRailTileType(t) == RAIL_TILE_SIGNALS
++	 * @pre SignalExMap::IsEnabled(t)
++	 */
++	static inline SignalExID GetID(TileIndex t)
++	{
++		/*make sure the tile has a SignalExID */
++		assert(SignalExMap::IsEnabled(t));
++		return SignalExMap::GetBitsID(t);
++	}
++
++	/**
++	 * Set the index of the extended signal that is attached to the tile.
++	 * SignalExID stored in (m7:7-0, m6:5-2, m2:14-12) and forms 
++	 * a 15-bit index. (m2:15) defines whether signalEx is enabled. 
++	 * @param t the tile
++	 * @param t the signalex index
++	 * @pre SignalExMap::IsEnabled(t)
++	 */
++	static inline void SetID(TileIndex t, SignalExID id)
++	{
++		/* Ensure tile has a signal */
++		assert(SignalExMap::IsEnabled(t));
++
++		SignalExMap::SetBitsID(t, id);
++	}
++
++	/**
++	 * Enables SignalEx on a tile.
++	 * Sets the SignalEx flag  on the RAIL_TILE_SIGNALS tile to true 
++	 * and wipes the SignalExId to 0.
++	 * @param t the tile
++	 * @pre: GetRailTileType(t) == RAIL_TILE_SIGNALS
++	 * @warning does not create the SignalEx object in the pool
++	 * @warning clears the SignalExID from the tile
++	 */
++	static inline void Enable(TileIndex t)
++	{
++		/* Ensure tile has signals */
++		assert(GetRailTileType(t) == RAIL_TILE_SIGNALS);
++		
++		SignalExMap::SetBitsFlag(t, 1U);
++		SignalExMap::SetBitsID(t, 0);
++	}
++
++	/**
++	 * Disables SignalEx on a tile.
++	 * @param t the tile
++	 * @pre GetRailTileType(t) == RAIL_TILE_SIGNALS
++	 * @pre SignalExMap::IsEnabled(t)
++	 * @warning does not delete the SignalEx object from the pool
++	 */
++	static inline void Disable(TileIndex t)
++	{
++		/* Ensure tile has signals */
++		assert(GetRailTileType(t) == RAIL_TILE_SIGNALS);
++		assert(SignalExMap::IsEnabled(t));
++		
++		SignalExMap::SetBitsFlag(t, 0);
++		SignalExMap::SetBitsID(t, 0);
++		
++	}
++};
++
++#endif /* SIGNALEXTENDED_MAP_H */
+Index: src/signalex_type.h
+===================================================================
+--- src/signalex_type.h	(revision 0)
++++ src/signalex_type.h	(revision 0)
+@@ -0,0 +1,38 @@
++/** @file signalex_type.h Types related to extended signal information, restrictions and logic. */
++
++#ifndef SIGNALEXTENDED_TYPE_H
++#define SIGNALEXTENDED_TYPE_H
++
++typedef uint16 SignalExID;
++
++struct SignalEx;
++
++/**
++ * SignalEx Feature Enums
++ * defines to check what additional features are
++ * currently enabled for the individual signals (all 4)
++ */
++enum SignalExFeature {
++	SIGEXF_EXTENDED		= 1<<0, ///< The signal has extensions 
++	SIGEXF_ASPECTS		= 1<<1, ///< Signal can define multi-aspects
++	SIGEXF_THEATRES		= 1<<2, ///< Signal can define theatres/routes
++	SIGEXF_PROGRAMMED	= 1<<3,	///< Signal can be programmed
++};
++
++/**
++ * Extension: Multi-Aspect Signal States (place-holder)
++ * Defines various warning states for signals, which can be different
++ * to the actual Signal states (at least for now).
++ */
++enum SignalExAspects{
++	SIGEXA_DANGER	= 0, ///< Train should not pass
++	SIGEXA_CAUTION1 = 1, ///< Can pass, next signal is SIGEXT_DANGER
++	SIGEXA_CAUTION2 = 2, ///< Can pass, next signal is SIGEXT_CAUTION1
++	SIGEXA_DIVERGE1 = 3, ///< Can pass, path divergence after next signal
++	SIGEXA_DIVERGE2 = 4, ///< Can pass, next signal is SIGEXT_DIVERGE1
++	SIGEXA_CLEAR	= 5, ///< Can pass
++	SIGEXA_CALLON	= 6, ///< Can pass to couple to a consist
++	SIGEXA_SHUNT	= 7, ///< Can pass for shunting
++};
++
++#endif /* SIGNALEXTENDED_TYPE_H */

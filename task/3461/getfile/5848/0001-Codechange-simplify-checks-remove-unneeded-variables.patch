@@ -1,0 +1,134 @@
+From 96e7345de3b0ecbd927fefced991126babf2b544 Mon Sep 17 00:00:00 2001
+From: skidd13 <skidd13@gmx.de>
+Date: Fri, 19 Mar 2010 22:03:09 +0100
+Subject: [PATCH 1/9] -Codechange: simplify checks/ remove unneeded variables and simplify code
+ -Codechange: Merge 2 functions into one
+
+---
+ src/misc/blob.hpp |   30 ++++++++++--------------------
+ src/misc/str.hpp  |   11 +++++------
+ 2 files changed, 15 insertions(+), 26 deletions(-)
+
+diff --git a/src/misc/blob.hpp b/src/misc/blob.hpp
+index 6c271cd..06e9be9 100644
+--- a/src/misc/blob.hpp
++++ b/src/misc/blob.hpp
+@@ -77,7 +77,7 @@ public:
+ 	/** copy constructor */
+ 	FORCEINLINE ByteBlob(const ByteBlob &src) {
+ 		InitEmpty();
+-		AppendRaw(src);
++		AppendRaw(src.Begin(), src.Length());
+ 	}
+ 
+ 	/** move constructor - take ownership of blob data */
+@@ -207,7 +207,7 @@ public:
+ 	/** free the blob's memory */
+ 	FORCEINLINE void Free()
+ 	{
+-		if (Capacity() > 0) {
++		if (Capacity() != 0) {
+ 			RawFree(&Hdr());
+ 			InitEmpty();
+ 		}
+@@ -217,25 +217,16 @@ public:
+ 	FORCEINLINE void AppendRaw(const void *p, uint num_bytes)
+ 	{
+ 		assert(p != NULL);
+-		if (num_bytes > 0) {
++		if (num_bytes != 0)
+ 			memcpy(Append(num_bytes), p, num_bytes);
+-		}
+-	}
+-
+-	/** append bytes from given source blob to the end of existing data bytes - reallocates if necessary */
+-	FORCEINLINE void AppendRaw(const ByteBlob& src)
+-	{
+-		if (!src.IsEmpty()) {
+-			memcpy(Append(src.Length()), src.Begin(), src.Length());
+-		}
+ 	}
+ 
+ 	/** Reallocate if there is no free space for num_bytes bytes.
+ 	 *  @return pointer to the new data to be added */
+ 	FORCEINLINE byte *Prepare(uint num_bytes)
+ 	{
+-		uint new_size = Length() + num_bytes;
+-		if (new_size > Capacity()) SmartAlloc(new_size);
++		num_bytes += Length();
++		if (num_bytes > Capacity()) SmartAlloc(num_bytes);
+ 		return data + Length();
+ 	}
+ 
+@@ -266,7 +257,7 @@ public:
+ 			memcpy(tmp + 1, data, tmp->items);
+ 
+ 		/* replace our block with new one */
+-		if (Capacity() > 0)
++		if (Capacity() != 0)
+ 			RawFree(&Hdr());
+ 		Init(tmp);
+ 	}
+@@ -274,11 +265,10 @@ public:
+ 	/** fixing the four bytes at the end of blob data - useful when blob is used to hold string */
+ 	FORCEINLINE void FixTail() const
+ 	{
+-		if (Capacity() > 0) {
+-			byte *p = &data[Length()];
+-			for (uint i = 0; i < tail_reserve; i++) {
+-				p[i] = 0;
+-			}
++		assert_compile(sizeof(uint32) == tail_reserve);
++		if (Capacity() != 0) {
++			uint32 *end = (uint32 *)&data[Length()];
++			*end = 0;
+ 		}
+ 	}
+ };
+diff --git a/src/misc/str.hpp b/src/misc/str.hpp
+index 44595e9..7385b54 100644
+--- a/src/misc/str.hpp
++++ b/src/misc/str.hpp
+@@ -60,7 +60,7 @@ struct CStrA : public CBlobT<char>
+ 	FORCEINLINE void Append(const CStrA &src)
+ 	{
+ 		if (src.Length() > 0) {
+-			base::AppendRaw(src);
++			base::AppendRaw(src.Data(), src.Size());
+ 			base::FixTail();
+ 		}
+ 	}
+@@ -98,7 +98,7 @@ struct CStrA : public CBlobT<char>
+ 		int ret;
+ 		int err = 0;
+ 		for (;;) {
+-			char *buf = MakeFreeSpace(addSize);
++			char *buf = base::MakeFreeSpace(addSize);
+ 			ret = vsnprintf(buf, base::GetReserve(), format, args);
+ 			if (ret >= (int)base::GetReserve()) {
+ 				/* Greater return than given count means needed buffer size. */
+@@ -118,10 +118,9 @@ struct CStrA : public CBlobT<char>
+ 			addSize *= 2;
+ 		}
+ 		if (ret > 0) {
+-			GrowSizeNC(ret);
+-		} else {
+-			base::FixTail();
++			base::GrowSizeNC(ret);
+ 		}
++		base::FixTail();
+ 		return ret;
+ 	}
+ 
+@@ -138,7 +137,7 @@ struct CStrA : public CBlobT<char>
+ 	/** Assign formated string (like sprintf). */
+ 	int CDECL WARN_FORMAT(2, 3) Format(const char *format, ...)
+ 	{
+-		base::Free();
++		base::Clear();
+ 		va_list args;
+ 		va_start(args, format);
+ 		int ret = AddFormatL(format, args);
+-- 
+1.6.6.1
+

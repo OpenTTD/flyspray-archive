@@ -1,0 +1,349 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revisi¢n: 17477)
++++ src/lang/english.txt	(copia de trabajo)
+@@ -2030,6 +2030,12 @@
+ STR_FOUND_TOWN_MANY_RANDOM_TOWNS                                :{BLACK}Many random towns
+ STR_FOUND_TOWN_RANDOM_TOWNS_TOOLTIP                             :{BLACK}Cover the map with randomly placed towns
+
++STR_FOUND_TOWN_NAME_TITLE                                       :{YELLOW}Town name:
++STR_FOUND_TOWN_NAME_EDITOR_TITLE                                :{BLACK}Enter the town name
++STR_FOUND_TOWN_NAME_EDITOR_HELP                                 :{BLACK}Click to enter the town name
++STR_FOUND_TOWN_NAME_RANDOM_BUTTON                               :{BLACK}Random name
++STR_FOUND_TOWN_NAME_RANDOM_TOOLTIP                              :{BLACK}Generate a new random name
++
+ STR_FOUND_TOWN_INITIAL_SIZE_TITLE                               :{YELLOW}Town size:
+ STR_FOUND_TOWN_INITIAL_SIZE_SMALL_BUTTON                        :{BLACK}Small
+ STR_FOUND_TOWN_INITIAL_SIZE_MEDIUM_BUTTON                       :{BLACK}Medium
+Index: src/town.h
+===================================================================
+--- src/town.h	(revisi¢n: 17477)
++++ src/town.h	(copia de trabajo)
+@@ -28,6 +28,7 @@
+ #include "command_type.h"
+ #include "town_map.h"
+ #include "subsidy_type.h"
++#include "newgrf_townname.h"
+
+ template <typename T>
+ struct BuildingCounts {
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revisi¢n: 17477)
++++ src/town_cmd.cpp	(copia de trabajo)
+@@ -31,7 +31,6 @@
+ #include "newgrf.h"
+ #include "newgrf_house.h"
+ #include "newgrf_commons.h"
+-#include "newgrf_townname.h"
+ #include "newgrf_text.h"
+ #include "autoslope.h"
+ #include "transparency.h"
+@@ -1474,8 +1473,9 @@
+  * @param townnameparts The town name
+  * @param size_mode How the size should be determined
+  * @param size Parameter for size determination
++ * @param custom_name Custom town name
+  */
+-static void DoCreateTown(Town *t, TileIndex tile, uint32 townnameparts, TownSize size, bool city, TownLayout layout)
++static void DoCreateTown(Town *t, TileIndex tile, uint32 townnameparts, TownSize size, bool city, TownLayout layout, const char * custom_name = NULL)
+ {
+ 	t->xy = tile;
+ 	t->num_houses = 0;
+@@ -1520,6 +1520,8 @@
+ 	}
+ 	t->townnameparts = townnameparts;
+
++	if (!StrEmpty(custom_name)) t->name = strdup(custom_name);
++
+ 	t->UpdateVirtCoord();
+ 	InvalidateWindowData(WC_TOWN_DIRECTORY, 0, 0);
+
+@@ -1570,6 +1572,8 @@
+ 	return CommandCost();
+ }
+
++static bool IsUniqueTownName(const char *name);
++
+ /** Create a new town.
+  * This obviously only works in the scenario editor. Function not removed
+  * as it might be possible in the future to fund your own town :)
+@@ -1579,6 +1583,7 @@
+  *               2 true iff it should be a city
+  *            3..5 town road layout (@see TownLayout)
+  * @param p2 town name parts
++ * @param text Custom town name
+  */
+ CommandCost CmdBuildTown(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
+ {
+@@ -1595,6 +1600,8 @@
+ 	if (layout > TL_RANDOM) return CMD_ERROR;
+
+ 	if (!VerifyTownName(townnameparts, &par)) return_cmd_error(STR_ERROR_NAME_MUST_BE_UNIQUE);
++	if (!StrEmpty(text) && !IsUniqueTownName(text)) return_cmd_error(STR_ERROR_NAME_MUST_BE_UNIQUE);
++	if (!StrEmpty(text) && strlen(text) >= MAX_LENGTH_TOWN_NAME_BYTES) return CMD_ERROR;
+
+ 	CommandCost cost = TownCanBePlacedHere(tile);
+ 	if (CmdFailed(cost)) return cost;
+@@ -1607,7 +1614,7 @@
+ 		Town *t = new Town(tile);
+ 		_generating_world = true;
+ 		UpdateNearestTownForRoadTiles(true);
+-		DoCreateTown(t, tile, townnameparts, size, city, layout);
++		DoCreateTown(t, tile, townnameparts, size, city, layout, text);
+ 		UpdateNearestTownForRoadTiles(false);
+ 		_generating_world = false;
+ 	}
+Index: src/strings.cpp
+===================================================================
+--- src/strings.cpp	(revisi¢n: 17477)
++++ src/strings.cpp	(copia de trabajo)
+@@ -551,6 +551,27 @@
+ 	return ((speed << units[_settings_game.locale.units].s_s) + units[_settings_game.locale.units].s_m / 2) / units[_settings_game.locale.units].s_m;
+ }
+
++char * GetTownName(char * buff, uint32 grfid, uint16 townnametype, uint32 townnameparts, const char *last)
++{
++	int64 temp[1];
++	temp[0] = townnameparts;
++	if (grfid == 0) {
++		/* Original town name */
++		buff = GetStringWithArgs(buff, townnametype, temp, last);
++	} else {
++		/* Newgrf town name */
++		if (GetGRFTownName(grfid) != NULL) {
++			/* The grf is loaded */
++			buff = GRFTownNameGenerate(buff, grfid, townnametype, townnameparts, last);
++		} else {
++			/* Fallback to english original */
++			buff = GetStringWithArgs(buff, SPECSTR_TOWNNAME_ENGLISH, temp, last);
++		}
++	}
++
++	return buff;
++}
++
+ static char *FormatString(char *buff, const char *str, int64 *argv, uint casei, const char *last)
+ {
+ 	WChar b;
+@@ -913,27 +934,13 @@
+
+ 			case SCC_TOWN_NAME: { // {TOWN}
+ 				const Town *t = Town::Get(GetInt32(&argv));
+-				int64 temp[1];
+
+ 				assert(t != NULL);
+
+-				temp[0] = t->townnameparts;
+-				uint32 grfid = t->townnamegrfid;
+-
+ 				if (t->name != NULL) {
+ 					buff = strecpy(buff, t->name, last);
+-				} else if (grfid == 0) {
+-					/* Original town name */
+-					buff = GetStringWithArgs(buff, t->townnametype, temp, last);
+ 				} else {
+-					/* Newgrf town name */
+-					if (GetGRFTownName(grfid) != NULL) {
+-						/* The grf is loaded */
+-						buff = GRFTownNameGenerate(buff, t->townnamegrfid, t->townnametype, t->townnameparts, last);
+-					} else {
+-						/* Fallback to english original */
+-						buff = GetStringWithArgs(buff, SPECSTR_TOWNNAME_ENGLISH, temp, last);
+-					}
++					buff = GetTownName(buff, t->townnamegrfid, t->townnametype, t->townnameparts, last);
+ 				}
+ 				break;
+ 			}
+Index: src/town_gui.cpp
+===================================================================
+--- src/town_gui.cpp	(revisi¢n: 17477)
++++ src/town_gui.cpp	(copia de trabajo)
+@@ -33,6 +33,8 @@
+ #include "landscape.h"
+ #include "cargotype.h"
+ #include "tile_map.h"
++#include "querystring_gui.h"
++#include "window_func.h"
+
+ #include "table/sprites.h"
+ #include "table/strings.h"
+@@ -812,6 +814,9 @@
+ 	TSEW_LAYOUT_GRID2,
+ 	TSEW_LAYOUT_GRID3,
+ 	TSEW_LAYOUT_RANDOM,
++	TSEW_TOWNNAME_TEXT,
++	TSEW_TOWNNAME_EDITBOX,
++	TSEW_TOWNNAME_RANDOM,
+ };
+
+ static const NWidgetPart _nested_found_town_widgets[] = {
+@@ -829,6 +834,14 @@
+ 										SetDataTip(STR_FOUND_TOWN_RANDOM_TOWN_BUTTON, STR_FOUND_TOWN_RANDOM_TOWN_TOOLTIP), SetPadding(0, 2, 1, 2),
+ 		NWidget(WWT_TEXTBTN, COLOUR_GREY, TSEW_MANYRANDOMTOWNS), SetMinimalSize(156, 12), SetFill(true, false),
+ 										SetDataTip(STR_FOUND_TOWN_MANY_RANDOM_TOWNS, STR_FOUND_TOWN_RANDOM_TOWNS_TOOLTIP), SetPadding(0, 2, 0, 2),
++		/* Town name selection. */
++		NWidget(NWID_VERTICAL),
++			NWidget(WWT_LABEL, COLOUR_DARK_GREEN, TSEW_TOWNSIZE), SetMinimalSize(156, 14), SetDataTip(STR_FOUND_TOWN_NAME_TITLE, STR_NULL),
++			NWidget(WWT_EDITBOX, COLOUR_WHITE, TSEW_TOWNNAME_EDITBOX), SetMinimalSize(156, 12), SetDataTip(STR_FOUND_TOWN_NAME_EDITOR_TITLE, STR_FOUND_TOWN_NAME_EDITOR_HELP),
++			NWidget(NWID_SPACER), SetMinimalSize(0, 3),
++			NWidget(WWT_TEXTBTN, COLOUR_GREY, TSEW_TOWNNAME_RANDOM), SetMinimalSize(78, 12), SetFill(true, false),
++										SetDataTip(STR_FOUND_TOWN_NAME_RANDOM_BUTTON, STR_FOUND_TOWN_NAME_RANDOM_TOOLTIP),
++		EndContainer(),
+ 		/* Town size selection. */
+ 		NWidget(NWID_HORIZONTAL),
+ 			NWidget(NWID_SPACER), SetFill(true, false),
+@@ -873,23 +886,70 @@
+ 	EndContainer(),
+ };
+
++extern int _nb_orig_names;
++
+ /** Found a town window class. */
+-struct FoundTownWindow : Window
++struct FoundTownWindow : QueryStringBaseWindow
+ {
+ private:
+-	static TownSize town_size;
+-	static bool city;
+-	static TownLayout town_layout;
+-
++	static TownSize town_size;     ///<Selected town size
++	static bool city;              ///<True if City is selected
++	static TownLayout town_layout; ///<Selected town layout
++	static uint32 townnamegrfid;   ///<GRF id of the town name
++	static uint16 townnametype;    ///<Town name type
++	static uint32 townnameparts;   ///<Town name parts currently in use
++	static char * customname;      ///<Custom name introduced by user
+ public:
+-	FoundTownWindow(const WindowDesc *desc, WindowNumber window_number) : Window()
++	FoundTownWindow(const WindowDesc *desc, WindowNumber window_number = 0) : QueryStringBaseWindow(MAX_LENGTH_TOWN_NAME_BYTES)
+ 	{
+ 		this->InitNested(desc, window_number);
++		this->caption = STR_NULL;
++		this->afilter = CS_ALPHANUMERAL;
++		this->LowerWidget(TSEW_TOWNNAME_EDITBOX);
++		this->RandomTownName();
++
+ 		town_layout = _settings_game.economy.town_layout;
+ 		city = false;
+ 		this->UpdateButtons();
+ 	}
+
++	static void RandomTownName()
++	{
++		QueryStringBaseWindow *w = dynamic_cast<QueryStringBaseWindow*>(FindWindowById(WC_FOUND_TOWN, 0));
++
++		char *last_of = &w->edit_str_buf[w->edit_str_size - 1]; // points to terminating '\0'
++
++		/* Set the parameters needed to display a town name correctly. */
++		if (_settings_game.game_creation.town_name < _nb_orig_names) {
++			/* Original town name */
++			townnamegrfid = 0;
++			townnametype = SPECSTR_TOWNNAME_START + _settings_game.game_creation.town_name;
++		} else {
++			/* Newgrf town name */
++			townnamegrfid = GetGRFTownNameId(_settings_game.game_creation.town_name  - _nb_orig_names);
++			townnametype  = GetGRFTownNameType(_settings_game.game_creation.town_name - _nb_orig_names);
++		}
++		free(customname);
++		if (!GenerateTownName(&townnameparts)) {		
++			customname = NULL; /* CORRECT */
++			GetString(w->edit_str_buf, STR_EMPTY, last_of);
++		} else {
++			customname = NULL;
++			GetTownName(w->edit_str_buf, townnamegrfid, townnametype, townnameparts, last_of);
++		}
++		*last_of = '\0';
++		InitializeTextBuffer(&w->text, w->edit_str_buf, w->edit_str_size, MAX_LENGTH_TOWN_NAME_PIXELS);
++
++		w->InvalidateWidget(TSEW_TOWNNAME_EDITBOX);
++		w->SetFocusedWidget(TSEW_TOWNNAME_EDITBOX);
++	}
++/*
++	void OnOSKInput(int wid)
++	{
++		free(this->customname);
++		this->customname = strdup(this->text.buf);
++	}
++*/
+ 	void UpdateButtons()
+ 	{
+ 		for (int i = TSEW_SIZE_SMALL; i <= TSEW_SIZE_RANDOM; i++) {
+@@ -908,6 +968,7 @@
+ 	virtual void OnPaint()
+ 	{
+ 		this->DrawWidgets();
++		this->DrawEditBox(TSEW_TOWNNAME_EDITBOX);
+ 	}
+
+ 	virtual void OnClick(Point pt, int widget)
+@@ -931,6 +992,10 @@
+ 					ScrollMainWindowToTile(t->xy);
+ 				}
+ 			} break;
++			
++			case TSEW_TOWNNAME_RANDOM:
++				this->RandomTownName();
++				break;
+
+ 			case TSEW_MANYRANDOMTOWNS:
+ 				this->HandleButtonClick(TSEW_MANYRANDOMTOWNS);
+@@ -970,6 +1035,20 @@
+ 		this->SetDirty();
+ 	}
+
++	virtual void OnMouseLoop()
++	{
++		this->HandleEditBox(TSEW_TOWNNAME_EDITBOX);
++	}
++
++	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
++	{
++		EventState state;
++		this->HandleEditBoxKey(TSEW_TOWNNAME_EDITBOX, key, keycode, state);
++		free(this->customname);
++		this->customname = strdup(this->text.buf);
++		return state;
++	}
++
+ 	virtual void OnPlaceObject(Point pt, TileIndex tile)
+ 	{
+ 		_place_proc(tile);
+@@ -983,19 +1062,19 @@
+
+ 	static void PlaceProc_Town(TileIndex tile)
+ 	{
+-		uint32 townnameparts;
+-		if (!GenerateTownName(&townnameparts)) {
+-			ShowErrorMessage(STR_ERROR_TOO_MANY_TOWNS, STR_ERROR_CAN_T_BUILD_TOWN_HERE, 0, 0);
+-			return;
++		if (DoCommandP(tile, town_size | city << 2 | town_layout << 3, townnameparts, CMD_BUILD_TOWN | CMD_MSG(STR_ERROR_CAN_T_BUILD_TOWN_HERE), CcBuildTown, strdup(customname))) {
++			RandomTownName();
+ 		}
+-
+-		DoCommandP(tile, town_size | city << 2 | town_layout << 3, townnameparts, CMD_BUILD_TOWN | CMD_MSG(STR_ERROR_CAN_T_BUILD_TOWN_HERE), CcBuildTown);
+ 	}
+ };
+
+ TownSize FoundTownWindow::town_size = TS_MEDIUM; // select medium-sized towns per default;
+ bool FoundTownWindow::city;
+ TownLayout FoundTownWindow::town_layout;
++uint32 FoundTownWindow::townnamegrfid;
++uint16 FoundTownWindow::townnametype;
++uint32 FoundTownWindow::townnameparts;
++char * FoundTownWindow::customname;
+
+ static const WindowDesc _found_town_desc(
+ 	WDP_AUTO, WDP_AUTO, 160, 162, 160, 162,
+Index: src/strings_func.h
+===================================================================
+--- src/strings_func.h	(revisi¢n: 17477)
++++ src/strings_func.h	(copia de trabajo)
+@@ -110,4 +110,6 @@
+
+ void CheckForMissingGlyphsInLoadedLanguagePack();
+
++char * GetTownName(char * buff, uint32 grfid, uint16 townnametype, uint32 townnameparts, const char *last);
++
+ #endif /* STRINGS_TYPE_H */

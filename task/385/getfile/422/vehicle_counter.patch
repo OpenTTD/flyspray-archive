@@ -1,0 +1,126 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 7059)
++++ lang/english.txt	(working copy)
+@@ -1731,7 +1731,12 @@ STR_3043_TRUCK_STATION_ORIENT           
+ STR_3046_MUST_DEMOLISH_BUS_STATION                              :{WHITE}Must demolish bus station first
+ STR_3047_MUST_DEMOLISH_TRUCK_STATION                            :{WHITE}Must demolish lorry station first
+ STR_3048_STATIONS                                               :{WHITE}{COMPANY} - {COMMA} Station{P "" s}
+-STR_3049_0                                                      :{YELLOW}{STATION} {STATIONFEATURES}
++STR_3049_0                                                      :{YELLOW}{STATION}
++STR_3049_TRAIN							:{YELLOW}{TRAIN}
++STR_3049_LORRY							:{YELLOW}{LORRY}
++STR_3049_BUS							:{YELLOW}{BUS}
++STR_3049_PLANE							:{YELLOW}{PLANE}
++STR_3049_SHIP							:{YELLOW}{SHIP}
+ STR_304A_NONE                                                   :{YELLOW}- None -
+ STR_304B_SITE_UNSUITABLE                                        :{WHITE}...site unsuitable
+ STR_304C_TOO_CLOSE_TO_ANOTHER_DOCK                              :{WHITE}Too close to another dock
+Index: station_gui.c
+===================================================================
+--- station_gui.c	(revision 7059)
++++ station_gui.c	(working copy)
+@@ -234,6 +234,32 @@ static void SortStationsList(plstations_
+ 	_last_station = NULL; // used for "cache" in namesorting
+ 	qsort((void*)sl->sort_list, sl->list_length, sizeof(sl->sort_list[0]), _station_sorter[sl->sort_type]);
+ 
++
++	/* count vehicles of each type for each station */
++
++	Vehicle *v; 
++	Order *o;
++	Station *s;
++
++	FOR_ALL_STATIONS(s) {
++		s->num_vehicles[0] = s->num_vehicles[1] = s->num_vehicles[2] = s->num_vehicles[3] = s->num_vehicles[4] = 0;
++	}
++
++	FOR_ALL_VEHICLES(v) {
++		uint16 type;
++		switch (v->type) {
++			case VEH_Train   : type=0; break;
++			case VEH_Road    : type=(v->cargo_type == CT_PASSENGERS)?2:1;break;
++			case VEH_Aircraft: type=3; break;
++			case VEH_Ship    : type=4; break;
++			default: continue; //in case of special vehicle
++		}
++		FOR_VEHICLE_ORDERS(v, o) {
++			s = GetStation(o->dest);
++			if (s) s->num_vehicles[type]++;
++		}
++	}
++
+ 	sl->resort_timer = DAY_TICKS * PERIODIC_RESORT_DAYS;
+ 	sl->flags &= ~SL_RESORT;
+ }
+@@ -304,9 +330,19 @@ static void PlayerStationsWndProc(Window
+ 				assert(st->owner == owner);
+ 
+ 				SetDParam(0, st->index);
+-				SetDParam(1, st->facilities);
+ 				x = DrawString(xb, y, STR_3049_0, 0) + 5;
+ 
++				for (j=0; j < 5; j++) {
++					if (st->facilities & (1<<j)) {
++						SetDParam(0, st->num_vehicles[j]);
++						if (st->num_vehicles[j]==0)
++							x=DrawString(x, y, STR_00E3, 0) + 2;
++						else
++							x=DrawString(x, y, STR_00E2, 0) + 2;
++						x=DrawString(x, y, STR_3049_TRAIN+j, 0) + 4;
++					}
++				}
++
+ 				// show cargo waiting and station ratings
+ 				for (j = 0; j != NUM_CARGO; j++) {
+ 					uint acc = GB(st->goods[j].waiting_acceptance, 0, 12);
+Index: station.h
+===================================================================
+--- station.h	(revision 7059)
++++ station.h	(working copy)
+@@ -87,6 +87,9 @@ struct Station {
+ 	uint16 random_bits;
+ 	byte waiting_triggers;
+ 
++	/* Used for counting visiting vehicles */
++	uint16	num_vehicles[5];
++
+ 	/* Stuff that is no longer used, but needed for conversion */
+ 	TileIndex bus_tile_obsolete;
+ 	TileIndex lorry_tile_obsolete;
+Index: order_cmd.c
+===================================================================
+--- order_cmd.c	(revision 7059)
++++ order_cmd.c	(working copy)
+@@ -414,6 +414,7 @@ int32 CmdInsertOrder(TileIndex tile, uin
+ 
+ 		/* Make sure to rebuild the whole list */
+ 		RebuildVehicleLists();
++		ResortStationLists();
+ 	}
+ 
+ 	return 0;
+@@ -504,6 +505,7 @@ int32 CmdDeleteOrder(TileIndex tile, uin
+ 		}
+ 
+ 		RebuildVehicleLists();
++		ResortStationLists();
+ 	}
+ 
+ 	return 0;
+@@ -686,6 +688,7 @@ int32 CmdCloneOrder(TileIndex tile, uint
+ 				InvalidateVehicleOrder(src);
+ 
+ 				RebuildVehicleLists();
++				ResortStationLists();
+ 			}
+ 		} break;
+ 
+@@ -745,6 +748,7 @@ int32 CmdCloneOrder(TileIndex tile, uint
+ 				InvalidateVehicleOrder(dst);
+ 
+ 				RebuildVehicleLists();
++				ResortStationLists();
+ 			}
+ 		} break;
+ 

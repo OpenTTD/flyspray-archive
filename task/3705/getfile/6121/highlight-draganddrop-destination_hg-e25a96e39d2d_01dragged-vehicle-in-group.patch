@@ -1,0 +1,149 @@
+diff -r 485ef234c1e2 src/group_gui.cpp
+--- a/src/group_gui.cpp	Sat May 22 15:37:53 2010 +0200
++++ b/src/group_gui.cpp	Sat May 22 17:17:26 2010 +0200
+@@ -148,6 +148,7 @@
+ 	GroupID group_rename;  ///< Group being renamed, INVALID_GROUP if none
+ 	GUIGroupList groups;   ///< List of groups
+ 	uint tiny_step_height; ///< Step height for the group list
++	GroupID group_over;    ///< Group over which a vehicle is dragged, INVALID_GROUP if none
+ 
+ 	/**
+ 	 * (Re)Build the group list.
+@@ -194,6 +195,22 @@
+ 		return r;
+ 	}
+ 
++	/**
++	 * Marks dirty the widget containing the currently highlighted group (#this->group_over).
++	 */
++	void SetHighlightedGroupWidgetDirty()
++	{
++		if (this->group_over == INVALID_GROUP) return;
++
++		if (IsAllGroupID(this->group_over)) {
++			this->SetWidgetDirty(GRP_WIDGET_ALL_VEHICLES);
++		} else if (IsDefaultGroupID(this->group_over)) {
++			this->SetWidgetDirty(GRP_WIDGET_DEFAULT_VEHICLES);
++		} else {
++			this->SetWidgetDirty(GRP_WIDGET_LIST_GROUP);
++		}
++	}
++
+ public:
+ 	VehicleGroupWindow(const WindowDesc *desc, WindowNumber window_number) : BaseVehicleListWindow()
+ 	{
+@@ -211,6 +228,7 @@
+ 		this->group_sel = ALL_GROUP;
+ 		this->vehicle_sel = INVALID_VEHICLE;
+ 		this->group_rename = INVALID_GROUP;
++		this->group_over = INVALID_GROUP;
+ 
+ 		const Owner owner = (Owner)GB(window_number, 0, 8);
+ 		this->vehicles.SetListing(*this->sorting);
+@@ -381,11 +399,21 @@
+ 	{
+ 		switch (widget) {
+ 			case GRP_WIDGET_ALL_VEHICLES:
++				if (!IsAllGroupID(this->group_sel) && IsAllGroupID(this->group_over)) {
++					/* This group isn't selected and a vehicle is dragged over it, highlight it. */
++					GfxFillRect(r.left + WD_FRAMERECT_LEFT, r.top + WD_FRAMERECT_TOP + 1, r.right - WD_FRAMERECT_RIGHT,
++								r.bottom - WD_FRAMERECT_BOTTOM, _colour_gradient[COLOUR_GREY][7]);
++				}
+ 				DrawString(r.left + WD_FRAMERECT_LEFT + 8, r.right - WD_FRAMERECT_RIGHT - 8, r.top + WD_FRAMERECT_TOP + 1,
+ 						STR_GROUP_ALL_TRAINS + this->vehicle_type, IsAllGroupID(this->group_sel) ? TC_WHITE : TC_BLACK);
+ 				break;
+ 
+ 			case GRP_WIDGET_DEFAULT_VEHICLES:
++				if (!IsDefaultGroupID(this->group_sel) && IsDefaultGroupID(this->group_over)) {
++					/* This group isn't selected and a vehicle is dragged over it, highlight it. */
++					GfxFillRect(r.left + WD_FRAMERECT_LEFT, r.top + WD_FRAMERECT_TOP + 1, r.right - WD_FRAMERECT_RIGHT,
++								r.bottom - WD_FRAMERECT_BOTTOM, _colour_gradient[COLOUR_GREY][7]);
++				}
+ 				DrawString(r.left + WD_FRAMERECT_LEFT + 8, r.right - WD_FRAMERECT_RIGHT - 8, r.top + WD_FRAMERECT_TOP + 1,
+ 						STR_GROUP_DEFAULT_TRAINS + this->vehicle_type, IsDefaultGroupID(this->group_sel) ? TC_WHITE : TC_BLACK);
+ 				break;
+@@ -398,6 +426,12 @@
+ 
+ 					assert(g->owner == this->owner);
+ 
++					if (this->group_sel != g->index && this->group_over == g->index) {
++						/* This group isn't selected and a vehicle is dragged over it, highlight it. */
++						GfxFillRect(r.left + WD_FRAMERECT_LEFT, y1, r.right - WD_FRAMERECT_RIGHT,
++									y1 + FONT_HEIGHT_NORMAL - 1, _colour_gradient[COLOUR_GREY][7]);
++					}
++
+ 					/* draw the selected group in white, else we draw it in black */
+ 					SetDParam(0, g->index);
+ 					DrawString(r.left + WD_FRAMERECT_LEFT + 8, r.right - WD_FRAMERECT_RIGHT - 8, y1, STR_GROUP_NAME, (this->group_sel == g->index) ? TC_WHITE : TC_BLACK);
+@@ -537,6 +571,7 @@
+ 				DoCommandP(0, DEFAULT_GROUP, this->vehicle_sel, CMD_ADD_VEHICLE_GROUP | CMD_MSG(STR_ERROR_GROUP_CAN_T_ADD_VEHICLE));
+ 
+ 				this->vehicle_sel = INVALID_VEHICLE;
++				this->group_over = INVALID_GROUP;
+ 
+ 				this->SetDirty();
+ 				break;
+@@ -546,6 +581,7 @@
+ 				const VehicleID vindex = this->vehicle_sel;
+ 
+ 				this->vehicle_sel = INVALID_VEHICLE;
++				this->group_over = INVALID_GROUP;
+ 
+ 				this->SetDirty();
+ 
+@@ -564,6 +600,7 @@
+ 				const VehicleID vindex = this->vehicle_sel;
+ 
+ 				this->vehicle_sel = INVALID_VEHICLE;
++				this->group_over = INVALID_GROUP;
+ 
+ 				this->SetDirty();
+ 
+@@ -655,9 +692,47 @@
+ 	{
+ 		/* abort drag & drop */
+ 		this->vehicle_sel = INVALID_VEHICLE;
++		this->SetHighlightedGroupWidgetDirty();
++		this->group_over = INVALID_GROUP;
+ 		this->SetWidgetDirty(GRP_WIDGET_LIST_VEHICLE);
+ 	}
+ 
++	virtual void OnMouseDrag(Point pt, int widget)
++	{
++		if (this->vehicle_sel != INVALID_VEHICLE) {
++			/* A vehicle is dragged over… */
++			GroupID new_group_over = INVALID_GROUP;
++			switch(widget) {
++				case GRP_WIDGET_ALL_VEHICLES:
++					new_group_over = ALL_GROUP; // …the 'All' group.
++					break;
++
++				case GRP_WIDGET_DEFAULT_VEHICLES: // …the 'Default' group.
++					new_group_over = DEFAULT_GROUP;
++					break;
++
++				case GRP_WIDGET_LIST_GROUP: { // …the list of custom groups.
++					uint group = (pt.y - this->GetWidget<NWidgetBase>(widget)->pos_y) / ((int) this->tiny_step_height);
++
++					if (group < this->vscroll2.GetCapacity()) {
++						group += this->vscroll2.GetPosition();
++
++						if (group < this->groups.Length()) { // ignore empty cells.
++							new_group_over = this->groups[group]->index;
++						}
++					}
++					break;
++				}
++			}
++
++			if (new_group_over == this->group_over) return;
++
++			this->SetHighlightedGroupWidgetDirty(); // Marks dirty the widget of the old highlighted group.
++			this->group_over = new_group_over;
++			this->SetHighlightedGroupWidgetDirty(); // Marks dirty the widget of the new highlighted group.
++		}
++	}
++
+ 	void ShowRenameGroupWindow(GroupID group, bool empty)
+ 	{
+ 		assert(Group::IsValidID(group));

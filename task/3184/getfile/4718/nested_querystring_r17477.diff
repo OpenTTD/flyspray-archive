@@ -1,0 +1,135 @@
+Index: src/misc_gui.cpp
+===================================================================
+--- src/misc_gui.cpp	(revisi¢n: 17477)
++++ src/misc_gui.cpp	(copia de trabajo)
+@@ -1182,21 +1182,41 @@
+
+ void QueryString::DrawEditBox(Window *w, int wid)
+ {
+-	const Widget *wi = &w->widget[wid];
++	uint left;
++	uint right;
++	uint top;
++	uint bottom;
++	if (w->widget == NULL) {
++		const NWidgetCore *wi = w->nested_array[wid];
+
+-	assert((wi->type & WWT_MASK) == WWT_EDITBOX);
++		assert((wi->type & WWT_MASK) == WWT_EDITBOX);
++		
++		left = wi->pos_x;
++		right = wi->pos_x + wi->current_x;
++		top = wi->pos_y;
++		bottom = wi->pos_y + wi->current_y;
++	} else {
++		const Widget *wi = &w->widget[wid];
+
+-	GfxFillRect(wi->left + 1, wi->top + 1, wi->right - 1, wi->bottom - 1, 215);
++		assert((wi->type & WWT_MASK) == WWT_EDITBOX);
++		
++		left = wi->left;
++		right = wi->right;
++		top = wi->top;
++		bottom = wi->bottom;
++	}
+
++	GfxFillRect(left + 1, top + 1, right - 1, bottom - 1, 215);
++
+ 	DrawPixelInfo dpi;
+ 	int delta;
+
+ 	/* Limit the drawing of the string inside the widget boundaries */
+ 	if (!FillDrawPixelInfo(&dpi,
+-			wi->left + 4,
+-			wi->top + 1,
+-			wi->right - wi->left - 4,
+-			wi->bottom - wi->top - 1)) {
++			left + 4,
++			top + 1,
++			right - left - 4,
++			bottom - top - 1)) {
+ 		return;
+ 	}
+
+@@ -1207,7 +1227,7 @@
+ 	 * space reserved at the end for the caret to show */
+ 	const Textbuf *tb = &this->text;
+
+-	delta = (wi->right - wi->left) - tb->width - 10;
++	delta = (right - left) - tb->width - 10;
+ 	if (delta > 0) delta = 0;
+
+ 	if (tb->caretxoffs + delta < 0) delta = -tb->caretxoffs;
+Index: src/querystring_gui.h
+===================================================================
+--- src/querystring_gui.h	(revisi¢n: 17477)
++++ src/querystring_gui.h	(copia de trabajo)
+@@ -61,6 +61,12 @@
+ 	char *edit_str_buf;
+ 	char *orig_str_buf;
+ 	const uint16 edit_str_size; ///< maximum length of string (in bytes), including terminating '\0'
++	
++	QueryStringBaseWindow(uint16 size) : Window(), edit_str_size(size)
++	{
++		assert(size != 0);
++		this->edit_str_buf = CallocT<char>(size);
++	}
+
+ 	QueryStringBaseWindow(uint16 size, const WindowDesc *desc, WindowNumber window_number = 0) : Window(desc, window_number), edit_str_size(size)
+ 	{
+Index: src/window_gui.h
+===================================================================
+--- src/window_gui.h	(revisi¢n: 17477)
++++ src/window_gui.h	(copia de trabajo)
+@@ -503,15 +503,28 @@
+ 	 */
+ 	inline bool SetFocusedWidget(byte widget_index)
+ 	{
+-		if (widget_index >= this->widget_count || this->widget + widget_index == this->focused_widget) {
++		/* Do nothing if widget_index is already focused, or if it wasn't a valid widget */
++		if (this->widget != NULL && (widget_index >= this->widget_count || this->widget + widget_index == this->focused_widget) ||
++			(this->nested_array != NULL && (widget_index >= this->nested_array_size ||
++				this->nested_focus != NULL && this->nested_array[widget_index] == this->nested_focus))) {
+ 			return false;
+ 		}
+
+-		if (this->focused_widget != NULL) {
+-			/* Repaint the widget that lost focus. A focused edit box may else leave the caret on the screen. */
+-			this->InvalidateWidget(this->focused_widget - this->widget);
++		/* Repaint the widget that lost focus. A focused edit box may else leave the caret on the screen. */
++		if (this->nested_array != NULL) {
++			assert(widget_index < this->nested_array_size);
++			if (this->nested_focus != NULL) {
++				this->nested_focus->Invalidate(this);
++			}
++			this->nested_focus = this->nested_array[widget_index];
+ 		}
+-		this->focused_widget = &this->widget[widget_index];
++		if (this->widget != NULL) {
++			assert(widget_index < this->widget_count);
++			if (this->focused_widget != NULL) {
++				this->InvalidateWidget(this->focused_widget - this->widget);
++			}
++			this->focused_widget = &this->widget[widget_index];
++		}
+ 		return true;
+ 	}
+
+Index: src/osk_gui.cpp
+===================================================================
+--- src/osk_gui.cpp	(revisi¢n: 17477)
++++ src/osk_gui.cpp	(copia de trabajo)
+@@ -75,7 +75,12 @@
+ 		this->parent = parent;
+ 		assert(parent != NULL);
+
+-		this->caption = (parent->widget[button].data != STR_NULL) ? parent->widget[button].data : parent->caption;
++		if (parent->widget != NULL) {
++			this->caption = (parent->widget[button].data != STR_NULL) ? parent->widget[button].data : parent->caption;
++		}
++		if (parent->nested_array != NULL) {
++			this->caption = (parent->nested_array[button]->widget_data != STR_NULL) ? parent->nested_array[button]->widget_data : parent->caption;
++		}
+
+ 		this->qs         = parent;
+ 		this->text_btn   = button;

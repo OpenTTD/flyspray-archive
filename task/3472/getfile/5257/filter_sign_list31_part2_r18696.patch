@@ -1,0 +1,146 @@
+diff -r af3ccf0030f3 src/signs_gui.cpp
+--- a/src/signs_gui.cpp	Wed Jan 06 20:53:35 2010 +0100
++++ b/src/signs_gui.cpp	Wed Jan 06 22:04:21 2010 +0100
+@@ -122,6 +122,10 @@
+ };
+ 
+ struct SignListWindow : QueryStringBaseWindow, SignList {
++private:
++	int selected_sign;
++
++public:
+ 	int text_offset; // Offset of the sign text relative to the left edge of the SLW_LIST widget.
+ 
+ 	SignListWindow(const WindowDesc *desc, WindowNumber window_number) : QueryStringBaseWindow(MAX_LENGTH_SIGN_NAME_BYTES)
+@@ -135,6 +139,7 @@
+ 
+ 		/* Initialize the filtering variables */
+ 		this->SetFilterString("");
++		this->selected_sign = -1;
+ 
+ 		/* Create initial list. */
+ 		this->signs.ForceRebuild();
+@@ -183,8 +188,18 @@
+ 			this->SetWidgetDirty(SLW_FILTER_CLEAR_BTN);
+ 		}
+ 
++		this->selected_sign = Clamp(this->selected_sign, -1, this->signs.Length() - 1); // Can happen when a new filter is used.
++
+ 		/* Rebuild the list of signs */
+ 		this->InvalidateData();
++	}
++
++	/** Make sure that the currently selected sign is within the visible part of the sign list */
++	void ScrollToSelected()
++	{
++		if (this->selected_sign == -1 || (uint)this->selected_sign >= this->signs.Length() ) return;
++
++		this->vscroll.ScrollTowards(this->selected_sign);
+ 	}
+ 
+ 	virtual void OnPaint()
+@@ -217,7 +232,7 @@
+ 					if (si->owner != OWNER_NONE) DrawCompanyIcon(si->owner, icon_left, y + sprite_offset_y);
+ 
+ 					SetDParam(0, si->index);
+-					DrawString(text_left, text_right, y, STR_SIGN_NAME, TC_YELLOW);
++					DrawString(text_left, text_right, y, STR_SIGN_NAME, this->selected_sign == i ? TC_BLUE : TC_YELLOW);
+ 					y += this->resize.step_height;
+ 				}
+ 				break;
+@@ -247,6 +262,7 @@
+ 			case SLW_FILTER_CLEAR_BTN:
+ 				this->ClearFilterTextWidget();
+ 				this->SetFilterString(0);
++				this->selected_sign = -1;
+ 				break;
+ 
+ 			case SLW_FILTER_MATCH_CASE_BTN:
+@@ -278,17 +294,23 @@
+ 				this->SetFilterString(this->text.buf);
+ 				break;
+ 
+-			case HEBR_CONFIRM: // Enter pressed -> goto first sign in list
+-				if (this->signs.Length() >= 1) {
+-					const Sign *si = this->signs[0];
+-					ScrollMainWindowToTile(TileVirtXY(si->x, si->y));
++			case HEBR_CONFIRM: { // Enter pressed -> goto selected sign in list (or first if no selected sign)
++				uint n_signs = this->signs.Length();
++				if (n_signs >= 1) {
++					uint sign_id = this->selected_sign == -1 || (uint)this->selected_sign >= n_signs ? 0 : this->selected_sign;
++					if (n_signs > sign_id) {
++						const Sign *si = this->signs[sign_id];
++						ScrollMainWindowToTile(TileVirtXY(si->x, si->y));
++					}
+ 				}
+ 				return state;
++			}
+ 
+ 			case HEBR_CANCEL: // ESC pressed, clear filter
+ 				this->ClearFilterTextWidget(); // Empty the text in the EditBox widget
+ 				this->SetFilterString(0);      // Use empty text as filter text (= view all signs)
+ 				this->UnfocusFocusedWidget();  // Unfocus the text box
++				this->selected_sign = -1;      // Deselect sign in sign list
+ 				return state;
+ 
+ 			case HEBR_NOT_FOCUSED: // The filter text box is not globaly focused
+@@ -304,6 +326,59 @@
+ 		}
+ 
+ 		if (state == ES_HANDLED) OnOSKInput(SLW_FILTER_TEXT);
++
++		/* Selection of signs using arrow up/down , page up/down and ctrl + home/end keys. 
++		 * This only happens if the edit box is globaly focused.
++		 */
++		if (state != ES_HANDLED && this->IsWidgetGloballyFocused(SLW_FILTER_TEXT)) {
++			switch (keycode) {
++				case WKC_UP:
++					/* scroll up by one */
++					this->selected_sign--;
++					if (this->selected_sign < 0) this->selected_sign = 0;
++					state = ES_HANDLED;
++					break;
++
++				case WKC_DOWN:
++					/* scroll down by one */
++					this->selected_sign++;
++					if (this->selected_sign < 0) this->selected_sign = 0;
++					state = ES_HANDLED;
++					break;
++
++				case WKC_PAGEUP:
++					/* scroll up a page */
++					this->selected_sign = max(0, this->selected_sign - (int)this->vscroll.GetCapacity());
++					state = ES_HANDLED;
++					break;
++
++				case WKC_PAGEDOWN:
++					/* scroll down a page */
++					this->selected_sign = min(this->selected_sign + this->vscroll.GetCapacity(), (int)this->signs.Length() - 1);
++					state = ES_HANDLED;
++					break;
++
++				case WKC_CTRL | WKC_HOME: // Home key without ctrl is processed by the edit box
++					/* jump to beginning */
++					this->selected_sign = 0;
++					state = ES_HANDLED;
++					break;
++
++				case WKC_CTRL | WKC_END: // End key without ctrl is processed by the edit box
++					/* jump to end */
++					this->selected_sign = (int)this->signs.Length() - 1;
++					state = ES_HANDLED;
++					break;
++			}
++
++			if (state == ES_HANDLED) {
++				/* Make sure the selected sign is visible */
++				this->ScrollToSelected();
++
++				/* Repaint the window */
++				this->SetDirty();
++			}
++		}
+ 
+ 		return state;
+ 	}

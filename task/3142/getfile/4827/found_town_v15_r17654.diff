@@ -1,0 +1,474 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revisión: 17654)
++++ src/settings.cpp	(copia de trabajo)
+@@ -679,6 +679,20 @@
+ 	return true;
+ }
+ 
++/**
++ * This function is called whenever the setting "Allow founding new towns" is changed.
++ * @param p1 Callback parameter
++ * @return Always true
++ */
++static bool CloseFoundTownGUI(int32 p1)
++{
++	/* If the setting is disabled, the found town window must be closed */
++	if (p1 == 0 && _game_mode != GM_EDITOR) {
++		DeleteWindowByClass(WC_FOUND_TOWN);
++	}
++	return true;
++}
++
+ static bool CloseSignalGUI(int32 p1)
+ {
+ 	if (p1 == 0) {
+Index: src/toolbar_gui.cpp
+===================================================================
+--- src/toolbar_gui.cpp	(revisión: 17654)
++++ src/toolbar_gui.cpp	(copia de trabajo)
+@@ -416,12 +416,18 @@
+ 
+ static void ToolbarTownClick(Window *w)
+ {
+-	PopupMainToolbMenu(w, TBN_TOWNDIRECTORY, STR_TOWN_MENU_TOWN_DIRECTORY, 1);
++	/* Only show the option to found towns when the setting is active */
++	PopupMainToolbMenu(w, TBN_TOWNDIRECTORY, STR_TOWN_MENU_TOWN_DIRECTORY, _settings_game.economy.found_new_towns ? 2 : 1);
++
++	SndPlayFx(SND_15_BEEP);
+ }
+ 
+ static void MenuClickTown(int index)
+ {
+-	ShowTownDirectory();
++	switch (index) {
++		case 0: ShowTownDirectory();   break;
++		case 1: if (_settings_game.economy.found_new_towns) ShowFoundTownWindow(); break;
++	}
+ }
+ 
+ /* --- Subidies button menu --- */
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revisión: 17654)
++++ src/lang/english.txt	(copia de trabajo)
+@@ -367,6 +367,7 @@
+ STR_MAP_MENU_SIGN_LIST                                          :Sign list
+ ############ range for town menu starts, yet the town directory is shown in the map menu in the scenario editor
+ STR_TOWN_MENU_TOWN_DIRECTORY                                    :Town directory
++STR_TOWN_MENU_FOUND_TOWN                                        :Found new town
+ ############ both ranges ends here
+ 
+ ############ range for subsidies menu starts
+@@ -768,6 +769,8 @@
+ STR_NEWS_INDUSTRY_CLOSURE_SUPPLY_PROBLEMS                       :{BIGFONT}{BLACK}Supply problems cause {STRING2} to announce imminent closure!
+ STR_NEWS_INDUSTRY_CLOSURE_LACK_OF_TREES                         :{BIGFONT}{BLACK}Lack of nearby trees causes {STRING2} to announce imminent closure!
+ 
++STR_NEWS_TOWN_FOUND_NEW                                         :{BIGFONT}{BLACK}{TOWN} has been founded!{}{}Citizens of the new town thank {RAW_STRING} for building funds!
++
+ STR_NEWS_EURO_INTRODUCTION                                      :{BIGFONT}{BLACK}European Monetary Union!{}{}The Euro is introduced as the sole currency for everyday transactions in your country!
+ STR_NEWS_BEGIN_OF_RECESSION                                     :{BIGFONT}{BLACK}World Recession!{}{}Financial experts fear worst as economy slumps!
+ STR_NEWS_END_OF_RECESSION                                       :{BIGFONT}{BLACK}Recession Over!{}{}Upturn in trade gives confidence to industries as economy strengthens!
+@@ -1257,6 +1260,7 @@
+ STR_CONFIG_SETTING_LARGER_TOWNS_DISABLED                        :{LTBLUE}Proportion of towns that will become cities: {ORANGE}None
+ STR_CONFIG_SETTING_CITY_SIZE_MULTIPLIER                         :{LTBLUE}Initial city size multiplier: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_MODIFIED_ROAD_REBUILD                        :{LTBLUE}Remove absurd road-elements during the road construction: {ORANGE}{STRING1}
++STR_CONFIG_SETTING_TOWN_BUILD_NEW                               :{LTBLUE}Allow founding new towns
+ 
+ STR_CONFIG_SETTING_GUI                                          :{ORANGE}Interface
+ STR_CONFIG_SETTING_CONSTRUCTION                                 :{ORANGE}Construction
+@@ -2026,6 +2030,7 @@
+ 
+ # Town generation window (SE)
+ STR_FOUND_TOWN_CAPTION                                          :{WHITE}Town Generation
++STR_FOUND_TOWN_INGAME_CAPTION                                   :{WHITE}Found New Town
+ STR_FOUND_TOWN_NEW_TOWN_BUTTON                                  :{BLACK}New Town
+ STR_FOUND_TOWN_NEW_TOWN_TOOLTIP                                 :{BLACK}Found new town
+ STR_FOUND_TOWN_RANDOM_TOWN_BUTTON                               :{BLACK}Random Town
+@@ -3291,6 +3296,7 @@
+ STR_ERROR_TOO_CLOSE_TO_ANOTHER_TOWN                             :{WHITE}... too close to another town
+ STR_ERROR_TOO_MANY_TOWNS                                        :{WHITE}... too many towns
+ STR_ERROR_NO_SPACE_FOR_TOWN                                     :{WHITE}... there is no more space on the map
++STR_ERROR_NO_ROADS                                              :{WHITE}... there are no available roads nearby
+ STR_ERROR_TOWN_EXPAND_WARN_NO_ROADS                             :{WHITE}The town will not build roads. You can enable building of roads via Advanced Settings->Economy->Towns.
+ STR_ERROR_ROAD_WORKS_IN_PROGRESS                                :{WHITE}Road works in progress
+ 
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revisión: 17654)
++++ src/settings_gui.cpp	(copia de trabajo)
+@@ -1314,6 +1314,7 @@
+ 	SettingEntry("economy.town_growth_rate"),
+ 	SettingEntry("economy.larger_towns"),
+ 	SettingEntry("economy.initial_city_size"),
++	SettingEntry("economy.found_new_towns"),
+ };
+ /** Towns sub-page */
+ static SettingsPage _settings_economy_towns_page = {_settings_economy_towns, lengthof(_settings_economy_towns)};
+Index: src/town.h
+===================================================================
+--- src/town.h	(revisión: 17654)
++++ src/town.h	(copia de trabajo)
+@@ -212,8 +212,8 @@
+ void SetTownRatingTestMode(bool mode);
+ uint GetMaskOfTownActions(int *nump, CompanyID cid, const Town *t);
+ bool GenerateTowns(TownLayout layout);
++int GetNewTownConstructionCost();
+ 
+-
+ /** Town actions of a company. */
+ enum TownActions {
+ 	TACT_NONE             = 0x00, ///< Empty action set.
+Index: src/table/pricebase.h
+===================================================================
+--- src/table/pricebase.h	(revisión: 17654)
++++ src/table/pricebase.h	(copia de trabajo)
+@@ -59,4 +59,5 @@
+ 	{   1600, PCAT_RUNNING     }, ///< roadveh_running
+ 	{   5600, PCAT_RUNNING     }, ///< ship_running
+ 	{1000000, PCAT_CONSTRUCTION}, ///< build_industry
++	{2500000, PCAT_CONSTRUCTION}, ///< found_town
+ };
+Index: src/table/settings.h
+===================================================================
+--- src/table/settings.h	(revisión: 17654)
++++ src/table/settings.h	(copia de trabajo)
+@@ -16,6 +16,7 @@
+ static bool InvalidateDetailsWindow(int32 p1);
+ static bool InvalidateStationBuildWindow(int32 p1);
+ static bool InvalidateBuildIndustryWindow(int32 p1);
++static bool CloseFoundTownGUI(int32 p1);
+ static bool CloseSignalGUI(int32 p1);
+ static bool InvalidateTownViewWindow(int32 p1);
+ static bool DeleteSelectStationWindow(int32 p1);
+@@ -433,6 +434,7 @@
+ 	 SDT_CONDVAR(GameSettings, economy.larger_towns,                 SLE_UINT8, 54, SL_MAX_VERSION, 0, D0,    4,     0,     255, 1, STR_CONFIG_SETTING_LARGER_TOWNS,           NULL),
+ 	 SDT_CONDVAR(GameSettings, economy.initial_city_size,            SLE_UINT8, 56, SL_MAX_VERSION, 0, 0,     2,     1,      10, 1, STR_CONFIG_SETTING_CITY_SIZE_MULTIPLIER,   NULL),
+ 	SDT_CONDBOOL(GameSettings, economy.mod_road_rebuild,                        77, SL_MAX_VERSION, 0, 0, false,                    STR_CONFIG_SETTING_MODIFIED_ROAD_REBUILD,  NULL),
++	SDT_CONDBOOL(GameSettings, economy.found_new_towns,                        128, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_SETTING_TOWN_BUILD_NEW,         CloseFoundTownGUI),
+ 
+ 	SDT_CONDNULL(1, 0, 106), // previously ai-new setting.
+ 	    SDT_BOOL(GameSettings, ai.ai_in_multiplayer,                                                0, 0, true,                     STR_CONFIG_SETTING_AI_IN_MULTIPLAYER,      NULL),
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revisión: 17654)
++++ src/town_cmd.cpp	(copia de trabajo)
+@@ -1408,9 +1408,10 @@
+  * @param townnameparts The town name
+  * @param size Parameter for size determination
+  * @param city whether to build a city or town
++ * @param found_town True if we are founding a town ingame
+  * @param layout the (road) layout of the town
+  */
+-static void DoCreateTown(Town *t, TileIndex tile, uint32 townnameparts, TownSize size, bool city, TownLayout layout)
++static void DoCreateTown(Town *t, TileIndex tile, uint32 townnameparts, TownSize size, bool city, bool found_town, TownLayout layout)
+ {
+ 	t->xy = tile;
+ 	t->num_houses = 0;
+@@ -1466,6 +1467,7 @@
+ 	int x = (int)size * 16 + 3;
+ 	if (size == TS_RANDOM) x = (Random() & 0xF) + 8;
+ 	if (city) x *= _settings_game.economy.initial_city_size;
++	if (found_town) x = 8; // Towns founded ingame are slightly bigger than small sized towns.
+ 
+ 	t->num_houses += x;
+ 	UpdateTownRadius(t);
+@@ -1479,6 +1481,17 @@
+ 	UpdateTownRadius(t);
+ 	UpdateTownMaxPass(t);
+ 	UpdateAirportsNoise();
++
++	if (found_town) {
++		char company_name[MAX_LENGTH_COMPANY_NAME_BYTES];
++		SetDParam(0, _current_company);
++		GetString(company_name, STR_COMPANY_NAME, lastof(company_name));
++		char *cn = strdup(company_name);
++		SetDParam(0, t->index);
++		SetDParamStr(1, cn);
++
++		AddNewsItem(STR_NEWS_TOWN_FOUND_NEW, NS_GENERAL, NR_TOWN, t->index, NR_NONE, UINT32_MAX, cn);
++	}
+ }
+ 
+ /**
+@@ -1503,6 +1516,42 @@
+ 		return_cmd_error(STR_ERROR_SITE_UNSUITABLE);
+ 	}
+ 
++	static const TileIndexDiffC _town_coord_mod[] = {
++		{-1,  0},
++		{ 1,  1},
++		{ 1, -1},
++		{-1, -1},
++		{-1,  0},
++		{ 0,  2},
++		{ 2,  0},
++		{ 0, -2},
++		{-1, -1},
++		{-2,  2},
++		{ 2,  2},
++		{ 2, -2},
++		{ 0,  0}
++	};
++
++	/* If we are founding a town and towns can't build roads, we need a road nearby to start construction */
++	if (_game_mode != GM_EDITOR && !_settings_game.economy.allow_town_roads) {
++		/* Find a road that we can base the construction on. */
++		const TileIndexDiffC *ptr = _town_coord_mod;
++		TileIndex road_tile = tile;
++
++		bool success = false;
++
++		while (!success && ptr != endof(_town_coord_mod)){
++			if (GetTownRoadBits(road_tile) != ROAD_NONE) {
++				success = true;
++				break;
++			}
++			road_tile = TILE_ADD(road_tile, ToTileIndexDiff(*ptr));
++			++ptr;
++		}
++
++		if (!success) return_cmd_error(STR_ERROR_NO_ROADS);
++	}
++
+ 	return CommandCost(EXPENSES_OTHER);
+ }
+ 
+@@ -1522,6 +1571,15 @@
+ 	return true;
+ }
+ 
++/**
++ * Gets the price for founding a town.
++ * @return Price of a town.
++ */
++int GetNewTownConstructionCost()
++{
++	return _price.found_town;
++};
++
+ /** Create a new town.
+  * This obviously only works in the scenario editor. Function not removed
+  * as it might be possible in the future to fund your own town :)
+@@ -1537,9 +1595,6 @@
+  */
+ CommandCost CmdFoundTown(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
+ {
+-	/* Only in the scenario editor */
+-	if (_game_mode != GM_EDITOR) return CMD_ERROR;
+-
+ 	TownSize size = (TownSize)GB(p1, 0, 2);
+ 	bool city = HasBit(p1, 2);
+ 	TownLayout layout = (TownLayout)GB(p1, 3, 3);
+@@ -1568,9 +1623,11 @@
+ 		if (CmdFailed(cost)) return cost;
+ 	}
+ 
++	bool found_town = _game_mode != GM_EDITOR;
++
+ 	/* Create the town */
+ 	if (flags & DC_EXEC) {
+-		_generating_world = true;
++		if (!found_town) _generating_world = true;
+ 		UpdateNearestTownForRoadTiles(true);
+ 		Town *t;
+ 		if (random) {
+@@ -1582,16 +1639,16 @@
+ 			}
+ 		} else {
+ 			t = new Town(tile);
+-			DoCreateTown(t, tile, townnameparts, size, city, layout);
++			DoCreateTown(t, tile, townnameparts, size, city, found_town, layout);
+ 		}
+ 		UpdateNearestTownForRoadTiles(false);
+-		_generating_world = false;
++		if (!found_town) _generating_world = false;
+ 		if (t != NULL && !StrEmpty(text)) {
+ 			t->name = strdup(text);
+ 			t->UpdateVirtCoord();
+ 		}
+ 	}
+-	return cost;
++	return CommandCost(EXPENSES_OTHER, GetNewTownConstructionCost());
+ }
+ 
+ /**
+@@ -1729,7 +1786,7 @@
+ 		/* Allocate a town struct */
+ 		Town *t = new Town(tile);
+ 
+-		DoCreateTown(t, tile, townnameparts, size, city, layout);
++		DoCreateTown(t, tile, townnameparts, size, city, false, layout);
+ 
+ 		/* if the population is still 0 at the point, then the
+ 		 * placement is so bad it couldn't grow at all */
+Index: src/road_cmd.cpp
+===================================================================
+--- src/road_cmd.cpp	(revisión: 17654)
++++ src/road_cmd.cpp	(copia de trabajo)
+@@ -1273,8 +1273,6 @@
+  */
+ void UpdateNearestTownForRoadTiles(bool invalidate)
+ {
+-	assert(!invalidate || _generating_world);
+-
+ 	for (TileIndex t = 0; t < MapSize(); t++) {
+ 		if (IsTileType(t, MP_ROAD) && !IsRoadDepot(t) && !HasTownOwnedRoad(t)) {
+ 			TownID tid = (TownID)INVALID_TOWN;
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revisión: 17654)
++++ src/command.cpp	(copia de trabajo)
+@@ -296,7 +296,7 @@
+ 	{CmdSellShareInCompany,                         0}, // CMD_SELL_SHARE_IN_COMPANY
+ 	{CmdBuyCompany,                                 0}, // CMD_BUY_COMANY
+ 
+-	{CmdFoundTown,          CMD_NO_TEST | CMD_OFFLINE}, // CMD_FOUND_TOWN
++	{CmdFoundTown,                                  0}, // CMD_FOUND_TOWN
+ 	{CmdRenameTown,                        CMD_SERVER}, // CMD_RENAME_TOWN
+ 	{CmdDoTownAction,                               0}, // CMD_DO_TOWN_ACTION
+ 
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revisión: 17654)
++++ src/settings_type.h	(copia de trabajo)
+@@ -330,6 +330,7 @@
+ 	bool   allow_town_roads;                 ///< towns are allowed to build roads (always allowed when generating world / in SE)
+ 	bool   station_noise_level;              ///< build new airports when the town noise level is still within accepted limits
+ 	uint16 town_noise_population[3];         ///< population to base decision on noise evaluation (@see town_council_tolerance)
++	bool   found_new_towns;                  ///< allow new towns to be built
+ };
+ 
+ /** Settings related to stations. */
+Index: src/town_gui.cpp
+===================================================================
+--- src/town_gui.cpp	(revisión: 17654)
++++ src/town_gui.cpp	(copia de trabajo)
+@@ -876,6 +876,7 @@
+ 	TSEW_SIZE_LARGE,
+ 	TSEW_SIZE_RANDOM,
+ 	TSEW_CITY,
++	TSEW_FOUND_COST,
+ 	TSEW_TOWNLAYOUT,
+ 	TSEW_LAYOUT_ORIGINAL,
+ 	TSEW_LAYOUT_BETTER,
+@@ -929,6 +930,8 @@
+ 		NWidget(NWID_SPACER), SetMinimalSize(0, 3),
+ 		NWidget(WWT_TEXTBTN, COLOUR_GREY, TSEW_CITY), SetPadding(0, 2, 0, 2), SetMinimalSize(156, 12), SetFill(true, false),
+ 										SetDataTip(STR_FOUND_TOWN_CITY, STR_FOUND_TOWN_CITY_TOOLTIP), SetFill(true, false),
++		/* Founding cost */
++		NWidget(WWT_LABEL, COLOUR_GREY, TSEW_FOUND_COST), SetPadding(0, 2, 2, 2), SetMinimalSize(156, 12), SetFill(1, 0),
+ 		/* Town roads selection. */
+ 		NWidget(NWID_HORIZONTAL),
+ 			NWidget(NWID_SPACER), SetFill(true, false),
+@@ -969,6 +972,9 @@
+ 			params(_settings_game.game_creation.town_name)
+ 	{
+ 		this->InitNested(desc, window_number);
++		if (_game_mode != GM_EDITOR) {
++			this->GetWidget<NWidgetCore>(TSEW_CAPTION)->SetDataTip(STR_FOUND_TOWN_INGAME_CAPTION, STR_TOOLTIP_WINDOW_TITLE_DRAG_THIS);
++		}
+ 		InitializeTextBuffer(&this->text, this->edit_str_buf, this->edit_str_size, MAX_LENGTH_TOWN_NAME_PIXELS);
+ 		this->RandomTownName();
+ 		this->UpdateButtons();
+@@ -1029,6 +1035,41 @@
+ 		this->DrawEditBox(TSEW_TOWNNAME_EDITBOX);
+ 	}
+ 
++	virtual void DrawWidget(const Rect &r, int widget) const
++	{
++		if (_game_mode != GM_EDITOR) {
++			switch (widget) {
++				case TSEW_FOUND_COST:
++					SetDParam(0, GetNewTownConstructionCost());
++					DrawString(r.left, r.right, r.top, STR_FUND_INDUSTRY_INDUSTRY_BUILD_COST, TC_FROMSTRING, SA_CENTER);
++					break;
++			}
++		}
++	}
++
++	/* This function hides some of the widgets depending on game state */
++	virtual void UpdateWidgetSize(int widget, Dimension *size, const Dimension &padding, Dimension *resize)
++	{
++		Dimension d = {0, 0};
++
++		if (_game_mode != GM_EDITOR) {
++			switch (widget) {
++				case TSEW_RANDOMTOWN:
++				case TSEW_MANYRANDOMTOWNS:
++				case TSEW_TOWNSIZE:
++				case TSEW_SIZE_SMALL:
++				case TSEW_SIZE_MEDIUM:
++				case TSEW_SIZE_LARGE:
++				case TSEW_SIZE_RANDOM:
++				case TSEW_CITY:
++					*size = d;
++					break;
++			}
++		} else if (widget == TSEW_FOUND_COST) {
++			*size = d;
++		}
++	}
++
+ 	virtual void OnClick(Point pt, int widget)
+ 	{
+ 		switch (widget) {
+Index: src/economy.cpp
+===================================================================
+--- src/economy.cpp	(revisión: 17654)
++++ src/economy.cpp	(copia de trabajo)
+@@ -674,6 +674,7 @@
+ 	SetWindowClassesDirty(WC_REPLACE_VEHICLE);
+ 	SetWindowClassesDirty(WC_VEHICLE_DETAILS);
+ 	SetWindowDirty(WC_PAYMENT_RATES, 0);
++	SetWindowDirty(WC_FOUND_TOWN, 0);
+ }
+ 
+ static void CompaniesPayInterest()
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revisión: 17654)
++++ src/saveload/saveload.cpp	(copia de trabajo)
+@@ -48,7 +48,7 @@
+ 
+ #include "saveload_internal.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 127;
++extern const uint16 SAVEGAME_VERSION = 128;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/saveload/economy_sl.cpp
+===================================================================
+--- src/saveload/economy_sl.cpp	(revisión: 17654)
++++ src/saveload/economy_sl.cpp	(copia de trabajo)
+@@ -19,8 +19,10 @@
+ static void Load_PRIC()
+ {
+ 	int vt = CheckSavegameVersion(65) ? SLE_FILE_I32 : SLE_FILE_I64;
+-	SlArray(NULL, NUM_PRICES, vt | SLE_VAR_NULL);
+-	SlArray(NULL, NUM_PRICES, SLE_FILE_U16 | SLE_VAR_NULL);
++	/* Since 128, the number of base prices increased in one. */
++	/* To keep compatibility with older games, a hardcoded value of 49 is used */
++	SlArray(NULL, 49, vt | SLE_VAR_NULL);
++	SlArray(NULL, 49, SLE_FILE_U16 | SLE_VAR_NULL);
+ }
+ 
+ /** Cargo payment rates in pre 126 savegames */
+Index: src/economy_type.h
+===================================================================
+--- src/economy_type.h	(revisión: 17654)
++++ src/economy_type.h	(copia de trabajo)
+@@ -107,10 +107,11 @@
+ 	Money roadveh_running;
+ 	Money ship_running;
+ 	Money build_industry;
++	Money found_town;
+ };
+ 
+ enum {
+-	NUM_PRICES = 49,
++	NUM_PRICES = 50,
+ };
+ 
+ assert_compile(NUM_PRICES * sizeof(Money) == sizeof(Prices));

@@ -1,0 +1,131 @@
+Index: src/engine_base.h
+===================================================================
+--- src/engine_base.h	(revisi¢n: 16931)
++++ src/engine_base.h	(copia de trabajo)
+@@ -27,6 +27,7 @@
+ 	CompanyMask company_avail;
+ 	uint8 original_image_index; ///< Original vehicle image index, thus the image index of the overridden vehicle
+ 	VehicleType type; ///< type, ie VEH_ROAD, VEH_TRAIN, etc.
++	static const int BASELIFE_INFINITE;
+
+ 	EngineInfo info;
+
+Index: src/newgrf.cpp
+===================================================================
+--- src/newgrf.cpp	(revisi¢n: 16931)
++++ src/newgrf.cpp	(copia de trabajo)
+@@ -470,6 +470,9 @@
+
+ 		case 0x04: // Model life
+ 			ei->base_life = grf_load_byte(buf);
++			if (ei->base_life == 0xFF) {
++				ei->base_life = 0xFFFF; /* New value for a vehicle that never expires */
++			}
+ 			break;
+
+ 		case 0x06: // Climates available
+@@ -736,6 +739,13 @@
+ 				ei->base_intro = grf_load_dword(&buf);
+ 				break;
+
++			case 0x2B: // Long format model life (years)
++				ei->base_life = grf_load_word(&buf);
++				if (ei->base_life > 5000) { /* Limited to 5000 years to prevent overflows. */
++					ei->base_life = 0xFFFF;
++				}
++				break;
++
+ 			default:
+ 				ret = CommonVehicleChangeInfo(ei, prop, &buf);
+ 				break;
+@@ -876,6 +886,13 @@
+ 				AlterVehicleListOrder(e->index, grf_load_extended(&buf));
+ 				break;
+
++			case 0x21: // Long format model life (years)
++				ei->base_life = grf_load_word(&buf);
++				if (ei->base_life > 5000) { /* Limited to 5000 years to prevent overflows. */
++					ei->base_life = 0xFFFF;
++				}
++				break;
++
+ 			default:
+ 				ret = CommonVehicleChangeInfo(ei, prop, &buf);
+ 				break;
+@@ -989,6 +1006,13 @@
+ 				AlterVehicleListOrder(e->index, grf_load_extended(&buf));
+ 				break;
+
++			case 0x1C: // Long format model life (years)
++				ei->base_life = grf_load_word(&buf);
++				if (ei->base_life > 5000) { /* Limited to 5000 years to prevent overflows. */
++					ei->base_life = 0xFFFF;
++				}
++				break;
++
+ 			default:
+ 				ret = CommonVehicleChangeInfo(ei, prop, &buf);
+ 				break;
+@@ -1098,6 +1122,13 @@
+ 				AlterVehicleListOrder(e->index, grf_load_extended(&buf));
+ 				break;
+
++			case 0x1C: // Long format model life (years)
++				ei->base_life = grf_load_word(&buf);
++				if (ei->base_life > 5000) { /* Limited to 5000 years to prevent overflows. */
++					ei->base_life = 0xFFFF;
++				}
++				break;
++
+ 			default:
+ 				ret = CommonVehicleChangeInfo(ei, prop, &buf);
+ 				break;
+Index: src/engine.cpp
+===================================================================
+--- src/engine.cpp	(revisi¢n: 16931)
++++ src/engine.cpp	(copia de trabajo)
+@@ -54,6 +54,8 @@
+
+ const uint EngineOverrideManager::NUM_DEFAULT_ENGINES = _engine_counts[VEH_TRAIN] + _engine_counts[VEH_ROAD] + _engine_counts[VEH_SHIP] + _engine_counts[VEH_AIRCRAFT];
+
++const int Engine::BASELIFE_INFINITE = 0xFFFF;
++
+ Engine::Engine() :
+ 	name(NULL),
+ 	overrides_count(0),
+@@ -72,7 +74,7 @@
+ 		/* Mark engine as valid anyway */
+ 		this->info.climates = 0x80;
+ 		/* Set model life to maximum to make wagons available */
+-		this->info.base_life = 0xFF;
++		this->info.base_life = BASELIFE_INFINITE;
+ 		return;
+ 	}
+
+@@ -89,7 +91,7 @@
+ 			this->info.string_id = STR_VEHICLE_NAME_TRAIN_ENGINE_RAIL_KIRBY_PAUL_TANK_STEAM + base;
+
+ 			/* Set the default model life of original wagons to "infinite" */
+-			if (this->u.rail.railveh_type == RAILVEH_WAGON) this->info.base_life = 0xFF;
++			if (this->u.rail.railveh_type == RAILVEH_WAGON) this->info.base_life = BASELIFE_INFINITE;
+
+ 			break;
+
+@@ -430,7 +432,7 @@
+ 	uint age = e->age;
+
+ 	/* Check for early retirement */
+-	if (e->company_avail != 0 && !_settings_game.vehicle.never_expire_vehicles && e->info.base_life != 0xFF) {
++	if (e->company_avail != 0 && !_settings_game.vehicle.never_expire_vehicles && e->info.base_life != e->BASELIFE_INFINITE) {
+ 		int retire_early = e->info.retire_early;
+ 		uint retire_early_max_age = max(0, e->duration_phase_1 + e->duration_phase_2 - retire_early * 12);
+ 		if (retire_early != 0 && age >= retire_early_max_age) {
+@@ -443,7 +445,7 @@
+ 	if (age < e->duration_phase_1) {
+ 		uint start = e->reliability_start;
+ 		e->reliability = age * (e->reliability_max - start) / e->duration_phase_1 + start;
+-	} else if ((age -= e->duration_phase_1) < e->duration_phase_2 || _settings_game.vehicle.never_expire_vehicles || e->info.base_life == 0xFF) {
++	} else if ((age -= e->duration_phase_1) < e->duration_phase_2 || _settings_game.vehicle.never_expire_vehicles || e->info.base_life == e->BASELIFE_INFINITE) {
+ 		/* We are at the peak of this engines life. It will have max reliability.
+ 		 * This is also true if the engines never expire. They will not go bad over time */
+ 		e->reliability = e->reliability_max;

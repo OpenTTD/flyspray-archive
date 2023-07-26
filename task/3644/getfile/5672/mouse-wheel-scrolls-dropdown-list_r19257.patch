@@ -1,0 +1,148 @@
+diff -r a7c05bde7b65 src/widgets/dropdown.cpp
+--- a/src/widgets/dropdown.cpp	Thu Feb 25 21:13:50 2010 +0000
++++ b/src/widgets/dropdown.cpp	Thu Feb 25 22:35:46 2010 +0100
+@@ -402,6 +402,23 @@
+ 	new DropdownWindow(w, list, selected, button, instant_close, dw_pos, dw_size, wi_colour, scroll);
+ }
+ 
++/* Builds a DropDownList from a StringID array. */
++bool BuildDropDownList(DropDownList *list, const StringID *strings, uint32 disabled_mask, uint32 hidden_mask) {
++	for (uint i = 0; strings[i] != INVALID_STRING_ID; i++) {
++		if (!HasBit(hidden_mask, i)) {
++			list->push_back(new DropDownListStringItem(strings[i], i, HasBit(disabled_mask, i)));
++		}
++	}
++
++	/* No entries in the list? */
++	if (list->size() == 0) {
++		DeleteDropDownList(list);
++		return false;
++	}
++
++	return true;
++}
++
+ /** Show a dropdown menu window near a widget of the parent window.
+  * The result code of the items is their index in the #strings list.
+  * @param w             Parent window that wants the dropdown menu.
+@@ -416,19 +433,8 @@
+ {
+ 	DropDownList *list = new DropDownList();
+ 
+-	for (uint i = 0; strings[i] != INVALID_STRING_ID; i++) {
+-		if (!HasBit(hidden_mask, i)) {
+-			list->push_back(new DropDownListStringItem(strings[i], i, HasBit(disabled_mask, i)));
+-		}
+-	}
+-
+-	/* No entries in the list? */
+-	if (list->size() == 0) {
+-		DeleteDropDownList(list);
+-		return;
+-	}
+-
+-	ShowDropDownList(w, list, selected, button, width);
++	if (BuildDropDownList(list, strings, disabled_mask, hidden_mask))
++		ShowDropDownList(w, list, selected, button, width);
+ }
+ 
+ /**
+@@ -454,3 +460,70 @@
+ 	return -1;
+ }
+ 
++void DoScrollDropDownList(Window *w, const DropDownList *list, const int selected, int button, int wheel)
++{
++	assert(list != NULL);
++	assert(w != NULL);
++	/* Ensure that we are scrolling */
++	if (wheel == 0) return;
++
++	/* Search the currently selected item */
++	DropDownList::const_iterator it = list->begin();
++	for (; it != list->end(); ++it) {
++		if (((DropDownListItem *) *it)->result == selected) break;
++	}
++	/* The currently selected item wasn't found */
++	if (it == list->end()) return;
++
++	/* Only scrolls from one item at the time */
++	wheel = wheel > 0 ? 1 : -1;
++
++	const DropDownListItem *bound = wheel > 0 ? list->back() : list->front();
++	/* Don't scrolls if we already are at list bounds */
++	if (((DropDownListItem *) *it) == bound) return;
++
++	int new_index = selected;
++	do {
++		/* Select the next item (it += wheel) */
++		wheel > 0 ? it++ : it--;
++		const DropDownListItem * item = *it;
++		if (!item->masked && item->Selectable()) {
++			/* The next item is valid */
++			new_index = item->result;
++			break;
++		}
++	} while (((DropDownListItem *) *it) != bound);
++
++	/* Returns false if the selected item hasn't change */
++	if (new_index == selected) return;
++
++	/* If the dropdown window was opened, close it */
++	DeleteWindowById(WC_DROPDOWN_MENU, 0);
++	/* Simulate a click on the item in the dropdown window */
++	w->OnDropdownSelect(button, new_index);
++}
++
++void ScrollDropDownList(Window *w, DropDownList *list, int selected, int button, int wheel)
++{
++	DoScrollDropDownList(w, list, selected, button, wheel);
++	DeleteDropDownList(list);
++}
++
++/**
++ * Scrolls a drop down menu.
++ * The result code of the items is their index in the #strings list.
++ * @param w             Parent window that wants the dropdown menu.
++ * @param strings       Menu list, end with #INVALID_STRING_ID
++ * @param selected      Index of initial selected item.
++ * @param button        Button widget number of the parent window #w that wants the dropdown menu.
++ * @param disabled_mask Bitmask for diabled items (items with their bit set are not copied to the dropdown list).
++ * @param hidden_mask   Bitmask for hidden items (items with their bit set are displayed, but not selectable in the dropdown list).
++ * @param wheel         The mouse wheel direction in which we should scroll the list
++ */
++void ScrollDropDownMenu(Window *w, const StringID *strings, int selected, int button, uint32 disabled_mask, uint32 hidden_mask, int wheel)
++{
++	DropDownList *list = new DropDownList();
++
++	if (BuildDropDownList(list, strings, disabled_mask, hidden_mask))
++		ScrollDropDownList(w, list, selected, button, wheel);
++}
+diff -r a7c05bde7b65 src/widgets/dropdown_func.h
+--- a/src/widgets/dropdown_func.h	Thu Feb 25 21:13:50 2010 +0000
++++ b/src/widgets/dropdown_func.h	Thu Feb 25 22:35:46 2010 +0100
+@@ -20,4 +20,6 @@
+ /* Hide drop down menu of a parent window */
+ int HideDropDownMenu(Window *pw);
+ 
++/* Scroll drop down menu containing a fixed list of strings */
++void ScrollDropDownMenu(Window *w, const StringID *strings, int selected, int button, uint32 disabled_mask, uint32 hidden_mask, int wheel);
+ #endif /* WIDGETS_DROPDOWN_FUNC_H */
+diff -r a7c05bde7b65 src/widgets/dropdown_type.h
+--- a/src/widgets/dropdown_type.h	Thu Feb 25 21:13:50 2010 +0000
++++ b/src/widgets/dropdown_type.h	Thu Feb 25 22:35:46 2010 +0100
+@@ -99,4 +99,14 @@
+  */
+ void ShowDropDownList(Window *w, DropDownList *list, int selected, int button, uint width = 0, bool auto_width = false, bool instant_close = false);
+ 
++/**
++ * Scrolls a drop down list.
++ * @param w        Parent window for the list.
++ * @param list     Prepopulated DropDownList. Will be deleted when the list is
++ *                 closed.
++ * @param selected The initially selected list item.
++ * @param button   The widget within the parent window that should be scrolled.
++ * @param wheel    The mouse wheel direction in which we should scroll the list
++ */
++void ScrollDropDownList(Window *w, DropDownList *list, int selected, int button, int wheel);
+ #endif /* WIDGETS_DROPDOWN_TYPE_H */

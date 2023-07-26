@@ -1,0 +1,147 @@
+diff -r 818fb5fd73fd src/signs_gui.cpp
+--- a/src/signs_gui.cpp	Sun Jan 03 14:16:47 2010 +0100
++++ b/src/signs_gui.cpp	Sun Jan 03 14:20:42 2010 +0100
+@@ -121,6 +121,10 @@
+ };
+ 
+ struct SignListWindow : QueryStringBaseWindow, SignList {
++private:
++	int selected_sign;
++
++public:
+ 	int text_offset; // Offset of the sign text relative to the left edge of the SLW_LIST widget.
+ 
+ 	SignListWindow(const WindowDesc *desc, WindowNumber window_number) : QueryStringBaseWindow(MAX_LENGTH_SIGN_NAME_BYTES)
+@@ -134,6 +138,7 @@
+ 
+ 		/* Initialize the filtering variables */
+ 		this->SetFilterString("");
++		this->selected_sign = -1;
+ 
+ 		/* Create initial list. */
+ 		this->signs.ForceRebuild();
+@@ -172,6 +177,10 @@
+ 			this->SetWidgetDirty(SLW_FILTER_CLEAR_BTN);
+ 		}
+ 
++		if ((this->selected_sign > -1) && ((uint)this->selected_sign >= this->signs.Length())) { // Can happen when a new filter is used.
++			this->selected_sign = this->signs.Length () - 1;
++		}
++
+ 		this->UpdateList();
+ 	}
+ 
+@@ -181,6 +190,36 @@
+ 		this->InvalidateData(0);
+ 		this->SetDirty();
+ 	}
++
++	void SelectNextSign()
++	{
++		this->selected_sign++;
++		if ((uint)this->selected_sign >= this->signs.Length()) {
++			this->selected_sign = this->signs.Length () - 1;
++		}
++
++		/* Scroll down a half page if moving below last line */
++		if (this->selected_sign >= this->vscroll.GetCapacity() + this->vscroll.GetPosition()) {
++			int pos = Clamp(this->vscroll.GetPosition() + this->vscroll.GetCapacity()/2 + 1,  0, this->vscroll.GetCount() - this->vscroll.GetCapacity());
++			this->vscroll.SetPosition(pos);
++		}
++
++		this->SetDirty();
++	}
++
++	void SelectPreviousSign()
++	{
++		this->selected_sign--;
++		if (this->selected_sign < 0) this->selected_sign = 0;
++
++		/* Scroll up a half page if moving above first line */
++		if (this->selected_sign < this->vscroll.GetPosition()) {
++			int pos = Clamp(this->vscroll.GetPosition() - this->vscroll.GetCapacity()/2 - 1,  0, this->vscroll.GetCount() - this->vscroll.GetCapacity());
++			this->vscroll.SetPosition(pos);
++		}
++
++		this->SetDirty();
++ 	}
+ 
+ 	virtual void OnPaint()
+ 	{
+@@ -212,7 +251,11 @@
+ 					if (si->owner != OWNER_NONE) DrawCompanyIcon(si->owner, icon_left, y + sprite_offset_y);
+ 
+ 					SetDParam(0, si->index);
+-					DrawString(text_left, text_right, y, STR_SIGN_NAME, TC_YELLOW);
++					if (this->selected_sign == i) {
++						DrawString(text_left, text_right, y, STR_SIGN_NAME, TC_BLUE);
++					} else {
++						DrawString(text_left, text_right, y, STR_SIGN_NAME, TC_YELLOW);
++					}
+ 					y += this->resize.step_height;
+ 				}
+ 				break;
+@@ -242,6 +285,7 @@
+ 			case SLW_FILTER_CLEAR_BTN:
+ 				this->ClearFilterTextWidget();
+ 				this->SetFilterString(0);
++				this->selected_sign = -1;
+ 				break;
+ 
+ 			case SLW_FILTER_MATCH_CASE_BTN:
+@@ -272,23 +316,30 @@
+ 				this->SetFilterString(this->text.buf);
+ 				break;
+ 
+-			case HEBR_CONFIRM: // Enter pressed -> goto first sign in list
+-				if (this->signs.Length() >= 1) {
+-					const Sign* si = this->signs[0];
+-					ScrollMainWindowToTile(TileVirtXY(si->x, si->y));
++			case HEBR_CONFIRM: { // Enter pressed -> goto selected sign in list (or first if no selected sign)
++				uint n_signs = this->signs.Length();
++				if (n_signs >= 1) {
++					uint sign_id = this->selected_sign == -1 || (uint)this->selected_sign >= n_signs ? 0 : this->selected_sign;
++					if (n_signs > sign_id) {
++						const Sign* si = this->signs[sign_id];
++						ScrollMainWindowToTile(TileVirtXY(si->x, si->y));
++					}
+ 				}
+ 				return state;
++			}
+ 
+ 			case HEBR_CANCEL: // ESC pressed, clear filter
+ 				this->ClearFilterTextWidget(); // Empty the text in the EditBox widget
+ 				this->SetFilterString(0);      // Use empty text as filter text (= view all signs)
+ 				this->UnfocusFocusedWidget();  // Unfocus the text box
++				this->selected_sign = -1;      // Deselect sign in sign list
+ 				return state;
+ 
+ 			case HEBR_NOT_FOCUSED: // The filter text box is not globaly focused
+ 				if (keycode == 'F') { // Hotkey to enable filter box
+ 					this->SetFocusedWidget(SLW_FILTER_TEXT);
+ 					SetFocusedWindow(this); // The user has asked to give focus to the text box, so make sure this window is focused.
++
+ 					state = ES_HANDLED;
+ 				}
+ 				break;
+@@ -298,6 +349,20 @@
+ 		}
+ 
+ 		if (state == ES_HANDLED) OnOSKInput(SLW_FILTER_TEXT);
++
++		/* Selection of signs using arrow up/down keys */
++		if (this->IsWidgetGloballyFocused(SLW_FILTER_TEXT)) {
++			switch (keycode) {
++				case WKC_UP:
++					this->SelectPreviousSign();
++					state = ES_HANDLED;
++					break;
++
++				case WKC_DOWN:
++					this->SelectNextSign();
++					state = ES_HANDLED;
++			}
++		}
+ 
+ 		return state;
+ 	}

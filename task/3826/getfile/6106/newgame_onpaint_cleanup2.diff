@@ -1,0 +1,230 @@
+diff -r f531819ae921 -r 7d685aa8ea8b src/genworld.h
+--- a/src/genworld.h	Wed May 19 17:04:02 2010 +0000
++++ b/src/genworld.h	Thu May 20 23:37:29 2010 +0200
+@@ -87,6 +87,7 @@
+ void HandleGeneratingWorldAbortion();
+ 
+ /* genworld_gui.cpp */
++void SetNewLandscapeType(byte landscape);
+ void SetGeneratingWorldProgress(GenWorldProgress cls, uint total);
+ void IncreaseGeneratingWorldProgress(GenWorldProgress cls);
+ void PrepareGenerateWorldProgress();
+diff -r f531819ae921 -r 7d685aa8ea8b src/genworld_gui.cpp
+--- a/src/genworld_gui.cpp	Wed May 19 17:04:02 2010 +0000
++++ b/src/genworld_gui.cpp	Thu May 20 23:37:29 2010 +0200
+@@ -52,11 +52,11 @@
+  * Changes landscape type and sets genworld window dirty
+  * @param landscape new landscape type
+  */
+-static inline void SetNewLandscapeType(byte landscape)
++void SetNewLandscapeType(byte landscape)
+ {
+ 	_settings_newgame.game_creation.landscape = landscape;
+-	SetWindowClassesDirty(WC_SELECT_GAME);
+-	SetWindowClassesDirty(WC_GENERATE_LANDSCAPE);
++	InvalidateWindowClassesData(WC_SELECT_GAME);
++	InvalidateWindowClassesData(WC_GENERATE_LANDSCAPE);
+ }
+ 
+ /** Widgets of GenerateLandscapeWindow */
+@@ -362,6 +362,13 @@
+ 		this->caption = STR_NULL;
+ 		this->afilter = CS_NUMERAL;
+ 
++		/* Disable town, industry and trees in SE */
++		this->SetWidgetDisabledState(GLAND_TOWN_PULLDOWN,     _game_mode == GM_EDITOR);
++		this->SetWidgetDisabledState(GLAND_INDUSTRY_PULLDOWN, _game_mode == GM_EDITOR);
++		this->SetWidgetDisabledState(GLAND_TREE_PULLDOWN,     _game_mode == GM_EDITOR);
++
++		OnInvalidateData();
++
+ 		this->mode = (GenenerateLandscapeWindowMode)this->window_number;
+ 	}
+ 
+@@ -400,6 +407,43 @@
+ 		}
+ 	}
+ 
++	virtual void OnInvalidateData(int data = 0)
++	{
++		/* Update the climate buttons */
++		this->SetWidgetLoweredState(GLAND_TEMPERATE, _settings_newgame.game_creation.landscape == LT_TEMPERATE);
++		this->SetWidgetLoweredState(GLAND_ARCTIC,    _settings_newgame.game_creation.landscape == LT_ARCTIC);
++		this->SetWidgetLoweredState(GLAND_TROPICAL,  _settings_newgame.game_creation.landscape == LT_TROPIC);
++		this->SetWidgetLoweredState(GLAND_TOYLAND,   _settings_newgame.game_creation.landscape == LT_TOYLAND);
++
++		/* Disable snowline if not arctic */
++		this->SetWidgetDisabledState(GLAND_SNOW_LEVEL_TEXT, _settings_newgame.game_creation.landscape != LT_ARCTIC);
++		this->SetWidgetDisabledState(GLAND_SNOW_LEVEL_DOWN, _settings_newgame.game_creation.snow_line_height <= MIN_SNOWLINE_HEIGHT || _settings_newgame.game_creation.landscape != LT_ARCTIC);
++		this->SetWidgetDisabledState(GLAND_SNOW_LEVEL_UP,   _settings_newgame.game_creation.snow_line_height >= MAX_SNOWLINE_HEIGHT || _settings_newgame.game_creation.landscape != LT_ARCTIC);
++
++		/* Disable date up / down buttons, if at limit */
++		this->SetWidgetDisabledState(GLAND_START_DATE_DOWN, _settings_newgame.game_creation.starting_year <= MIN_YEAR);
++		this->SetWidgetDisabledState(GLAND_START_DATE_UP,   _settings_newgame.game_creation.starting_year >= MAX_YEAR);
++
++		/* You can't select smoothness / non-water borders if not terragenesis */
++		if (mode == GLWM_GENERATE) {
++			this->SetWidgetDisabledState(GLAND_SMOOTHNESS_PULLDOWN, _settings_newgame.game_creation.land_generator == 0);
++			this->SetWidgetDisabledState(GLAND_VARIETY_PULLDOWN, _settings_newgame.game_creation.land_generator == 0);
++			this->SetWidgetDisabledState(GLAND_BORDERS_RANDOM, _settings_newgame.game_creation.land_generator == 0 || !_settings_newgame.construction.freeform_edges);
++			this->SetWidgetsDisabledState(_settings_newgame.game_creation.land_generator == 0 || !_settings_newgame.construction.freeform_edges || _settings_newgame.game_creation.water_borders == BORDERS_RANDOM,
++					GLAND_WATER_NW, GLAND_WATER_NE, GLAND_WATER_SE, GLAND_WATER_SW, WIDGET_LIST_END);
++
++			this->SetWidgetLoweredState(GLAND_BORDERS_RANDOM, _settings_newgame.game_creation.water_borders == BORDERS_RANDOM);
++
++			this->SetWidgetLoweredState(GLAND_WATER_NW, HasBit(_settings_newgame.game_creation.water_borders, BORDER_NW));
++			this->SetWidgetLoweredState(GLAND_WATER_NE, HasBit(_settings_newgame.game_creation.water_borders, BORDER_NE));
++			this->SetWidgetLoweredState(GLAND_WATER_SE, HasBit(_settings_newgame.game_creation.water_borders, BORDER_SE));
++			this->SetWidgetLoweredState(GLAND_WATER_SW, HasBit(_settings_newgame.game_creation.water_borders, BORDER_SW));
++
++			this->SetWidgetsDisabledState(_settings_newgame.game_creation.land_generator == 0 && (_settings_newgame.game_creation.landscape == LT_ARCTIC || _settings_newgame.game_creation.landscape == LT_TROPIC),
++					GLAND_TERRAIN_PULLDOWN, GLAND_WATER_PULLDOWN, WIDGET_LIST_END);
++		}
++	}
++
+ 	virtual void UpdateWidgetSize(int widget, Dimension *size, const Dimension &padding, Dimension *fill, Dimension *resize)
+ 	{
+ 		const StringID *strs = NULL;
+@@ -479,43 +523,7 @@
+ 
+ 	virtual void OnPaint()
+ 	{
+-		/* You can't select smoothness / non-water borders if not terragenesis */
+-		if (mode == GLWM_GENERATE) {
+-			this->SetWidgetDisabledState(GLAND_SMOOTHNESS_PULLDOWN, _settings_newgame.game_creation.land_generator == 0);
+-			this->SetWidgetDisabledState(GLAND_VARIETY_PULLDOWN, _settings_newgame.game_creation.land_generator == 0);
+-			this->SetWidgetDisabledState(GLAND_BORDERS_RANDOM, _settings_newgame.game_creation.land_generator == 0 || !_settings_newgame.construction.freeform_edges);
+-			this->SetWidgetsDisabledState(_settings_newgame.game_creation.land_generator == 0 || !_settings_newgame.construction.freeform_edges || _settings_newgame.game_creation.water_borders == BORDERS_RANDOM,
+-					GLAND_WATER_NW, GLAND_WATER_NE, GLAND_WATER_SE, GLAND_WATER_SW, WIDGET_LIST_END);
+-
+-			this->SetWidgetLoweredState(GLAND_BORDERS_RANDOM, _settings_newgame.game_creation.water_borders == BORDERS_RANDOM);
+-
+-			this->SetWidgetLoweredState(GLAND_WATER_NW, HasBit(_settings_newgame.game_creation.water_borders, BORDER_NW));
+-			this->SetWidgetLoweredState(GLAND_WATER_NE, HasBit(_settings_newgame.game_creation.water_borders, BORDER_NE));
+-			this->SetWidgetLoweredState(GLAND_WATER_SE, HasBit(_settings_newgame.game_creation.water_borders, BORDER_SE));
+-			this->SetWidgetLoweredState(GLAND_WATER_SW, HasBit(_settings_newgame.game_creation.water_borders, BORDER_SW));
+-
+-			this->SetWidgetsDisabledState(_settings_newgame.game_creation.land_generator == 0 && (_settings_newgame.game_creation.landscape == LT_ARCTIC || _settings_newgame.game_creation.landscape == LT_TROPIC),
+-					GLAND_TERRAIN_PULLDOWN, GLAND_WATER_PULLDOWN, WIDGET_LIST_END);
+-		}
+-		/* Disable snowline if not hilly */
+-		this->SetWidgetDisabledState(GLAND_SNOW_LEVEL_TEXT, _settings_newgame.game_creation.landscape != LT_ARCTIC);
+-		/* Disable town, industry and trees in SE */
+-		this->SetWidgetDisabledState(GLAND_TOWN_PULLDOWN,     _game_mode == GM_EDITOR);
+-		this->SetWidgetDisabledState(GLAND_INDUSTRY_PULLDOWN, _game_mode == GM_EDITOR);
+-		this->SetWidgetDisabledState(GLAND_TREE_PULLDOWN,     _game_mode == GM_EDITOR);
+-
+-		this->SetWidgetDisabledState(GLAND_START_DATE_DOWN, _settings_newgame.game_creation.starting_year <= MIN_YEAR);
+-		this->SetWidgetDisabledState(GLAND_START_DATE_UP,   _settings_newgame.game_creation.starting_year >= MAX_YEAR);
+-		this->SetWidgetDisabledState(GLAND_SNOW_LEVEL_DOWN, _settings_newgame.game_creation.snow_line_height <= MIN_SNOWLINE_HEIGHT || _settings_newgame.game_creation.landscape != LT_ARCTIC);
+-		this->SetWidgetDisabledState(GLAND_SNOW_LEVEL_UP,   _settings_newgame.game_creation.snow_line_height >= MAX_SNOWLINE_HEIGHT || _settings_newgame.game_creation.landscape != LT_ARCTIC);
+-
+-		this->SetWidgetLoweredState(GLAND_TEMPERATE, _settings_newgame.game_creation.landscape == LT_TEMPERATE);
+-		this->SetWidgetLoweredState(GLAND_ARCTIC,    _settings_newgame.game_creation.landscape == LT_ARCTIC);
+-		this->SetWidgetLoweredState(GLAND_TROPICAL,  _settings_newgame.game_creation.landscape == LT_TROPIC);
+-		this->SetWidgetLoweredState(GLAND_TOYLAND,   _settings_newgame.game_creation.landscape == LT_TOYLAND);
+-
+ 		this->DrawWidgets();
+-
+ 		this->DrawEditBox(GLAND_RANDOM_EDITBOX);
+ 	}
+ 
+@@ -580,6 +588,7 @@
+ 
+ 					_settings_newgame.game_creation.starting_year = Clamp(_settings_newgame.game_creation.starting_year + widget - GLAND_START_DATE_TEXT, MIN_YEAR, MAX_YEAR);
+ 				}
++				OnInvalidateData();
+ 				_left_button_clicked = false;
+ 				break;
+ 
+@@ -587,6 +596,7 @@
+ 				this->widget_id = GLAND_START_DATE_TEXT;
+ 				SetDParam(0, _settings_newgame.game_creation.starting_year);
+ 				ShowQueryString(STR_JUST_INT, STR_MAPGEN_START_DATE_QUERY_CAPT, 8, 100, this, CS_NUMERAL, QSF_ENABLE_DEFAULT);
++				OnInvalidateData();
+ 				break;
+ 
+ 			case GLAND_SNOW_LEVEL_DOWN:
+@@ -597,7 +607,8 @@
+ 					this->SetDirty();
+ 
+ 					_settings_newgame.game_creation.snow_line_height = Clamp(_settings_newgame.game_creation.snow_line_height + widget - GLAND_SNOW_LEVEL_TEXT, MIN_SNOWLINE_HEIGHT, MAX_SNOWLINE_HEIGHT);
+-				}
++					OnInvalidateData();
++					}
+ 				_left_button_clicked = false;
+ 				break;
+ 
+@@ -613,6 +624,7 @@
+ 
+ 			case GLAND_LANDSCAPE_PULLDOWN: // Landscape generator
+ 				ShowDropDownMenu(this, _landscape, _settings_newgame.game_creation.land_generator, GLAND_LANDSCAPE_PULLDOWN, 0, 0);
++				OnInvalidateData();
+ 				break;
+ 
+ 			case GLAND_HEIGHTMAP_ROTATION_PULLDOWN: // Heightmap rotation
+@@ -695,8 +707,11 @@
+ 			case GLAND_TREE_PULLDOWN:          _settings_newgame.game_creation.tree_placer = index; break;
+ 			case GLAND_SMOOTHNESS_PULLDOWN:    _settings_newgame.game_creation.tgen_smoothness = index;  break;
+ 			case GLAND_VARIETY_PULLDOWN:       _settings_newgame.game_creation.variety = index; break;
+-			case GLAND_LANDSCAPE_PULLDOWN:     _settings_newgame.game_creation.land_generator = index; break;
+ 			case GLAND_HEIGHTMAP_ROTATION_PULLDOWN: _settings_newgame.game_creation.heightmap_rotation = index; break;
++			case GLAND_LANDSCAPE_PULLDOWN:
++				_settings_newgame.game_creation.land_generator = index;
++				OnInvalidateData();
++				break;
+ 
+ 			case GLAND_TOWN_PULLDOWN:
+ 				if ((uint)index == CUSTOM_TOWN_NUMBER_DIFFICULTY) {
+@@ -751,11 +766,13 @@
+ 			case GLAND_START_DATE_TEXT:
+ 				this->SetWidgetDirty(GLAND_START_DATE_TEXT);
+ 				_settings_newgame.game_creation.starting_year = Clamp(value, MIN_YEAR, MAX_YEAR);
++				OnInvalidateData();
+ 				break;
+ 
+ 			case GLAND_SNOW_LEVEL_TEXT:
+ 				this->SetWidgetDirty(GLAND_SNOW_LEVEL_TEXT);
+ 				_settings_newgame.game_creation.snow_line_height = Clamp(value, MIN_SNOWLINE_HEIGHT, MAX_SNOWLINE_HEIGHT);
++				OnInvalidateData();
+ 				break;
+ 
+ 			case GLAND_TOWN_PULLDOWN:
+diff -r f531819ae921 -r 7d685aa8ea8b src/intro_gui.cpp
+--- a/src/intro_gui.cpp	Wed May 19 17:04:02 2010 +0000
++++ b/src/intro_gui.cpp	Thu May 20 23:37:29 2010 +0200
+@@ -30,12 +30,6 @@
+ #include "table/strings.h"
+ #include "table/sprites.h"
+ 
+-static inline void SetNewLandscapeType(byte landscape)
+-{
+-	_settings_newgame.game_creation.landscape = landscape;
+-	SetWindowClassesDirty(WC_SELECT_GAME);
+-}
+-
+ enum SelectGameIntroWidgets {
+ 	SGI_GENERATE_GAME,
+ 	SGI_LOAD_GAME,
+@@ -62,10 +56,10 @@
+ 	{
+ 		this->InitNested(desc);
+ 		this->LowerWidget(_settings_newgame.game_creation.landscape + SGI_TEMPERATE_LANDSCAPE);
+-		this->SetLandscapeButtons();
++		this->OnInvalidateData();
+ 	}
+ 
+-	void SetLandscapeButtons()
++	virtual void OnInvalidateData(int data = 0)
+ 	{
+ 		this->SetWidgetLoweredState(SGI_TEMPERATE_LANDSCAPE, _settings_newgame.game_creation.landscape == LT_TEMPERATE);
+ 		this->SetWidgetLoweredState(SGI_ARCTIC_LANDSCAPE,    _settings_newgame.game_creation.landscape == LT_ARCTIC);
+@@ -131,7 +125,7 @@
+ 			case SGI_TROPIC_LANDSCAPE: case SGI_TOYLAND_LANDSCAPE:
+ 				this->RaiseWidget(_settings_newgame.game_creation.landscape + SGI_TEMPERATE_LANDSCAPE);
+ 				SetNewLandscapeType(widget - SGI_TEMPERATE_LANDSCAPE);
+-				this->SetLandscapeButtons();
++				this->OnInvalidateData();
+ 				break;
+ 
+ 			case SGI_OPTIONS:         ShowGameOptions(); break;

@@ -1,0 +1,152 @@
+Index: src/ship_cmd.cpp
+===================================================================
+--- src/ship_cmd.cpp	(revision 21532)
++++ src/ship_cmd.cpp	(working copy)
+@@ -377,21 +377,6 @@
+ 	DIR_E , DIR_SE, DIR_S
+ };
+ 
+-static Direction ShipGetNewDirectionFromTiles(TileIndex new_tile, TileIndex old_tile)
+-{
+-	uint offs = (TileY(new_tile) - TileY(old_tile) + 1) * 4 +
+-							TileX(new_tile) - TileX(old_tile) + 1;
+-	assert(offs < 11 && offs != 3 && offs != 7);
+-	return _new_vehicle_direction_table[offs];
+-}
+-
+-static Direction ShipGetNewDirection(Vehicle *v, int x, int y)
+-{
+-	uint offs = (y - v->y_pos + 1) * 4 + (x - v->x_pos + 1);
+-	assert(offs < 11 && offs != 3 && offs != 7);
+-	return _new_vehicle_direction_table[offs];
+-}
+-
+ static inline TrackBits GetAvailShipTracks(TileIndex tile, DiagDirection dir)
+ {
+ 	return GetTileShipTrackStatus(tile) & DiagdirReachesTracks(dir);
+@@ -436,7 +421,7 @@
+ {
+ 	uint32 r;
+ 	const byte *b;
+-	Direction dir;
++	DiagDirection enterdir = DIAGDIR_BEGIN;
+ 	Track track;
+ 	TrackBits tracks;
+ 
+@@ -510,35 +495,48 @@
+ 					}
+ 				}
+ 			}
++			/* update image of ship, as well as delta XY */
++			v->x_pos = gp.x;
++			v->y_pos = gp.y;
++			v->z_pos = GetSlopeZ(gp.x, gp.y);
++			v->UpdateViewport(true, true);
++			return;
+ 		} else {
+-			DiagDirection diagdir;
+ 			/* New tile */
+ 			if (TileX(gp.new_tile) >= MapMaxX() || TileY(gp.new_tile) >= MapMaxY()) {
+ 				goto reverse_direction;
+ 			}
+ 
+-			dir = ShipGetNewDirectionFromTiles(gp.new_tile, gp.old_tile);
+-			assert(dir == DIR_NE || dir == DIR_SE || dir == DIR_SW || dir == DIR_NW);
+-			diagdir = DirToDiagDir(dir);
++			/* Determine what direction we're entering the new tile from. */
++			enterdir = DiagdirBetweenTiles(gp.old_tile, gp.new_tile);
++			assert(IsValidDiagDirection(enterdir));
+ 
+ 			/* Handle vehicles entering wormhole. */
+-			if (IsTileType(v->tile, MP_TUNNELBRIDGE) &&  // Leaving wormhole entry.
+-					v->state != TRACK_BIT_WORMHOLE && // Not already in wormhole.
+-					diagdir == GetTunnelBridgeDirection(v->tile) // Going in the direction of wormhole.
++			if (IsTileType(gp.old_tile, MP_TUNNELBRIDGE) && // Leaving wormhole entry.
++					enterdir == GetTunnelBridgeDirection(gp.old_tile) // Going in the direction of wormhole
+ 				) {
+-				/* Enter wormhole. */
+-				v->state = TRACK_BIT_WORMHOLE;
+-				goto enter_wormhole;
++				/* If next tile is exit of tunnel-bridge do not enter wormhole.
++				 * On tunnels and bridges with length 2 we don't enter wormhole. */
++				if (!(IsTileType(gp.new_tile, MP_TUNNELBRIDGE) && GetSlopeZ(gp.x, gp.y) == v->z_pos)) {
++					/* The new tile is not an exit so we enter wormhole. */
++					v->state = TRACK_BIT_WORMHOLE;
++					v->direction = DiagDirToDir(enterdir);
++					goto enter_wormhole;
++				}
+ 			}
++			/* Point where vehicles returns coming out of wormhole
++			 * v->state is still TRACK_BIT_WORMHOLE.
++			 * v->tile and gp.new_tile can be equal in case of train reversing. */
++leaving_wormhole:
+ 
+-			tracks = GetAvailShipTracks(gp.new_tile, diagdir);
++			tracks = GetAvailShipTracks(gp.new_tile, enterdir);
+ 			if (tracks == TRACK_BIT_NONE) goto reverse_direction;
+ 
+ 			/* Choose a direction, and continue if we find one */
+-			track = ChooseShipTrack(v, gp.new_tile, diagdir, tracks);
++			track = ChooseShipTrack(v, gp.new_tile, enterdir, tracks);
+ 			if (track == INVALID_TRACK) goto reverse_direction;
+ 
+-			b = _ship_subcoord[diagdir][track];
++			b = _ship_subcoord[enterdir][track];
+ 
+ 			gp.x = (gp.x & ~0xF) | b[0];
+ 			gp.y = (gp.y & ~0xF) | b[1];
+@@ -553,15 +551,26 @@
+ 			}
+ 
+ 			v->direction = (Direction)b[2];
++			/* update image of ship, as well as delta XY */
++			v->x_pos = gp.x;
++			v->y_pos = gp.y;
++			v->z_pos = GetSlopeZ(gp.x, gp.y);
++			v->UpdateViewport(true, true);
++			return;
+ 		}
++
+ 	} else {
+-enter_wormhole:
+-		/* On a bridge */
++		/* In a wormhole. */
++
+ 		if (IsTileType(gp.new_tile, MP_TUNNELBRIDGE) && HasBit(VehicleEnterTile(v, gp.new_tile, gp.x, gp.y), VETS_LEAVING_WORMHOLE)) {
+-			/* Vehicle is leaving wormhole. */
+-			v->tile = gp.new_tile;
+-			v->state = DiagDirToDiagTrackBits(DirToDiagDir(v->direction));
++			/* Leaving wormhole. */
++			enterdir = DiagdirBetweenTiles(TileVirtXY(v->x_pos, v->y_pos), gp.new_tile);
++			assert(IsValidDiagDirection(enterdir));
++			/* Jump back to assign track bits and resreve track etc. */
++			goto leaving_wormhole;
+ 		} else {
++
++enter_wormhole:
+ 			v->x_pos = gp.x;
+ 			v->y_pos = gp.y;
+ 			VehicleMove(v, !(v->vehstatus & VS_HIDDEN));
+@@ -569,20 +578,10 @@
+ 		}
+ 	}
+ 
+-	/* update image of ship, as well as delta XY */
+-	dir = ShipGetNewDirection(v, gp.x, gp.y);
+-	v->x_pos = gp.x;
+-	v->y_pos = gp.y;
+-	v->z_pos = GetSlopeZ(gp.x, gp.y);
+-
+-getout:
++reverse_direction:
++	v->direction = ReverseDir(v->direction);
+ 	v->UpdateViewport(true, true);
+ 	return;
+-
+-reverse_direction:
+-	dir = ReverseDir(v->direction);
+-	v->direction = dir;
+-	goto getout;
+ }
+ 
+ bool Ship::Tick()

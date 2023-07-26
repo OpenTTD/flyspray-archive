@@ -1,0 +1,125 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 22876)
++++ src/lang/english.txt	(working copy)
+@@ -1851,6 +1851,8 @@
+ STR_CONTENT_DETAIL_SELECTED_BECAUSE_OF                          :{SILVER}Selected because of: {WHITE}{RAW_STRING}
+ STR_CONTENT_DETAIL_DEPENDENCIES                                 :{SILVER}Dependencies: {WHITE}{RAW_STRING}
+ STR_CONTENT_DETAIL_TAGS                                         :{SILVER}Tags: {WHITE}{RAW_STRING}
++STR_CONTENT_DETAIL_GRFID                                        :{SILVER}GRF ID: {WHITE}{RAW_STRING}
++STR_CONTENT_DETAIL_MD5SUM                                       :{SILVER}MD5sum: {WHITE}{RAW_STRING}
+ STR_CONTENT_NO_ZLIB                                             :{WHITE}OpenTTD is build without "zlib" support...
+ STR_CONTENT_NO_ZLIB_SUB                                         :{WHITE}... downloading content is not possible!
+ 
+Index: src/network/network_content_gui.cpp
+===================================================================
+--- src/network/network_content_gui.cpp	(revision 22876)
++++ src/network/network_content_gui.cpp	(working copy)
+@@ -482,6 +482,8 @@
+ 		static const int DETAIL_RIGHT        =  5; ///< Number of pixels at the right
+ 		static const int DETAIL_TOP          =  5; ///< Number of pixels at the top
+ 
++		char buf[DRAW_STRING_BUFFER];
++
+ 		/* Height for the title banner */
+ 		int DETAIL_TITLE_HEIGHT = 5 * FONT_HEIGHT_NORMAL;
+ 
+@@ -500,7 +502,7 @@
+ 
+ 		/* Also show the total download size, so keep some space from the bottom */
+ 		const uint max_y = r.bottom - FONT_HEIGHT_NORMAL - WD_PAR_VSEP_WIDE;
+-		int y = r.top + DETAIL_TITLE_HEIGHT + DETAIL_TOP;
++		int y = r.top + DETAIL_TITLE_HEIGHT + DETAIL_TOP, vsep_y;
+ 
+ 		if (this->selected->upgrade) {
+ 			SetDParam(0, STR_CONTENT_TYPE_BASE_GRAPHICS + this->selected->type - CONTENT_TYPE_BASE_GRAPHICS);
+@@ -516,6 +518,12 @@
+ 			y = DrawStringMultiLine(r.left + DETAIL_LEFT, r.right - DETAIL_RIGHT, y, max_y, STR_CONTENT_DETAIL_VERSION);
+ 		}
+ 
++		SetDParam(0, STR_CONTENT_TYPE_BASE_GRAPHICS + this->selected->type - CONTENT_TYPE_BASE_GRAPHICS);
++		y = DrawStringMultiLine(r.left + DETAIL_LEFT, r.right - DETAIL_RIGHT, y, max_y, STR_CONTENT_DETAIL_TYPE);
++
++		y += WD_PAR_VSEP_WIDE;
++		vsep_y = y;
++
+ 		if (!StrEmpty(this->selected->description)) {
+ 			SetDParamStr(0, this->selected->description);
+ 			y = DrawStringMultiLine(r.left + DETAIL_LEFT, r.right - DETAIL_RIGHT, y, max_y, STR_CONTENT_DETAIL_DESCRIPTION);
+@@ -526,16 +534,28 @@
+ 			y = DrawStringMultiLine(r.left + DETAIL_LEFT, r.right - DETAIL_RIGHT, y, max_y, STR_CONTENT_DETAIL_URL);
+ 		}
+ 
+-		SetDParam(0, STR_CONTENT_TYPE_BASE_GRAPHICS + this->selected->type - CONTENT_TYPE_BASE_GRAPHICS);
+-		y = DrawStringMultiLine(r.left + DETAIL_LEFT, r.right - DETAIL_RIGHT, y, max_y, STR_CONTENT_DETAIL_TYPE);
++		if (this->selected->tag_count != 0) {
++			/* List all tags */
++			buf[0] = '\0';
++			char *p = buf;
++			for (uint i = 0; i < this->selected->tag_count; i++) {
++				p += seprintf(p, lastof(buf), i == 0 ? "%s" : ", %s", this->selected->tags[i]);
++			}
++			SetDParamStr(0, buf);
++			y = DrawStringMultiLine(r.left + DETAIL_LEFT, r.right - DETAIL_RIGHT, y, max_y, STR_CONTENT_DETAIL_TAGS);
++		}
+ 
+-		y += WD_PAR_VSEP_WIDE;
++		if (y != vsep_y) y += WD_PAR_VSEP_WIDE;
++
+ 		SetDParam(0, this->selected->filesize);
+ 		y = DrawStringMultiLine(r.left + DETAIL_LEFT, r.right - DETAIL_RIGHT, y, max_y, STR_CONTENT_DETAIL_FILESIZE);
+ 
++		y += WD_PAR_VSEP_WIDE;
++		vsep_y = y;
++
+ 		if (this->selected->dependency_count != 0) {
+ 			/* List dependencies */
+-			char buf[DRAW_STRING_BUFFER] = "";
++			buf[0] = '\0';
+ 			char *p = buf;
+ 			for (uint i = 0; i < this->selected->dependency_count; i++) {
+ 				ContentID cid = this->selected->dependencies[i];
+@@ -554,23 +574,12 @@
+ 			y = DrawStringMultiLine(r.left + DETAIL_LEFT, r.right - DETAIL_RIGHT, y, max_y, STR_CONTENT_DETAIL_DEPENDENCIES);
+ 		}
+ 
+-		if (this->selected->tag_count != 0) {
+-			/* List all tags */
+-			char buf[DRAW_STRING_BUFFER] = "";
+-			char *p = buf;
+-			for (uint i = 0; i < this->selected->tag_count; i++) {
+-				p += seprintf(p, lastof(buf), i == 0 ? "%s" : ", %s", this->selected->tags[i]);
+-			}
+-			SetDParamStr(0, buf);
+-			y = DrawStringMultiLine(r.left + DETAIL_LEFT, r.right - DETAIL_RIGHT, y, max_y, STR_CONTENT_DETAIL_TAGS);
+-		}
+-
+ 		if (this->selected->IsSelected()) {
+ 			/* When selected show all manually selected content that depends on this */
+ 			ConstContentVector tree;
+ 			_network_content_client.ReverseLookupTreeDependency(tree, this->selected);
+ 
+-			char buf[DRAW_STRING_BUFFER] = "";
++			buf[0] = '\0';
+ 			char *p = buf;
+ 			for (ConstContentIterator iter = tree.Begin(); iter != tree.End(); iter++) {
+ 				const ContentInfo *ci = *iter;
+@@ -583,6 +592,18 @@
+ 				y = DrawStringMultiLine(r.left + DETAIL_LEFT, r.right - DETAIL_RIGHT, y, max_y, STR_CONTENT_DETAIL_SELECTED_BECAUSE_OF);
+ 			}
+ 		}
++
++		if (this->selected->type == CONTENT_TYPE_NEWGRF) {
++			if (y != vsep_y) y += WD_PAR_VSEP_WIDE;
++
++			snprintf(buf, lengthof(buf), "%08X", BSWAP32(this->selected->id));
++			SetDParamStr(0, buf);
++			y = DrawStringMultiLine(r.left + DETAIL_LEFT, r.right - DETAIL_RIGHT, y, max_y, STR_CONTENT_DETAIL_GRFID);
++
++			md5sumToString(buf, lastof(buf), this->selected->md5sum);
++			SetDParamStr(0, buf);
++			y = DrawStringMultiLine(r.left + DETAIL_LEFT, r.right - DETAIL_RIGHT, y, max_y, STR_CONTENT_DETAIL_MD5SUM);
++		}
+ 	}
+ 
+ 	virtual void OnClick(Point pt, int widget, int click_count)

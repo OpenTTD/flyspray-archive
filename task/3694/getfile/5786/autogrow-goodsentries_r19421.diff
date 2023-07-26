@@ -1,0 +1,834 @@
+diff --git a/projects/openttd_vs80.vcproj b/projects/openttd_vs80.vcproj
+index c9fec08..ff9dafc 100644
+--- a/projects/openttd_vs80.vcproj
++++ b/projects/openttd_vs80.vcproj
+@@ -1672,6 +1672,10 @@
+ 				>
+ 			</File>
+ 			<File
++				RelativePath=".\..\src\core\autogrowvec_type.hpp"
++				>
++			</File>
++			<File
+ 				RelativePath=".\..\src\core\bitmath_func.cpp"
+ 				>
+ 			</File>
+diff --git a/projects/openttd_vs90.vcproj b/projects/openttd_vs90.vcproj
+index a3c51ea..304962d 100644
+--- a/projects/openttd_vs90.vcproj
++++ b/projects/openttd_vs90.vcproj
+@@ -1669,6 +1669,10 @@
+ 				>
+ 			</File>
+ 			<File
++				RelativePath=".\..\src\core\autogrowvec_type.hpp"
++				>
++			</File>
++			<File
+ 				RelativePath=".\..\src\core\bitmath_func.cpp"
+ 				>
+ 			</File>
+diff --git a/source.list b/source.list
+index 4837913..8ba5c2b 100644
+--- a/source.list
++++ b/source.list
+@@ -343,6 +343,7 @@ video/cocoa/cocoa_v.h
+ core/alloc_func.cpp
+ core/alloc_func.hpp
+ core/alloc_type.hpp
++core/autogrowvec_type.hpp
+ core/bitmath_func.cpp
+ core/bitmath_func.hpp
+ core/endian_func.hpp
+diff --git a/src/ai/api/ai_station.cpp b/src/ai/api/ai_station.cpp
+index 5e25e5d..1f2e341 100644
+--- a/src/ai/api/ai_station.cpp
++++ b/src/ai/api/ai_station.cpp
+@@ -33,18 +33,20 @@
+ 
+ /* static */ int32 AIStation::GetCargoWaiting(StationID station_id, CargoID cargo_id)
+ {
+-	if (!IsValidStation(station_id)) return -1;
+ 	if (!AICargo::IsValidCargo(cargo_id)) return -1;
++	const Station *st = ::Station::GetIfValid(station_id);
++	if (st == NULL) return -1;
+ 
+-	return ::Station::Get(station_id)->goods[cargo_id].cargo.Count();
++	return st->goods[cargo_id].cargo.Count();
+ }
+ 
+ /* static */ int32 AIStation::GetCargoRating(StationID station_id, CargoID cargo_id)
+ {
+-	if (!IsValidStation(station_id)) return -1;
+ 	if (!AICargo::IsValidCargo(cargo_id)) return -1;
++	const Station *st = ::Station::GetIfValid(station_id);
++	if (st == NULL) return -1;
+ 
+-	return ::ToPercent8(::Station::Get(station_id)->goods[cargo_id].rating);
++	return ::ToPercent8(st->goods[cargo_id].rating);
+ }
+ 
+ /* static */ int32 AIStation::GetCoverageRadius(AIStation::StationType station_type)
+diff --git a/src/aircraft_cmd.cpp b/src/aircraft_cmd.cpp
+index 52a0116..9d8ca29 100644
+--- a/src/aircraft_cmd.cpp
++++ b/src/aircraft_cmd.cpp
+@@ -1305,9 +1305,9 @@ static void MaybeCrashAirplane(Aircraft *v)
+ 	if (GB(Random(), 0, 22) > prob) return;
+ 
+ 	/* Crash the airplane. Remove all goods stored at the station. */
+-	for (CargoID i = 0; i < NUM_CARGO; i++) {
+-		st->goods[i].rating = 1;
+-		st->goods[i].cargo.Truncate(0);
++	for (Station::GoodsVector::Iterator i(st->goods.Begin()); i != st->goods.End(); ++i) {
++		i->rating = 1;
++		i->cargo.Truncate(0);
+ 	}
+ 
+ 	CrashAirplane(v);
+diff --git a/src/cargopacket.cpp b/src/cargopacket.cpp
+index 418eb8e..626dc89 100644
+--- a/src/cargopacket.cpp
++++ b/src/cargopacket.cpp
+@@ -31,6 +31,17 @@ CargoPacket::CargoPacket()
+ 	this->source_id   = INVALID_SOURCE;
+ }
+ 
++bool CargoPacket::operator==(const CargoPacket &other) const
++{
++	return this->feeder_share == other.feeder_share &&
++			this->count == other.count &&
++			this->days_in_transit == other.days_in_transit &&
++			this->source_id == other.source_id &&
++			this->source == other.source &&
++			this->source_xy == other.source_xy &&
++			this->loaded_at_xy == other.loaded_at_xy;
++}
++
+ /* NOTE: We have to zero memory ourselves here because we are using a 'new'
+  * that, in contrary to all other pools, does not memset to 0. */
+ CargoPacket::CargoPacket(StationID source, TileIndex source_xy, uint16 count, SourceType source_type, SourceID source_id) :
+@@ -99,6 +110,46 @@ CargoList<Tinst>::~CargoList()
+ }
+ 
+ template <class Tinst>
++CargoList<Tinst>::CargoList(const CargoList<Tinst> &other) :
++	count(other.count),
++	cargo_days_in_transit(other.cargo_days_in_transit)
++{
++	for(ConstIterator i(other.packets.begin()); i != other.packets.end(); ++i) {
++		this->packets.push_back(new CargoPacket(**i));
++	}
++}
++
++template <class Tinst>
++CargoList<Tinst> &CargoList<Tinst>::operator=(const CargoList<Tinst> &other)
++{
++	if (this != &other) {
++		this->count = other.count;
++		this->cargo_days_in_transit = other.cargo_days_in_transit;
++		for(ConstIterator i(other.packets.begin()); i != other.packets.end(); ++i) {
++			this->packets.push_back(new CargoPacket(**i));
++		}
++	}
++	return *this;
++}
++
++template <class Tinst>
++bool CargoList<Tinst>::operator==(const CargoList<Tinst> &other) const
++{
++	if (this->count != other.count ||
++			this->cargo_days_in_transit != other.cargo_days_in_transit ||
++			this->packets.size() != other.packets.size()) {
++		return false;
++	}
++
++	ConstIterator i(this->packets.begin());
++	ConstIterator j(other.packets.begin());
++	for(; i != this->packets.end(); ++i, ++j) {
++		if (!(**i == **j)) return false;
++	}
++	return true;
++}
++
++template <class Tinst>
+ void CargoList<Tinst>::RemoveFromCache(const CargoPacket *cp)
+ {
+ 	this->count                 -= cp->count;
+diff --git a/src/cargopacket.h b/src/cargopacket.h
+index dfd5e72..708b8a1 100644
+--- a/src/cargopacket.h
++++ b/src/cargopacket.h
+@@ -85,6 +85,8 @@ public:
+ 	 */
+ 	CargoPacket(uint16 count, byte days_in_transit, StationID source, TileIndex source_xy, TileIndex loaded_at_xy, Money feeder_share = 0, SourceType source_type = ST_INDUSTRY, SourceID source_id = INVALID_SOURCE);
+ 
++	bool operator==(const CargoPacket &other) const;
++
+ 	/** Destroy the packet */
+ 	~CargoPacket() { }
+ 
+@@ -227,9 +229,15 @@ protected:
+ 
+ public:
+ 	/** Create the cargo list */
+-	CargoList() {}
++	CargoList() : count(0), cargo_days_in_transit(0) {}
+ 	/** And destroy it ("frees" all cargo packets) */
+ 	~CargoList();
++	/** Do a deep copy */
++	CargoList(const CargoList &other);
++	/** Deep copy assignment */
++	CargoList &operator=(const CargoList &other);
++	/** Deep comparison */
++	bool operator==(const CargoList &other) const;
+ 
+ 	/**
+ 	 * Returns a pointer to the cargo packet list (so you can iterate over it etc).
+@@ -351,6 +359,14 @@ public:
+ 	/** The vehicles have a cargo list (and we want that saved). */
+ 	friend const struct SaveLoad *GetVehicleDescription(VehicleType vt);
+ 
++	VehicleCargoList() : feeder_share(0) {}
++
++	bool operator==(const VehicleCargoList &other) const
++	{
++		return this->feeder_share == other.feeder_share &&
++			this->CargoList<VehicleCargoList>::operator==(other);
++	}
++
+ 	/**
+ 	 * Returns total sum of the feeder share for all packets
+ 	 * @return the before mentioned number
+diff --git a/src/core/autogrowvec_type.hpp b/src/core/autogrowvec_type.hpp
+new file mode 100644
+index 0000000..369a9dd
+--- /dev/null
++++ b/src/core/autogrowvec_type.hpp
+@@ -0,0 +1,128 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/** @file autogrowvec_type.hpp Simple vector class that automatically grows when accessed beyond end. */
++
++
++#ifndef AUTOGROWVECTOR_TYPE_HPP_
++#define AUTOGROWVECTOR_TYPE_HPP_
++
++#include "../stdafx.h"
++#include "../debug.h"
++#include <vector>
++
++template<typename Tvalue>
++class AutoGrowVector {
++protected:
++	typedef typename std::vector<Tvalue> BaseVector;
++	BaseVector base;
++	static const Tvalue empty;
++
++public:
++	typedef typename BaseVector::iterator Iterator;
++	typedef typename BaseVector::const_iterator ConstIterator;
++
++	/**
++	 * Get the number of items in the list.
++	 */
++	FORCEINLINE uint Length() const
++	{
++		return this->base.size();
++	}
++
++	/**
++	 * Get the pointer to the first item (const)
++	 *
++	 * @return the pointer to the first item
++	 */
++	FORCEINLINE ConstIterator Begin() const
++	{
++		return this->base.begin();
++	}
++
++	/**
++	 * Get the pointer to the first item
++	 *
++	 * @return the pointer to the first item
++	 */
++	FORCEINLINE Iterator Begin()
++	{
++		return this->base.begin();
++	}
++
++	/**
++	 * Get the pointer behind the last valid item (const)
++	 *
++	 * @return the pointer behind the last valid item
++	 */
++	FORCEINLINE ConstIterator End() const
++	{
++		return this->base.end();
++	}
++
++	/**
++	 * Get the pointer behind the last valid item
++	 *
++	 * @return the pointer behind the last valid item
++	 */
++	FORCEINLINE Iterator End()
++	{
++		return this->base.end();
++	}
++
++	/**
++	 * Get item "number"; resize the vector and create new item if necessary
++	 *
++	 * @param index the positon of the item
++	 * @return the item
++	 */
++	FORCEINLINE Tvalue &operator[](uint index)
++	{
++		if (index >= this->base.size()) {
++			this->base.resize(index + 1, AutoGrowVector<Tvalue>::empty);
++		}
++		return this->base[index];
++	}
++
++	/**
++	 * Get item "number" (const) or empty item if the index is unused
++	 *
++	 * @param index the positon of the item
++	 * @return the item
++	 */
++	FORCEINLINE const Tvalue &operator[](uint index) const
++	{
++		if (index < this->base.size()) {
++			return this->base[index];
++		} else {
++			return AutoGrowVector<Tvalue>::empty;
++		}
++	}
++
++	FORCEINLINE void Reserve(uint new_size)
++	{
++		this->base.reserve(new_size);
++	}
++
++	void Compact()
++	{
++		while(!this->base.empty()) {
++			if (this->base.back() == AutoGrowVector<Tvalue>::empty) {
++				this->base.pop_back();
++			} else {
++				return;
++			}
++		}
++	}
++};
++
++template <typename Tvalue> const Tvalue AutoGrowVector<Tvalue>::empty = Tvalue();
++
++
++#endif /* AUTOGROWVECTOR_TYPE_HPP_ */
+diff --git a/src/core/pool_type.hpp b/src/core/pool_type.hpp
+index 9c32a81..f267c12 100644
+--- a/src/core/pool_type.hpp
++++ b/src/core/pool_type.hpp
+@@ -83,6 +83,24 @@ struct Pool {
+ 		Tindex index; ///< Index of this pool item
+ 
+ 		/**
++		 * Don't initialize the index on construction - it's done by operator new.
++		 */
++		FORCEINLINE PoolItem() {}
++
++		/**
++		 * Don't copy the index on copy-constructing.
++		 */
++		FORCEINLINE PoolItem(const PoolItem &other) {}
++
++		/**
++		 * Don't copy the index on assignment.
++		 */
++		FORCEINLINE PoolItem &operator=(const PoolItem &other)
++		{
++			return *this;
++		}
++
++		/**
+ 		 * Allocates space for new Titem
+ 		 * @param size size of Titem
+ 		 * @return pointer to allocated memory
+diff --git a/src/economy.cpp b/src/economy.cpp
+index de56391..0e37ce5 100644
+--- a/src/economy.cpp
++++ b/src/economy.cpp
+@@ -1414,7 +1414,11 @@ void LoadUnloadStation(Station *st)
+ 
+ 	int cargo_left[NUM_CARGO];
+ 
+-	for (uint i = 0; i < NUM_CARGO; i++) cargo_left[i] = st->goods[i].cargo.Count();
++	Station::GoodsVector::ConstIterator begin(st->goods.Begin());
++	CargoID length(st->goods.Length());
++	for (CargoID i = 0; i < length; ++i) {
++		cargo_left[i] = (begin + i)->cargo.Count();
++	}
+ 
+ 	std::list<Vehicle *>::iterator iter;
+ 	for (iter = st->loading_vehicles.begin(); iter != st->loading_vehicles.end(); ++iter) {
+diff --git a/src/newgrf_station.cpp b/src/newgrf_station.cpp
+index 8dafa62..d3b3a48 100644
+--- a/src/newgrf_station.cpp
++++ b/src/newgrf_station.cpp
+@@ -517,8 +517,10 @@ uint32 Station::GetNewGRFVariable(const ResolverObject *object, byte variable, b
+ 			CargoID cargo_type;
+ 			uint32 value = 0;
+ 
+-			for (cargo_type = 0; cargo_type < NUM_CARGO; cargo_type++) {
+-				if (HasBit(this->goods[cargo_type].acceptance_pickup, GoodsEntry::PICKUP)) SetBit(value, cargo_type);
++			GoodsVector::ConstIterator begin(this->goods.Begin());
++			CargoID length(this->goods.Length());
++			for (cargo_type = 0; cargo_type < length; ++cargo_type) {
++				if (HasBit((begin + cargo_type)->acceptance_pickup, GoodsEntry::PICKUP)) SetBit(value, cargo_type);
+ 			}
+ 			return value;
+ 		}
+@@ -624,10 +626,14 @@ static const SpriteGroup *StationResolveReal(const ResolverObject *object, const
+ 			break;
+ 
+ 		case CT_DEFAULT:
+-			for (cargo_type = 0; cargo_type < NUM_CARGO; cargo_type++) {
+-				cargo += st->goods[cargo_type].cargo.Count();
++		{
++			Station::GoodsVector::ConstIterator begin(st->goods.Begin());
++			CargoID length(st->goods.Length());
++			for (cargo_type = 0; cargo_type < length; cargo_type++) {
++				cargo += (begin + cargo_type)->cargo.Count();
+ 			}
+ 			break;
++		}
+ 
+ 		default:
+ 			cargo = st->goods[cargo_type].cargo.Count();
+diff --git a/src/openttd.cpp b/src/openttd.cpp
+index eb77989..818cc81 100644
+--- a/src/openttd.cpp
++++ b/src/openttd.cpp
+@@ -1165,7 +1165,7 @@ static void CheckCaches()
+ 
+ 	Station *st;
+ 	FOR_ALL_STATIONS(st) {
+-		for (CargoID c = 0; c < NUM_CARGO; c++) {
++		for (CargoID c = 0; c < st->goods.Length(); c++) {
+ 			byte buff[sizeof(StationCargoList)];
+ 			memcpy(buff, &st->goods[c].cargo, sizeof(StationCargoList));
+ 			st->goods[c].cargo.InvalidateCache();
+diff --git a/src/saveload/afterload.cpp b/src/saveload/afterload.cpp
+index 15777af..879d3e2 100644
+--- a/src/saveload/afterload.cpp
++++ b/src/saveload/afterload.cpp
+@@ -1439,9 +1439,9 @@ bool AfterLoadGame()
+ 	if (CheckSavegameVersion(74)) {
+ 		Station *st;
+ 		FOR_ALL_STATIONS(st) {
+-			for (CargoID c = 0; c < NUM_CARGO; c++) {
+-				st->goods[c].last_speed = 0;
+-				if (st->goods[c].cargo.Count() != 0) SetBit(st->goods[c].acceptance_pickup, GoodsEntry::PICKUP);
++			for (Station::GoodsVector::Iterator i(st->goods.Begin()); i != st->goods.End(); ++i) {
++				i->last_speed = 0;
++				if (i->cargo.Count() != 0) SetBit(i->acceptance_pickup, GoodsEntry::PICKUP);
+ 			}
+ 		}
+ 	}
+diff --git a/src/saveload/cargopacket_sl.cpp b/src/saveload/cargopacket_sl.cpp
+index 8090ed6..3059aca 100644
+--- a/src/saveload/cargopacket_sl.cpp
++++ b/src/saveload/cargopacket_sl.cpp
+@@ -39,10 +39,10 @@
+ 		 * station where the goods came from is already removed, the source
+ 		 * information is lost. In that case we set it to the position of this
+ 		 * station */
+-		Station *st;
++		const Station *st;
+ 		FOR_ALL_STATIONS(st) {
+-			for (CargoID c = 0; c < NUM_CARGO; c++) {
+-				GoodsEntry *ge = &st->goods[c];
++			for (Station::GoodsVector::ConstIterator goods_it(st->goods.Begin()); goods_it != st->goods.End(); ++goods_it) {
++				const GoodsEntry *ge = &(*goods_it);
+ 
+ 				const StationCargoList::List *packets = ge->cargo.Packets();
+ 				for (StationCargoList::ConstIterator it(packets->begin()); it != packets->end(); it++) {
+@@ -71,7 +71,9 @@
+ 
+ 		Station *st;
+ 		FOR_ALL_STATIONS(st) {
+-			for (CargoID c = 0; c < NUM_CARGO; c++) st->goods[c].cargo.InvalidateCache();
++			for (Station::GoodsVector::Iterator c(st->goods.Begin()); c != st->goods.End(); ++c) {
++				c->cargo.InvalidateCache();
++			}
+ 		}
+ 	}
+ }
+diff --git a/src/saveload/saveload.cpp b/src/saveload/saveload.cpp
+index 0e8fea7..4cb1e17 100644
+--- a/src/saveload/saveload.cpp
++++ b/src/saveload/saveload.cpp
+@@ -46,7 +46,7 @@
+ 
+ #include "saveload_internal.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 140;
++extern const uint16 SAVEGAME_VERSION = SL_VECTOR;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+diff --git a/src/saveload/saveload.h b/src/saveload/saveload.h
+index 0914a50..d83e577 100644
+--- a/src/saveload/saveload.h
++++ b/src/saveload/saveload.h
+@@ -79,8 +79,6 @@ enum SLRefType {
+ 	REF_ORDERLIST     = 8,
+ };
+ 
+-#define SL_MAX_VERSION 255
+-
+ enum {
+ 	INC_VEHICLE_COMMON = 0,
+ };
+@@ -338,4 +336,14 @@ bool SaveloadCrashWithMissingNewGRFs();
+ 
+ extern char _savegame_format[8];
+ 
++/**
++ * save/load versions used for the various branches
++ * SL_TRUNK is always the current trunk version.
++ */
++enum SaveLoadVersions {
++	SL_TRUNK = 140,
++	SL_VECTOR = SL_TRUNK + 5,
++	SL_MAX_VERSION = 255
++};
++
+ #endif /* SAVELOAD_H */
+diff --git a/src/saveload/station_sl.cpp b/src/saveload/station_sl.cpp
+index c705e2b..92ff659 100644
+--- a/src/saveload/station_sl.cpp
++++ b/src/saveload/station_sl.cpp
+@@ -102,6 +102,7 @@ void AfterLoadStations()
+ 			Station *sta = Station::From(st);
+ 			for (const RoadStop *rs = sta->bus_stops; rs != NULL; rs = rs->next) sta->bus_station.Add(rs->xy);
+ 			for (const RoadStop *rs = sta->truck_stops; rs != NULL; rs = rs->next) sta->truck_station.Add(rs->xy);
++			if (CheckSavegameVersion(SL_VECTOR)) sta->goods.Compact();
+ 		}
+ 
+ 		StationUpdateAnimTriggers(st);
+@@ -258,6 +259,12 @@ static void Load_STNS()
+ 		_waiting_acceptance = 0;
+ 
+ 		uint num_cargo = CheckSavegameVersion(55) ? 12 : NUM_CARGO;
++
++		/* We cannot copy-construct cargo lists here, so we have to make sure they stay in place.
++		 * Also reserving all the intended amount at once is cheaper than constantly re-reserving.
++		 */
++		st->goods.Reserve(num_cargo);
++
+ 		for (CargoID i = 0; i < num_cargo; i++) {
+ 			GoodsEntry *ge = &st->goods[i];
+ 			SlObject(ge, GetGoodsDesc());
+@@ -292,9 +299,8 @@ static void Ptrs_STNS()
+ 	Station *st;
+ 	FOR_ALL_STATIONS(st) {
+ 		if (!CheckSavegameVersion(68)) {
+-			for (CargoID i = 0; i < NUM_CARGO; i++) {
+-				GoodsEntry *ge = &st->goods[i];
+-				SlObject(ge, GetGoodsDesc());
++			for (Station::GoodsVector::Iterator i = st->goods.Begin(); i != st->goods.End(); ++i) {
++				SlObject(&(*i), GetGoodsDesc());
+ 			}
+ 		}
+ 		SlObject(st, _old_station_desc);
+@@ -320,6 +326,9 @@ static const SaveLoad _base_station_desc[] = {
+ 	      SLE_END()
+ };
+ 
++/** the number of goods entries present in a station */
++uint8 _num_goods;
++
+ static const SaveLoad _station_desc[] = {
+ 	SLE_WRITEBYTE(Station, facilities,                 FACIL_NONE),
+ 	SLE_ST_INCLUDE(),
+@@ -345,6 +354,7 @@ static const SaveLoad _station_desc[] = {
+ 	      SLE_VAR(Station, had_vehicle_of_type,        SLE_UINT8),
+ 	      SLE_LST(Station, loading_vehicles,           REF_VEHICLE),
+ 	  SLE_CONDVAR(Station, always_accepted,            SLE_UINT32, 127, SL_MAX_VERSION),
++	 SLEG_CONDVAR(_num_goods,                          SLE_UINT8, SL_VECTOR, SL_MAX_VERSION),
+ 
+ 	      SLE_END()
+ };
+@@ -374,12 +384,14 @@ const SaveLoad *GetBaseStationDescription()
+ static void RealSave_STNN(BaseStation *bst)
+ {
+ 	bool waypoint = (bst->facilities & FACIL_WAYPOINT) != 0;
+-	SlObject(bst, waypoint ? _waypoint_desc : _station_desc);
+-
+-	if (!waypoint) {
++	if (waypoint) {
++		SlObject(bst, _waypoint_desc);
++	} else {
+ 		Station *st = Station::From(bst);
+-		for (CargoID i = 0; i < NUM_CARGO; i++) {
+-			SlObject(&st->goods[i], GetGoodsDesc());
++		_num_goods = st->goods.Length();
++		SlObject(bst, _station_desc);
++		for (Station::GoodsVector::Iterator it(st->goods.Begin()); it != st->goods.End(); ++it) {
++			SlObject(&(*it), GetGoodsDesc());
+ 		}
+ 	}
+ 
+@@ -410,7 +422,14 @@ static void Load_STNN()
+ 
+ 		if (!waypoint) {
+ 			Station *st = Station::From(bst);
+-			for (CargoID i = 0; i < NUM_CARGO; i++) {
++			uint num_cargo = CheckSavegameVersion(SL_VECTOR) ? (uint)NUM_CARGO : _num_goods;
++
++			/* We cannot copy-construct cargo lists here, so we have to make sure they stay in place.
++			 * Also reserving all the intended amount at once is cheaper than constantly re-reserving.
++			 */
++			st->goods.Reserve(num_cargo);
++
++			for (CargoID i = 0; i < num_cargo; i++) {
+ 				SlObject(&st->goods[i], GetGoodsDesc());
+ 			}
+ 		}
+@@ -432,9 +451,8 @@ static void Ptrs_STNN()
+ 
+ 	Station *st;
+ 	FOR_ALL_STATIONS(st) {
+-		for (CargoID i = 0; i < NUM_CARGO; i++) {
+-			GoodsEntry *ge = &st->goods[i];
+-			SlObject(ge, GetGoodsDesc());
++		for (Station::GoodsVector::Iterator it(st->goods.Begin()); it != st->goods.End(); ++it) {
++			SlObject(&(*it), GetGoodsDesc());
+ 		}
+ 		SlObject(st, _station_desc);
+ 	}
+diff --git a/src/station.cpp b/src/station.cpp
+index 320d641..72d5634 100644
+--- a/src/station.cpp
++++ b/src/station.cpp
+@@ -94,8 +94,8 @@ Station::~Station()
+ 	/* Remove all news items */
+ 	DeleteStationNews(this->index);
+ 
+-	for (CargoID c = 0; c < NUM_CARGO; c++) {
+-		this->goods[c].cargo.Truncate(0);
++	for (GoodsVector::Iterator i = this->goods.Begin(); i != this->goods.End(); ++i) {
++		i->cargo.Truncate(0);
+ 	}
+ 
+ 	CargoPacket::InvalidateAllFrom(this->index);
+diff --git a/src/station_base.h b/src/station_base.h
+index e3aa8b7..40c79bd 100644
+--- a/src/station_base.h
++++ b/src/station_base.h
+@@ -17,6 +17,7 @@
+ #include "newgrf_airport.h"
+ #include "cargopacket.h"
+ #include "industry_type.h"
++#include "core/autogrowvec_type.hpp"
+ 
+ typedef Pool<BaseStation, StationID, 32, 64000> StationPool;
+ extern StationPool _station_pool;
+@@ -37,6 +38,15 @@ struct GoodsEntry {
+ 		last_age(255)
+ 	{}
+ 
++	bool operator==(const GoodsEntry &other) const
++	{
++		return this->acceptance_pickup == other.acceptance_pickup &&
++			this->days_since_pickup == other.days_since_pickup &&
++			this->last_speed == other.last_speed &&
++			this->last_age == other.last_age &&
++			this->cargo == other.cargo;
++	}
++
+ 	byte acceptance_pickup;
+ 	byte days_since_pickup;
+ 	byte rating;
+@@ -51,6 +61,8 @@ typedef SmallVector<Industry *, 2> IndustryVector;
+ /** Station data structure */
+ struct Station : SpecializedStation<Station, false> {
+ public:
++	typedef AutoGrowVector<GoodsEntry> GoodsVector;
++
+ 	RoadStop *GetPrimaryRoadStop(RoadStopType type) const
+ 	{
+ 		return type == ROADSTOP_BUS ? bus_stops : truck_stops;
+@@ -90,7 +102,7 @@ public:
+ 
+ 	byte last_vehicle_type;
+ 	std::list<Vehicle *> loading_vehicles;
+-	GoodsEntry goods[NUM_CARGO];  ///< Goods at this station
++	GoodsVector goods;            ///< Goods at this station
+ 	uint32 always_accepted;       ///< Bitmask of always accepted cargo types (by houses, HQs, industry tiles when industry doesn't accept cargo)
+ 
+ 	IndustryVector industries_near; ///< Cached list of industries near the station that can accept cargo, @see DeliverGoodsToIndustry()
+diff --git a/src/station_cmd.cpp b/src/station_cmd.cpp
+index 956079d..09af77d 100644
+--- a/src/station_cmd.cpp
++++ b/src/station_cmd.cpp
+@@ -440,8 +440,9 @@ static uint GetAcceptanceMask(const Station *st)
+ {
+ 	uint mask = 0;
+ 
+-	for (CargoID i = 0; i < NUM_CARGO; i++) {
+-		if (HasBit(st->goods[i].acceptance_pickup, GoodsEntry::ACCEPTANCE)) mask |= 1 << i;
++	Station::GoodsVector::ConstIterator begin(st->goods.Begin());
++	for (Station::GoodsVector::ConstIterator i(begin); i != st->goods.End(); ++i) {
++		if (HasBit(i->acceptance_pickup, GoodsEntry::ACCEPTANCE)) mask |= 1 << (i - begin);
+ 	}
+ 	return mask;
+ }
+@@ -581,7 +582,10 @@ void UpdateStationAcceptance(Station *st, bool show_msg)
+ 			amt = 0;
+ 		}
+ 
+-		SB(st->goods[i].acceptance_pickup, GoodsEntry::ACCEPTANCE, 1, amt >= 8);
++		/* non-existing goods entry means good isn't accepted */
++		if (amt >= 8 || i < st->goods.Length()) {
++			SB(st->goods[i].acceptance_pickup, GoodsEntry::ACCEPTANCE, 1, amt >= 8);
++		}
+ 	}
+ 
+ 	/* Only show a message in case the acceptance was actually changed. */
+@@ -3011,6 +3015,8 @@ static void UpdateStationRating(Station *st)
+ 
+ 	const CargoSpec *cs;
+ 	FOR_ALL_CARGOSPECS(cs) {
++		/* no need to update ratings which are not there */
++		if (st->goods.Length() <= cs->Index()) break;
+ 		GoodsEntry *ge = &st->goods[cs->Index()];
+ 		/* Slowly increase the rating back to his original level in the case we
+ 		 *  didn't deliver cargo yet to this station. This happens when a bribe
+@@ -3174,8 +3180,8 @@ void ModifyStationRatingAround(TileIndex tile, Owner owner, int amount, uint rad
+ 	FOR_ALL_STATIONS(st) {
+ 		if (st->owner == owner &&
+ 				DistanceManhattan(tile, st->xy) <= radius) {
+-			for (CargoID i = 0; i < NUM_CARGO; i++) {
+-				GoodsEntry *ge = &st->goods[i];
++			for (Station::GoodsVector::Iterator i = st->goods.Begin(); i != st->goods.End(); ++i) {
++				GoodsEntry *ge = &(*i);
+ 
+ 				if (ge->acceptance_pickup != 0) {
+ 					ge->rating = Clamp(ge->rating + amount, 0, 255);
+@@ -3384,14 +3390,6 @@ void BuildOilRig(TileIndex tile)
+ 
+ 	st->rect.BeforeAddTile(tile, StationRect::ADD_FORCE);
+ 
+-	for (CargoID j = 0; j < NUM_CARGO; j++) {
+-		st->goods[j].acceptance_pickup = 0;
+-		st->goods[j].days_since_pickup = 255;
+-		st->goods[j].rating = INITIAL_STATION_RATING;
+-		st->goods[j].last_speed = 0;
+-		st->goods[j].last_age = 255;
+-	}
+-
+ 	st->UpdateVirtCoord();
+ 	UpdateStationAcceptance(st, false);
+ 	st->RecomputeIndustriesNear();
+diff --git a/src/station_gui.cpp b/src/station_gui.cpp
+index e731931..892145d 100644
+--- a/src/station_gui.cpp
++++ b/src/station_gui.cpp
+@@ -236,7 +236,7 @@ protected:
+ 			if (st->owner == owner || (st->owner == OWNER_NONE && HasStationInUse(st->index, owner))) {
+ 				if (this->facilities & st->facilities) { // only stations with selected facilities
+ 					int num_waiting_cargo = 0;
+-					for (CargoID j = 0; j < NUM_CARGO; j++) {
++					for (CargoID j = 0; j < st->goods.Length(); j++) {
+ 						if (!st->goods[j].cargo.Empty()) {
+ 							num_waiting_cargo++; // count number of waiting cargo
+ 							if (HasBit(this->cargo_filter, j)) {
+@@ -288,7 +288,7 @@ protected:
+ 	{
+ 		Money diff = 0;
+ 
+-		for (CargoID j = 0; j < NUM_CARGO; j++) {
++		for (CargoID j = 0; j < max((*a)->goods.Length(), (*b)->goods.Length()); j++) {
+ 			if (!HasBit(cargo_filter, j)) continue;
+ 			if (!(*a)->goods[j].cargo.Empty()) diff += GetTransportedGoodsIncome((*a)->goods[j].cargo.Count(), 20, 50, j);
+ 			if (!(*b)->goods[j].cargo.Empty()) diff -= GetTransportedGoodsIncome((*b)->goods[j].cargo.Count(), 20, 50, j);
+@@ -303,7 +303,7 @@ protected:
+ 		byte maxr1 = 0;
+ 		byte maxr2 = 0;
+ 
+-		for (CargoID j = 0; j < NUM_CARGO; j++) {
++		for (CargoID j = 0; j < max((*a)->goods.Length(), (*b)->goods.Length()); j++) {
+ 			if (!HasBit(cargo_filter, j)) continue;
+ 			if (HasBit((*a)->goods[j].acceptance_pickup, GoodsEntry::PICKUP)) maxr1 = max(maxr1, (*a)->goods[j].rating);
+ 			if (HasBit((*b)->goods[j].acceptance_pickup, GoodsEntry::PICKUP)) maxr2 = max(maxr2, (*b)->goods[j].rating);
+@@ -318,7 +318,7 @@ protected:
+ 		byte minr1 = 255;
+ 		byte minr2 = 255;
+ 
+-		for (CargoID j = 0; j < NUM_CARGO; j++) {
++		for (CargoID j = 0; j < max((*a)->goods.Length(), (*b)->goods.Length()); j++) {
+ 			if (!HasBit(cargo_filter, j)) continue;
+ 			if (HasBit((*a)->goods[j].acceptance_pickup, GoodsEntry::PICKUP)) minr1 = min(minr1, (*a)->goods[j].rating);
+ 			if (HasBit((*b)->goods[j].acceptance_pickup, GoodsEntry::PICKUP)) minr2 = min(minr2, (*b)->goods[j].rating);
+@@ -466,7 +466,7 @@ public:
+ 					x += rtl ? -5 : 5;
+ 
+ 					/* show cargo waiting and station ratings */
+-					for (CargoID j = 0; j < NUM_CARGO; j++) {
++					for (CargoID j = 0; j < st->goods.Length(); j++) {
+ 						if (!st->goods[j].cargo.Empty()) {
+ 							/* For RTL we work in exactly the opposite direction. So
+ 							 * decrement the space needed first, then draw to the left
+@@ -1001,7 +1001,7 @@ struct StationViewWindow : public Window {
+ 		const Station *st = Station::Get(station_id);
+ 
+ 		/* count types of cargos waiting in station */
+-		for (CargoID i = 0; i < NUM_CARGO; i++) {
++		for (CargoID i = 0; i < st->goods.Length(); i++) {
+ 			if (st->goods[i].cargo.Empty()) {
+ 				this->cargo_rows[i] = 0;
+ 			} else {
+@@ -1054,7 +1054,7 @@ struct StationViewWindow : public Window {
+ 		const Station *st = Station::Get(this->window_number);
+ 		if (--pos < 0) {
+ 			StringID str = STR_JUST_NOTHING;
+-			for (CargoID i = 0; i < NUM_CARGO; i++) {
++			for (CargoID i = 0; i < st->goods.Length(); i++) {
+ 				if (!st->goods[i].cargo.Empty()) str = STR_EMPTY;
+ 			}
+ 			SetDParam(0, str);
+@@ -1107,7 +1107,7 @@ struct StationViewWindow : public Window {
+ 		const Station *st = Station::Get(this->window_number);
+ 
+ 		uint32 cargo_mask = 0;
+-		for (CargoID i = 0; i < NUM_CARGO; i++) {
++		for (CargoID i = 0; i < st->goods.Length(); i++) {
+ 			if (HasBit(st->goods[i].acceptance_pickup, GoodsEntry::ACCEPTANCE)) SetBit(cargo_mask, i);
+ 		}
+ 		Rect s = {r.left + WD_FRAMERECT_LEFT, r.top + WD_FRAMERECT_TOP, r.right - WD_FRAMERECT_RIGHT, INT32_MAX};
+diff --git a/src/town_cmd.cpp b/src/town_cmd.cpp
+index 2a4e367..201d588 100644
+--- a/src/town_cmd.cpp
++++ b/src/town_cmd.cpp
+@@ -2447,7 +2447,9 @@ static void TownActionBribe(Town *t)
+ 		Station *st;
+ 		FOR_ALL_STATIONS(st) {
+ 			if (st->town == t && st->owner == _current_company) {
+-				for (CargoID i = 0; i < NUM_CARGO; i++) st->goods[i].rating = 0;
++				for (Station::GoodsVector::Iterator i = st->goods.Begin(); i != st->goods.End(); ++i) {
++					i->rating = 0;
++				}
+ 			}
+ 		}
+ 

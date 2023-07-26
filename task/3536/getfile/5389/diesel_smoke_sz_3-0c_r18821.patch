@@ -1,0 +1,70 @@
+Index: train_cmd.cpp
+===================================================================
+--- train_cmd.cpp	(revision 18821)
++++ train_cmd.cpp	(working copy)
+@@ -2156,7 +2156,14 @@
+ {
+ 	bool sound = false;
+ 
+-	if ((v->vehstatus & VS_TRAIN_SLOWING) || v->cur_speed < 2) {
++	/* Do not show any smoke/locomotive effect when train is slowin down or
++	 * player clicks stop button in train's window or
++	 * train is loading/unloading or
++	 * train's current speed is less than 2 km/h or
++	 * or train is entering station with an order to stop there and is gradually slowing down to stop there with speed equal as station-tile maximum entering speed. */
++	if ((v->vehstatus & VS_TRAIN_SLOWING) || (v->vehstatus & VS_STOPPED) || v->cur_speed < 2 ||
++		 (IsTileType(v->tile, MP_STATION) && v->IsFrontEngine() && v->current_order.ShouldStopAtStation(v, GetStationIndex(v->tile)) &&
++		  v->cur_speed >= ((Station::GetByTile(v->tile)->GetPlatformLength(v->tile, DirToDiagDir(v->direction)) >> (2 >> v->current_order.GetStopLocation())) * 25))) {
+ 		return;
+ 	}
+ 
+@@ -2198,24 +2205,43 @@
+ 
+ 		switch (effect_type) {
+ 			case 0:
+-				/* steam smoke. */
+-				if (GB(v->tick_counter, 0, 4) == 0) {
++				/* Steam smoke - amount is gradually falling until train reaches its maximum speed, after that it's normal.
++			 	 * Details: while train's current speed is gradually
++			 	 * increasing, steam plumes' density decreases by one
++			 	 * third each third of its maximum speed spectrum.
++			 	 * Steam emission finally normalises at very
++				 * close to train's maximum speed (=GB(0,4)). */
++				if (GB(v->tick_counter, 0, (1 + ((u->cur_speed * 3) / u->tcache.cached_max_speed))) == 0) {
+ 					CreateEffectVehicleRel(v, x, y, 10, EV_STEAM_SMOKE);
+ 					sound = true;
+ 				}
+ 				break;
+ 
+ 			case 1:
+-				/* diesel smoke */
+-				if (u->cur_speed <= 40 && Chance16(15, 128)) {
++				/* Diesel smoke - thicker when train is starting, gradually
++				 * subsiding till locomotive reaches its maximum speed when it stops.
++				 * Details: Train's (max.) speed spectrum is divided into 32 parts.
++				 * When max. speed is reached, chance for smoke emission erodes by 32 (1/4).
++				 * Power and train's weight come in handy too to either increase smoke emission
++				 * in 6 steps (1000HP each) if the power is low or decrease smoke emission in
++				 * 6 steps (512 tonnes each) if the train isn't overweight. Power and weight
++				 * contributions are expressed in a way that neither extreme power, nor extreme
++				 * weight can ruin the balance (e.g. FreightWagonMultiplier) in the formula.
++				 * When the train reaches maximum speed no diesel_smoke is emitted as train
++				 * has enough traction to keep locomotive running optimally. */
++				if (u->cur_speed < u->tcache.cached_max_speed && Chance16((64 - ((u->cur_speed << 5) / u->tcache.cached_max_speed) + (32 >> (u->tcache.cached_power >> 10)) - (32 >> (u->tcache.cached_weight >> 9))), 128)) {
+ 					CreateEffectVehicleRel(v, 0, 0, 10, EV_DIESEL_SMOKE);
+ 					sound = true;
+ 				}
+ 				break;
+ 
+ 			case 2:
+-				/* blue spark */
+-				if (GB(v->tick_counter, 0, 2) == 0 && Chance16(1, 45)) {
++				/* Electric train's spark - more often occurs when train is departing (more load)
++				 * Details: Electric locomotives are usually at least twice as powerful as their diesel
++				 * counterparts, so spark emissions are kept simple. Only when starting, creating huge
++				 * force are sparks more likely to happen, but when reaching its max. speed, quarter by
++				 * quarter of it, chance decreases untill the usuall 2,22% at train's top speed. */
++				if (GB(v->tick_counter, 0, 2) == 0 && Chance16((6 - ((u->cur_speed << 2) / u->tcache.cached_max_speed)), 90)) {
+ 					CreateEffectVehicleRel(v, 0, 0, 10, EV_ELECTRIC_SPARK);
+ 					sound = true;
+ 				}

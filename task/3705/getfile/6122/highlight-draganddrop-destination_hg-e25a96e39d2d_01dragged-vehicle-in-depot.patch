@@ -1,0 +1,182 @@
+diff -r 7e469e3eab0f src/depot_gui.cpp
+--- a/src/depot_gui.cpp	Sat May 22 20:44:31 2010 +0200
++++ b/src/depot_gui.cpp	Sat May 22 21:30:30 2010 +0200
+@@ -213,6 +213,7 @@
+ 
+ struct DepotWindow : Window {
+ 	VehicleID sel;
++	VehicleID vehicle_over; ///< Rail vehicle over which another one is dragged, INVALID_VEHICLE if none
+ 	VehicleType type;
+ 	bool generate_list;
+ 	VehicleList vehicle_list;
+@@ -223,6 +224,7 @@
+ 		assert(IsCompanyBuildableVehicleType(type)); // ensure that we make the call with a valid type
+ 
+ 		this->sel = INVALID_VEHICLE;
++		this->vehicle_over = INVALID_VEHICLE;
+ 		this->generate_list = true;
+ 		this->type = type;
+ 
+@@ -263,7 +265,8 @@
+ 				free_wagon = u->IsFreeWagon();
+ 
+ 				uint x_space = free_wagon ? TRAININFO_DEFAULT_VEHICLE_WIDTH : 0;
+-				DrawTrainImage(u, image_left + (rtl ? 0 : x_space), image_right - (rtl ? x_space : 0), sprite_y - 1, this->sel, free_wagon ? 0 : this->hscroll.GetPosition());
++				DrawTrainImage(u, image_left + (rtl ? 0 : x_space), image_right - (rtl ? x_space : 0), sprite_y - 1,
++								this->sel, free_wagon ? 0 : this->hscroll.GetPosition(), this->vehicle_over);
+ 
+ 				/* Number of wagons relative to a standard length wagon (rounded up) */
+ 				SetDParam(0, CeilDiv(u->tcache.cached_total_length, 8));
+@@ -862,6 +865,7 @@
+ 
+ 		/* abort drag & drop */
+ 		this->sel = INVALID_VEHICLE;
++		this->vehicle_over = INVALID_VEHICLE;
+ 		this->SetWidgetDirty(DEPOT_WIDGET_MATRIX);
+ 	};
+ 
+@@ -877,6 +881,48 @@
+ 		}
+ 	}
+ 
++	virtual void OnMouseDrag(Point pt, int widget)
++	{
++		if (this->type == VEH_TRAIN && this->sel != INVALID_VEHICLE) {
++			/* A rail vehicle is dragged… */
++			if (widget != DEPOT_WIDGET_MATRIX) { // …outside of the depot matrix
++				if (this->vehicle_over != INVALID_VEHICLE) {
++					this->vehicle_over = INVALID_VEHICLE;
++					this->SetWidgetDirty(DEPOT_WIDGET_MATRIX);
++				}
++
++				return;
++			}
++
++			NWidgetBase *matrix = this->GetWidget<NWidgetBase>(widget);
++			const Vehicle *v = NULL;
++			GetDepotVehiclePtData gdvp = {NULL, NULL};
++
++			if (this->GetVehicleFromDepotWndPt(pt.x - matrix->pos_x, pt.y - matrix->pos_y, &v, &gdvp) != MODE_DRAG_VEHICLE) return;
++
++			VehicleID new_vehicle_over = INVALID_VEHICLE;
++
++			if (gdvp.head != NULL) {
++				if (gdvp.wagon == NULL && gdvp.head->Last()->index != this->sel) { // …at the end of the train.
++					/* NOTE: As a wagon can't be moved at the begin of a train, head index isn't used to mark a drag-and-drop
++					 * destination inside a train. This head index is then used to indicate that a wagon is inserted at
++					 * the end of the train.
++				     */
++					new_vehicle_over = gdvp.head->index;
++				} else if (gdvp.wagon != NULL && gdvp.head != gdvp.wagon &&
++							gdvp.wagon->index != this->sel &&
++							gdvp.wagon->Previous()->index != this->sel) { // …over an existing wagon.
++					new_vehicle_over = gdvp.wagon->index;
++				}
++			}
++
++			if (this->vehicle_over == new_vehicle_over) return;
++
++			this->vehicle_over = new_vehicle_over;
++			this->SetWidgetDirty(widget);
++		}
++	}
++
+ 	virtual void OnDragDrop(Point pt, int widget)
+ 	{
+ 		switch (widget) {
+@@ -896,6 +942,7 @@
+ 							DoCommandP(Vehicle::Get(sel)->tile, Vehicle::Get(sel)->index, true,
+ 									CMD_REVERSE_TRAIN_DIRECTION | CMD_MSG(STR_ERROR_CAN_T_REVERSE_DIRECTION_RAIL_VEHICLE));
+ 						} else if (gdvp.wagon == NULL || gdvp.wagon->index != sel) {
++							this->vehicle_over = INVALID_VEHICLE;
+ 							TrainDepotMoveVehicle(gdvp.wagon, sel, gdvp.head);
+ 						} else if (gdvp.head != NULL && Train::From(gdvp.head)->IsFrontEngine()) {
+ 							ShowVehicleViewWindow(gdvp.head);
+diff -r 7e469e3eab0f src/train_gui.cpp
+--- a/src/train_gui.cpp	Sat May 22 20:44:31 2010 +0200
++++ b/src/train_gui.cpp	Sat May 22 21:30:30 2010 +0200
+@@ -49,6 +49,33 @@
+ }
+ 
+ /**
++ * Highlight the position where a rail vehicle is dragged over by drawing a light gray background.
++ * @param px        The current x position to draw from.
++ * @param max_width The maximum space available to draw.
++ * @param selection Selected vehicle that is dragged
++ * @return The width of the highlight mark.
++ */
++uint HighlightDragPosition(int px, int max_width, VehicleID selection)
++{
++	bool rtl = _dynlang.text_dir == TD_RTL;
++
++	assert(selection != INVALID_VEHICLE);
++	Point offset;
++	int dragged_width = Train::Get(selection)->GetDisplayImageWidth(&offset) + WD_FRAMERECT_LEFT + WD_FRAMERECT_RIGHT;
++
++	int drag_hlight_left = rtl ? max(px -dragged_width, 0) : px;
++	int drag_hlight_right = rtl ? px : min(px + dragged_width, max_width);
++	int drag_hlight_width = max(drag_hlight_right - drag_hlight_left, 0);
++
++	if (drag_hlight_width > 0) {
++		GfxFillRect(drag_hlight_left + WD_FRAMERECT_LEFT, WD_FRAMERECT_TOP + 1,
++					drag_hlight_right - WD_FRAMERECT_RIGHT, 13 - WD_FRAMERECT_BOTTOM, _colour_gradient[COLOUR_GREY][7]);
++	}
++
++	return drag_hlight_width;
++}
++
++/**
+  * Draws an image of a whole train
+  * @param v         Front vehicle
+  * @param left      The minimum horizontal position
+@@ -56,8 +83,9 @@
+  * @param y         Vertical position to draw at
+  * @param selection Selected vehicle to draw a frame around
+  * @param skip      Number of pixels to skip at the front (for scrolling)
++ * @param drag_dest The vehicle another one is dragged over, INVALID_VEHICLE if none
+  */
+-void DrawTrainImage(const Train *v, int left, int right, int y, VehicleID selection, int skip)
++void DrawTrainImage(const Train *v, int left, int right, int y, VehicleID selection, int skip, VehicleID drag_dest)
+ {
+ 	bool rtl = _dynlang.text_dir == TD_RTL;
+ 	Direction dir = rtl ? DIR_E : DIR_W;
+@@ -75,7 +103,15 @@
+ 
+ 	int px = rtl ? max_width + skip : -skip;
+ 	bool sel_articulated = false;
++	bool dragging = (drag_dest != INVALID_VEHICLE);
++	bool drag_at_end_of_train = (drag_dest == v->index); // Head index is used to mark dragging at end of train
+ 	for (; v != NULL && (rtl ? px > 0 : px < max_width); v = v->Next()) {
++		if (dragging && !drag_at_end_of_train && drag_dest == v->index) {
++			/* Highlight the drag-and-drop destination inside the train. */
++			uint drag_hlight_width = HighlightDragPosition(px, max_width, selection);
++			px += rtl ? -drag_hlight_width : drag_hlight_width;
++		}
++
+ 		Point offset;
+ 		int width = Train::From(v)->GetDisplayImageWidth(&offset);
+ 
+@@ -102,6 +138,11 @@
+ 		px += rtl ? -width : width;
+ 	}
+ 
++	if (dragging && drag_at_end_of_train) {
++		/* Highlight the drag-and-drop destination at the end of the train. */
++		HighlightDragPosition(px, max_width, selection);
++	}
++
+ 	if (highlight_l != highlight_r) {
+ 		/* Draw the highlight. Now done after drawing all the engines, as
+ 		 * the next engine after the highlight could overlap it. */
+diff -r 7e469e3eab0f src/vehicle_gui.h
+--- a/src/vehicle_gui.h	Sat May 22 20:44:31 2010 +0200
++++ b/src/vehicle_gui.h	Sat May 22 21:30:30 2010 +0200
+@@ -64,7 +64,7 @@
+ 
+ int DrawVehiclePurchaseInfo(int left, int right, int y, EngineID engine_number);
+ 
+-void DrawTrainImage(const Train *v, int left, int right, int y, VehicleID selection, int skip);
++void DrawTrainImage(const Train *v, int left, int right, int y, VehicleID selection, int skip, VehicleID drag_dest = INVALID_VEHICLE);
+ void DrawRoadVehImage(const Vehicle *v, int left, int right, int y, VehicleID selection);
+ void DrawShipImage(const Vehicle *v, int left, int right, int y, VehicleID selection);
+ void DrawAircraftImage(const Vehicle *v, int left, int right, int y, VehicleID selection);

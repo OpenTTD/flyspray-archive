@@ -1,0 +1,326 @@
+commit caaa3c16d75b787bafe6a81e8cfaaa955d6c929d
+Author: Michael Lutz <michi@icosahedron.de>
+Date:   Sun Sep 20 18:18:32 2009 +0200
+
+    -Feature: [OSX] Add a MIDI driver using Cocoa/CoreAudio.
+
+diff --git a/config.lib b/config.lib
+index aab42f9..fc5d483 100644
+--- a/config.lib
++++ b/config.lib
+@@ -1287,7 +1287,7 @@ make_cflags_and_ldflags() {
+ 
+ 	if [ "$with_cocoa" != "0" ]; then
+ 		CFLAGS="$CFLAGS -DWITH_COCOA"
+-		LIBS="$LIBS -F/System/Library/Frameworks -framework Cocoa -framework Carbon -framework AudioUnit"
++		LIBS="$LIBS -F/System/Library/Frameworks -framework Cocoa -framework Carbon -framework AudioUnit -framework AudioToolbox"
+ 
+ 		if [ "$enable_cocoa_quartz" != "0" ]; then
+ 			CFLAGS="$CFLAGS -DENABLE_COCOA_QUARTZ"
+diff --git a/source.list b/source.list
+index c1ca1b3..c6cbc25 100644
+--- a/source.list
++++ b/source.list
+@@ -321,6 +321,7 @@ zoom_type.h
+ #if WIN32
+ #else
+ music/bemidi.h
++music/cocoa_m.h
+ music/extmidi.h
+ music/libtimidity.h
+ music/os2_m.h
+@@ -912,6 +913,7 @@ sound/null_s.cpp
+ 		video/cocoa/fullscreen.mm
+ 		video/cocoa/wnd_quartz.mm
+ 		video/cocoa/wnd_quickdraw.mm
++		music/cocoa_m.cpp
+ 		sound/cocoa_s.cpp
+ 		os/macosx/splash.cpp
+ 	#end
+diff --git a/src/music/cocoa_m.cpp b/src/music/cocoa_m.cpp
+new file mode 100644
+index 0000000..5231452
+--- /dev/null
++++ b/src/music/cocoa_m.cpp
+@@ -0,0 +1,221 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/**
++ * @file cocoa_m.cpp
++ * @brief MIDI music player for MacOS X using CoreAudio.
++ */
++
++
++#ifdef WITH_COCOA
++
++#include "../stdafx.h"
++#include "cocoa_m.h"
++#include "../debug.h"
++
++#define Rect        OTTDRect
++#define Point       OTTDPoint
++#include <AudioUnit/AudioUnit.h>
++#include <AudioToolbox/AudioToolbox.h>
++#undef Rect
++#undef Point
++
++static FMusicDriver_Cocoa iFMusicDriver_Cocoa;
++
++
++static MusicPlayer    _player = NULL;
++static MusicSequence  _sequence = NULL;
++static MusicTimeStamp _seq_length = 0;
++static bool           _playing = false;
++static byte           _volume = 127;
++
++
++/** Set the volume of the current sequence. */
++static void DoSetVolume()
++{
++	if (_sequence == NULL) return;
++
++	AUGraph graph;
++	MusicSequenceGetAUGraph(_sequence, &graph);
++
++	AudioUnit synth = NULL;
++
++	/* Get output audio unit */
++	UInt32 nodeCount = 0;
++	AUGraphGetNodeCount(graph, &nodeCount);
++	for (UInt32 i = 0; i < nodeCount; i++) {
++		AUNode node;
++		AUGraphGetIndNode(graph, i, &node);
++
++		ComponentDescription desc;
++		AudioUnit unit;
++
++#if (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5)
++		if (MacOSVersionIsAtLeast(10, 5, 0)) {
++			AUGraphNodeInfo(graph, node, &desc, &unit);
++		} else
++#endif
++		{
++			AUGraphGetNodeInfo(graph, node, &desc, NULL, NULL, &unit);
++		}
++
++		if (desc.componentType == kAudioUnitType_Output) {
++			synth = unit;
++			break;
++		}
++	}
++	if (synth == NULL) {
++		DEBUG(driver, 1, "cocoa_m: Failed to get output node to set volume");
++		return;
++	}
++
++	Float32 vol = _volume / 127.0f;  // 0 - +127 -> 0.0 - 1.0
++	AudioUnitSetParameter(synth, kHALOutputParam_Volume, kAudioUnitScope_Global, 0, vol, 0);
++}
++
++
++/**
++ * Initialized the MIDI player, including QuickTime initialization.
++ */
++const char *MusicDriver_Cocoa::Start(const char * const *parm)
++{
++	if (NewMusicPlayer(&_player) != noErr) return "failed to create music player";
++
++	return NULL;
++}
++
++
++/**
++ * Checks wether the player is active.
++ */
++bool MusicDriver_Cocoa::IsSongPlaying()
++{
++	if (!_playing) return false;
++
++	MusicTimeStamp time = 0;
++	MusicPlayerGetTime(_player, &time);
++	return time < _seq_length;
++}
++
++
++/**
++ * Stops the MIDI player.
++ */
++void MusicDriver_Cocoa::Stop()
++{
++	if (_player != NULL) DisposeMusicPlayer(_player);
++	if (_sequence != NULL) DisposeMusicSequence(_sequence);
++}
++
++
++/**
++ * Starts playing a new song.
++ *
++ * @param filename Path to a MIDI file.
++ */
++void MusicDriver_Cocoa::PlaySong(const char *filename)
++{
++	DEBUG(driver, 2, "cocoa_m: trying to play '%s'", filename);
++
++	this->StopSong();
++	if (_sequence != NULL) {
++		DisposeMusicSequence(_sequence);
++		_sequence = NULL;
++	}
++
++	if (NewMusicSequence(&_sequence) != noErr) {
++		DEBUG(driver, 0, "cocoa_m: Failed to create music sequence");
++		return;
++	}
++
++	const char *os_file = OTTD2FS(filename);
++	CFURLRef url = CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault, (const UInt8*)os_file, strlen(os_file), false);
++
++#if (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5)
++	if (MacOSVersionIsAtLeast(10, 5, 0)) {
++		if (MusicSequenceFileLoad(_sequence, url, 0, 0) != noErr) {
++			DEBUG(driver, 0, "cocoa_m: Failed to load MIDI file");
++			CFRelease(url);
++			return;
++		}
++	} else
++#endif
++	{
++		FSRef refFile;
++		if (!CFURLGetFSRef(url, &refFile)) {
++			DEBUG(driver, 0, "cocoa_m: Failed to make FSRef");
++			CFRelease(url);
++			return;
++		}
++		if (MusicSequenceLoadSMFWithFlags(_sequence, &refFile, 0) != noErr) {
++			DEBUG(driver, 0, "cocoa_m: Failed to load MIDI file old style");
++			CFRelease(url);
++			return;
++		}
++	}
++	CFRelease(url);
++
++	/* Construct audio graph */
++	AUGraph graph = NULL;
++
++	MusicSequenceGetAUGraph(_sequence, &graph);
++	AUGraphOpen(graph);
++	if (AUGraphInitialize(graph) != noErr) {
++		DEBUG(driver, 0, "cocoa_m: Failed to initialize AU graph");
++		return;
++	}
++
++	/* Figure out sequence length */
++	UInt32 num_tracks;
++	MusicSequenceGetTrackCount(_sequence, &num_tracks);
++	_seq_length = 0;
++	for (UInt32 i = 0; i < num_tracks; i++) {
++		MusicTrack     track = NULL;
++		MusicTimeStamp trackLength = 0;
++		UInt32         prop_size = sizeof(MusicTimeStamp);
++		MusicSequenceGetIndTrack(_sequence, i, &track);
++		MusicTrackGetProperty(track, kSequenceTrackProperty_TrackLength, &trackLength, &prop_size);
++		if (trackLength > _seq_length) _seq_length = trackLength;
++	}
++	/* Add 8 beats for reverb/long note release */
++	_seq_length += 8;
++
++	DoSetVolume();
++	MusicPlayerSetSequence(_player, _sequence);
++	MusicPlayerPreroll(_player);
++	if (MusicPlayerStart(_player) != noErr) return;
++	_playing = true;
++
++	DEBUG(driver, 3, "cocoa_m: playing '%s'", filename);
++}
++
++
++/**
++ * Stops playing the current song, if the player is active.
++ */
++void MusicDriver_Cocoa::StopSong()
++{
++	MusicPlayerStop(_player);
++	MusicPlayerSetSequence(_player, NULL);
++	_playing = false;
++}
++
++
++/**
++ * Changes the playing volume of the MIDI player.
++ *
++ * @param vol The desired volume, range of the value is @c 0-127
++ */
++void MusicDriver_Cocoa::SetVolume(byte vol)
++{
++	_volume = vol;
++	DoSetVolume();
++}
++
++#endif /* WITH_COCOA */
+diff --git a/src/music/cocoa_m.h b/src/music/cocoa_m.h
+new file mode 100644
+index 0000000..f3cff9d
+--- /dev/null
++++ b/src/music/cocoa_m.h
+@@ -0,0 +1,41 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/** @file cocoa_m.h Base of music playback via CoreAudio. */
++
++#ifndef MUSIC_MACOSX_COCOA_H
++#define MUSIC_MACOSX_COCOA_H
++
++#include "music_driver.hpp"
++
++class MusicDriver_Cocoa: public MusicDriver {
++public:
++	/* virtual */ const char *Start(const char * const *param);
++
++	/* virtual */ void Stop();
++
++	/* virtual */ void PlaySong(const char *filename);
++
++	/* virtual */ void StopSong();
++
++	/* virtual */ bool IsSongPlaying();
++
++	/* virtual */ void SetVolume(byte vol);
++	/* virtual */ const char *GetName() const { return "cocoa"; }
++};
++
++class FMusicDriver_Cocoa: public MusicDriverFactory<FMusicDriver_Cocoa> {
++public:
++	static const int priority = 10;
++	/* virtual */ const char *GetName() { return "cocoa"; }
++	/* virtual */ const char *GetDescription() { return "Cocoa MIDI Driver"; }
++	/* virtual */ Driver *CreateInstance() { return new MusicDriver_Cocoa(); }
++};
++
++#endif /* MUSIC_MACOSX_COCOA_H */
+diff --git a/src/music/qtmidi.h b/src/music/qtmidi.h
+index 8ad7c47..806a3c1 100644
+--- a/src/music/qtmidi.h
++++ b/src/music/qtmidi.h
+@@ -32,7 +32,7 @@ public:
+ 
+ class FMusicDriver_QtMidi: public MusicDriverFactory<FMusicDriver_QtMidi> {
+ public:
+-	static const int priority = 10;
++	static const int priority = 5;
+ 	/* virtual */ const char *GetName() { return "qt"; }
+ 	/* virtual */ const char *GetDescription() { return "QuickTime MIDI Driver"; }
+ 	/* virtual */ Driver *CreateInstance() { return new MusicDriver_QtMidi(); }

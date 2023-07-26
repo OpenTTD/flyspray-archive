@@ -1,0 +1,204 @@
+Index: terraform_gui.c
+===================================================================
+--- terraform_gui.c	(revision 6375)
++++ terraform_gui.c	(working copy)
+@@ -27,7 +27,6 @@
+ 	}
+ }
+ 
+-
+ /** Scenario editor command that generates desert areas */
+ static void GenerateDesertArea(TileIndex end, TileIndex start)
+ {
+@@ -103,6 +102,9 @@
+ 	case GUI_PlaceProc_LevelArea >> 4:
+ 		DoCommandP(end_tile, start_tile, 0, CcPlaySound10, CMD_LEVEL_LAND | CMD_AUTO);
+ 		break;
++	case GUI_PlaceProc_LandArea >> 4:
++		DoCommandP(end_tile, start_tile, 0, CcPlaySound1E, CMD_PURCHASE_LAND_AREA | CMD_AUTO | CMD_NO_WATER | CMD_MSG(STR_5806_CAN_T_PURCHASE_THIS_LAND));
++		break;
+ 	case GUI_PlaceProc_RockyArea >> 4:
+ 		GenerateRockyArea(end_tile, start_tile);
+ 		break;
+@@ -156,6 +158,11 @@
+ 	VpStartPlaceSizing(tile, VPM_X_AND_Y | GUI_PlaceProc_LevelArea);
+ }
+ 
++void PlaceProc_BuyLand(TileIndex tile)
++{
++	VpStartPlaceSizing(tile, VPM_X_AND_Y | GUI_PlaceProc_LandArea);
++}
++
+ static void TerraformClick_Lower(Window *w)
+ {
+ 	HandlePlacePushButton(w, 4, ANIMCURSOR_LOWERLAND, 2, PlaceProc_LowerLand);
+Index: rail_gui.c
+===================================================================
+--- rail_gui.c	(revision 6375)
++++ rail_gui.c	(working copy)
+@@ -209,11 +209,6 @@
+ 		CMD_BUILD_TUNNEL | CMD_AUTO | CMD_MSG(STR_5016_CAN_T_BUILD_TUNNEL_HERE));
+ }
+ 
+-void PlaceProc_BuyLand(TileIndex tile)
+-{
+-	DoCommandP(tile, 0, 0, CcPlaySound1E, CMD_PURCHASE_LAND_AREA | CMD_AUTO | CMD_NO_WATER | CMD_MSG(STR_5806_CAN_T_PURCHASE_THIS_LAND));
+-}
+-
+ static void PlaceRail_ConvertRail(TileIndex tile)
+ {
+ 	VpStartPlaceSizing(tile, VPM_X_AND_Y | GUI_PlaceProc_ConvertRailArea);
+Index: gui.h
+===================================================================
+--- gui.h	(revision 6375)
++++ gui.h	(working copy)
+@@ -45,6 +45,9 @@
+ void ShowOrdersWindow(const Vehicle *v);
+ void ShowVehWithSharedOrdersTrains(Vehicle *v);
+ 
++/* rail_gui.c */
++void CcPlaySound1E(bool success, TileIndex tile, uint32 p1, uint32 p2);
++
+ /* road_gui.c */
+ void ShowBuildRoadToolbar(void);
+ void ShowBuildRoadScenToolbar(void);
+@@ -75,12 +78,13 @@
+ bool GUIPlaceProcDragXY(const WindowEvent *we);
+ 
+ enum { // max 32 - 4 = 28 types
+-	GUI_PlaceProc_DemolishArea    = 0 << 4,
+-	GUI_PlaceProc_LevelArea       = 1 << 4,
+-	GUI_PlaceProc_DesertArea      = 2 << 4,
+-	GUI_PlaceProc_WaterArea       = 3 << 4,
+-	GUI_PlaceProc_ConvertRailArea = 4 << 4,
+-	GUI_PlaceProc_RockyArea       = 5 << 4,
++	GUI_PlaceProc_DemolishArea	= 0 << 4,
++	GUI_PlaceProc_LevelArea		= 1 << 4,
++	GUI_PlaceProc_DesertArea	= 2 << 4,
++	GUI_PlaceProc_WaterArea		= 3 << 4,
++	GUI_PlaceProc_ConvertRailArea	= 4 << 4,
++	GUI_PlaceProc_RockyArea		= 5 << 4,
++	GUI_PlaceProc_LandArea		= 6 << 4,
+ };
+ 
+ /* misc_gui.c */
+Index: clear_cmd.c
+===================================================================
+--- clear_cmd.c	(revision 6375)
++++ clear_cmd.c	(working copy)
+@@ -336,7 +336,7 @@
+ }
+ 
+ 
+-/** Levels a selected (rectangle) area of land
++/** level a selected area (rectangle) of land
+  * @param tile end tile of area-drag
+  * @param p1 start tile of area drag
+  * @param p2 unused
+@@ -357,7 +357,7 @@
+ 	// remember level height
+ 	h = TileHeight(p1);
+ 
+-	// make sure sx,sy are smaller than ex,ey
++	// ensure sx,sy are smaller than ex,ey
+ 	ex = TileX(tile);
+ 	ey = TileY(tile);
+ 	sx = TileX(p1);
+@@ -372,6 +372,7 @@
+ 	money = GetAvailableMoneyForCommand();
+ 	cost = 0;
+ 
++	// loop through the affected tiles
+ 	BEGIN_TILE_LOOP(tile2, size_x, size_y, tile) {
+ 		curh = TileHeight(tile2);
+ 		while (curh != h) {
+@@ -394,32 +395,60 @@
+ 	return (cost == 0) ? CMD_ERROR : cost;
+ }
+ 
+-/** Purchase a land area. Actually you only purchase one tile, so
+- * the name is a bit confusing ;p
+- * @param tile the tile the player is purchasing
+- * @param p1 unused
++/** purchase a selected area (rectangle) of land
++ * @param tile end tile of area-drag
++ * @param p1 start tile of area drag
+  * @param p2 unused
+  */
+ int32 CmdPurchaseLandArea(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+-	int32 cost;
++	int size_x, size_y;
++	int ex;
++	int ey;
++	int sx, sy;
++	int32 ret, cost, money;
+ 
++	if (p1 >= MapSize()) return CMD_ERROR;
++
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+-	if (!EnsureNoVehicle(tile)) return CMD_ERROR;
++	// ensure sx,sy are smaller than ex,ey
++	ex = TileX(tile);
++	ey = TileY(tile);
++	sx = TileX(p1);
++	sy = TileY(p1);
++	if (ex < sx) intswap(ex, sx);
++	if (ey < sy) intswap(ey, sy);
++	tile = TileXY(sx, sy);
+ 
+-	if (IsOwnedLandTile(tile) && IsTileOwner(tile, _current_player)) {
+-		return_cmd_error(STR_5807_YOU_ALREADY_OWN_IT);
+-	}
++	size_x = ex-sx+1;
++	size_y = ey-sy+1;
+ 
+-	cost = DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
+-	if (CmdFailed(cost)) return CMD_ERROR;
++	money = GetAvailableMoneyForCommand();
++	cost = 0;
+ 
+-	if (flags & DC_EXEC) {
+-		MakeOwnedLand(tile, _current_player);
+-		MarkTileDirtyByTile(tile);
+-	}
++	// loop through the affected tiles
++	BEGIN_TILE_LOOP(tile2, size_x, size_y, tile) {
++		if (!EnsureNoVehicle(tile2)) return CMD_ERROR;
+ 
++		if (IsOwnedLandTile(tile2) && IsTileOwner(tile2, _current_player)) {
++			return_cmd_error(STR_5807_YOU_ALREADY_OWN_IT);
++		}
++
++		ret = DoCommand(tile2, 0, 0, flags & ~DC_EXEC, CMD_LANDSCAPE_CLEAR);
++		if (CmdFailed(ret)) return CMD_ERROR;
++		cost += ret;
++
++		if (flags & DC_EXEC) {
++			if ((money -= ret) < 0) {
++				_additional_cash_required = ret;
++				return cost - ret;
++			}
++			MakeOwnedLand(tile2, _current_player);
++			MarkTileDirtyByTile(tile2);
++		}
++	} END_TILE_LOOP(tile2, size_x, size_y, tile)
++
+ 	return cost + _price.purchase_land * 10;
+ }
+ 
+Index: command.c
+===================================================================
+--- command.c	(revision 6375)
++++ command.c	(working copy)
+@@ -452,7 +452,8 @@
+ 		(cmd & 0xFF) == CMD_CONVERT_RAIL ||
+ 		(cmd & 0xFF) == CMD_LEVEL_LAND ||
+ 		(cmd & 0xFF) == CMD_REMOVE_ROAD ||
+-		(cmd & 0xFF) == CMD_REMOVE_LONG_ROAD;
++		(cmd & 0xFF) == CMD_REMOVE_LONG_ROAD ||
++		(cmd & 0xFF) == CMD_PURCHASE_LAND_AREA;
+ 
+ 	_docommand_recursive = 1;
+ 

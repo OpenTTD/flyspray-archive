@@ -1,0 +1,138 @@
+Index: src/signs_gui.cpp
+===================================================================
+--- src/signs_gui.cpp	(revision 17266)
++++ src/signs_gui.cpp	(working copy)
+@@ -88,51 +88,67 @@
+ };
+ 
+ struct SignListWindow : Window, SignList {
+-	SignListWindow(const WindowDesc *desc, WindowNumber window_number) : Window(desc, window_number)
++	SignListWindow(const WindowDesc *desc, WindowNumber window_number) : Window()
+ 	{
+ 		this->vscroll.cap = 12;
+ 		this->resize.step_height = 10;
+ 		this->resize.height = this->height - 10 * 7; // minimum if 5 in the list
+ 
++		//Create initial list
+ 		this->signs.ForceRebuild();
+-		this->signs.NeedResort();
+-
+-		this->FindWindowPlacementAndResize(desc);
++		this->signs.ForceResort();
++		BuildSignsList();
++		SortSignsList();
++		SetVScrollCount(this, this->signs.Length());
++		
++		this->InitNested(desc, window_number);
+ 	}
+ 
+ 	virtual void OnPaint()
+ 	{
+-		BuildSignsList();
+-		SortSignsList();
+-
+-		SetVScrollCount(this, this->signs.Length());
+-
+-		SetDParam(0, this->vscroll.count);
+ 		this->DrawWidgets();
++	}
+ 
+-		/* No signs? */
+-		int y = this->widget[SLW_LIST].top + 2; // offset from top of widget
+-		if (this->vscroll.count == 0) {
+-			DrawString(this->widget[SLW_LIST].left + 2, this->widget[SLW_LIST].right, y, STR_STATION_LIST_NONE);
+-			return;
+-		}
++	virtual void DrawWidget(const Rect &r, int widget) const
++	{
++		switch (widget) {
++			case SLW_LIST: {	//The list has to be drawn
++				/* No signs? */
++				uint y = r.top + 2; // offset from top of widget
++				if (this->vscroll.count == 0) {
++					DrawString(r.left + 2, r.right, y, STR_STATION_LIST_NONE);
++					return;
++				}
+ 
+-		/* Start drawing the signs */
+-		for (uint16 i = this->vscroll.pos; i < this->vscroll.cap + this->vscroll.pos && i < this->vscroll.count; i++) {
+-			const Sign *si = this->signs[i];
++				/* Start drawing the signs */
++				for (uint16 i = this->vscroll.pos; i < this->vscroll.cap + this->vscroll.pos && i < this->vscroll.count; i++) {
++					const Sign *si = this->signs[i];
+ 
+-			if (si->owner != OWNER_NONE) DrawCompanyIcon(si->owner, this->widget[SLW_LIST].left + 4, y + 1);
++					if (si->owner != OWNER_NONE) DrawCompanyIcon(si->owner, r.left + 4, y + 1);
+ 
+-			SetDParam(0, si->index);
+-			DrawString(this->widget[SLW_LIST].left + 22, this->widget[SLW_LIST].right, y, STR_SIGN_NAME, TC_YELLOW);
+-			y += 10;
++					SetDParam(0, si->index);
++					DrawString(r.left + 22, r.right, y, STR_SIGN_NAME, TC_YELLOW);
++					y += 10;
++				}
++				break;
++			}
+ 		}
+ 	}
+ 
++	virtual void SetStringParameters(int widget) const
++	{
++		switch (widget) {
++			case SLW_CAPTION: {
++				SetDParam(0, this->vscroll.count);
++				break;
++			}
++		}
++	}
++
+ 	virtual void OnClick(Point pt, int widget)
+ 	{
+ 		if (widget == SLW_LIST) {
+-			uint32 id_v = (pt.y - this->widget[SLW_LIST].top - 1) / 10;
++			uint32 id_v = (pt.y - this->nested_array[SLW_LIST]->pos_y - 1) / this->resize.step_height;
+ 
+ 			if (id_v >= this->vscroll.cap) return;
+ 			id_v += this->vscroll.pos;
+@@ -150,24 +166,20 @@
+ 
+ 	virtual void OnInvalidateData(int data)
+ 	{
+-		if (data == 0) {
++		if (data == 0) {	//New or deleted sign
++			//Rebuild the list
+ 			this->signs.ForceRebuild();
+-		} else {
++			BuildSignsList();
++			SetVScrollCount(this, this->signs.Length()); //Update the VScrollCount (new or deleted sign)
++			this->InvalidateWidget(SLW_CAPTION);
++		} else {			//Change sign contents
+ 			this->signs.ForceResort();
+ 		}
++
++		SortSignsList();	//Try to sort the list after each change
+ 	}
+ };
+ 
+-static const Widget _sign_list_widget[] = {
+-{   WWT_CLOSEBOX,   RESIZE_NONE,  COLOUR_GREY,     0,    10,     0,    13, STR_BLACK_CROSS,       STR_TOOLTIP_CLOSE_WINDOW},
+-{    WWT_CAPTION,  RESIZE_RIGHT,  COLOUR_GREY,    11,   345,     0,    13, STR_SIGN_LIST_CAPTION, STR_TOOLTIP_WINDOW_TITLE_DRAG_THIS},
+-{  WWT_STICKYBOX,     RESIZE_LR,  COLOUR_GREY,   346,   357,     0,    13, 0x0,                   STR_TOOLTIP_STICKY},
+-{      WWT_PANEL,     RESIZE_RB,  COLOUR_GREY,     0,   345,    14,   137, 0x0,                   STR_NULL},
+-{  WWT_SCROLLBAR,    RESIZE_LRB,  COLOUR_GREY,   346,   357,    14,   125, 0x0,                   STR_TOOLTIP_VSCROLL_BAR_SCROLLS_LIST},
+-{  WWT_RESIZEBOX,   RESIZE_LRTB,  COLOUR_GREY,   346,   357,   126,   137, 0x0,                   STR_TOOLTIP_RESIZE},
+-{   WIDGETS_END},
+-};
+-
+ static const NWidgetPart _nested_sign_list_widgets[] = {
+ 	NWidget(NWID_HORIZONTAL),
+ 		NWidget(WWT_CLOSEBOX, COLOUR_GREY, SLW_CLOSEBOX),
+@@ -187,7 +199,7 @@
+ 	WDP_AUTO, WDP_AUTO, 358, 138, 358, 138,
+ 	WC_SIGN_LIST, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_STICKY_BUTTON | WDF_RESIZABLE,
+-	_sign_list_widget, _nested_sign_list_widgets, lengthof(_nested_sign_list_widgets)
++	NULL, _nested_sign_list_widgets, lengthof(_nested_sign_list_widgets)
+ );
+ 
+ 

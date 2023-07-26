@@ -1,0 +1,234 @@
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(revision 19316)
++++ src/rail_cmd.cpp	(working copy)
+@@ -1105,14 +1105,15 @@
+  * - p2 = (bit  0- 2) - track-orientation, valid values: 0-5 (Track enum)
+  * - p2 = (bit  3)    - 1 = override signal/semaphore, or pre/exit/combo signal (CTRL-toggle)
+  * - p2 = (bit  4)    - 0 = signals, 1 = semaphores
+- * - p2 = (bit  5)    - 0 = build, 1 = remove signals
++ * - p2 = (bit  5)    - 1 = keep fixed interval
+  * - p2 = (bit  6)    - 0 = selected stretch, 1 = auto fill
+  * - p2 = (bit  7- 9) - default signal type
+  * - p2 = (bit 24-31) - user defined signals_density
+  * @param text unused
++ * @param remove false to build, true to remove
+  * @return the cost of this operation or an error
+  */
+-static CommandCost CmdSignalTrackHelper(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
++static CommandCost CmdSignalTrackHelper(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text, bool remove)
+ {
+ 	CommandCost ret, total_cost(EXPENSES_CONSTRUCTION);
+ 	bool err = true;
+@@ -1121,7 +1122,7 @@
+ 	Track track = (Track)GB(p2, 0, 3);
+ 	bool mode = HasBit(p2, 3);
+ 	bool semaphores = HasBit(p2, 4);
+-	bool remove = HasBit(p2, 5);
++	bool fixed_interval = HasBit(p2, 5);
+ 	bool autofill = HasBit(p2, 6);
+ 	Trackdir trackdir = TrackToTrackdir(track);
+ 	byte signal_density = GB(p2, 24, 8);
+@@ -1167,23 +1168,40 @@
+ 	if (signals & SignalAlongTrackdir(trackdir))   SetBit(signal_dir, 0);
+ 	if (signals & SignalAgainstTrackdir(trackdir)) SetBit(signal_dir, 1);
+ 
+-	/* signal_ctr         - amount of tiles already processed
+-	 * signals_density    - setting to put signal on every Nth tile (double space on |, -- tracks)
++	/* signal_ctr          - amount of tiles already processed
++	 * last_used_ctr       - signal_ctr value for last built/removed signal
++	 * signals_density     - setting to put signal on every Nth tile (double space on |, -- tracks)
+ 	 **********
+ 	 * trackdir   - trackdir to build with autorail
+ 	 * semaphores - semaphores or signals
+ 	 * signals    - is there a signal/semaphore on the first tile, copy its style (two-way/single-way)
+ 	 *              and convert all others to semaphore/signal
+-	 * remove     - 1 remove signals, 0 build signals */
++	 * remove     - 1 remove signals, 0 build signals
++	 **********
++	 * last_valid_tile     - index of last valid rail tile (where siganl can be placed /removed)
++	 * last_valid_trackdir - trackdir of last valid rail tile
++	 * last_valid_ctr      - signal_ctr value for last valid rail tile */
+ 	int signal_ctr = 0;
++	TileIndex last_valid_tile = INVALID_TILE;
++	int last_valid_ctr;
++	Trackdir last_valid_trackdir;
++	int last_used_ctr = INT_MIN; // initially INT_MIN to force building/removing at the first tile
++
++	/* reuse p1, bits below do not change */
++	p1 = 0;
++	SB(p1, 3, 1, mode);
++	SB(p1, 4, 1, semaphores);
++	SB(p1, 5, 3, sigtype);
++
+ 	for (;;) {
+ 		/* only build/remove signals with the specified density */
+-		if ((remove && autofill) || signal_ctr % signal_density == 0) {
+-			uint32 p1 = GB(TrackdirToTrack(trackdir), 0, 3);
+-			SB(p1, 3, 1, mode);
+-			SB(p1, 4, 1, semaphores);
+-			SB(p1, 5, 3, sigtype);
+-			if (!remove && signal_ctr == 0) SetBit(p1, 17);
++		if (
++			(remove && autofill) ||
++			(signal_ctr >= (last_used_ctr + signal_density)) ||
++			(fixed_interval && (signal_ctr % signal_density == 0))
++		) {
++			SB(p1, 0, 3, TrackdirToTrack(trackdir));
++			SB(p1, 17, 1, !remove && signal_ctr == 0);
+ 
+ 			/* Pick the correct orientation for the track direction */
+ 			signals = 0;
+@@ -1196,6 +1214,25 @@
+ 			if (ret.Succeeded()) {
+ 				err = false;
+ 				total_cost.AddCost(ret);
++				last_used_ctr = signal_ctr;
++			} else {
++				/* If signal can't be placed, place it at the last possible position */
++				if ((last_valid_tile != INVALID_TILE) && (last_valid_tile != tile) && (last_valid_ctr != last_used_ctr)) {
++					SB(p1, 0, 3, TrackdirToTrack(last_valid_trackdir));
++					SB(p1, 17, 1, 0);
++
++					/* Pick the correct orientation for the track direction */
++					signals = 0;
++					if (HasBit(signal_dir, 0)) signals |= SignalAlongTrackdir(last_valid_trackdir);
++					if (HasBit(signal_dir, 1)) signals |= SignalAgainstTrackdir(last_valid_trackdir);
++
++					ret = DoCommand(last_valid_tile, p1, signals, flags, remove ? CMD_REMOVE_SIGNALS : CMD_BUILD_SIGNALS);
++					if (ret.Succeeded()) {
++						err = false;
++						total_cost.AddCost(ret);
++						last_used_ctr = last_valid_ctr;
++					}
++				}
+ 			}
+ 		}
+ 
+@@ -1204,6 +1241,8 @@
+ 
+ 			/* Prevent possible loops */
+ 			if (tile == start_tile && trackdir == start_trackdir) break;
++
++			/* remember last tile where we can place a signal */
+ 		} else {
+ 			if (tile == end_tile) break;
+ 
+@@ -1217,6 +1256,14 @@
+ 				ToggleBit(trackdir, 0);
+ 			}
+ 		}
++
++		/* remember last track piece where we can place a signal */
++		if (IsPlainRailTile(tile) && (autofill || ( // CheckSignalAutoFill guaranties that track is valid
++				HasTrack(tile, TrackdirToTrack(trackdir)) && !TracksOverlap(GetTrackBits(tile))))) {
++			last_valid_tile = tile;
++			last_valid_ctr = signal_ctr;
++			last_valid_trackdir = trackdir;
++		}
+ 	}
+ 
+ 	return err ? CMD_ERROR : total_cost;
+@@ -1231,7 +1278,7 @@
+  * - p2 = (bit  0- 2) - track-orientation, valid values: 0-5 (Track enum)
+  * - p2 = (bit  3)    - 1 = override signal/semaphore, or pre/exit/combo signal (CTRL-toggle)
+  * - p2 = (bit  4)    - 0 = signals, 1 = semaphores
+- * - p2 = (bit  5)    - 0 = build, 1 = remove signals
++ * - p2 = (bit  5)    - 1 = keep fixed interval
+  * - p2 = (bit  6)    - 0 = selected stretch, 1 = auto fill
+  * - p2 = (bit  7- 9) - default signal type
+  * - p2 = (bit 24-31) - user defined signals_density
+@@ -1241,7 +1288,7 @@
+  */
+ CommandCost CmdBuildSignalTrack(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
+ {
+-	return CmdSignalTrackHelper(tile, flags, p1, p2, text);
++	return CmdSignalTrackHelper(tile, flags, p1, p2, text, false);
+ }
+ 
+ /** Remove signals
+@@ -1316,7 +1363,7 @@
+  * - p2 = (bit  0- 2) - track-orientation, valid values: 0-5 (Track enum)
+  * - p2 = (bit  3)    - 1 = override signal/semaphore, or pre/exit/combo signal (CTRL-toggle)
+  * - p2 = (bit  4)    - 0 = signals, 1 = semaphores
+- * - p2 = (bit  5)    - 0 = build, 1 = remove signals
++ * - p2 = (bit  5)    - 1 = keep fixed interval
+  * - p2 = (bit  6)    - 0 = selected stretch, 1 = auto fill
+  * - p2 = (bit  7- 9) - default signal type
+  * - p2 = (bit 24-31) - user defined signals_density
+@@ -1326,7 +1373,7 @@
+  */
+ CommandCost CmdRemoveSignalTrack(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
+ {
+-	return CmdSignalTrackHelper(tile, flags, p1, SetBit(p2, 5), text); // bit 5 is remove bit
++	return CmdSignalTrackHelper(tile, flags, p1, p2, text, true);
+ }
+ 
+ /** Update power of train under which is the railtype being converted */
+Index: src/rail_gui.cpp
+===================================================================
+--- src/rail_gui.cpp	(revision 19316)
++++ src/rail_gui.cpp	(working copy)
+@@ -558,12 +558,14 @@
+ 		/* signal GUI is used */
+ 		SB(p2,  3, 1, 0);
+ 		SB(p2,  4, 1, _cur_signal_variant);
++		SB(p2,  5, 1, _settings_client.gui.drag_signals_fixed_distance);
+ 		SB(p2,  6, 1, _ctrl_pressed);
+ 		SB(p2,  7, 3, _cur_signal_type);
+ 		SB(p2, 24, 8, _settings_client.gui.drag_signals_density);
+ 	} else {
+ 		SB(p2,  3, 1, 0);
+ 		SB(p2,  4, 1, (_cur_year < _settings_client.gui.semaphore_build_before ? SIG_SEMAPHORE : SIG_ELECTRIC));
++		SB(p2,  5, 1, _settings_client.gui.drag_signals_fixed_distance);
+ 		SB(p2,  6, 1, _ctrl_pressed);
+ 		SB(p2,  7, 3, _default_signal_type[_settings_client.gui.default_signal_type]);
+ 		SB(p2, 24, 8, _settings_client.gui.drag_signals_density);
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 19316)
++++ src/settings_gui.cpp	(working copy)
+@@ -1309,6 +1309,7 @@
+ 	SettingEntry("construction.signal_side"),
+ 	SettingEntry("gui.enable_signal_gui"),
+ 	SettingEntry("gui.drag_signals_density"),
++	SettingEntry("gui.drag_signals_fixed_distance"),
+ 	SettingEntry("gui.semaphore_build_before"),
+ 	SettingEntry("gui.default_signal_type"),
+ 	SettingEntry("gui.cycle_signal_types"),
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 19316)
++++ src/settings_type.h	(working copy)
+@@ -87,6 +87,7 @@
+ 	bool   bridge_pillars;                   ///< show bridge pillars for high bridges
+ 	bool   auto_euro;                        ///< automatically switch to euro in 2002
+ 	byte   drag_signals_density;             ///< many signals density
++	bool   drag_signals_fixed_distance;      ///< keep fixed distance between signals when dragging
+ 	Year   semaphore_build_before;           ///< build semaphore signals automatically before this year
+ 	byte   news_message_timeout;             ///< how much longer than the news message "age" should we keep the message in the history
+ 	bool   show_track_reservation;           ///< highlight reserved tracks.
+Index: src/table/settings.h
+===================================================================
+--- src/table/settings.h	(revision 19316)
++++ src/table/settings.h	(working copy)
+@@ -570,6 +570,7 @@
+ 	  SDTC_VAR(gui.default_rail_type,         SLE_UINT8, S, MS,     0,        0,        2, 0, STR_CONFIG_SETTING_DEFAULT_RAIL_TYPE,           NULL),
+ 	 SDTC_BOOL(gui.enable_signal_gui,                    S,  0,  true,                        STR_CONFIG_SETTING_ENABLE_SIGNAL_GUI,           CloseSignalGUI),
+ 	  SDTC_VAR(gui.drag_signals_density,      SLE_UINT8, S,  0,     4,        1,       20, 0, STR_CONFIG_SETTING_DRAG_SIGNALS_DENSITY,        DragSignalsDensityChanged),
++	 SDTC_BOOL(gui.drag_signals_fixed_distance,          S,  0, false,                        STR_CONFIG_SETTING_DRAG_SIGNALS_FIXED_DISTANCE, NULL),
+ 	  SDTC_VAR(gui.semaphore_build_before,    SLE_INT32, S, NC,  1950, MIN_YEAR, MAX_YEAR, 1, STR_CONFIG_SETTING_SEMAPHORE_BUILD_BEFORE_DATE, ResetSignalVariant),
+ 	 SDTC_BOOL(gui.vehicle_income_warn,                  S,  0,  true,                        STR_CONFIG_SETTING_WARN_INCOME_LESS,            NULL),
+ 	  SDTC_VAR(gui.order_review_system,       SLE_UINT8, S, MS,     2,        0,        2, 0, STR_CONFIG_SETTING_ORDER_REVIEW,                NULL),
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 19316)
++++ src/lang/english.txt	(working copy)
+@@ -1249,6 +1249,7 @@
+ STR_CONFIG_SETTING_ALLOW_SHARES                                 :{LTBLUE}Allow buying shares from other companies: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_FEEDER_PAYMENT_SHARE                         :{LTBLUE}Percentage of leg profit to pay in feeder systems: {ORANGE}{STRING1}%
+ STR_CONFIG_SETTING_DRAG_SIGNALS_DENSITY                         :{LTBLUE}When dragging, place signals every: {ORANGE}{STRING1} tile(s)
++STR_CONFIG_SETTING_DRAG_SIGNALS_FIXED_DISTANCE                  :{LTBLUE}When dragging, keep fixed distance between signals
+ STR_CONFIG_SETTING_SEMAPHORE_BUILD_BEFORE_DATE                  :{LTBLUE}Automatically build semaphores before: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_ENABLE_SIGNAL_GUI                            :{LTBLUE}Enable the signal GUI: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_DEFAULT_SIGNAL_TYPE                          :{LTBLUE}Signal type to build by default: {ORANGE}{STRING1}

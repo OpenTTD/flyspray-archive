@@ -1,0 +1,646 @@
+diff --git a/src/cargopacket.cpp b/src/cargopacket.cpp
+index 355cabe..92fd775 100644
+--- a/src/cargopacket.cpp
++++ b/src/cargopacket.cpp
+@@ -16,20 +16,19 @@ void InitializeCargoPackets()
+ 	_cargopacket_pool.CleanPool();
+ }
+ 
+-CargoPacket::CargoPacket(StationID source, uint16 count, SourceType source_type, SourceID source_id)
++CargoPacket::CargoPacket(StationID in_source, uint16 in_count, SourceType source_type, SourceID in_source_id) :
++	count(in_count),
++	source(in_source),
++	source_id(in_source_id)
+ {
+-	if (source != INVALID_STATION) assert(count != 0);
++	if (Station::IsValidID(source)) {
++		assert(count != 0);
++		this->source_xy = Station::Get(source)->xy;
++	}
+ 
+-//	this->feeder_share    = 0; // no need to zero already zeroed data (by operator new)
+-	this->source_xy       = (source != INVALID_STATION) ? Station::Get(source)->xy : 0;
+ 	this->loaded_at_xy    = this->source_xy;
+-	this->source          = source;
+-
+-	this->count           = count;
+-//	this->days_in_transit = 0;
+ 
+ 	this->source_type     = source_type;
+-	this->source_id       = source_id;
+ }
+ 
+ /**
+@@ -61,157 +60,163 @@ CargoList::~CargoList()
+ 
+ void CargoList::AgeCargo()
+ {
+-	if (empty) return;
++	if (packets.empty()) return;
+ 
+-	uint dit = 0;
++	days_in_transit = 0;
+ 	for (List::const_iterator it = packets.begin(); it != packets.end(); it++) {
+-		if ((*it)->days_in_transit != 0xFF) (*it)->days_in_transit++;
+-		dit += (*it)->days_in_transit * (*it)->count;
++		CargoPacket *cp = *it;
++		if (cp->days_in_transit != 0xFF) ++(cp->days_in_transit);
++		days_in_transit += cp->days_in_transit * cp->count;
+ 	}
+-	days_in_transit = dit / count;
+ }
+ 
+-void CargoList::Append(CargoPacket *cp)
++void CargoList::RemoveFromCache(CargoPacket *cp) {
++	this->count -= cp->count;
++	this->feeder_share -= cp->feeder_share;
++	this->days_in_transit -= cp->days_in_transit * cp->count;
++}
++
++void CargoList::AddToCache(CargoPacket *cp) {
++	this->count += cp->count;
++	this->feeder_share += cp->feeder_share;
++	this->days_in_transit += cp->count * cp->days_in_transit;
++}
++
++void CargoList::Append(CargoPacket *cp, bool merge)
+ {
+ 	assert(cp != NULL);
+ 
+-	for (List::iterator it = packets.begin(); it != packets.end(); it++) {
+-		if ((*it)->SameSource(cp) && (*it)->count + cp->count <= 65535) {
+-			(*it)->count        += cp->count;
+-			(*it)->feeder_share += cp->feeder_share;
+-			delete cp;
+-
+-			InvalidateCache();
+-			return;
++	if (merge) {
++		for (List::iterator it = packets.begin(); it != packets.end(); it++) {
++			CargoPacket *in_list = *it;
++			if (in_list->SameSource(cp) && in_list->count + cp->count <= CargoPacket::MAX_COUNT) {
++				in_list->count += cp->count;
++				in_list->feeder_share += cp->feeder_share;
++				AddToCache(cp);
++				delete cp;
++				return;
++			}
+ 		}
+ 	}
+ 
+-	/* The packet could not be merged with another one */
++	/* The packet could or should not be merged with another one */
+ 	packets.push_back(cp);
+-	InvalidateCache();
++	AddToCache(cp);
+ }
+ 
+ 
+-void CargoList::Truncate(uint count)
++void CargoList::Truncate(uint max_remain)
+ {
+-	for (List::iterator it = packets.begin(); it != packets.end(); it++) {
+-		uint local_count = (*it)->count;
+-		if (local_count <= count) {
+-			count -= local_count;
+-			continue;
++	for (List::iterator it = packets.begin(); it != packets.end();) {
++		CargoPacket * cp = *it;
++		uint local_count = cp->count;
++		if (max_remain == 0) {
++			RemoveFromCache(cp);
++			delete cp;
++			packets.erase(it++);
++		} else {
++			if (local_count > max_remain) {
++				uint diff = local_count - max_remain;
++				this->count -= diff;
++				this->days_in_transit -= cp->days_in_transit * diff;
++				cp->count = max_remain;
++				max_remain = 0;
++			} else {
++				max_remain -= local_count;
++			}
++			++it;
+ 		}
+-
+-		(*it)->count = count;
+-		count = 0;
+-	}
+-
+-	while (!packets.empty()) {
+-		CargoPacket *cp = packets.back();
+-		if (cp->count != 0) break;
+-		delete cp;
+-		packets.pop_back();
+ 	}
+-
+-	InvalidateCache();
+ }
+ 
+-bool CargoList::MoveTo(CargoList *dest, uint count, CargoList::MoveToAction mta, CargoPayment *payment, uint data)
++bool CargoList::MoveTo(CargoList *dest, uint max_move, CargoList::MoveToAction mta, CargoPayment *payment, uint data)
+ {
+ 	assert(mta == MTA_FINAL_DELIVERY || dest != NULL);
+ 	assert(mta == MTA_UNLOAD || mta == MTA_CARGO_LOAD || payment != NULL);
+-	CargoList tmp;
+ 
+-	while (!packets.empty() && count > 0) {
+-		CargoPacket *cp = *packets.begin();
+-		if (cp->count <= count) {
++	List::iterator it = packets.begin();
++	while(it != packets.end() && max_move > 0) {
++		CargoPacket *cp = *it;
++		if (cp->count <= max_move) {
+ 			/* Can move the complete packet */
+-			packets.remove(cp);
+-			switch (mta) {
+-				case MTA_FINAL_DELIVERY:
+-					if (cp->source == data) {
+-						tmp.Append(cp);
+-					} else {
++			if (cp->source == data && mta == MTA_FINAL_DELIVERY) {
++				++it;
++			} else {
++				max_move -= cp->count;
++				packets.erase(it++);
++				RemoveFromCache(cp);
++				switch(mta) {
++					case MTA_FINAL_DELIVERY:
+ 						payment->PayFinalDelivery(cp, cp->count);
+-						count -= cp->count;
+ 						delete cp;
+-					}
+-					continue; // of the loop
++						continue; // of the loop
+ 
+-				case MTA_CARGO_LOAD:
+-					cp->loaded_at_xy = data;
+-					break;
++					case MTA_CARGO_LOAD:
++						cp->loaded_at_xy = data;
++						break;
+ 
+-				case MTA_TRANSFER:
+-					payment->PayTransfer(cp, cp->count);
+-					break;
++					case MTA_TRANSFER:
++						/* here the packet isn't in either list, so we can change it */
++						cp->feeder_share += payment->PayTransfer(cp, cp->count);
++						break;
+ 
+-				case MTA_UNLOAD:
+-					break;
++					case MTA_UNLOAD:
++						break;
++				}
++				dest->Append(cp, false);
+ 			}
+-			count -= cp->count;
+-			dest->packets.push_back(cp);
+ 		} else {
+ 			/* Can move only part of the packet, so split it into two pieces */
+ 			if (mta != MTA_FINAL_DELIVERY) {
+-				CargoPacket *cp_new = new CargoPacket();
+-
+-				Money fs = cp->feeder_share * count / static_cast<uint>(cp->count);
++				Money fs = cp->feeder_share * max_move / static_cast<uint>(cp->count);
+ 				cp->feeder_share -= fs;
++				CargoPacket *cp_new = new CargoPacket(max_move, cp->days_in_transit, fs);
+ 
+ 				cp_new->source          = cp->source;
+ 				cp_new->source_xy       = cp->source_xy;
+ 				cp_new->loaded_at_xy    = (mta == MTA_CARGO_LOAD) ? data : cp->loaded_at_xy;
+ 
+-				cp_new->days_in_transit = cp->days_in_transit;
+-				cp_new->feeder_share    = fs;
+-
+ 				cp_new->source_type     = cp->source_type;
+ 				cp_new->source_id       = cp->source_id;
+ 
+-				cp_new->count = count;
+-				dest->packets.push_back(cp_new);
++				RemoveFromCache(cp_new); // this reflects the changes in cp
++
++				if (mta == MTA_TRANSFER) {
++					/* add the feeder share before inserting in dest */
++					cp_new->feeder_share += payment->PayTransfer(cp_new, max_move);
++				}
+ 
+-				if (mta == MTA_TRANSFER) payment->PayTransfer(cp_new, count);
++				dest->Append(cp_new, false);
++			} else if (cp->source == data) {
++				++it;
++				continue;
+ 			} else {
+-				payment->PayFinalDelivery(cp, count);
++				payment->PayFinalDelivery(cp, max_move);
++				this->count -= max_move;
++				this->days_in_transit -= max_move * cp->days_in_transit;
+ 			}
+-			cp->count -= count;
++			cp->count -= max_move;
+ 
+-			count = 0;
++			max_move = 0;
+ 		}
+ 	}
+ 
+-	bool remaining = !packets.empty();
+-
+-	if (mta == MTA_FINAL_DELIVERY && !tmp.Empty()) {
+-		/* There are some packets that could not be delivered at the station, put them back */
+-		tmp.MoveTo(this, UINT_MAX, MTA_UNLOAD, NULL);
+-		tmp.packets.clear();
+-	}
+-
+-	if (dest != NULL) dest->InvalidateCache();
+-	InvalidateCache();
+-
+-	return remaining;
++	return it != packets.end();
+ }
+ 
+ void CargoList::InvalidateCache()
+ {
+-	empty = packets.empty();
+ 	count = 0;
+ 	feeder_share = 0;
+-	source = INVALID_STATION;
+ 	days_in_transit = 0;
+ 
+-	if (empty) return;
++	if (packets.empty()) return;
+ 
+-	uint dit = 0;
+ 	for (List::const_iterator it = packets.begin(); it != packets.end(); it++) {
+-		count        += (*it)->count;
+-		dit          += (*it)->days_in_transit * (*it)->count;
+-		feeder_share += (*it)->feeder_share;
++		CargoPacket *cp = *it;
++		count           += cp->count;
++		days_in_transit += cp->days_in_transit * cp->count;
++		feeder_share    += cp->feeder_share;
+ 	}
+-	days_in_transit = dit / count;
+-	source = (*packets.begin())->source;
+ }
+ 
+diff --git a/src/cargopacket.h b/src/cargopacket.h
+index de8268a..12411ab 100644
+--- a/src/cargopacket.h
++++ b/src/cargopacket.h
+@@ -19,29 +19,55 @@ struct CargoPacket;
+ typedef Pool<CargoPacket, CargoPacketID, 1024, 1048576> CargoPacketPool;
+ extern CargoPacketPool _cargopacket_pool;
+ 
++class CargoList;
++extern const struct SaveLoad *GetCargoPacketDesc();
++
+ /**
+  * Container for cargo from the same location and time
+  */
+ struct CargoPacket : CargoPacketPool::PoolItem<&_cargopacket_pool> {
++private:
++	/* These fields are all involved in the cargo list's cache.
++	 * They can only be modified by CargoList which knows about that.
++	 */
+ 	Money feeder_share;     ///< Value of feeder pickup to be paid for on delivery of cargo
+-	TileIndex source_xy;    ///< The origin of the cargo (first station in feeder chain)
+-	TileIndex loaded_at_xy; ///< Location where this cargo has been loaded into the vehicle
+-	StationID source;       ///< The station where the cargo came from first
+-
+ 	uint16 count;           ///< The amount of cargo in this packet
+ 	byte days_in_transit;   ///< Amount of days this packet has been in transit
++public:
++	friend class CargoList;
++	friend const struct SaveLoad *GetCargoPacketDesc();
++
++	static const uint16 MAX_COUNT = 65535;
+ 
++	/*
++	 * source and loaded_at_xy don't mess with the cargo list's cache
++	 * so it's OK to modify them.
++	 */
++	StationID source;           ///< The station where the cargo came from first
+ 	SourceTypeByte source_type; ///< Type of #source_id
+ 	SourceID source_id;         ///< Index of source, INVALID_SOURCE if unknown/invalid
++	TileIndex source_xy;        ///< The origin of the cargo (first station in feeder chain)
++	TileIndex loaded_at_xy;     ///< Location where this cargo has been loaded into the vehicle
+ 
+ 	/**
+ 	 * Creates a new cargo packet
+-	 * @param source the source of the packet
+-	 * @param count  the number of cargo entities to put in this packet
++	 * @param source      the source station of the packet
++	 * @param count       the number of cargo entities to put in this packet
++	 * @param source_type the type of the packet's source (see @SourceType)
++	 * @param source_id   the number of the packet's source {town|industry|headquarter}
+ 	 * @pre count != 0 || source == INVALID_STATION
+ 	 */
+ 	CargoPacket(StationID source = INVALID_STATION, uint16 count = 0, SourceType source_type = ST_INDUSTRY, SourceID source_id = INVALID_SOURCE);
+ 
++	/*
++	 * Creates a new cargo packet. Initializes the fields that cannot be changed later.
++	 * Used when loading or splitting packets.
++	 * @param cnt the number of cargo entities to put in this packet
++	 * @param dit number of days the cargo has been in transit
++	 * @param fs  feeder share the packet has already accumulated
++	 */
++	CargoPacket(uint16 cnt, byte dit, Money fs = 0) : feeder_share(fs), count(cnt), days_in_transit(dit) {}
++
+ 	/** Destroy the packet */
+ 	~CargoPacket() { }
+ 
+@@ -58,6 +84,11 @@ struct CargoPacket : CargoPacketPool::PoolItem<&_cargopacket_pool> {
+ 	}
+ 
+ 	static void InvalidateAllFrom(SourceType src_type, SourceID src);
++
++	/* read-only accessors for the private fields */
++	FORCEINLINE uint16 Count() const {return count;}
++	FORCEINLINE Money FeederShare() const {return feeder_share;}
++	FORCEINLINE byte DaysInTransit() const {return days_in_transit;}
+ };
+ 
+ /**
+@@ -94,17 +125,29 @@ public:
+ private:
+ 	List packets;         ///< The cargo packets in this list
+ 
+-	bool empty;           ///< Cache for whether this list is empty or not
+ 	uint count;           ///< Cache for the number of cargo entities
+ 	Money feeder_share;   ///< Cache for the feeder share
+-	StationID source;     ///< Cache for the source of the packet
+-	uint days_in_transit; ///< Cache for the number of days in transit
++	uint days_in_transit; ///< Cache for the added number of days in transit of all packets
++
++	/*
++	 * Update the cache to reflect adding of this packet.
++	 * Increases count, feeder share and days_in_transit
++	 * @param cp a new packet to be inserted
++	 */
++	void AddToCache(CargoPacket *cp);
++
++	/*
++	 * Update the cached values to reflect the removal of this packet.
++	 * Decreases count, feeder share and days_in_transit
++	 * @param cp Packet to be removed from cache
++	 */
++	void RemoveFromCache(CargoPacket *cp);
+ 
+ public:
+ 	friend const struct SaveLoad *GetGoodsDesc();
+ 
+ 	/** Create the cargo list */
+-	FORCEINLINE CargoList() { this->InvalidateCache(); }
++	FORCEINLINE CargoList() : count(0), feeder_share(0), days_in_transit(0) {}
+ 	/** And destroy it ("frees" all cargo packets) */
+ 	~CargoList();
+ 
+@@ -123,7 +166,7 @@ public:
+ 	 * Checks whether this list is empty
+ 	 * @return true if and only if the list is empty
+ 	 */
+-	FORCEINLINE bool Empty() const { return this->empty; }
++	FORCEINLINE bool Empty() const { return this->packets.empty(); }
+ 
+ 	/**
+ 	 * Returns the number of cargo entities in this list
+@@ -141,13 +184,13 @@ public:
+ 	 * Returns source of the first cargo packet in this list
+ 	 * @return the before mentioned source
+ 	 */
+-	FORCEINLINE StationID Source() const { return this->source; }
++	FORCEINLINE StationID Source() const { return Empty() ? INVALID_STATION : this->packets.front()->source; }
+ 
+ 	/**
+ 	 * Returns average number of days in transit for a cargo entity
+ 	 * @return the before mentioned number
+ 	 */
+-	FORCEINLINE uint DaysInTransit() const { return this->days_in_transit; }
++	FORCEINLINE uint DaysInTransit() const { return this->days_in_transit / this->count; }
+ 
+ 
+ 	/**
+@@ -155,9 +198,10 @@ public:
+ 	 * @warning After appending this packet may not exist anymore!
+ 	 * @note Do not use the cargo packet anymore after it has been appended to this CargoList!
+ 	 * @param cp the cargo packet to add
++	 * @param merge if the list should be searched for a packet with SameSource as cp for merging
+ 	 * @pre cp != NULL
+ 	 */
+-	void Append(CargoPacket *cp);
++	void Append(CargoPacket *cp, bool merge = true);
+ 
+ 	/**
+ 	 * Truncates the cargo in this list to the given amount. It leaves the
+diff --git a/src/economy.cpp b/src/economy.cpp
+index f3d4c74..d06a53a 100644
+--- a/src/economy.cpp
++++ b/src/economy.cpp
+@@ -1047,29 +1047,30 @@ void CargoPayment::PayFinalDelivery(CargoPacket *cp, uint count)
+ 	}
+ 
+ 	/* Handle end of route payment */
+-	Money profit = DeliverGoods(count, this->ct, this->current_station, cp->source_xy, cp->days_in_transit, this->owner, cp->source_type, cp->source_id);
++	Money profit = DeliverGoods(count, this->ct, this->current_station, cp->source_xy, cp->DaysInTransit(), this->owner, cp->source_type, cp->source_id);
+ 	this->route_profit += profit;
+ 
+ 	/* The vehicle's profit is whatever route profit there is minus feeder shares. */
+-	this->visual_profit += profit - cp->feeder_share;
++	this->visual_profit += profit - cp->FeederShare();
+ }
+ 
+ /**
+  * Handle payment for transfer of the given cargo packet.
+  * @param cp The cargo packet to pay for.
+  * @param count The number of packets to pay for.
++ * @return the feeder share received for this transfer
+  */
+-void CargoPayment::PayTransfer(CargoPacket *cp, uint count)
++Money CargoPayment::PayTransfer(CargoPacket *cp, uint count)
+ {
+ 	Money profit = GetTransportedGoodsIncome(
+ 		count,
+ 		/* pay transfer vehicle for only the part of transfer it has done: ie. cargo_loaded_at_xy to here */
+ 		DistanceManhattan(cp->loaded_at_xy, Station::Get(this->current_station)->xy),
+-		cp->days_in_transit,
++		cp->DaysInTransit(),
+ 		this->ct);
+ 
+ 	this->visual_profit += profit; // accumulate transfer profits for whole vehicle
+-	cp->feeder_share    += profit; // account for the (virtual) profit already made for the cargo packet
++	return profit;                 // account for the (virtual) profit already made for the cargo packet
+ }
+ 
+ /**
+diff --git a/src/economy_base.h b/src/economy_base.h
+index ca9dc33..de96f19 100644
+--- a/src/economy_base.h
++++ b/src/economy_base.h
+@@ -32,7 +32,7 @@ struct CargoPayment : CargoPaymentPool::PoolItem<&_cargo_payment_pool> {
+ 	CargoPayment(Vehicle *front);
+ 	~CargoPayment();
+ 
+-	void PayTransfer(CargoPacket *cp, uint count);
++	Money PayTransfer(CargoPacket *cp, uint count);
+ 	void PayFinalDelivery(CargoPacket *cp, uint count);
+ 
+ 	/**
+diff --git a/src/saveload/cargopacket_sl.cpp b/src/saveload/cargopacket_sl.cpp
+index 7a6a1c8..d23765a 100644
+--- a/src/saveload/cargopacket_sl.cpp
++++ b/src/saveload/cargopacket_sl.cpp
+@@ -7,21 +7,25 @@
+ 
+ #include "saveload.h"
+ 
+-static const SaveLoad _cargopacket_desc[] = {
+-	     SLE_VAR(CargoPacket, source,          SLE_UINT16),
+-	     SLE_VAR(CargoPacket, source_xy,       SLE_UINT32),
+-	     SLE_VAR(CargoPacket, loaded_at_xy,    SLE_UINT32),
+-	     SLE_VAR(CargoPacket, count,           SLE_UINT16),
+-	     SLE_VAR(CargoPacket, days_in_transit, SLE_UINT8),
+-	     SLE_VAR(CargoPacket, feeder_share,    SLE_INT64),
+-	 SLE_CONDVAR(CargoPacket, source_type,     SLE_UINT8,  125, SL_MAX_VERSION),
+-	 SLE_CONDVAR(CargoPacket, source_id,       SLE_UINT16, 125, SL_MAX_VERSION),
+-
+-	/* Used to be paid_for, but that got changed. */
+-	SLE_CONDNULL(1, 0, 120),
+-
+-	SLE_END()
+-};
++const SaveLoad *GetCargoPacketDesc()
++{
++	static const SaveLoad _cargopacket_desc[] = {
++		    SLE_VAR(CargoPacket, source,          SLE_UINT16),
++		    SLE_VAR(CargoPacket, source_xy,       SLE_UINT32),
++		    SLE_VAR(CargoPacket, loaded_at_xy,    SLE_UINT32),
++		    SLE_VAR(CargoPacket, count,           SLE_UINT16),
++		    SLE_VAR(CargoPacket, days_in_transit, SLE_UINT8),
++		    SLE_VAR(CargoPacket, feeder_share,    SLE_INT64),
++		SLE_CONDVAR(CargoPacket, source_type,     SLE_UINT8,  125, SL_MAX_VERSION),
++		SLE_CONDVAR(CargoPacket, source_id,       SLE_UINT16, 125, SL_MAX_VERSION),
++
++		/* Used to be paid_for, but that got changed. */
++		SLE_CONDNULL(1, 0, 120),
++
++		SLE_END()
++	};
++	return _cargopacket_desc;
++}
+ 
+ static void Save_CAPA()
+ {
+@@ -29,7 +33,7 @@ static void Save_CAPA()
+ 
+ 	FOR_ALL_CARGOPACKETS(cp) {
+ 		SlSetArrayIndex(cp->index);
+-		SlObject(cp, _cargopacket_desc);
++		SlObject(cp, GetCargoPacketDesc());
+ 	}
+ }
+ 
+@@ -39,7 +43,7 @@ static void Load_CAPA()
+ 
+ 	while ((index = SlIterateArray()) != -1) {
+ 		CargoPacket *cp = new (index) CargoPacket();
+-		SlObject(cp, _cargopacket_desc);
++		SlObject(cp, GetCargoPacketDesc());
+ 	}
+ }
+ 
+diff --git a/src/saveload/oldloader_sl.cpp b/src/saveload/oldloader_sl.cpp
+index 001e65d..a09f734 100644
+--- a/src/saveload/oldloader_sl.cpp
++++ b/src/saveload/oldloader_sl.cpp
+@@ -757,10 +757,8 @@ static bool LoadOldGood(LoadgameState *ls, int num)
+ 	SB(ge->acceptance_pickup, GoodsEntry::ACCEPTANCE, 1, HasBit(_waiting_acceptance, 15));
+ 	SB(ge->acceptance_pickup, GoodsEntry::PICKUP, 1, _cargo_source != 0xFF);
+ 	if (GB(_waiting_acceptance, 0, 12) != 0) {
+-		CargoPacket *cp = new CargoPacket();
+-		cp->source          = (_cargo_source == 0xFF) ? INVALID_STATION : _cargo_source;
+-		cp->count           = GB(_waiting_acceptance, 0, 12);
+-		cp->days_in_transit = _cargo_days;
++		CargoPacket *cp = new CargoPacket(GB(_waiting_acceptance, 0, 12), _cargo_days);
++		cp->source = (_cargo_source == 0xFF) ? INVALID_STATION : _cargo_source,
+ 		ge->cargo.Append(cp);
+ 	}
+ 
+@@ -1391,8 +1389,8 @@ bool LoadOldVehicle(LoadgameState *ls, int num)
+ 		if (_old_next_ptr != 0xFFFF) v->next = (Vehicle *)(size_t)_old_next_ptr;
+ 
+ 		if (_cargo_count != 0) {
+-			CargoPacket *cp = new CargoPacket((_cargo_source == 0xFF) ? INVALID_STATION : _cargo_source, _cargo_count);
+-			cp->days_in_transit = _cargo_days;
++			CargoPacket *cp = new CargoPacket(_cargo_count, _cargo_days);
++			cp->source = (_cargo_source == 0xFF) ? INVALID_STATION : _cargo_source;
+ 			v->cargo.Append(cp);
+ 		}
+ 	}
+diff --git a/src/saveload/station_sl.cpp b/src/saveload/station_sl.cpp
+index e1b5470..b58d8cc 100644
+--- a/src/saveload/station_sl.cpp
++++ b/src/saveload/station_sl.cpp
+@@ -236,15 +236,10 @@ static void Load_STNS()
+ 				SB(ge->acceptance_pickup, GoodsEntry::ACCEPTANCE, 1, HasBit(_waiting_acceptance, 15));
+ 				if (GB(_waiting_acceptance, 0, 12) != 0) {
+ 					/* Don't construct the packet with station here, because that'll fail with old savegames */
+-					CargoPacket *cp = new CargoPacket();
++					CargoPacket *cp = new CargoPacket(GB(_waiting_acceptance, 0, 12), _cargo_days, _cargo_feeder_share);
+ 					/* In old versions, enroute_from used 0xFF as INVALID_STATION */
+-					cp->source          = (CheckSavegameVersion(7) && _cargo_source == 0xFF) ? INVALID_STATION : _cargo_source;
+-					cp->count           = GB(_waiting_acceptance, 0, 12);
+-					cp->days_in_transit = _cargo_days;
+-					cp->feeder_share    = _cargo_feeder_share;
+-					cp->source_xy       = _cargo_source_xy;
+-					cp->days_in_transit = _cargo_days;
+-					cp->feeder_share    = _cargo_feeder_share;
++					cp->source      = (CheckSavegameVersion(7) && _cargo_source == 0xFF) ? INVALID_STATION : _cargo_source;
++					cp->source_xy   = _cargo_source_xy;
+ 					SB(ge->acceptance_pickup, GoodsEntry::PICKUP, 1, 1);
+ 					ge->cargo.Append(cp);
+ 				}
+diff --git a/src/saveload/vehicle_sl.cpp b/src/saveload/vehicle_sl.cpp
+index fca25a6..c5ba650 100644
+--- a/src/saveload/vehicle_sl.cpp
++++ b/src/saveload/vehicle_sl.cpp
+@@ -710,13 +710,10 @@ void Load_VEHS()
+ 
+ 		if (_cargo_count != 0 && IsCompanyBuildableVehicleType(v)) {
+ 			/* Don't construct the packet with station here, because that'll fail with old savegames */
+-			CargoPacket *cp = new CargoPacket();
+-			cp->source          = _cargo_source;
+-			cp->source_xy       = _cargo_source_xy;
+-			cp->count           = _cargo_count;
+-			cp->days_in_transit = _cargo_days;
+-			cp->feeder_share    = _cargo_feeder_share;
+-			cp->loaded_at_xy    = _cargo_loaded_at_xy;
++			CargoPacket *cp  = new CargoPacket(_cargo_count, _cargo_days, _cargo_feeder_share);
++			cp->source       = _cargo_source,
++			cp->source_xy    = _cargo_source_xy;
++			cp->loaded_at_xy = _cargo_loaded_at_xy;
+ 			v->cargo.Append(cp);
+ 		}
+ 
+diff --git a/src/station_gui.cpp b/src/station_gui.cpp
+index 407cb81..5872514 100644
+--- a/src/station_gui.cpp
++++ b/src/station_gui.cpp
+@@ -834,13 +834,13 @@ struct StationViewWindow : public Window {
+ 						for (CargoDataList::iterator jt = cargolist.begin(); jt != cargolist.end(); jt++) {
+ 							CargoData *cd = &(*jt);
+ 							if (cd->cargo == i && cd->source == cp->source) {
+-								cd->count += cp->count;
++								cd->count += cp->Count();
+ 								added = true;
+ 								break;
+ 							}
+ 						}
+ 
+-						if (!added) cargolist.push_back(CargoData(i, cp->source, cp->count));
++						if (!added) cargolist.push_back(CargoData(i, cp->source, cp->Count()));
+ 					}
+ 				}
+ 			}

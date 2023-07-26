@@ -1,0 +1,65 @@
+Index: src/video/sdl_v.cpp
+===================================================================
+--- src/video/sdl_v.cpp	(revision 17931)
++++ src/video/sdl_v.cpp	(working copy)
+@@ -22,6 +22,7 @@
+ #include "../functions.h"
+ #include "../thread/thread.h"
+ #include "../genworld.h"
++#include "../screenshot.h"
+ #include "sdl_v.h"
+ #include <SDL.h>
+ 
+@@ -248,6 +249,7 @@
+ 	_screen.height = newscreen->h;
+ 	_screen.pitch = newscreen->pitch / (bpp / 8);
+ 	_sdl_screen = newscreen;
++	_screen.dst_ptr = _sdl_screen->pixels;
+ 	InitPalette();
+ 
+ 	snprintf(caption, sizeof(caption), "OpenTTD %s", _openttd_revision);
+@@ -486,6 +488,9 @@
+ 	SdlClose(SDL_INIT_VIDEO);
+ }
+ 
++static int _shot_ctr = 0;
++bool _in_gameloop = false;
++
+ void VideoDriver_SDL::MainLoop()
+ {
+ 	uint32 cur_ticks = SDL_CALL SDL_GetTicks();
+@@ -560,12 +565,19 @@
+ 			/* The gameloop is the part that can run asynchroniously. The rest
+ 			 * except sleeping can't. */
+ 			if (_draw_threaded) _draw_mutex->EndCritical();
++if (_shot_ctr > 0) {
++	SetScreenshotType(SC_VIEWPORT);
++	printf("%d\n", _shot_ctr);
++	_shot_ctr--;
++}
+ 
++_in_gameloop = true;
+ 			GameLoop();
++_in_gameloop = false;
+ 
+ 			if (_draw_threaded) _draw_mutex->BeginCritical();
+ 
+-			_screen.dst_ptr = _sdl_screen->pixels;
++//			_screen.dst_ptr = _sdl_screen->pixels;
+ 			UpdateWindows();
+ 			if (++pal_tick > 4) {
+ 				CheckPaletteAnim();
+@@ -600,7 +612,12 @@
+ 
+ bool VideoDriver_SDL::ChangeResolution(int w, int h)
+ {
+-	return CreateMainSurface(w, h);
++	_shot_ctr = 3;
++	/* Don't release the old surface while it is being processed */
++	if (_draw_threaded && _in_gameloop) _draw_mutex->BeginCritical();
++	bool res = CreateMainSurface(w, h);
++	if (_draw_threaded && _in_gameloop) _draw_mutex->EndCritical();
++	return res;
+ }
+ 
+ bool VideoDriver_SDL::ToggleFullscreen(bool fullscreen)

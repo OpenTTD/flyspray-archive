@@ -1,0 +1,91 @@
+diff -r 4fb585796f09 src/depot_gui.cpp
+--- a/src/depot_gui.cpp	Fri Mar 19 13:55:02 2010 +0100
++++ b/src/depot_gui.cpp	Fri Mar 19 13:55:06 2010 +0100
+@@ -888,12 +888,19 @@
+ 
+ 			VehicleID new_vehicle_over = INVALID_VEHICLE;
+ 
+-			if (gdvp.head != NULL && gdvp.wagon != NULL && 
+-					gdvp.head != gdvp.wagon && 
+-					gdvp.wagon->index != this->sel && 
+-					gdvp.wagon->Previous()->index != this->sel) {
+-				/* Drag over an existing wagon */
+-				new_vehicle_over = gdvp.wagon->index;
++			if (gdvp.head != NULL) {
++				if (gdvp.wagon == NULL && gdvp.head->Last()->index != this->sel) {
++					/* Drag at the end of a train. As we cannot move a wagon at the
++					   begin of a train, head index isn't used to denote a drag & drop
++					   destination inside a train. This head index is then used to indicate 
++					   that we are inserting a wagon at the end of the train. */
++					new_vehicle_over = gdvp.head->index;
++				} else if (gdvp.wagon != NULL && gdvp.head != gdvp.wagon && 
++							gdvp.wagon->index != this->sel && 
++							gdvp.wagon->Previous()->index != this->sel) {
++					/* Drag over an existing wagon */
++					new_vehicle_over = gdvp.wagon->index;
++				}
+ 			}
+ 
+ 			if (this->vehicle_over == new_vehicle_over) return;
+diff -r 4fb585796f09 src/train_gui.cpp
+--- a/src/train_gui.cpp	Fri Mar 19 13:55:02 2010 +0100
++++ b/src/train_gui.cpp	Fri Mar 19 13:55:06 2010 +0100
+@@ -48,6 +48,23 @@
+ 	}
+ }
+ 
++int HighlightDragPosition(bool rtl, int px, int max_width, Point *offset, int width)
++{
++	Dimension sprite_size = GetSpriteSize(SPR_ARROW_UP);
++	int sprite_size_width = sprite_size.width;
++
++	if (rtl ? px + sprite_size_width <= 0 : px - sprite_size_width >= max_width) return 0;
++
++	int drag_offset_x = offset->x - (width + (rtl ? -sprite_size_width : sprite_size_width)) / 2;
++	uint drag_x = px + (rtl ? -drag_offset_x : drag_offset_x);
++	uint drag_y = offset->y - (sprite_size.height / 2);
++
++	DrawSprite(SPR_ARROW_DOWN, PAL_NONE, drag_x, drag_y + 2);
++	DrawSprite(SPR_ARROW_UP, PAL_NONE, drag_x, drag_y + 7);
++
++	return sprite_size.width;
++}
++
+ /**
+  * Draws an image of a whole train
+  * @param v         Front vehicle
+@@ -76,13 +93,17 @@
+ 
+ 	int px = rtl ? max_width + skip : -skip;
+ 	bool sel_articulated = false;
++	bool dragging = drag_dest != INVALID_VEHICLE;
++	bool drag_at_end_of_train = (drag_dest == v->index); // Head index is used to mark dragging at the end of train
++	Point offset;
++	int width = 0;
+ 	for (; v != NULL && (rtl ? px > 0 : px < max_width); v = v->Next()) {
+-		Point offset;
+-		int width = Train::From(v)->GetDisplayImageWidth(&offset);
++		width = Train::From(v)->GetDisplayImageWidth(&offset);
+ 
+-		if (drag_dest != INVALID_VEHICLE && drag_dest == v->index) {
+-			/* Highlight the drag & drop destination inside train: insert a 5px wide space. */
+-			px += rtl ? -5 : 5;
++		if (dragging && !drag_at_end_of_train && drag_dest == v->index) {
++			/* Highlight the drag & drop destination inside train. */
++			int highlight_width = HighlightDragPosition(rtl, px, max_width, &offset, width);
++			px += rtl ? -highlight_width : highlight_width;
+ 		}
+ 
+ 		if (rtl ? px + width > 0 : px - width < max_width) {
+@@ -108,6 +129,11 @@
+ 		px += rtl ? -width : width;
+ 	}
+ 
++	if (dragging && drag_at_end_of_train) {
++		/* Highlight the drag & drop destination at the end of train. */
++		HighlightDragPosition(rtl, px, max_width, &offset, width);
++	}
++
+ 	if (highlight_l != highlight_r) {
+ 		/* Draw the highlight. Now done after drawing all the engines, as
+ 		 * the next engine after the highlight could overlap it. */

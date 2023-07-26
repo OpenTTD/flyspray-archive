@@ -1,0 +1,107 @@
+Index: src/rail_gui.cpp
+===================================================================
+--- src/rail_gui.cpp	(revision 17206)
++++ src/rail_gui.cpp	(working copy)
+@@ -314,7 +314,7 @@
+ 
+ /** Updates the Remove button because of Ctrl state change
+  * @param w window the button belongs to
+- * @return true iff the remove buton was changed
++ * @return true if the remove button was changed
+  */
+ static bool RailToolbar_CtrlChanged(Window *w)
+ {
+@@ -548,7 +548,7 @@
+ 		return;
+ 	}
+ 
+-	const Window *w = FindWindowById(WC_BUILD_SIGNAL, 0);
++	Window *w = FindWindowById(WC_BUILD_SIGNAL, 0);
+ 
+ 	if (w != NULL) {
+ 		/* signal GUI is used */
+@@ -575,6 +575,11 @@
+ 			CMD_REMOVE_SIGNAL_TRACK | CMD_MSG(STR_ERROR_CAN_T_REMOVE_SIGNALS_FROM) :
+ 			CMD_BUILD_SIGNAL_TRACK  | CMD_MSG(STR_ERROR_CAN_T_BUILD_SIGNALS_HERE),
+ 		CcPlaySound1E);
++	if (_ctrl_pressed) {
++		/* _thd hasn't been reset yet, so do it manually to let OnCTRLStateChange() switch to alternate variant */
++		 _thd.size.x = _thd.size.y = TILE_SIZE;
++		w->OnCTRLStateChange(); // Default variant was shown during ctrl-drag. Restore alternate variant on mouse-up
++	}
+ }
+ 
+ 
+@@ -725,9 +730,14 @@
+ 
+ 	virtual void OnPlaceDrag(ViewportPlaceMethod select_method, ViewportDragDropSelectionProcess select_proc, Point pt)
+ 	{
+-		/* no dragging if you have pressed the convert button */
+-		if (FindWindowById(WC_BUILD_SIGNAL, 0) != NULL && _convert_signal_button && this->IsWidgetLowered(RTW_BUILD_SIGNALS)) return;
++		Window *w = FindWindowById(WC_BUILD_SIGNAL, 0);
+ 
++		if (w != NULL) {
++			/* No dragging if you have pressed the convert button */
++			if (_convert_signal_button && this->IsWidgetLowered(RTW_BUILD_SIGNALS)) return;
++
++			w->OnCTRLStateChange();
++		}
+ 		VpSelectTilesWithMethod(pt.x, pt.y, select_method);
+ 	}
+ 
+@@ -1536,7 +1546,10 @@
+ 
+ 	virtual void OnPaint()
+ 	{
+-		this->LowerWidget((_cur_signal_variant == SIG_ELECTRIC ? BSW_ELECTRIC_NORM : BSW_SEMAPHORE_NORM) + _cur_signal_type);
++		/* There's no need do raise and lower widgets on each paint cycle if one is already lowered */
++		if (!this->IsWidgetLowered(BSW_ELECTRIC_NORM + _cur_signal_type) && !this->IsWidgetLowered(BSW_SEMAPHORE_NORM + _cur_signal_type)) {
++			this->OnCTRLStateChange();
++		}
+ 
+ 		this->SetWidgetLoweredState(BSW_CONVERT, _convert_signal_button);
+ 
+@@ -1581,7 +1594,7 @@
+ 			case BSW_ELECTRIC_COMBO:
+ 			case BSW_ELECTRIC_PBS:
+ 			case BSW_ELECTRIC_PBS_OWAY:
+-				this->RaiseWidget((_cur_signal_variant == SIG_ELECTRIC ? BSW_ELECTRIC_NORM : BSW_SEMAPHORE_NORM) + _cur_signal_type);
++				this->RaiseWidget((this->IsWidgetLowered(BSW_ELECTRIC_NORM + _cur_signal_type) ? BSW_ELECTRIC_NORM : BSW_SEMAPHORE_NORM) + _cur_signal_type);
+ 
+ 				_cur_signal_type = (SignalType)((uint)((widget - BSW_SEMAPHORE_NORM) % (SIGTYPE_LAST + 1)));
+ 				_cur_signal_variant = widget >= BSW_ELECTRIC_NORM ? SIG_ELECTRIC : SIG_SEMAPHORE;
+@@ -1589,6 +1602,11 @@
+ 
+ 			case BSW_CONVERT:
+ 				_convert_signal_button = !_convert_signal_button;
++				if (_convert_signal_button && _ctrl_pressed) {
++					/* Hide signal type button if convert is pressed while ctrl is held */
++					this->RaiseWidget((this->IsWidgetLowered(BSW_ELECTRIC_NORM + _cur_signal_type)
++						? BSW_ELECTRIC_NORM : BSW_SEMAPHORE_NORM) + _cur_signal_type);
++				}
+ 				break;
+ 
+ 			case BSW_DRAG_SIGNALS_DENSITY_DECREASE:
+@@ -1610,6 +1628,22 @@
+ 
+ 		this->SetDirty();
+ 	}
++
++	virtual EventState OnCTRLStateChange()
++	{
++		this->RaiseWidget((this->IsWidgetLowered(BSW_ELECTRIC_NORM + _cur_signal_type) ? BSW_ELECTRIC_NORM : BSW_SEMAPHORE_NORM) + _cur_signal_type);
++		/* Only switch variant buttons with ctrl if not currently dragging (more than 1 tile highlighted) */
++		if (_ctrl_pressed && _thd.size.x == TILE_SIZE && _thd.size.y == TILE_SIZE) {
++			/* Using the signal converter with ctrl doesn't depend on selected signal,
++			 * so it's clearer to leave buttons raised for the duration of ctrl-press. */
++			if (!_convert_signal_button) this->LowerWidget(((_cur_signal_variant == SIG_ELECTRIC) ? BSW_SEMAPHORE_NORM : BSW_ELECTRIC_NORM) + _cur_signal_type);
++		} else {
++			/* Lower default button widget (the one that was actually pressed) */
++			this->LowerWidget(((_cur_signal_variant == SIG_ELECTRIC) ? BSW_ELECTRIC_NORM : BSW_SEMAPHORE_NORM) + _cur_signal_type);
++		}
++		this->SetDirty();
++		return ES_NOT_HANDLED;
++	}
+ };
+ 
+ /** Nested widget definition of the build signal window */

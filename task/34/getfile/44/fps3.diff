@@ -1,0 +1,1467 @@
+Index: functions.h
+===================================================================
+--- functions.h	(revision 3396)
++++ functions.h	(working copy)
+@@ -133,12 +133,7 @@
+ void InitTextEffects(void);
+ void DrawTextEffects(DrawPixelInfo *dpi);
+ 
+-void InitTextMessage(void);
+-void DrawTextMessage(void);
+-void CDECL AddTextMessage(uint16 color, uint8 duration, const char *message, ...);
+-void UndrawTextMessage(void);
+-void TextMessageDailyLoop(void);
+-
++/* animated_tiles.c */
+ bool AddAnimatedTile(TileIndex tile);
+ void DeleteAnimatedTile(TileIndex tile);
+ void AnimateAnimatedTiles(void);
+Index: video/cocoa_v.m
+===================================================================
+--- video/cocoa_v.m	(revision 3396)
++++ video/cocoa_v.m	(working copy)
+@@ -61,6 +61,7 @@
+ #include "../network.h"
+ #include "../variables.h"
+ #include "../os/macosx/splash.h"
++#include "../textmessagebox.h"
+ 
+ #include "cocoa_v.h"
+ 
+@@ -744,6 +745,7 @@
+ 				QZ_CheckPaletteAnim();
+ 				pal_tick = 1;
+ 			}
++			TextMessageBoxesFrameLoop(cur_ticks);
+ 			QZ_Draw();
+ 		} else {
+ #ifdef _DEBUG
+@@ -754,7 +756,7 @@
+ 			st+= GetTick() - st0;
+ #endif
+ 			_screen.dst_ptr = _cocoa_video_data.pixels;
+-			DrawTextMessage();
++			DrawTextMessageBoxes();
+ 			DrawMouseCursor();
+ 			QZ_Draw();
+ 		}
+Index: video/sdl_v.c
+===================================================================
+--- video/sdl_v.c	(revision 3396)
++++ video/sdl_v.c	(working copy)
+@@ -13,6 +13,7 @@
+ #include "../window.h"
+ #include "../network.h"
+ #include "../variables.h"
++#include "../textmessagebox.h"
+ #include "sdl_v.h"
+ #include <SDL.h>
+ 
+@@ -458,11 +459,12 @@
+ 				CheckPaletteAnim();
+ 				pal_tick = 1;
+ 			}
++			TextMessageBoxesFrameLoop(cur_ticks);
+ 			DrawSurfaceToScreen();
+ 		} else {
+ 			SDL_CALL SDL_Delay(1);
+ 			_screen.dst_ptr = _sdl_screen->pixels;
+-			DrawTextMessage();
++			DrawTextMessageBoxes();
+ 			DrawMouseCursor();
+ 			DrawSurfaceToScreen();
+ 		}
+Index: video/win32_v.c
+===================================================================
+--- video/win32_v.c	(revision 3396)
++++ video/win32_v.c	(working copy)
+@@ -9,6 +9,7 @@
+ #include "../variables.h"
+ #include "../win32.h"
+ #include "../window.h"
++#include "../textmessagebox.h"
+ #include "win32_v.h"
+ #include <windows.h>
+ 
+@@ -759,6 +760,7 @@
+ 			if (_force_full_redraw)
+ 				MarkWholeScreenDirty();
+ 
++			TextMessageBoxesFrameLoop(cur_ticks);
+ 			GdiFlush();
+ 			_screen.dst_ptr = _wnd.buffer_bits;
+ 			UpdateWindows();
+@@ -767,7 +769,7 @@
+ 			Sleep(1);
+ 			GdiFlush();
+ 			_screen.dst_ptr = _wnd.buffer_bits;
+-			DrawTextMessage();
++			DrawTextMessageBoxes();
+ 			DrawMouseCursor();
+ 		}
+ 	}
+Index: network.c
+===================================================================
+--- network.c	(revision 3396)
++++ network.c	(working copy)
+@@ -31,6 +31,7 @@
+ #include "console.h" /* IConsoleCmdExec */
+ #include <stdarg.h> /* va_list */
+ #include "md5.h"
++#include "textmessagebox.h"
+ 
+ #ifdef __MORPHOS__
+ // the library base is required here
+@@ -158,7 +159,7 @@
+ 	}
+ 
+ 	IConsolePrintF(color, "%s", message);
+-	AddTextMessage(color, duration, "%s", message);
++	ChatAddMessage(color, duration, "%s", message);
+ }
+ 
+ // Calculate the frame-lag of a client
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 3396)
++++ openttd.c	(working copy)
+@@ -40,6 +40,7 @@
+ #include "depot.h"
+ #include "waypoint.h"
+ #include "ai/ai.h"
++#include "textmessagebox.h"
+ 
+ #include <stdarg.h>
+ 
+@@ -465,6 +466,7 @@
+ 
+ 	// initialize the ingame console
+ 	IConsoleInit();
++	InitializeTextMessageBoxes();
+ 	InitializeGUI();
+ 	IConsoleCmdExec("exec scripts/autoexec.scr 0");
+ 
+@@ -494,6 +496,7 @@
+ 	_video_driver->main_loop();
+ 
+ 	WaitTillSaved();
++	UnInitializeTextMessageBoxes();
+ 	IConsoleFree();
+ 
+ #ifdef ENABLE_NETWORK
+Index: gfx.c
+===================================================================
+--- gfx.c	(revision 3396)
++++ gfx.c	(working copy)
+@@ -12,6 +12,7 @@
+ #include "table/sprites.h"
+ #include "hal.h"
+ #include "variables.h"
++#include "textmessagebox.h"
+ 
+ #ifdef _DEBUG
+ bool _dbg_screen_rect;
+@@ -56,7 +57,7 @@
+ 	if (xo == 0 && yo == 0) return;
+ 
+ 	if (_cursor.visible) UndrawMouseCursor();
+-	UndrawTextMessage();
++	UndrawTextMessageBoxes();
+ 
+ 	p = _screen.pitch;
+ 
+@@ -1725,7 +1726,7 @@
+ 			UndrawMouseCursor();
+ 		}
+ 	}
+-	UndrawTextMessage();
++	UndrawTextMessageBoxes();
+ 
+ #if defined(_DEBUG)
+ 	if (_dbg_screen_rect)
+Index: texteff.c
+===================================================================
+--- texteff.c	(revision 3396)
++++ texteff.c	(working copy)
+@@ -25,196 +25,8 @@
+ 	uint32 params_2;
+ } TextEffect;
+ 
+-#define MAX_TEXTMESSAGE_LENGTH 250
+-
+-typedef struct TextMessage {
+-	char message[MAX_TEXTMESSAGE_LENGTH];
+-	uint16 color;
+-	uint16 end_date;
+-} TextMessage;
+-
+-#define MAX_CHAT_MESSAGES 10
+ static TextEffect _text_effect_list[30];
+-static TextMessage _text_message_list[MAX_CHAT_MESSAGES];
+-TileIndex _animated_tile_list[256];
+ 
+-
+-static int _textmessage_width = 0;
+-static bool _textmessage_dirty = true;
+-static bool _textmessage_visible = false;
+-
+-static const int _textmessage_box_left = 10; // Pixels from left
+-static const int _textmessage_box_y = 150;  // Height of box
+-static const int _textmessage_box_bottom = 30; // Pixels from bottom
+-static const int _textmessage_box_max_width = 400; // Max width of box
+-
+-static Pixel _textmessage_backup[150 * 400]; // (y * max_width)
+-
+-extern void memcpy_pitch(void *d, void *s, int w, int h, int spitch, int dpitch);
+-
+-// Duration is in game-days
+-void CDECL AddTextMessage(uint16 color, uint8 duration, const char *message, ...)
+-{
+-	char buf[MAX_TEXTMESSAGE_LENGTH];
+-	va_list va;
+-	size_t length;
+-	uint i;
+-
+-	va_start(va, message);
+-	vsnprintf(buf, lengthof(buf), message, va);
+-	va_end(va);
+-
+-	/* Special color magic */
+-	if ((color & 0xFF) == 0xC9) color = 0x1CA;
+-
+-	/* Cut the message till it fits inside the chatbox */
+-	length = strlen(buf);
+-	while (GetStringWidth(buf) > _textmessage_width - 9) buf[--length] = '\0';
+-
+-	/* Find an empty spot and put the message there */
+-	for (i = 0; i < MAX_CHAT_MESSAGES; i++) {
+-		if (_text_message_list[i].message[0] == '\0') {
+-			// Empty spot
+-			ttd_strlcpy(_text_message_list[i].message, buf, sizeof(_text_message_list[i].message));
+-			_text_message_list[i].color = color;
+-			_text_message_list[i].end_date = _date + duration;
+-
+-			_textmessage_dirty = true;
+-			return;
+-		}
+-	}
+-
+-	// We did not found a free spot, trash the first one, and add to the end
+-	memmove(&_text_message_list[0], &_text_message_list[1], sizeof(_text_message_list[0]) * (MAX_CHAT_MESSAGES - 1));
+-	ttd_strlcpy(_text_message_list[MAX_CHAT_MESSAGES - 1].message, buf, sizeof(_text_message_list[MAX_CHAT_MESSAGES - 1].message));
+-	_text_message_list[MAX_CHAT_MESSAGES - 1].color = color;
+-	_text_message_list[MAX_CHAT_MESSAGES - 1].end_date = _date + duration;
+-
+-	_textmessage_dirty = true;
+-}
+-
+-void InitTextMessage(void)
+-{
+-	uint i;
+-
+-	for (i = 0; i < MAX_CHAT_MESSAGES; i++) {
+-		_text_message_list[i].message[0] = '\0';
+-	}
+-
+-	_textmessage_width = _textmessage_box_max_width;
+-}
+-
+-// Hide the textbox
+-void UndrawTextMessage(void)
+-{
+-	if (_textmessage_visible) {
+-		// Sometimes we also need to hide the cursor
+-		//   This is because both textmessage and the cursor take a shot of the
+-		//   screen before drawing.
+-		//   Now the textmessage takes his shot and paints his data before the cursor
+-		//   does, so in the shot of the cursor is the screen-data of the textmessage
+-		//   included when the cursor hangs somewhere over the textmessage. To
+-		//   avoid wrong repaints, we undraw the cursor in that case, and everything
+-		//   looks nicely ;)
+-		// (and now hope this story above makes sense to you ;))
+-
+-		if (_cursor.visible) {
+-			if (_cursor.draw_pos.x + _cursor.draw_size.x >= _textmessage_box_left &&
+-				_cursor.draw_pos.x <= _textmessage_box_left + _textmessage_width &&
+-				_cursor.draw_pos.y + _cursor.draw_size.y >= _screen.height - _textmessage_box_bottom - _textmessage_box_y &&
+-				_cursor.draw_pos.y <= _screen.height - _textmessage_box_bottom) {
+-				UndrawMouseCursor();
+-			}
+-		}
+-
+-		_textmessage_visible = false;
+-		// Put our 'shot' back to the screen
+-		memcpy_pitch(
+-			_screen.dst_ptr + _textmessage_box_left + (_screen.height-_textmessage_box_bottom-_textmessage_box_y) * _screen.pitch,
+-			_textmessage_backup,
+-			_textmessage_width, _textmessage_box_y, _textmessage_width, _screen.pitch);
+-
+-		// And make sure it is updated next time
+-		_video_driver->make_dirty(_textmessage_box_left, _screen.height-_textmessage_box_bottom-_textmessage_box_y, _textmessage_width, _textmessage_box_y);
+-
+-		_textmessage_dirty = true;
+-	}
+-}
+-
+-// Check if a message is expired every day
+-void TextMessageDailyLoop(void)
+-{
+-	uint i;
+-
+-	for (i = 0; i < MAX_CHAT_MESSAGES; i++) {
+-		if (_text_message_list[i].message[0] == '\0') continue;
+-
+-		if (_date > _text_message_list[i].end_date) {
+-			/* Move the remaining messages over the current message */
+-			if (i != MAX_CHAT_MESSAGES - 1)
+-				memmove(&_text_message_list[i], &_text_message_list[i + 1], sizeof(_text_message_list[i]) * (MAX_CHAT_MESSAGES - i - 1));
+-
+-			/* Mark the last item as empty */
+-			_text_message_list[MAX_CHAT_MESSAGES - 1].message[0] = '\0';
+-			_textmessage_dirty = true;
+-
+-			/* Go one item back, because we moved the array 1 to the left */
+-			i--;
+-		}
+-	}
+-}
+-
+-// Draw the textmessage-box
+-void DrawTextMessage(void)
+-{
+-	int i, j;
+-	bool has_message;
+-
+-	if (!_textmessage_dirty) return;
+-
+-	// First undraw if needed
+-	UndrawTextMessage();
+-
+-	if (_iconsole_mode == ICONSOLE_FULL)
+-		return;
+-
+-	/* Check if we have anything to draw at all */
+-	has_message = false;
+-	for ( i = 0; i < MAX_CHAT_MESSAGES; i++) {
+-		if (_text_message_list[i].message[0] == '\0') break;
+-
+-		has_message = true;
+-	}
+-	if (!has_message) return;
+-
+-	// Make a copy of the screen as it is before painting (for undraw)
+-	memcpy_pitch(
+-		_textmessage_backup,
+-		_screen.dst_ptr + _textmessage_box_left + (_screen.height-_textmessage_box_bottom-_textmessage_box_y) * _screen.pitch,
+-		_textmessage_width, _textmessage_box_y, _screen.pitch, _textmessage_width);
+-
+-	// Switch to _screen painting
+-	_cur_dpi = &_screen;
+-
+-	j = 0;
+-	// Paint the messages
+-	for (i = MAX_CHAT_MESSAGES - 1; i >= 0; i--) {
+-		if (_text_message_list[i].message[0] == '\0') continue;
+-
+-		j++;
+-		GfxFillRect(_textmessage_box_left, _screen.height-_textmessage_box_bottom-j*13-2, _textmessage_box_left+_textmessage_width - 1, _screen.height-_textmessage_box_bottom-j*13+10, /* black, but with some alpha */ 0x322 | USE_COLORTABLE);
+-
+-		DoDrawString(_text_message_list[i].message, _textmessage_box_left + 2, _screen.height - _textmessage_box_bottom - j * 13 - 1, 0x10);
+-		DoDrawString(_text_message_list[i].message, _textmessage_box_left + 3, _screen.height - _textmessage_box_bottom - j * 13, _text_message_list[i].color);
+-	}
+-
+-	// Make sure the data is updated next flush
+-	_video_driver->make_dirty(_textmessage_box_left, _screen.height-_textmessage_box_bottom-_textmessage_box_y, _textmessage_width, _textmessage_box_y);
+-
+-	_textmessage_visible = true;
+-	_textmessage_dirty = false;
+-}
+-
+ static void MarkTextEffectAreaDirty(TextEffect *te)
+ {
+ 	MarkAllViewportsDirty(
+@@ -316,63 +128,3 @@
+ 
+ 	}
+ }
+-
+-void DeleteAnimatedTile(TileIndex tile)
+-{
+-	TileIndex* ti;
+-
+-	for (ti = _animated_tile_list; ti != endof(_animated_tile_list); ti++) {
+-		if (tile == *ti) {
+-			/* remove the hole */
+-			memmove(ti, ti + 1, endof(_animated_tile_list) - 1 - ti);
+-			/* and clear last item */
+-			endof(_animated_tile_list)[-1] = 0;
+-			MarkTileDirtyByTile(tile);
+-			return;
+-		}
+-	}
+-}
+-
+-bool AddAnimatedTile(TileIndex tile)
+-{
+-	TileIndex* ti;
+-
+-	for (ti = _animated_tile_list; ti != endof(_animated_tile_list); ti++) {
+-		if (tile == *ti || *ti == 0) {
+-			*ti = tile;
+-			MarkTileDirtyByTile(tile);
+-			return true;
+-		}
+-	}
+-
+-	return false;
+-}
+-
+-void AnimateAnimatedTiles(void)
+-{
+-	const TileIndex* ti;
+-
+-	for (ti = _animated_tile_list; ti != endof(_animated_tile_list) && *ti != 0; ti++) {
+-		AnimateTile(*ti);
+-	}
+-}
+-
+-void InitializeAnimatedTiles(void)
+-{
+-	memset(_animated_tile_list, 0, sizeof(_animated_tile_list));
+-}
+-
+-static void SaveLoad_ANIT(void)
+-{
+-	// In pre version 6, we has 16bit per tile, now we have 32bit per tile, convert it ;)
+-	if (CheckSavegameVersion(6)) {
+-		SlArray(_animated_tile_list, lengthof(_animated_tile_list), SLE_FILE_U16 | SLE_VAR_U32);
+-	} else {
+-		SlArray(_animated_tile_list, lengthof(_animated_tile_list), SLE_UINT32);
+-	}
+-}
+-
+-
+-const ChunkHandler _animated_tile_chunk_handlers[] = {
+-	{ 'ANIT', SaveLoad_ANIT, SaveLoad_ANIT, CH_RIFF | CH_LAST},
+-};
+Index: misc.c
+===================================================================
+--- misc.c	(revision 3396)
++++ misc.c	(working copy)
+@@ -19,6 +19,7 @@
+ #include "vehicle_gui.h"
+ #include "variables.h"
+ #include "ai/ai.h"
++#include "textmessagebox.h"
+ 
+ extern void StartupEconomy(void);
+ 
+@@ -175,7 +176,6 @@
+ 	InitializeCheats();
+ 
+ 	InitTextEffects();
+-	InitTextMessage();
+ 	InitializeAnimatedTiles();
+ 
+ 	InitializeLandscapeVariables(false);
+@@ -517,7 +517,7 @@
+ 	/* yeah, increse day counter and call various daily loops */
+ 	_date++;
+ 
+-	TextMessageDailyLoop();
++	TextMessageBoxesDailyLoop();
+ 
+ 	DisasterDailyLoop();
+ 	WaypointsDailyLoop();
+@@ -582,7 +582,7 @@
+ 
+ 		/* Because the _date wraps here, and text-messages expire by game-days, we have to clean out
+ 		 *  all of them if the date is set back, else those messages will hang for ever */
+-		InitTextMessage();
++		ChatClearMessages();
+ 	}
+ 
+ 	if (_patches.auto_euro)
+Index: openttd.dsp
+===================================================================
+--- openttd.dsp	(revision 3396)
++++ openttd.dsp	(working copy)
+@@ -143,6 +143,10 @@
+ # End Source File
+ # Begin Source File
+ 
++SOURCE=.\animated_tiles.c
++# End Source File
++# Begin Source File
++
+ SOURCE=.\aystar.c
+ # End Source File
+ # Begin Source File
+@@ -442,6 +446,10 @@
+ # End Source File
+ # Begin Source File
+ 
++SOURCE=.\textmessagebox.c
++# End Source File
++# Begin Source File
++
+ SOURCE=.\thread.c
+ # End Source File
+ # Begin Source File
+@@ -710,6 +718,10 @@
+ # End Source File
+ # Begin Source File
+ 
++SOURCE=.\textmessagebox.h
++# End Source File
++# Begin Source File
++
+ SOURCE=.\thread.h
+ # End Source File
+ # Begin Source File
+Index: main_gui.c
+===================================================================
+--- main_gui.c	(revision 3396)
++++ main_gui.c	(working copy)
+@@ -27,6 +27,7 @@
+ #include "waypoint.h"
+ #include "variables.h"
+ #include "train.h"
++#include "textmessagebox.h"
+ 
+ #include "network_data.h"
+ #include "network_client.h"
+@@ -2470,5 +2471,6 @@
+ 	_cur_resolution[1] = _screen.height;
+ 	RelocateAllWindows(_screen.width, _screen.height);
+ 	ScreenSizeChanged();
++	TextMessageBoxesScreenSizeChanged();
+ 	MarkWholeScreenDirty();
+ }
+Index: Makefile
+===================================================================
+--- Makefile	(revision 3396)
++++ Makefile	(working copy)
+@@ -604,6 +604,7 @@
+ SRCS += aircraft_gui.c
+ SRCS += airport.c
+ SRCS += airport_gui.c
++SRCS += animated_tiles.c
+ SRCS += aystar.c
+ SRCS += bridge_gui.c
+ SRCS += callback_table.c
+@@ -688,6 +689,7 @@
+ SRCS += subsidy_gui.c
+ SRCS += terraform_gui.c
+ SRCS += texteff.c
++SRCS += textmessagebox.c
+ SRCS += thread.c
+ SRCS += tile.c
+ SRCS += town_cmd.c
+Index: openttd.vcproj
+===================================================================
+--- openttd.vcproj	(revision 3396)
++++ openttd.vcproj	(working copy)
+@@ -165,6 +165,9 @@
+ 				RelativePath=".\airport.c">
+ 			</File>
+ 			<File
++				RelativePath=".\animated_tiles.c">
++			</File>
++			<File
+ 				RelativePath=".\aystar.c">
+ 			</File>
+ 			<File
+@@ -357,6 +360,9 @@
+ 				RelativePath=".\texteff.c">
+ 			</File>
+ 			<File
++				RelativePath=".\textmessagebox.c">
++			</File>
++			<File
+ 				RelativePath=".\thread.c">
+ 			</File>
+ 			<File
+@@ -562,6 +568,9 @@
+ 				RelativePath=".\string.h">
+ 			</File>
+ 			<File
++				RelativePath=".\textmessagebox.h">
++			</File>
++			<File
+ 				RelativePath=".\thread.h">
+ 			</File>
+ 			<File
+Index: console_cmds.c
+===================================================================
+--- console_cmds.c	(revision 3396)
++++ console_cmds.c	(working copy)
+@@ -17,6 +17,7 @@
+ #include "settings.h"
+ #include "hal.h" /* for file list */
+ #include "vehicle.h"
++#include "textmessagebox.h"
+ 
+ // ** scriptfile handling ** //
+ static FILE *_script_file;
+@@ -143,6 +144,25 @@
+ 
+ 	return false;
+ }
++
++DEF_CONSOLE_CMD(ConDisplayInfo)
++{
++	if (argc == 0) {
++		IConsoleHelp("Show or hide info box. Usage: 'display_info <1 | 0>'");
++		return true;
++	}
++
++	if (argc == 2) {
++		uint32 result;
++		if (GetArgumentInteger(&result, argv[1])) {
++			EnableTextMessageBox(TMB_INFO, (result == 1) ? true : false);
++			return true;
++		}
++	}
++
++	return false;
++}
++
+ #endif /* _DEBUG */
+ 
+ DEF_CONSOLE_CMD(ConScrollToTile)
+@@ -1254,6 +1274,7 @@
+ 
+ 	IConsoleVarRegister("con_developer",    &_stdlib_con_developer, ICONSOLE_VAR_BOOLEAN, "Enable/disable console debugging information (internal)");
+ 	IConsoleCmdRegister("resettile",        ConResetTile);
++	IConsoleCmdRegister("display_info",        ConDisplayInfo);
+ 	IConsoleAliasRegister("dbg_echo",       "echo %A; echo %B");
+ 	IConsoleAliasRegister("dbg_echo2",      "echo %!");
+ }
+Index: textmessagebox.c
+===================================================================
+--- textmessagebox.c	(revision 0)
++++ textmessagebox.c	(revision 0)
+@@ -0,0 +1,607 @@
++/** 
++  * @file textmessagebox.c Textmessage boxes (network chat, info box)
++  * @see textmessagebox.h
++  */
++
++#include "stdafx.h"
++#include "openttd.h"
++#include "functions.h"
++#include "strings.h"
++#include "gfx.h"
++#include "viewport.h"
++#include "saveload.h"
++#include "hal.h"
++#include "console.h"
++#include "string.h"
++#include "variables.h"
++#include "table/sprites.h"
++#include "textmessagebox.h"
++
++TextMessageBox *_textmessage_boxes[TMB_END];
++
++TextMessageBox *_cur_textmessage_box;
++
++// general TMB system
++
++void CreateTextMessageBox(TextMessageBoxName name, int begin, uint lines, int x, int width, bool grows_downwards);
++void DeleteTextMessageBox(TextMessageBoxName name);
++void InsertTextMessageVA(uint index, uint16 color, const char *message, va_list va);
++void CDECL InsertTextMessage(uint index, uint16 color, const char *message, ...);
++void ChangeTextMessageVA(uint index, uint16 color, const char *message, va_list va);
++void CDECL ChangeTextMessage(uint index, uint16 color, const char *message, ...);
++void DeleteTextMessage(uint index);
++void DrawTextMessageBoxes(void);
++void UndrawTextMessageBoxes(void);
++void TextMessageBoxesDailyLoop(void);
++void TextMessageBoxesFrameLoop(uint32 system_time);
++void InitializeTextMessageBoxes(void);
++void UnInitializeTextMessageBoxes(void);
++void TextMessageBoxesScreenSizeChanged(void);
++
++static void DrawTextMessageBox(void);
++static void UndrawTextMessageBox(void);
++
++// Chat TMB
++
++void ChatClearMessages(void);
++void CDECL ChatAddMessage(uint16 color, uint8 duration, const char *message, ...);
++
++static void ChatDailyLoop(void);
++
++// Info TMB
++
++#ifdef _DEBUG
++static void InfoInitialize(void);
++static void InfoFrameLoop(uint32 system_time);
++#endif
++
++
++/**
++ * Create TMB of given name.
++ * 
++ * @param name name of TMB
++ * @param begin y-coord of beginning of TMB (depends on gros_downwards)
++ * @param lines number of lines (used to calculate height)
++ * @param x y-coord of beginning of TMB
++ * @param width width of TMB
++ * @param grows_downwards orientation of TMB
++ *
++ * @warning if grows_downwards is true, begin is y-coord of top border of TMB, else begin is y-coord of bottom border.
++ */
++void CreateTextMessageBox(TextMessageBoxName name, int begin, uint lines, int x, int width, bool grows_downwards)
++{
++	TextMessageBox *new_box;
++	uint i;
++        
++	assert(name < TMB_END);        
++    
++	new_box = (TextMessageBox *) malloc(sizeof(TextMessageBox));
++	new_box->message_list = (TextMessage **) malloc(sizeof(TextMessage *) * lines);
++	for (i = 0; i < lines; i++)
++		new_box->message_list[i] = NULL;
++	new_box->max_messages = lines;
++	new_box->height = lines * 15; // height of line = 15 pixels
++	new_box->width = width;
++	new_box->x = x;
++	new_box->y = grows_downwards ? begin : (begin - new_box->height);
++	new_box->grows_downwards = grows_downwards;
++	new_box->backup = (void *) malloc(sizeof(Pixel) * new_box->width * new_box->height);
++	new_box->dirty = true;
++	new_box->visible = false;
++	new_box->enabled = false;
++	new_box->update_proc_daily = NULL;
++	new_box->update_proc_frame = NULL;
++	if (_textmessage_boxes[name] != NULL) {
++		/* save as many messages as possible */
++		if (_textmessage_boxes[name]->max_messages < lines)
++			lines = _textmessage_boxes[name]->max_messages;
++		for (i = 0; i < lines; i++) {
++			new_box->message_list[i] = _textmessage_boxes[name]->message_list[i];
++			_textmessage_boxes[name]->message_list[i] = NULL;
++		}
++		/* save procs */
++		new_box->update_proc_daily = _textmessage_boxes[name]->update_proc_daily;
++		new_box->update_proc_frame = _textmessage_boxes[name]->update_proc_frame;	
++	}
++	_textmessage_boxes[name] = new_box;
++}
++
++/**
++ * Delete TMB of given name.
++ * 
++ * @param name name of TMB
++ */
++void DeleteTextMessageBox(TextMessageBoxName name) 
++{
++	uint i;
++    
++	assert(name < TMB_END);        
++	
++	_cur_textmessage_box = _textmessage_boxes[name];
++	UndrawTextMessageBox();
++	/* delete the box itself */
++	free(_textmessage_boxes[name]->backup);
++	for (i = 0; i < _textmessage_boxes[name]->max_messages; i++) {
++		if (_textmessage_boxes[name]->message_list[i] != NULL)
++			free(_textmessage_boxes[name]->message_list[i]);
++	}
++	free(_textmessage_boxes[name]);
++	_textmessage_boxes[name] = NULL;        
++}
++
++/**
++ * Enable of disable TMB
++ * 
++ * @param name name of TMB
++ * @param enable enable or disable ?
++ */
++void EnableTextMessageBox(TextMessageBoxName name, bool enable)
++{
++	assert(name < TMB_END);        
++    
++	if (_textmessage_boxes[name]->enabled == enable)
++		return;
++	
++	_cur_textmessage_box = _textmessage_boxes[name];
++	if (enable == false) {
++		UndrawTextMessageBox();	
++		_cur_textmessage_box->enabled = false;
++	} else {
++		_cur_textmessage_box->enabled = true;
++		DrawTextMessageBox();	
++	}
++}
++
++/**
++ * Insert text message to current TMB.
++ *
++ * @param index desired index of message
++ * @param color color of message
++ * @param messag message itself (printf format)
++ */
++void CDECL InsertTextMessage(uint index, uint16 color, const char *message, ...)
++{
++	va_list va;
++
++	va_start(va, message);
++	InsertTextMessageVA(index, color, message, va);
++}
++
++/**
++ * Insert text message to current TMB.
++ *
++ * @param index desired index of message
++ * @param color color of message
++ * @param messag message itself (printf format)
++ * @param va list of arguments
++ */
++void InsertTextMessageVA(uint index, uint16 color, const char *message, va_list va) {
++	uint i;
++
++	assert(_cur_textmessage_box != NULL);
++	assert(index < _cur_textmessage_box->max_messages);
++    
++	if (_cur_textmessage_box->message_list[_cur_textmessage_box->max_messages - 1] != NULL)
++		free(_cur_textmessage_box->message_list[_cur_textmessage_box->max_messages - 1]);
++	for (i = _cur_textmessage_box->max_messages - 1; i > index; i--)
++		_cur_textmessage_box->message_list[i] = _cur_textmessage_box->message_list[i - 1]; 
++
++	_cur_textmessage_box->message_list[index] = NULL;
++
++	ChangeTextMessageVA(index, color, message, va);
++}
++
++/**
++ * Change text message in current TMB
++ *
++ * @param index desired index of message (message does not have to exist, but it must be lower than max_messages)
++ * @param color color of message
++ * @param messag message itself (printf format)
++ * @param va list of arguments
++ */
++void CDECL ChangeTextMessage(uint index, uint16 color, const char *message, ...)
++{
++	va_list va;
++    
++	va_start(va, message);
++	ChangeTextMessageVA(index, color, message, va);
++}
++
++/**
++ * Change text message in current TMB
++ *
++ * @param index desired index of message (message does not have to exist, but it must be lower than max_messages)
++ * @param color color of message
++ * @param messag message itself (printf format)
++ */
++void ChangeTextMessageVA(uint index, uint16 color, const char *message, va_list va)
++{
++	char buf[MAX_TEXTMESSAGE_LENGTH];
++	size_t length;
++    
++	assert(_cur_textmessage_box != NULL);
++	assert(index < _cur_textmessage_box->max_messages);
++    
++	if (_cur_textmessage_box->message_list[index] == NULL) {
++		_cur_textmessage_box->message_list[index] = (TextMessage *) malloc(sizeof(TextMessage));
++		_cur_textmessage_box->message_list[index]->message[0] = '\0';	
++	}
++    
++	_cur_textmessage_box->message_list[index]->color = color;
++    
++	vsnprintf(buf, lengthof(buf), message, va);
++	va_end(va);
++
++	// Special color magic (TODO: what exactly ?)
++	if ((color & 0xFF) == 0xC9) color = 0x1CA;
++
++	// Cut the message till it fits inside the chatbox
++	length = strlen(buf);
++	while (GetStringWidth(buf) > _cur_textmessage_box->width - 9) buf[--length] = '\0';
++
++	ttd_strlcpy(_cur_textmessage_box->message_list[index]->message, buf, sizeof(_cur_textmessage_box->message_list[index]->message));
++    
++	_cur_textmessage_box->dirty = true;
++}
++
++/**
++ * Delete text message in current TMB
++ *
++ * @param index desired index of message (message does not have to exist, but it must be lower than max_messages)
++ */
++void DeleteTextMessage(uint index)
++{
++	uint i;
++	assert(_cur_textmessage_box != NULL);
++	assert(index < _cur_textmessage_box->max_messages);
++	assert(_cur_textmessage_box->message_list[index] != NULL);
++    
++	free(_cur_textmessage_box->message_list[index]);
++	for (i = index; i < _cur_textmessage_box->max_messages - 1; i++)
++		_cur_textmessage_box->message_list[i] = _cur_textmessage_box->message_list[i+1];
++	
++	_cur_textmessage_box->dirty = true;	
++}
++
++/**
++ * Draw current TMB
++ *
++ * @see _cur_textmessage_box
++ */
++static void DrawTextMessageBox(void)
++{
++	uint i;
++	int j;
++	int basey;
++	bool has_message;
++
++	if (!_cur_textmessage_box->dirty) return;
++
++	// First undraw if needed
++	UndrawTextMessageBox();
++
++	if (_iconsole_mode == ICONSOLE_FULL)
++		return;
++
++	// Check if we have anything to draw at all
++	has_message = false;
++	for ( i = 0; i < _cur_textmessage_box->max_messages; i++) {
++		if (_cur_textmessage_box->message_list[i] != NULL)
++			has_message = true;
++	}
++	if (!has_message) return;
++
++	// Make a copy of the screen as it is before painting (for undraw)
++	memcpy_pitch(
++		_cur_textmessage_box->backup,
++		_screen.dst_ptr + _cur_textmessage_box->x + _cur_textmessage_box->y * _screen.pitch,
++		_cur_textmessage_box->width, _cur_textmessage_box->height, _screen.pitch, _cur_textmessage_box->width);
++
++	// Switch to _screen painting
++	_cur_dpi = &_screen;
++
++	j = 0;
++	// Paint the messages
++	for (i = 0; i < _cur_textmessage_box->max_messages; i++) {
++
++		if (_cur_textmessage_box->message_list[i] == NULL) 
++			continue;
++
++		if (_cur_textmessage_box->grows_downwards)
++			basey = _cur_textmessage_box->y + j*13;
++		else
++			basey = _cur_textmessage_box->y + _cur_textmessage_box->height - (j+1)*13;
++	    
++		j++;
++		GfxFillRect(_cur_textmessage_box->x, basey, _cur_textmessage_box->x + _cur_textmessage_box->width - 1, basey + 13 - 1,
++			/* black, but with some alpha */ 0x322 | USE_COLORTABLE);
++
++		basey += 2;
++	    
++		DoDrawString(_cur_textmessage_box->message_list[i]->message, _cur_textmessage_box->x + 2, basey + 1, 0x10);
++		DoDrawString(_cur_textmessage_box->message_list[i]->message, _cur_textmessage_box->x + 3, basey, _cur_textmessage_box->message_list[i]->color);
++	}
++
++	// Make sure the data is updated next flush
++	_video_driver->make_dirty(_cur_textmessage_box->x, _screen.height-_cur_textmessage_box->y, _cur_textmessage_box->width, _cur_textmessage_box->height);
++
++	_cur_textmessage_box->visible = true;
++	_cur_textmessage_box->dirty = false;
++}
++
++/**
++ * Undraw current TMB
++ *
++ * @see _cur_textmessage_box
++ */
++static void UndrawTextMessageBox(void)
++{
++	if (_cur_textmessage_box->visible) {
++		// Sometimes we also need to hide the cursor
++		//   This is because both textmessage and the cursor take a shot of the
++		//   screen before drawing.
++		//   Now the textmessage takes his shot and paints his data before the cursor
++		//   does, so in the shot of the cursor is the screen-data of the textmessage
++		//   included when the cursor hangs somewhere over the textmessage. To
++		//   avoid wrong repaints, we undraw the cursor in that case, and everything
++		//   looks nicely ;)
++		// (and now hope this story above makes sense to you ;))
++
++		if (_cursor.visible) {
++			if (_cursor.draw_pos.x + _cursor.draw_size.x >= _cur_textmessage_box->x &&
++				_cursor.draw_pos.x <= _cur_textmessage_box->x + _cur_textmessage_box->width &&
++				_cursor.draw_pos.y + _cursor.draw_size.y >= _cur_textmessage_box->y &&
++				_cursor.draw_pos.y <= _screen.height - _cur_textmessage_box->y + _cur_textmessage_box->height) {
++				UndrawMouseCursor();
++			}
++		}
++
++		_cur_textmessage_box->visible = false;
++		// Put our 'shot' back to the screen
++		memcpy_pitch(
++			_screen.dst_ptr + _cur_textmessage_box->x + _cur_textmessage_box->y * _screen.pitch,
++			_cur_textmessage_box->backup,
++			_cur_textmessage_box->width, _cur_textmessage_box->height, _cur_textmessage_box->width, _screen.pitch);
++
++		// And make sure it is updated next time
++		_video_driver->make_dirty(_cur_textmessage_box->x, _screen.height-_cur_textmessage_box->y, _cur_textmessage_box->width, _cur_textmessage_box->height);
++
++		_cur_textmessage_box->dirty = true;
++	}
++}
++
++/**
++ * Draw all TMBs
++ */
++void DrawTextMessageBoxes(void)
++{
++	uint i;
++	for (i = 0; i < TMB_END; i++) {
++		if (_textmessage_boxes[i] == NULL || _textmessage_boxes[i]->enabled == false)
++			continue;
++		_cur_textmessage_box = _textmessage_boxes[i];
++		DrawTextMessageBox();
++	}
++}
++
++/**
++ * Undraw all TMBs
++ */
++void UndrawTextMessageBoxes(void)
++{
++	uint i;
++	for (i = 0; i < TMB_END; i++) {
++		if (_textmessage_boxes[i] == NULL || _textmessage_boxes[i]->enabled == false)
++			continue;
++		_cur_textmessage_box = _textmessage_boxes[i];
++		UndrawTextMessageBox();
++	}
++}
++
++/**
++ * Call all TMB DailyLoop handlers.
++ * Does not call disableds' ones.
++ */
++void TextMessageBoxesDailyLoop(void)
++{
++	uint i;
++	for (i = 0; i < TMB_END; i++) {
++		if (_textmessage_boxes[i] == NULL || _textmessage_boxes[i]->enabled == false)
++			continue;
++		if (_textmessage_boxes[i]->update_proc_daily  != NULL)
++			_textmessage_boxes[i]->update_proc_daily();
++    }
++}
++
++/**
++ * Call all TMB FrameLoop handlers.
++ * Does not call disableds' ones.
++ */
++void TextMessageBoxesFrameLoop(uint32 system_time)
++{
++	uint i;
++	for (i = 0; i < TMB_END; i++) {
++		if (_textmessage_boxes[i] == NULL || _textmessage_boxes[i]->enabled == false)
++			continue;
++		if (_textmessage_boxes[i]->update_proc_frame  != NULL)
++			_textmessage_boxes[i]->update_proc_frame(system_time);
++	}
++}
++
++/**
++ * Initialize TMBs
++ *
++ * @note: Put your TMB's inicializaton here.
++ */
++void InitializeTextMessageBoxes(void)
++{
++	TextMessageBoxesScreenSizeChanged();
++#ifdef _DEBUG
++	InfoInitialize();
++#endif
++}
++
++/**
++ * Uninitialize TMBs
++ *
++ * @note: Put your TMB's uninicializaton here.
++ */
++void UnInitializeTextMessageBoxes(void)
++{
++	uint i;
++	for (i = 0; i < TMB_END; i++) {
++		if (_textmessage_boxes[i] == NULL)
++			continue;
++		DeleteTextMessageBox(i);
++	}
++}
++
++/**
++ * Recalculate sizes of TMBs
++ *
++ * @note: Put your TMB's placement/recalculation here.
++ * @note: This function is called before initialization of TMB (to have TMB ready for messages insertion)
++ */
++void TextMessageBoxesScreenSizeChanged(void)
++{
++	CreateTextMessageBox(TMB_CHAT, _screen.height - 30, 150/15, 10, 400, false);
++	_cur_textmessage_box = _textmessage_boxes[TMB_CHAT];
++	_cur_textmessage_box->update_proc_daily = &ChatDailyLoop;
++	_cur_textmessage_box->enabled = true;
++#ifdef _DEBUG
++	CreateTextMessageBox(TMB_INFO, _screen.height - 30, 2, _screen.width - 10 - 150, 150, false);
++	_cur_textmessage_box = _textmessage_boxes[TMB_INFO];
++	_cur_textmessage_box->update_proc_frame = &InfoFrameLoop;
++#endif
++}
++
++/**
++ * Clear Chat TMB
++ */
++void ChatClearMessages(void)
++{
++	uint i;
++    
++	if (_textmessage_boxes[TMB_CHAT] == NULL)
++		return;
++	
++	for (i = 0; i < _textmessage_boxes[TMB_CHAT]->max_messages; i++) {
++		if (_textmessage_boxes[TMB_CHAT]->message_list[i] != NULL) {
++			free(_textmessage_boxes[TMB_CHAT]->message_list[i]);
++			_textmessage_boxes[TMB_CHAT]->message_list[i] = NULL;
++		}
++	}    
++}
++
++/**
++ * Add message to Chat TMB
++ */
++void CDECL ChatAddMessage(uint16 color, uint8 duration, const char *message, ...) 
++{
++	va_list va;
++
++	va_start(va, message);
++    
++	_cur_textmessage_box = _textmessage_boxes[TMB_CHAT];
++	InsertTextMessageVA(0, color, message, va);
++	_cur_textmessage_box->message_list[0]->user_int = _date + duration;
++}
++
++/**
++ * Remove stale messages in Chat TMB
++ */
++static void ChatDailyLoop(void) 
++{
++	uint i;
++	_cur_textmessage_box = _textmessage_boxes[TMB_CHAT];
++
++	for (i = 0; i < _cur_textmessage_box->max_messages ; i++) {
++		if (_cur_textmessage_box->message_list[i] == NULL)
++			continue;
++	
++		if (_cur_textmessage_box->message_list[i]->user_int < _date) {
++			DeleteTextMessage(i);
++			i--;
++			_cur_textmessage_box->dirty = true;
++		}
++	}
++}
++
++#ifdef _DEBUG
++
++/// Number of frames used to calculate average FPS - about ten seconds
++#define FPS_AVG_FRAMES 300
++
++/// Duration of last FPS_AVG_FRAMES in milliseconds.
++static uint32 fps_frame_duration[FPS_AVG_FRAMES];
++
++/// Sum of fps_frame_duration.
++static uint32 fps_frame_duration_total;
++
++/// Index to fps_frame_duration to be overwritten.
++static int fps_frame_index;
++
++/// Time of last full frame in milliseconds. (used to calculate value for fps_frame_duration)
++static uint32 fps_last_full_frame;
++
++/// Number of frames in last second. (value to display)
++static int fps_full_frames;
++
++/// Number of frames in this second. (value to increase)
++static int fps_full_frames_new;
++
++/// Time of next second (time to shift frames_new to frames)
++static uint32 fps_next_second;
++
++/// Time of next second (time to shift frames_new to frames)
++static uint32 fps_next_display_time;
++
++/**
++ * Initialize Info TMB
++ * @todo: Better initialization of average fps.
++ */
++static void InfoInitialize(void)
++{
++	uint i;
++	for (i = 0; i < FPS_AVG_FRAMES; i++) {
++		fps_frame_duration[i] = 30; // for normal average fps at start
++		fps_frame_duration_total += fps_frame_duration[i];
++	}
++}
++
++/**
++ * Recalculate info statistics
++ */
++static void InfoFrameLoop(uint32 system_time)
++{
++	// next second ?
++	if (fps_next_second <= system_time) {
++		fps_next_second = system_time+1000;
++		fps_full_frames = fps_full_frames_new;
++		fps_full_frames_new = 0;
++	}
++
++	// display info 10 times per second
++	if (fps_next_display_time <= system_time) {
++		fps_next_display_time = system_time+100;
++
++		_cur_textmessage_box = _textmessage_boxes[TMB_INFO];
++		ChangeTextMessage(0, 12, "FPS : %d ", fps_full_frames);
++		ChangeTextMessage(1, 12, "Average FPS : %.2f ", FPS_AVG_FRAMES*1000 / (float)fps_frame_duration_total);	
++	}
++    
++	// frame has passed
++	fps_full_frames_new++;
++    
++	// calculate duration of frame and update frame duration array
++	fps_frame_duration_total -= fps_frame_duration[fps_frame_index];
++	fps_frame_duration[fps_frame_index] = system_time - fps_last_full_frame;
++	fps_frame_duration_total += fps_frame_duration[fps_frame_index];
++	fps_last_full_frame = system_time;
++
++	// calculate new offset for frame duration array
++	fps_frame_index++;
++	fps_frame_index %= FPS_AVG_FRAMES;
++}
++
++#endif
+Index: window.c
+===================================================================
+--- window.c	(revision 3396)
++++ window.c	(working copy)
+@@ -12,6 +12,7 @@
+ #include "console.h"
+ #include "variables.h"
+ #include "table/sprites.h"
++#include "textmessagebox.h"
+ 
+ // delta between mouse cursor and upper left corner of dragged window
+ static Point _drag_delta;
+@@ -1510,7 +1511,7 @@
+ 	for (w = _windows; w != _last_window; w++) {
+ 		if (w->viewport != NULL) UpdateViewportPosition(w);
+ 	}
+-	DrawTextMessage();
++	DrawTextMessageBoxes();
+ 	// Redraw mouse cursor in case it was hidden
+ 	DrawMouseCursor();
+ }
+Index: textmessagebox.h
+===================================================================
+--- textmessagebox.h	(revision 0)
++++ textmessagebox.h	(revision 0)
+@@ -0,0 +1,109 @@
++#ifndef TEXTMESSAGEBOX_H
++#define TEXTMESSAGEBOX_H
++
++/** @file textmessagebox.h 
++ * Header file for textmessage boxes (TMBs) (network chat, info box)
++ * @see textmessagebox.c 
++ */
++
++#include <stdarg.h> /* va_list */
++
++/// Maximum length of message (including '\0')
++#define MAX_TEXTMESSAGE_LENGTH 250
++
++/**
++ * Message of a TMB.
++ * Maximum length of message is MAX_TEXTMESSAGE_LENGTH (including NULL char).
++ *
++ * @see asdfasdfasd
++ */
++typedef struct TextMessage {
++	/// message itself
++	char message[MAX_TEXTMESSAGE_LENGTH];
++	/// color of message
++	uint16 color;
++	/// user data (not used by TMB system, feel free to use it (ex: time to expire, ptr to object used for recalculation of message, ...)
++	union { 
++		int user_int;
++		void *user_ptr;
++	};
++} TextMessage;
++
++/// type of TMB daily update function
++typedef void TextMessageBoxDailyUpdateProc(void);
++/// type of TMB frame update function
++typedef void TextMessageBoxFrameUpdateProc(uint32 system_time);
++
++/**
++ * TMB for displaying various information.
++ * It is currently used for network chat messages and info messages (DEBUG_ has to be defined)
++ *
++ * @see
++ */
++typedef struct TextMessageBox {
++	TextMessage **message_list; ///< array of pointers to TextMessage
++	uint max_messages; ///< maximum number of messages, do not change
++	int height; ///< height of TMB
++	int width; ///< width of TMB
++	int x; ///< x coordinate of left border
++	int y; ///< y coordinate of top border
++	bool grows_downwards; ///< is the first messaage displayed in top line (true) or bottom line (false). @see CreateTextMessageBox
++	void *backup; ///< array used to backup underlying screen area
++	bool dirty; ///< needs to be redrawn ?
++	bool visible; ///< visible or hidden ?
++	bool enabled; ///< enabled (= shown, update_procs called)
++	TextMessageBoxDailyUpdateProc *update_proc_daily; ///< called every day (allowed to be null)
++	TextMessageBoxFrameUpdateProc *update_proc_frame; ///< called every frame (allowed to be null)
++} TextMessageBox;
++
++/// names of TMBs
++typedef enum TextMessageBoxNames {
++	/// network chat TMB
++	TMB_CHAT,
++#ifdef _DEBUG
++	/// info TMB
++	TMB_INFO,
++#endif
++	TMB_END,
++} TextMessageBoxName;
++
++extern void memcpy_pitch(void *d, void *s, int w, int h, int spitch, int dpitch);
++
++/// TMBs
++extern TextMessageBox *_textmessage_boxes[TMB_END];
++
++/// currently selected TMB
++extern TextMessageBox *_cur_textmessage_box;
++
++// general TMB system
++
++void CreateTextMessageBox(TextMessageBoxName name, int begin, uint lines, int x, int width, bool grows_downwards);
++void DeleteTextMessageBox(TextMessageBoxName name);
++void EnableTextMessageBox(TextMessageBoxName name, bool enable);
++
++void InsertTextMessageVA(uint index, uint16 color, const char *message, va_list va);
++void CDECL InsertTextMessage(uint index, uint16 color, const char *message, ...);
++void ChangeTextMessageVA(uint index, uint16 color, const char *message, va_list va);
++void CDECL ChangeTextMessage(uint index, uint16 color, const char *message, ...);
++void DeleteTextMessage(uint index);
++
++void DrawTextMessageBoxes(void);
++void UndrawTextMessageBoxes(void);
++
++void TextMessageBoxesDailyLoop(void);
++void TextMessageBoxesFrameLoop(uint32 system_time);
++
++void InitializeTextMessageBoxes(void);
++void UnInitializeTextMessageBoxes(void);
++
++void TextMessageBoxesScreenSizeChanged(void);
++
++// Chat TMB
++
++void ChatClearMessages(void);
++void CDECL ChatAddMessage(uint16 color, uint8 duration, const char *message, ...);
++
++#ifdef _DEBUG
++// Info TMB
++#endif
++#endif /* TEXTMESSAGE_H */
+Index: animated_tiles.c
+===================================================================
+--- animated_tiles.c	(revision 0)
++++ animated_tiles.c	(revision 0)
+@@ -0,0 +1,75 @@
++#include "stdafx.h"
++#include "openttd.h"
++#include "functions.h"
++#include "strings.h"
++#include "gfx.h"
++#include "viewport.h"
++#include "saveload.h"
++#include "hal.h"
++#include "console.h"
++#include "string.h"
++#include "variables.h"
++#include "table/sprites.h"
++#include <stdarg.h> /* va_list */
++
++TileIndex _animated_tile_list[256];
++
++void DeleteAnimatedTile(TileIndex tile)
++{
++	TileIndex* ti;
++
++	for (ti = _animated_tile_list; ti != endof(_animated_tile_list); ti++) {
++		if (tile == *ti) {
++			/* remove the hole */
++			memmove(ti, ti + 1, endof(_animated_tile_list) - 1 - ti);
++			/* and clear last item */
++			endof(_animated_tile_list)[-1] = 0;
++			MarkTileDirtyByTile(tile);
++			return;
++		}
++	}
++}
++
++bool AddAnimatedTile(TileIndex tile)
++{
++	TileIndex* ti;
++
++	for (ti = _animated_tile_list; ti != endof(_animated_tile_list); ti++) {
++		if (tile == *ti || *ti == 0) {
++			*ti = tile;
++			MarkTileDirtyByTile(tile);
++			return true;
++		}
++	}
++
++	return false;
++}
++
++void AnimateAnimatedTiles(void)
++{
++	const TileIndex* ti;
++
++	for (ti = _animated_tile_list; ti != endof(_animated_tile_list) && *ti != 0; ti++) {
++		AnimateTile(*ti);
++	}
++}
++
++void InitializeAnimatedTiles(void)
++{
++	memset(_animated_tile_list, 0, sizeof(_animated_tile_list));
++}
++
++static void SaveLoad_ANIT(void)
++{
++	// In pre version 6, we has 16bit per tile, now we have 32bit per tile, convert it ;)
++	if (CheckSavegameVersion(6)) {
++		SlArray(_animated_tile_list, lengthof(_animated_tile_list), SLE_FILE_U16 | SLE_VAR_U32);
++	} else {
++		SlArray(_animated_tile_list, lengthof(_animated_tile_list), SLE_UINT32);
++	}
++}
++
++
++const ChunkHandler _animated_tile_chunk_handlers[] = {
++	{ 'ANIT', SaveLoad_ANIT, SaveLoad_ANIT, CH_RIFF | CH_LAST},
++};

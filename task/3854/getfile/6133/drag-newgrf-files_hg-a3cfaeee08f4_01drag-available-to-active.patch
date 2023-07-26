@@ -1,0 +1,161 @@
+diff -r f6e30cce6f5f src/newgrf_gui.cpp
+--- a/src/newgrf_gui.cpp	Mon May 24 09:23:03 2010 +0200
++++ b/src/newgrf_gui.cpp	Mon May 24 09:38:43 2010 +0200
+@@ -488,6 +488,8 @@
+ 				NWidgetBase *nw = this->GetWidget<NWidgetBase>(SNGRFS_FILE_LIST);
+ 				uint i = (pt.y - nw->pos_y) / nw->resize_y + this->vscroll.GetPosition();
+ 
++				if (i + 1 == this->vscroll.GetCount()) break; // Do nothing if the click occurs on the empty line at the end of the list
++
+ 				GRFConfig *c;
+ 				for (c = this->actives; c != NULL && i > 0; c = c->next, i--) {}
+ 
+@@ -544,7 +546,13 @@
+ 				}
+ 				this->InvalidateData();
+ 				this->DeleteChildWindows(WC_QUERY_STRING); // Remove the parameter query window
+-				if (click_count == 1) break;
++				if (click_count == 1) {
++					if (this->avail_sel != NULL) {
++						/* Activate drag and drop */
++						SetObjectToPlaceWnd(SPR_CURSOR_MOUSE, PAL_NONE, HT_DRAG, this);
++					}
++					break;
++				}
+ 			}
+ 			/* Fall through with double click. */
+ 			case SNGRFS_ADD: {
+@@ -647,50 +655,88 @@
+ 
+ 	virtual void OnDragDrop(Point pt, int widget)
+ 	{
+-		if (widget == SNGRFS_FILE_LIST && this->active_sel != NULL) {
+-			GRFConfig *from = this->active_sel;
+-			/* Gets the selected file offset in the active list and its predecessor. */
+-			GRFConfig *from_prev = NULL;
+-			uint from_pos = 0;
+-			for (GRFConfig *cursor = this->actives; cursor != NULL; cursor = cursor->next) {
+-				if (cursor == from) break;
++		if (widget == SNGRFS_FILE_LIST) {
++			if (this->active_sel != NULL) { // Move NewGRF file inside active list
++				GRFConfig *from = this->active_sel;
++				/* Gets the selected file offset in the active list and its predecessor. */
++				GRFConfig *from_prev = NULL;
++				uint from_pos = 0;
++				for (GRFConfig *cursor = this->actives; cursor != NULL; cursor = cursor->next) {
++					if (cursor == from) break;
+ 
+-				from_prev = cursor;
+-				from_pos++;
+-			}
+-
+-			/* Gets the drag-and-drop destination offset. */
+-			NWidgetBase *nw = this->GetWidget<NWidgetBase>(SNGRFS_FILE_LIST);
+-			uint to_pos = (pt.y - nw->pos_y) / nw->resize_y + this->vscroll.GetPosition();
+-
+-			if (from_pos != to_pos) { // Don't move NewGRF file over itself
+-				/* Gets destination file and its predecessor. */
+-				GRFConfig *to = this->actives;
+-				GRFConfig *to_prev = NULL;
+-				for (uint i = 0; to != NULL && i < to_pos; to_prev = to, to = to->next, i++) {}
+-
+-				/* Detach NewGRF file of its original position. */
+-				if (from_prev == NULL) { // Detach from start of list
+-					this->actives = this->actives->next;
+-				} else {
+-					from_prev->next = from->next;
++					from_prev = cursor;
++					from_pos++;
+ 				}
+ 
++				/* Gets the drag-and-drop destination offset. */
++				NWidgetBase *nw = this->GetWidget<NWidgetBase>(SNGRFS_FILE_LIST);
++				uint to_pos = (pt.y - nw->pos_y) / nw->resize_y + this->vscroll.GetPosition();
++				if (to_pos + 1 == this->vscroll.GetCount()) to_pos--; // Active list contains an empty line at end, skip it
++
++				if (from_pos != to_pos) { // Don't move NewGRF file over itself
++					/* Gets destination file and its predecessor. */
++					GRFConfig *to = this->actives;
++					GRFConfig *to_prev = NULL;
++					for (uint i = 0; to != NULL && i < to_pos; to_prev = to, to = to->next, i++) {}
++
++					/* Detach NewGRF file of its original position. */
++					if (from_prev == NULL) { // Detach from start of list
++						this->actives = this->actives->next;
++					} else {
++						from_prev->next = from->next;
++					}
++
++					/* Attach NewGRF file to its new position. */
++					if (from_pos < to_pos) { // Move down NewGRF file
++						from->next = to->next;
++						to->next = from;
++					} else if (to_prev == NULL) { // Move up at start of the list
++						this->actives = from;
++						from->next = to;
++					} else { // Move up inside list
++						from->next = to;
++						to_prev->next = from;
++					}
++
++					this->vscroll.ScrollTowards(to_pos);
++					this->preset = -1;
++					this->InvalidateData();
++				}
++			} else if (this->avail_sel != NULL) { // Insert available NewGRF file into active list
++				/* Check for duplicate grfid. */
++				for (GRFConfig *cursor = this->actives; cursor != NULL; cursor = cursor->next) {
++					if (cursor->ident.grfid == this->avail_sel->ident.grfid) {
++						ShowErrorMessage(STR_NEWGRF_DUPLICATE_GRFID, INVALID_STRING_ID, WL_INFO);
++						ResetObjectToPlace();
++						return;
++					}
++				}
++
++				GRFConfig *from = DuplicateGRFConfig(this->avail_sel);
++
++				/* Gets the drag-and-drop destination offset. */
++				NWidgetBase *nw = this->GetWidget<NWidgetBase>(SNGRFS_FILE_LIST);
++				uint to_pos = (pt.y - nw->pos_y) / nw->resize_y + this->vscroll.GetPosition();
++
+ 				/* Attach NewGRF file to its new position. */
+-				if (from_pos < to_pos) { // Move down NewGRF file
+-					from->next = to->next;
+-					to->next = from;
+-				} else if (to_prev == NULL) { // Move up at start of the list
++				if (to_pos == 0 || this->actives == NULL) { // Insert at start of list
++					from->next = this->actives;
+ 					this->actives = from;
+-					from->next = to;
+-				} else { // Move up inside list
+-					from->next = to;
++				} else {
++					/* Gets file before the destination position. */
++					GRFConfig *to_prev = this->actives;
++					for (uint i = 1; i < to_pos && to_prev->next != NULL; i++, to_prev = to_prev->next) {}
++
++					/* Insert NewGRF file inside list. */
++					from->next = to_prev->next;
+ 					to_prev->next = from;
+ 				}
+ 
+-				this->vscroll.ScrollTowards(to_pos);
+-				this->preset = -1;
+-				this->InvalidateData();
++				this->active_sel = from;
++				this->avail_sel = NULL;
++				this->avail_pos = -1;
++				this->avails.ForceRebuild();
++				this->InvalidateData(2);
+ 			}
+ 		}
+ 
+@@ -800,7 +846,7 @@
+ 				for (const GRFConfig *c = this->actives; c != NULL; c = c->next, i++) {}
+ 
+ 				this->vscroll.SetCapacityFromWidget(this, SNGRFS_FILE_LIST);
+-				this->vscroll.SetCount(i);
++				this->vscroll.SetCount(i + 1); // Reserve an empty space at end of list: used to drag an available file at end of active list
+ 
+ 				this->vscroll2.SetCapacityFromWidget(this, SNGRFS_AVAIL_LIST);
+ 				if (this->avail_pos >= 0) this->vscroll2.ScrollTowards(this->avail_pos);

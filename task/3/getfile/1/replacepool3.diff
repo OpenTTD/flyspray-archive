@@ -1,0 +1,335 @@
+Index: players.c
+===================================================================
+--- players.c	(revision 3240)
++++ players.c	(working copy)
+@@ -34,6 +34,8 @@
+ 	0x34C, 0x34D, 0x34F
+ };
+ 
++static void RemoveAllEngineReplacement(Player *p);
++
+ void DrawPlayerFace(uint32 face, int color, int x, int y)
+ {
+ 	byte flag = 0;
+@@ -541,6 +543,10 @@
+ 	for(i = 0; i != MAX_PLAYERS; i++)
+ 		_players[i].index=i;
+ 	_cur_player_tick_index = 0;
++
++	/* Clean the engine renew pool and create 1 block in it */
++	CleanPool(&_engine_renew_pool);
++	AddBlockToPool(&_engine_renew_pool);
+ }
+ 
+ void OnTick_Players(void)
+@@ -893,6 +899,8 @@
+ 			p->money64 = p->player_money = 100000000; // XXX - wtf?
+ 			p->is_active = false;
+ 		}
++		RemoveAllEngineReplacement(p);
++
+ 	} break;
+ 
+ 	case 3: { /* Merge a company (#1) into another company (#2), elimination company #1 */
+@@ -1097,15 +1105,78 @@
+ 	 _patches.ending_date = 2051;
+ }
+ 
++/************************************************************************
++ *  * Engine Replacement stuff
++ *   ************************************************************************/
++enum {
++	ENGINE_RENEW_POOL_BLOCK_SIZE_BITS = 3,
++	ENGINE_RENEW_POOL_MAX_BLOCKS      = 8000,
++};
++
++#define FOR_ALL_ENGINE_RENEWS_FROM(er, start) for (er = GetEngineRenew(start); er != NULL; er = (er->index + 1 < GetEngineRenewPoolSize()) ? GetEngineRenew(er->index + 1) : NULL)
++#define FOR_ALL_ENGINE_RENEWS(er) FOR_ALL_ENGINE_RENEWS_FROM(er, 0)
++
++static void EngineRenewPoolNewBlock(uint start_item)
++{
++	EngineRenew *er;
++
++	FOR_ALL_ENGINE_RENEWS_FROM(er, start_item) {
++		er->index = start_item++;
++		er->from = INVALID_ENGINE;
++	}
++}
++
++MemoryPool _engine_renew_pool = { "EngineRe", ENGINE_RENEW_POOL_MAX_BLOCKS, ENGINE_RENEW_POOL_BLOCK_SIZE_BITS, sizeof(EngineRenew), &EngineRenewPoolNewBlock, 0, 0, NULL };
++
++static EngineRenew *AllocateEngineRenew(void)
++{
++	EngineRenew *er;
++
++	FOR_ALL_ENGINE_RENEWS(er) {
++		if (er->from == INVALID_ENGINE) {
++			er->to = INVALID_ENGINE;
++			er->next = NULL;
++			return er;
++		}
++	}
++
++	/* Check if we can add a block to the pool */
++	if (AddBlockToPool(&_engine_renew_pool)) return AllocateEngineRenew();
++
++	return NULL;
++}
++
+ void InitialiseEngineReplacement(Player *p)
+ {
+-	EngineID engine;
++	p->engine_replacement = NULL;
++}
+ 
+-	for (engine = 0; engine < TOTAL_NUM_ENGINES; engine++)
+-		p->engine_replacement[engine] = INVALID_ENGINE;
++static EngineRenew *GetEngineReplacement(const Player *p, EngineID engine)
++{
++	EngineRenew *er;
++
++	for (er = p->engine_replacement; er != NULL; er = er->next) {
++		if (er->from == engine) return er;
++	}
++	return NULL;
+ }
+ 
+ /**
++ * Remove all engine replacement settingsfor the player.
++ * @param p Player.
++ */
++static void RemoveAllEngineReplacement(Player *p)
++{
++	EngineRenew *er;
++	
++	for(er = p->engine_replacement; er != NULL; er=er->next) {
++		er->from = INVALID_ENGINE;
++	}
++	
++	p->engine_replacement = NULL;
++}
++
++/**
+  * Retrieve the engine replacement for the given player and original engine type.
+  * @param p Player.
+  * @param engine Engine type.
+@@ -1113,7 +1184,8 @@
+  */
+ EngineID EngineReplacement(const Player *p, EngineID engine)
+ {
+-	return p->engine_replacement[engine];
++	const EngineRenew *er = GetEngineReplacement(p, engine);
++	return er == NULL ? INVALID_ENGINE : er->to;
+ }
+ 
+ /**
+@@ -1137,7 +1209,26 @@
+  */
+ int32 AddEngineReplacement(Player *p, EngineID old_engine, EngineID new_engine, uint32 flags)
+ {
+-	if (flags & DC_EXEC) p->engine_replacement[old_engine] = new_engine;
++	EngineRenew *er;
++
++	// Check if the old vehicle is already in the list
++	er = GetEngineReplacement(p, old_engine);
++	if (er != NULL) {
++		if (flags & DC_EXEC) er->to = new_engine;
++		return 0;
++	}
++
++	er = AllocateEngineRenew();
++	if (er == NULL) return CMD_ERROR;
++
++	if (flags & DC_EXEC) {
++		er->from = old_engine;
++		er->to = new_engine;
++		er->next = p->engine_replacement;
++
++		p->engine_replacement = er;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -1150,10 +1241,27 @@
+  */
+ int32 RemoveEngineReplacement(Player *p, EngineID engine, uint32 flags)
+ {
+-	if (flags & DC_EXEC) p->engine_replacement[engine] = INVALID_ENGINE;
+-	return 0;
++	EngineRenew *er, *last = NULL;
++
++	for (er = p->engine_replacement; er != NULL; er = er->next) {
++		if (er->from == engine) {
++			if (flags & DC_EXEC) {
++				if (last == NULL) {
++					p->engine_replacement = er->next;
++				} else {
++					last->next = er->next;
++				}
++				er->from = INVALID_ENGINE;
++			}
++			return 0;
++		}
++		last = er;
++	}
++
++	return CMD_ERROR;
+ }
+ 
++
+ // Save/load of players
+ static const SaveLoad _player_desc[] = {
+ 	SLE_VAR(Player,name_2,					SLE_UINT32),
+@@ -1199,7 +1307,8 @@
+ 	SLE_CONDVAR(Player,is_active,	SLE_UINT8, 4, 255),
+ 
+ 	// Engine renewal settings
+-	SLE_CONDARR(Player,engine_replacement,  SLE_UINT16, 256, 16, 255),
++	SLE_CONDARR(NullStruct,null,SLE_FILE_U16 | SLE_VAR_NULL, 256, 16, 18),
++	SLE_CONDREF(Player,engine_replacement,REF_ENGINE_RENEWS, 19, 255),
+ 	SLE_CONDVAR(Player,engine_renew,         SLE_UINT8,      16, 255),
+ 	SLE_CONDVAR(Player,engine_renew_months,  SLE_INT16,      16, 255),
+ 	SLE_CONDVAR(Player,engine_renew_money,  SLE_UINT32,      16, 255),
+@@ -1336,6 +1445,44 @@
+ 	}
+ }
+ 
++static const SaveLoad _engine_renew_desc[] = {
++	SLE_VAR(EngineRenew, from, SLE_UINT16),
++	SLE_VAR(EngineRenew, to,   SLE_UINT16),
++
++	SLE_REF(EngineRenew, next, REF_ENGINE_RENEWS),
++
++	SLE_END()
++};
++
++static void Save_ERNW(void)
++{
++	EngineRenew *er;
++
++	FOR_ALL_ENGINE_RENEWS(er) {
++		if (er->from != INVALID_ENGINE) {
++			SlSetArrayIndex(er->index);
++			SlObject(er, _engine_renew_desc);
++		}
++	}
++}
++
++static void Load_ERNW(void)
++{
++	int index;
++
++	while ((index = SlIterateArray()) != -1) {
++		EngineRenew *er;
++
++		if (!AddBlockIfNeeded(&_engine_renew_pool, index))
++			error("EngineRenews: failed loading savegame: too many EngineRenews");
++
++		er = GetEngineRenew(index);
++		SlObject(er, _engine_renew_desc);
++	}
++}
++
+ const ChunkHandler _player_chunk_handlers[] = {
+-	{ 'PLYR', Save_PLYR, Load_PLYR, CH_ARRAY | CH_LAST},
++	{ 'PLYR', Save_PLYR, Load_PLYR, CH_ARRAY          },
++	{ 'ERNW', Save_ERNW, Load_ERNW, CH_ARRAY | CH_LAST},
+ };
++
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 3240)
++++ saveload.c	(working copy)
+@@ -29,7 +29,7 @@
+ #include <setjmp.h>
+ 
+ enum {
+-	SAVEGAME_VERSION = 18,
++	SAVEGAME_VERSION = 19,
+ 
+ };
+ 
+@@ -1107,6 +1107,7 @@
+ 		case REF_TOWN:      return ((const     Town*)obj)->index + 1;
+ 		case REF_ORDER:     return ((const    Order*)obj)->index + 1;
+ 		case REF_ROADSTOPS: return ((const RoadStop*)obj)->index + 1;
++		case REF_ENGINE_RENEWS: return ((const EngineRenew*)obj)->index + 1;
+ 		default: NOT_REACHED();
+ 	}
+ 
+@@ -1162,6 +1163,11 @@
+ 				error("RoadStops: failed loading savegame: too many RoadStops");
+ 			return GetRoadStop(index);
+ 		}
++		case REF_ENGINE_RENEWS: {
++			if (!AddBlockIfNeeded(&_engine_renew_pool, index))
++				error("EngineRenews: failed loading savegame: too many EngineRenews");
++			return GetEngineRenew(index);
++		}
+ 
+ 		case REF_VEHICLE_OLD: {
+ 			/* Old vehicles were saved differently:
+Index: player.h
+===================================================================
+--- player.h	(revision 3240)
++++ player.h	(working copy)
+@@ -3,6 +3,7 @@
+ #ifndef PLAYER_H
+ #define PLAYER_H
+ 
++#include "pool.h"
+ #include "aystar.h"
+ #include "rail.h"
+ #include "engine.h"
+@@ -188,7 +189,7 @@
+ 	int64 yearly_expenses[3][13];
+ 	PlayerEconomyEntry cur_economy;
+ 	PlayerEconomyEntry old_economy[24];
+-	EngineID engine_replacement[TOTAL_NUM_ENGINES];
++	struct EngineRenew *engine_replacement; // Defined later
+ 	bool engine_renew;
+ 	bool renew_keep_length;
+ 	int16 engine_renew_months;
+@@ -263,6 +264,27 @@
+ int8 SaveHighScoreValue(const Player *p);
+ int8 SaveHighScoreValueNetwork(void);
+ 
++/* Engine Replacement Functions */
++
++typedef struct EngineRenew {
++	uint16 index;
++	EngineID from;
++	EngineID to;
++	struct EngineRenew *next;
++} EngineRenew;
++
++extern MemoryPool _engine_renew_pool;
++
++static inline EngineRenew *GetEngineRenew(uint16 index)
++{
++	return (EngineRenew*)GetItemFromPool(&_engine_renew_pool, index);
++}
++
++static inline uint16 GetEngineRenewPoolSize(void)
++{
++	return _engine_renew_pool.total_items;
++}
++
+ void InitialiseEngineReplacement(Player *p);
+ EngineID EngineReplacement(const Player *p, EngineID engine);
+ bool EngineHasReplacement(const Player *p, EngineID engine);
+Index: saveload.h
+===================================================================
+--- saveload.h	(revision 3240)
++++ saveload.h	(working copy)
+@@ -47,7 +47,8 @@
+ 	REF_STATION     = 2,
+ 	REF_TOWN        = 3,
+ 	REF_VEHICLE_OLD = 4,
+-	REF_ROADSTOPS   = 5
++	REF_ROADSTOPS   = 5,
++	REF_ENGINE_RENEWS = 6,
+ } SLRefType;
+ 
+ 

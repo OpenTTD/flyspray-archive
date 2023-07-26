@@ -1,0 +1,533 @@
+Index: aircraft_cmd.c
+===================================================================
+--- aircraft_cmd.c	(revision 6441)
++++ aircraft_cmd.c	(working copy)
+@@ -1348,6 +1348,9 @@
+ 	if (v->current_order.type == OT_GOTO_DEPOT) return;
+ 
+ 	st = GetStation(v->u.air.targetairport);
++
++	IncrementStationVehicleStats(st, STS_VEH_AIRCRAFT);
++
+ 	v->last_station_visited = v->u.air.targetairport;
+ 
+ 	/* Check if station was ever visited before */
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 6441)
++++ lang/english.txt	(working copy)
+@@ -2987,3 +2987,35 @@
+ STR_HUB_AIRPORTS                                                :{BLACK}Hub airports
+ STR_HELIPORTS                                                   :{BLACK}Helicopter airports
+ ########
++
++########### Strings for Statistics
++STR_STS_ALL_VEH                                                 :{BLACK}All Vehicles
++STR_STS_TRAIN                                                   :{BLACK}Trains
++STR_STS_ROAD                                                    :{BLACK}Road Vehicles
++STR_STS_SHIP                                                    :{BLACK}Ships
++STR_STS_AIRCRAFT                                                :{BLACK}Aircraft
++STR_STS_STATISTICS_STATION                                      :{WHITE}Stats for {STATION} {STATIONFEATURES}
++STR_STS_RESET_STATISTICS                                        :{BLACK}Reset Stats
++STR_STS_GREEN_NUMBER                                            :{GREEN}{COMMA}
++STR_STS_LTBLUE_NUMBER                                           :{LTBLUE}{COMMA}
++STR_STS_ORANGE_NUMBER                                           :{ORANGE}{COMMA}
++STR_STS_SILVER_NUMBER                                           :{SILVER}{COMMA}
++STR_STS_WHITE_NUMBER                                            :{WHITE}{COMMA}
++STR_STS_YELLOW_NUMBER                                           :{YELLOW}{COMMA}
++STR_STS_VEH_STATS                                               :{BLACK}Vehicle Statistics
++STR_STS_VEH_STATS_TIP                                           :{BLACK}Show Statistics on how many Vehicles are visiting the Station in a separate window
++STR_STS_MATRIX_TIP                                              :{BLACK}Clicking a line opens up the window(s) for the scheduled vehicles of that type
++STR_STS_TOGGLE                                                  :{SKIP}{SKIP}{STRING}
++STR_STS_AVERAGE_TIP                                             :{BLACK}Showing average, minimum and maximum number of arrivals and number of counted months
++STR_STS_MONTHLY_TIP                                             :{BLACK}Showing number of arrivals last month and this month
++STR_STS_TOGGLE_MINMAXAVG                                        :{BLACK}Avg/Min/Max Statistics
++STR_STS_TOGGLE_MONTHLY                                          :{BLACK}This/Last Month Statistics
++STR_STS_TOGGLE_MONTHLY_TIP                                      :{BLACK}Show number of arrivals in the current and last month
++STR_STS_TOGGLE_AVERAGE_TIP                                      :{BLACK}Show minimum, maximum and average number of arrivals
++STR_STS_AVERAGE                                                 :{BLACK}Avg
++STR_STS_MINIMUM                                                 :{BLACK}Min
++STR_STS_MAXIMUM                                                 :{BLACK}Max
++STR_STS_COUNTED                                                 :{BLACK}Month
++STR_STS_THIS_MONTH                                              :{BLACK}This month
++STR_STS_LAST_MONTH                                              :{BLACK}Last month
++STR_STS_RESET_STATISTICS_TIP                                    :{BLACK}Reset all the statistics for this station to 0
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 6441)
++++ openttd.h	(working copy)
+@@ -434,6 +434,7 @@
+ 	WC_GENERATE_LANDSCAPE       = 0x50,
+ 	WC_GENERATE_PROGRESS_WINDOW = 0x51,
+ 	WC_OK_CANCEL_QUERY          = 0x52,
++	WC_STATS_STATION_VEHICLES   = 0x53,
+ };
+ 
+ 
+Index: roadveh_cmd.c
+===================================================================
+--- roadveh_cmd.c	(revision 6441)
++++ roadveh_cmd.c	(working copy)
+@@ -825,6 +825,8 @@
+ 
+ static void RoadVehArrivesAt(const Vehicle* v, Station* st)
+ {
++	IncrementStationVehicleStats(st, STS_VEH_ROAD);
++
+ 	if (v->cargo_type == CT_PASSENGERS) {
+ 		/* Check if station was ever visited before */
+ 		if (!(st->had_vehicle_of_type & HVOT_BUS)) {
+Index: ship_cmd.c
+===================================================================
+--- ship_cmd.c	(revision 6441)
++++ ship_cmd.c	(working copy)
+@@ -427,6 +427,8 @@
+ 
+ static void ShipArrivesAt(const Vehicle* v, Station* st)
+ {
++	IncrementStationVehicleStats(st, STS_VEH_SHIP);
++
+ 	/* Check if station was ever visited before */
+ 	if (!(st->had_vehicle_of_type & HVOT_SHIP)) {
+ 		uint32 flags;
+Index: station.h
+===================================================================
+--- station.h	(revision 6441)
++++ station.h	(working copy)
+@@ -8,7 +8,27 @@
+ #include "sprite.h"
+ #include "tile.h"
+ #include "newgrf_station.h"
++ 
++/* Enum for Stationstats (STS) Values */
++typedef enum STSVehicleType {
++	STS_VEH_TRAIN,
++	STS_VEH_ROAD,
++	STS_VEH_AIRCRAFT,
++	STS_VEH_SHIP,
++	STS_VEH_ALL,
++	STS_VEH_TYPE_COUNT,    // Total number of vehicle-types that are counted in stationstats
++} STSVehicleType;
+ 
++/* This struct stores statistical data about a station */
++typedef struct StationStats {
++	uint16 this_month;     // Statistics count for this month
++	uint16 last_month;     // Statistics count for last month
++	uint16 month_min;      // Minimum value for all months counted
++	uint16 month_max;      // Maximum value for all months counted
++	uint32 total;          // Total value for all months counted
++	uint16 months_counted; // Total number of counted months
++} StationStats;
++
+ typedef struct GoodsEntry {
+ 	uint16 waiting_acceptance;
+ 	byte days_since_pickup;
+@@ -87,6 +107,9 @@
+ 	uint16 random_bits;
+ 	byte waiting_triggers;
+ 
++	/* Store statistical data about number and type of vehicles visiting the station */
++	StationStats vehicle_stats[STS_VEH_TYPE_COUNT];
++
+ 	/* Stuff that is no longer used, but needed for conversion */
+ 	TileIndex bus_tile_obsolete;
+ 	TileIndex lorry_tile_obsolete;
+@@ -258,4 +281,7 @@
+ 	return (st->had_vehicle_of_type & HVOT_BUOY) != 0; /* XXX: We should really ditch this ugly coding and switch to something sane... */
+ }
+ 
++/* Increment Stats-values for a specified vehicle-type and all vehicles */
++void IncrementStationVehicleStats(Station *st, STSVehicleType type);
++
+ #endif /* STATION_H */
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 6441)
++++ station_cmd.c	(working copy)
+@@ -486,6 +486,8 @@
+ 	st->random_bits = Random();
+ 	st->waiting_triggers = 0;
+ 
++	/* Set all vehicle-stats for this station to 0 */
++	memset(st->vehicle_stats, 0, sizeof(st->vehicle_stats));
+ }
+ 
+ // Update the virtual coords needed to draw the station sign.
+@@ -2384,6 +2386,7 @@
+ 	InvalidateWindowClasses(WC_STATION_LIST);
+ 
+ 	DeleteWindowById(WC_STATION_VIEW, index);
++	DeleteWindowById(WC_STATS_STATION_VEHICLES, index); // Delete corresponding statistics-window
+ 
+ 	/* Now delete all orders that go to the station */
+ 	RemoveOrderFromAllVehicles(OT_GOTO_STATION, index);
+@@ -2539,8 +2542,53 @@
+ 	}
+ }
+ 
++/* Increment Stats-values for a specified vehicle-type and all vehicles. Update statistics-window */
++void IncrementStationVehicleStats(Station *st, STSVehicleType type)
++{
++	st->vehicle_stats[STS_VEH_ALL].this_month++;            // Increment all vehicles count
++	st->vehicle_stats[type].this_month++;                   // Increment count of this vehicle type
++	InvalidateWindow(WC_STATS_STATION_VEHICLES, st->index); // Set corresponding statistics-window to be redrawn
++}
++
++/**
++ * Update statistics when a new month begins
++ * Move the current month statistics to the last month, calculate the new total
++ * And set new minimum and maximum values. Also set this months statistics to 0 and
++ * Increment the number of counted months.
++ *
++ * @param stats Struct containing the statistics-values to be updated
++ *
++ * @note Should only be called if there are really already values counted.
++ *        Otherwise it will count months even if no vehicle ever visited the station.
++ */
++void SetNewMonthStats(StationStats* stats)
++{
++	if (stats->months_counted == 0) { // Use current months value as minimum if first counted month
++		stats->month_min = stats->this_month;
++	} else {                          // Else set new minimum
++		stats->month_min = min(stats->month_min, stats->this_month);
++	}
++	stats->total += stats->this_month; // Add this months count to the total
++	stats->month_max = max(stats->month_max, stats->this_month);
++	stats->last_month = stats->this_month;
++	stats->this_month = 0;
++	stats->months_counted++;
++}
++
+ void StationMonthlyLoop(void)
+ {
++	Station *st;
++	StationStats *sts;
++
++	/* Loop all stations to find out if there are vehicle-statistics to be updated */
++ 	FOR_ALL_STATIONS(st) {
++		for (sts = st->vehicle_stats; sts != endof(st->vehicle_stats); sts++) {
++			/* Only set new stats if this vehicle-type was already counted at this station */
++			if (sts->months_counted != 0 || sts->this_month != 0)
++				SetNewMonthStats(sts);
++		}
++		InvalidateWindow(WC_STATS_STATION_VEHICLES, st->index);
++	}
+ }
+ 
+ 
+@@ -2983,6 +3031,17 @@
+ 	SLE_END()
+ };
+ 
++/* Station statistical data, will be saved starting with savegame-version 34 */
++static const SaveLoad _station_stats_data[] = {
++	SLE_CONDVAR(StationStats, this_month,     SLE_UINT16, 34, 255),
++	SLE_CONDVAR(StationStats, last_month,     SLE_UINT16, 34, 255),
++	SLE_CONDVAR(StationStats, month_min,      SLE_UINT16, 34, 255),
++	SLE_CONDVAR(StationStats, month_max,      SLE_UINT16, 34, 255),
++	SLE_CONDVAR(StationStats, total,          SLE_UINT32, 34, 255),
++	SLE_CONDVAR(StationStats, months_counted, SLE_UINT16, 34, 255),
++	SLE_END()
++};
++
+ static const SaveLoad _goods_desc[] = {
+ 	    SLE_VAR(GoodsEntry, waiting_acceptance, SLE_UINT16),
+ 	    SLE_VAR(GoodsEntry, days_since_pickup,  SLE_UINT8),
+@@ -3018,6 +3077,11 @@
+ 			st->goods[i].enroute_from = INVALID_STATION;
+ 		}
+ 	}
++	
++	/* Save/Load statistical data for this station */
++	for (i = 0; i != STS_VEH_TYPE_COUNT; i++) {
++		SlObject(&st->vehicle_stats[i], _station_stats_data);
++	}
+ 
+ 	if (st->num_specs != 0) {
+ 		/* Allocate speclist memory when loading a game */
+@@ -3048,6 +3112,12 @@
+ 		st = GetStation(index);
+ 		SaveLoad_STNS(st);
+ 
++		/* If its an older savegame without saved statistical data for the station,
++		 * (before version 34) set all vehicle-stats for this station to 0 */
++		if (CheckSavegameVersion(34)) {
++			memset(st->vehicle_stats, 0, sizeof(st->vehicle_stats));
++		}
++
+ 		// this means it's an oldstyle savegame without support for nonuniform stations
+ 		if (st->train_tile != 0 && st->trainst_h == 0) {
+ 			uint w = GB(st->trainst_w, 4, 4);
+Index: station_gui.c
+===================================================================
+--- station_gui.c	(revision 6441)
++++ station_gui.c	(working copy)
+@@ -485,6 +485,207 @@
+ 	}
+ }
+ 
++enum {
++	STS_MATRIX_LINE_HEIGHT    = 14,    // Height of a line in the statistics-displaymatrix
++	STS_MATRIX_TOP_OFFSET     = 26,    // How many pixels from top the matrix starts in the window
++	STS_VEH_MATRIX            = 0x501, // Total number of vehicle-types lines and one column for vehicle-statistics-matrix
++	STS_VEH_INFO_LINE_OFFSET  = 16,    // How many pixels from top the info-line is located
++	STS_VEH_FIRST_LINE_OFFSET = 29,    // First line to draw strings in matrix
++	STS_VEH_LEFT_OFFSET       = 10,    // Start strings this pixels away from the left window-border
++	STS_VEH_AVG_OFFSET        = 140,   // Column for average statistics
++	STS_VEH_MIN_OFFSET        = 190,   // Column for minimum statistics
++	STS_VEH_MAX_OFFSET        = 240,   // Column for maximum statistics
++	STS_VEH_MONTHS_OFFSET     = 290,   // Column for number of counted months
++	STS_VEH_LAST_MONTH_OFFSET = 190,   // Column for last months statistics
++	STS_VEH_THIS_MONTH_OFFSET = 290,   // Column for this months statistics
++};
++
++/* Matrix-height is STS_MATRIX_LINE_HEIGHT * STS_VEH_TYPE_COUNT
++ * Window-Layout:
++ * Closebox - Captiontext - Stickybox
++ * Line with descriptiontext for matrix
++ * Matrix for displaying statistics
++ * Locationbutton - Togglebutton - Resetbutton
++ */
++static const Widget _station_stats_widgets[] = {
++{   WWT_CLOSEBOX,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,                   STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,   RESIZE_NONE,    14,    11,   287,     0,    13, STR_STS_STATISTICS_STATION, STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,   RESIZE_NONE,    14,   288,   299,     0,    13, 0x0,                        STR_STICKY_BUTTON},
++{      WWT_PANEL,   RESIZE_NONE,    14,     0,   299,    14,    25, 0x0,                        STR_NULL},
++{     WWT_MATRIX,   RESIZE_NONE,    14,     0,   299,    26,    96, STS_VEH_MATRIX,             STR_STS_MATRIX_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    64,    97,   109, STR_00E4_LOCATION,          STR_3053_CENTER_MAIN_VIEW_ON_STATION},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    65,   209,    97,   109, STR_STS_TOGGLE,             STR_NULL},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   210,   299,    97,   109, STR_STS_RESET_STATISTICS,   STR_STS_RESET_STATISTICS_TIP},
++{   WIDGETS_END},
++};
++
++/* Draw the statistics-window */
++void DrawStationStatWindow(Window *w, Station *st)
++{
++	/* y is the vertical base-value for drawing strings */
++	int i, y;
++	const bool show_average = w->custom[0];
++	/* Array of strings to be displayed for each line in front of the statistics
++	 * keep the order in sync with the order in STSVehicleType */
++	const stringarray[STS_VEH_TYPE_COUNT] = {
++		STR_STS_TRAIN,
++		STR_STS_ROAD,
++		STR_STS_AIRCRAFT,
++		STR_STS_SHIP,
++		STR_STS_ALL_VEH,
++	};
++
++	SetDParam(0, st->index);      // Get the Station name
++	SetDParam(1, st->facilities); // And the little carrier type images
++	/* Set the correct string for the toggle-button */
++	SetDParam(2, show_average ? STR_STS_TOGGLE_MONTHLY : STR_STS_TOGGLE_MINMAXAVG);
++	DrawWindowWidgets(w);         // First draw the widgets
++
++	y = STS_VEH_INFO_LINE_OFFSET;
++	if (show_average) { // Draw info-line for average statistics
++		DrawStringRightAligned(STS_VEH_AVG_OFFSET,    y, STR_STS_AVERAGE, 0);
++		DrawStringRightAligned(STS_VEH_MIN_OFFSET,    y, STR_STS_MINIMUM, 0);
++		DrawStringRightAligned(STS_VEH_MAX_OFFSET,    y, STR_STS_MAXIMUM, 0);
++		DrawStringRightAligned(STS_VEH_MONTHS_OFFSET, y, STR_STS_COUNTED, 0);
++	} else {            // Draw info-line for monthly statistics
++		DrawStringRightAligned(STS_VEH_LAST_MONTH_OFFSET, y, STR_STS_LAST_MONTH, 0);
++		DrawStringRightAligned(STS_VEH_THIS_MONTH_OFFSET, y, STR_STS_THIS_MONTH, 0);
++	}
++
++	for (i = 0; i < STS_VEH_TYPE_COUNT; i++) { // Show the statistics for the different vehicle-types
++		y = STS_VEH_FIRST_LINE_OFFSET + i * STS_MATRIX_LINE_HEIGHT; // Calculate drawing-position of the line
++		/* Always draw the textstring showing which vehicle-type the line is for */
++		DrawString(STS_VEH_LEFT_OFFSET, y, stringarray[i], 0);
++		if (show_average) { // Show average or monthly statistics?
++			if (st->vehicle_stats[i].months_counted != 0) { // Draw only if at least one month is completely counted
++				/* Show rounded average 
++				 * Calculation: ((total*2)/months+1)/2 */
++				SetDParam(0, (((st->vehicle_stats[i].total * 2) / st->vehicle_stats[i].months_counted + 1) / 2));
++				DrawStringRightAligned(STS_VEH_AVG_OFFSET, y, STR_STS_SILVER_NUMBER, 0);
++				/* Show minimum */
++				SetDParam(0, st->vehicle_stats[i].month_min);
++				DrawStringRightAligned(STS_VEH_MIN_OFFSET, y, STR_STS_ORANGE_NUMBER, 0);
++				/* Show maximum */
++				SetDParam(0, st->vehicle_stats[i].month_max);
++				DrawStringRightAligned(STS_VEH_MAX_OFFSET, y, STR_STS_GREEN_NUMBER, 0);
++				/* Show numer of months counted */
++				SetDParam(0, st->vehicle_stats[i].months_counted);
++				DrawStringRightAligned(STS_VEH_MONTHS_OFFSET, y, STR_STS_LTBLUE_NUMBER, 0);
++			}
++		} else { // Statistics for this and last month, number of scheduled vehicles will be added later
++			if (st->vehicle_stats[i].months_counted != 0
++				|| st->vehicle_stats[i].this_month != 0) {
++				/* Show vehicles counted last month */
++				SetDParam(0, st->vehicle_stats[i].last_month);
++				DrawStringRightAligned(STS_VEH_LAST_MONTH_OFFSET, y, STR_STS_YELLOW_NUMBER, 0);
++				/* Show vehicles counted this month */
++				SetDParam(0, st->vehicle_stats[i].this_month);
++				DrawStringRightAligned(STS_VEH_THIS_MONTH_OFFSET, y, STR_STS_WHITE_NUMBER, 0);
++			}
++		}
++	}
++}
++
++/* Handle window-events for statistics-window */
++void StationStatsWndProc(Window *w, WindowEvent *e)
++{
++	Station *st = GetStation(w->window_number);
++	switch(e->event) {
++		case WE_PAINT:
++			DrawStationStatWindow(w, st);
++			break;
++		case WE_RCLICK: {
++			/* Manually draw the tooltips, as they change depending on the 'state' of the window */
++			const bool show_average = w->custom[0];
++			switch (e->click.widget) {
++				case 3: // Info-line tooltip
++					GuiShowTooltips(show_average ? STR_STS_AVERAGE_TIP : STR_STS_MONTHLY_TIP);
++					break;
++				case 6: // Toggle-button tooltip
++					GuiShowTooltips(show_average ? STR_STS_TOGGLE_MONTHLY_TIP : STR_STS_TOGGLE_AVERAGE_TIP);
++					break;
++			}
++			break;
++		}
++		case WE_CLICK:
++			switch (e->click.widget) {
++				case 4: { // Click on Matrix
++					/* Store number of line in matrix that was clicked */
++					uint32 click_id = (e->click.pt.y - STS_MATRIX_TOP_OFFSET) / STS_MATRIX_LINE_HEIGHT;
++
++					switch (click_id) {
++						case STS_VEH_ALL: // Show all vehicles for the station
++							/* Currently not really supported so just show the different windows */
++							if (st->facilities & FACIL_TRAIN)
++								ShowPlayerTrains(st->owner, st->index);
++							if ((st->facilities & FACIL_TRUCK_STOP) ||
++								(st->facilities & FACIL_BUS_STOP))
++								ShowPlayerRoadVehicles(st->owner, st->index);
++							if (st->facilities & FACIL_AIRPORT)
++								ShowPlayerAircraft(st->owner, st->index);
++							if (st->facilities & FACIL_DOCK)
++								ShowPlayerShips(st->owner, st->index);
++							break;
++						case STS_VEH_TRAIN:
++							if (st->facilities & FACIL_TRAIN)
++								ShowPlayerTrains(st->owner, st->index);
++							break;
++						case STS_VEH_ROAD:
++							if ((st->facilities & FACIL_TRUCK_STOP) ||
++								(st->facilities & FACIL_BUS_STOP))
++								ShowPlayerRoadVehicles(st->owner, st->index);
++							break;
++						case STS_VEH_SHIP:
++							if (st->facilities & FACIL_DOCK)
++								ShowPlayerShips(st->owner, st->index);
++							break;
++						case STS_VEH_AIRCRAFT:
++							if (st->facilities & FACIL_AIRPORT)
++								ShowPlayerAircraft(st->owner, st->index);
++							break;
++					}
++					break;
++				}
++				case 5: // Go to station location
++					ScrollMainWindowToTile(GetStation(w->window_number)->xy);
++					break;
++				case 6: // Toggle Average and This Month
++					w->custom[0] ^= 1;
++					InvalidateWindow(WC_STATS_STATION_VEHICLES, w->window_number);
++					break;
++				case 7: // Reset statistics
++					if (st->owner == _current_player) {
++						/* Set all vehicle-stats for this station to 0 */
++						memset(st->vehicle_stats, 0, sizeof(st->vehicle_stats));
++						InvalidateWindow(WC_STATS_STATION_VEHICLES, w->window_number);
++					}
++					break;
++			}
++			break;
++	}
++}
++
++WindowDesc _station_view_stats = {
++	-1, -1, 300, 110,
++	WC_STATS_STATION_VEHICLES, 0,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON,
++	_station_stats_widgets,
++	StationStatsWndProc
++};
++
++/* Display the statistics-window */
++void ShowStationStatsWindow(Station *st)
++{
++	Window *w;
++
++	w = AllocateWindowDescFront(&_station_view_stats, st->index);
++	if (w != NULL) {
++		const byte color = st->owner;
++		/* Oil-rigs have no owner, set caption-bar-colour to owner colour if no oil-rig */
++		if (color != OWNER_NONE) w->caption_color = color;
++	}
++}
++
+ static const Widget _station_view_expanded_widgets[] = {
+ {   WWT_CLOSEBOX,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,          STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    14,    11,   236,     0,    13, STR_300A_0,        STR_018C_WINDOW_TITLE_DRAG_THIS},
+@@ -500,6 +701,7 @@
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   207,   220,   198,   209, STR_LORRY,         STR_SCHEDULED_ROAD_VEHICLES_TIP },
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   221,   234,   198,   209, STR_PLANE,         STR_SCHEDULED_AIRCRAFT_TIP },
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   235,   248,   198,   209, STR_SHIP,          STR_SCHEDULED_SHIPS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,   248,   210,   221, STR_STS_VEH_STATS, STR_STS_VEH_STATS_TIP },
+ {   WIDGETS_END},
+ };
+ 
+@@ -518,6 +720,7 @@
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   207,   220,    98,   109, STR_LORRY,         STR_SCHEDULED_ROAD_VEHICLES_TIP },
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   221,   234,    98,   109, STR_PLANE,         STR_SCHEDULED_AIRCRAFT_TIP },
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   235,   248,    98,   109, STR_SHIP,          STR_SCHEDULED_SHIPS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,   248,   110,   121, STR_STS_VEH_STATS, STR_STS_VEH_STATS_TIP },
+ {   WIDGETS_END},
+ };
+ 
+@@ -663,10 +866,10 @@
+ 			/* toggle height/widget set */
+ 			if (IsWindowOfPrototype(w, _station_view_expanded_widgets)) {
+ 				AssignWidgetToWindow(w, _station_view_widgets);
+-				w->height = 110;
++				w->height = 122;
+ 			} else {
+ 				AssignWidgetToWindow(w, _station_view_expanded_widgets);
+-				w->height = 210;
++				w->height = 222;
+ 			}
+ 
+ 			SetWindowDirty(w);
+@@ -704,6 +907,9 @@
+ 			ShowPlayerShips(owner, w->window_number);
+ 			break;
+ 		}
++		case 14: // Display the statistics-window for this station
++			ShowStationStatsWindow(GetStation(w->window_number));
++			break;
+ 		}
+ 		break;
+ 
+@@ -730,7 +936,7 @@
+ 
+ 
+ static const WindowDesc _station_view_desc = {
+-	-1, -1, 249, 110,
++	-1, -1, 249, 122,
+ 	WC_STATION_VIEW,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON,
+ 	_station_view_widgets,
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 6441)
++++ train_cmd.c	(working copy)
+@@ -2610,6 +2610,8 @@
+ 		);
+ 	}
+ 
++	IncrementStationVehicleStats(st, STS_VEH_TRAIN);
++
+ 	// Did we reach the final destination?
+ 	if (v->current_order.type == OT_GOTO_STATION &&
+ 			v->current_order.dest == station) {

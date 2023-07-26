@@ -1,0 +1,77 @@
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+index b872882..7f52acd 100644
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -1166,6 +1166,7 @@ STR_CONFIG_SETTING_SE_FLAT_WORLD_HEIGHT                         :{LTBLUE}The hei
+ STR_CONFIG_SETTING_ENABLE_FREEFORM_EDGES                        :{LTBLUE}Enable terraforming the tiles at the map borders: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_EDGES_NOT_EMPTY                              :{WHITE}One or more tiles at the northern edge are not empty
+ STR_CONFIG_SETTING_EDGES_NOT_WATER                              :{WHITE}One or more tiles at one of the edges is not water
++STR_CONFIG_SETTING_ENABLE_INCOMPLETE_TERRAFORMING               :{LTBLUE}Enable terraforming to continue even if it fails partially
+ 
+ STR_CONFIG_SETTING_STATION_SPREAD                               :{LTBLUE}Max station spread: {ORANGE}{STRING1} {RED}Warning: High setting slows game
+ STR_CONFIG_SETTING_SERVICEATHELIPAD                             :{LTBLUE}Service helicopters at helipads automatically: {ORANGE}{STRING1}
+diff --git a/src/saveload/saveload.cpp b/src/saveload/saveload.cpp
+index 8dc12ee..916af5d 100644
+--- a/src/saveload/saveload.cpp
++++ b/src/saveload/saveload.cpp
+@@ -46,7 +46,7 @@
+ 
+ #include "saveload_internal.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 140;
++extern const uint16 SAVEGAME_VERSION = 141;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+diff --git a/src/settings_gui.cpp b/src/settings_gui.cpp
+index d8e610b..1408dba 100644
+--- a/src/settings_gui.cpp
++++ b/src/settings_gui.cpp
+@@ -1325,6 +1325,7 @@ static SettingEntry _settings_construction[] = {
+ 	SettingEntry("station.never_expire_airports"),
+ 	SettingEntry("construction.freeform_edges"),
+ 	SettingEntry("construction.extra_tree_placement"),
++	SettingEntry("construction.incomplete_terraforming"),
+ };
+ /** Construction sub-page */
+ static SettingsPage _settings_construction_page = {_settings_construction, lengthof(_settings_construction)};
+diff --git a/src/settings_type.h b/src/settings_type.h
+index 4adabf0..51a4698 100644
+--- a/src/settings_type.h
++++ b/src/settings_type.h
+@@ -187,6 +187,7 @@ struct ConstructionSettings {
+ 	uint8  raw_industry_construction;        ///< type of (raw) industry construction (none, "normal", prospecting)
+ 	bool   freeform_edges;                   ///< allow terraforming the tiles at the map edges
+ 	uint8  extra_tree_placement;             ///< (dis)allow building extra trees in-game
++	bool   incomplete_terraforming;          ///< allow terraforming even if it fails partially
+ };
+ 
+ /** Settings related to the AI. */
+diff --git a/src/table/settings.h b/src/table/settings.h
+index 38f1391..dac1b9b 100644
+--- a/src/table/settings.h
++++ b/src/table/settings.h
+@@ -535,6 +535,7 @@ const SettingDesc _settings[] = {
+ 	 SDT_CONDVAR(GameSettings, game_creation.water_borders,                   SLE_UINT8,111, SL_MAX_VERSION, 0, 0,    15,                     0,      16, 0, STR_NULL,                                 NULL),
+ 	 SDT_CONDVAR(GameSettings, game_creation.custom_town_number,             SLE_UINT16,115, SL_MAX_VERSION, 0, 0,     1,                     1,    5000, 0, STR_NULL,                                 NULL),
+ 	 SDT_CONDVAR(GameSettings, construction.extra_tree_placement,             SLE_UINT8,132, SL_MAX_VERSION, 0,MS,     2,                     0,       2, 0, STR_CONFIG_SETTING_EXTRA_TREE_PLACEMENT,  NULL),
++	SDT_CONDBOOL(GameSettings, construction.incomplete_terraforming,                    141, SL_MAX_VERSION, 0, 0, false,                                    STR_CONFIG_SETTING_ENABLE_INCOMPLETE_TERRAFORMING, NULL),
+ 
+  SDT_CONDOMANY(GameSettings, locale.currency,                               SLE_UINT8, 97, SL_MAX_VERSION, N, 0, 0, CUSTOM_CURRENCY_ID, _locale_currencies, STR_NULL, NULL, NULL),
+  SDT_CONDOMANY(GameSettings, locale.units,                                  SLE_UINT8, 97, SL_MAX_VERSION, N, 0, 1, 2, _locale_units,                       STR_NULL, NULL, NULL),
+diff --git a/src/terraform_cmd.cpp b/src/terraform_cmd.cpp
+index 5bad78f..e0f1155 100644
+--- a/src/terraform_cmd.cpp
++++ b/src/terraform_cmd.cpp
+@@ -385,7 +385,10 @@ CommandCost CmdLevelLand(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32
+ 		uint curh = TileHeight(tile);
+ 		while (curh != h) {
+ 			CommandCost ret = DoCommand(tile, SLOPE_N, (curh > h) ? 0 : 1, flags & ~DC_EXEC, CMD_TERRAFORM_LAND);
+-			if (ret.Failed()) return (cost.GetCost() == 0) ? ret : cost;
++			if (ret.Failed()) {
++				if (_settings_game.construction.incomplete_terraforming) break;
++				return (cost.GetCost() == 0) ? ret : cost;
++			}
+ 
+ 			if (flags & DC_EXEC) {
+ 				money -= ret.GetCost();

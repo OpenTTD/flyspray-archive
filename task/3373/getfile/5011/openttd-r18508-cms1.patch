@@ -1,0 +1,1145 @@
+OpenTTD hacking, patch #1 (alpha)
+
+This is a proof-of-concept for a feature: automatic train modification.
+The far future idea is to implement railway sidings where you could push
+around your wagons like in real world. ;) 
+
+Right now the sidings are actually inside depots and you can modify 'goto
+depot' orders to have the trains reconnected. The GUI is of 'just make it
+work' type so don't complain - just fix it if you know how.
+
+As this is an alpha patch I left some unrelated changes in:
+ - display locomotives and wagons counts in company overview window
+ - some documentation fixes
+
+Signed-off-by: Michał Mirosław <mirq-linux@rere.qmqm.pl>
+
+./findversion.sh
+g54ffa0e5M      18508   2       g54ffa0e5M
+
+diff --git a/source.list b/source.list
+index a6c0839..3bac2bc 100644
+--- a/source.list
++++ b/source.list
+@@ -290,6 +290,7 @@ townname_type.h
+ track_func.h
+ track_type.h
+ train.h
++train_ext.h
+ transparency.h
+ transparency_gui.h
+ transport_type.h
+diff --git a/src/command.cpp b/src/command.cpp
+index 35e2757..c39a7d1 100644
+--- a/src/command.cpp
++++ b/src/command.cpp
+@@ -172,6 +172,7 @@ DEF_COMMAND(CmdCompanyCtrl);
+ 
+ DEF_COMMAND(CmdLevelLand);
+ 
++DEF_COMMAND(CmdOrderModifyConsist);
+ DEF_COMMAND(CmdRefitRailVehicle);
+ 
+ DEF_COMMAND(CmdBuildSignalTrack);
+@@ -306,6 +307,7 @@ static const Command _command_proc_table[] = {
+ 	{CmdRefitShip,                                  0}, // CMD_REFIT_SHIP
+ 
+ 	{CmdOrderRefit,                                 0}, // CMD_ORDER_REFIT
++	{CmdOrderModifyConsist,                         0}, // CMD_ORDER_MODIFY_TRAIN
+ 	{CmdCloneOrder,                                 0}, // CMD_CLONE_ORDER
+ 
+ 	{CmdClearArea,                        CMD_NO_TEST}, // CMD_CLEAR_AREA; destroying multi-tile houses makes town rating differ between test and execution
+diff --git a/src/command_type.h b/src/command_type.h
+index 1a48f28..58c5190 100644
+--- a/src/command_type.h
++++ b/src/command_type.h
+@@ -252,6 +252,7 @@ enum {
+ 	CMD_REFIT_SHIP,                   ///< refit the cargo space of a ship
+ 
+ 	CMD_ORDER_REFIT,                  ///< change the refit informaction of an order (for "goto depot" )
++	CMD_ORDER_MODIFY_TRAIN,           ///< change the train modification spec of an order (for "goto depot" )
+ 	CMD_CLONE_ORDER,                  ///< clone (and share) an order
+ 	CMD_CLEAR_AREA,                   ///< clear an area
+ 
+diff --git a/src/company_gui.cpp b/src/company_gui.cpp
+index 9ef68b6..dbe51e4 100644
+--- a/src/company_gui.cpp
++++ b/src/company_gui.cpp
+@@ -22,6 +22,8 @@
+ #include "network/network_func.h"
+ #include "economy_func.h"
+ #include "vehicle_base.h"
++#include "roadveh.h"
++#include "train.h"
+ #include "newgrf.h"
+ #include "company_manager_face.h"
+ #include "strings_func.h"
+@@ -1783,7 +1785,9 @@ struct CompanyWindow : Window
+ 				break;
+ 
+ 			case CW_WIDGET_DESC_VEHICLE_COUNTS:
+-				SetDParam(0, 5000); // Maximum number of vehicles
++				SetDParam(0, 9999); // Maximum number of vehicles
++				SetDParam(1, 9999);
++				SetDParam(2, 9999);
+ 				for (uint i = 0; i < lengthof(_company_view_vehicle_count_strings); i++) {
+ 					size->width = max(size->width, GetStringBoundingBox(_company_view_vehicle_count_strings[i]).width);
+ 				}
+@@ -1821,6 +1825,8 @@ struct CompanyWindow : Window
+ 
+ 			case CW_WIDGET_DESC_VEHICLE_COUNTS: {
+ 				uint amounts[] = { 0, 0, 0, 0 };
++				uint amount1[] = { 0, 0, 0, 0 };
++				uint amount2[] = { 0, 0, 0, 0 };
+ 				int y = r.top;
+ 
+ 				const Vehicle *v;
+@@ -1829,6 +1835,16 @@ struct CompanyWindow : Window
+ 						if (v->IsPrimaryVehicle()) {
+ 							assert((size_t)v->type < lengthof(amounts));
+ 							amounts[v->type]++;
++							
++							if (v->type == VEH_ROAD) {
++								const RoadVehicle *u = RoadVehicle::From(v);
++								++(u->IsBus() ? amount1 : amount2)[VEH_ROAD];
++							}
++						}
++						if (v->type == VEH_TRAIN) {
++							const Train *u = Train::From(v);
++							if (u->IsEngine()) ++amount1[VEH_TRAIN];
++							if (u->IsWagon()) ++amount2[VEH_TRAIN];
+ 						}
+ 					}
+ 				}
+@@ -1841,6 +1857,8 @@ struct CompanyWindow : Window
+ 					for (uint i = 0; i < lengthof(amounts); i++) {
+ 						if (amounts[i] != 0) {
+ 							SetDParam(0, amounts[i]);
++							SetDParam(1, amount1[i]);
++							SetDParam(2, amount2[i]);
+ 							DrawString(r.left, r.right, y, _company_view_vehicle_count_strings[i]);
+ 							y += FONT_HEIGHT_NORMAL;
+ 						}
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+index 25d5b82..54187a8 100644
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -2531,8 +2531,8 @@ STR_COMPANY_VIEW_PRESIDENT_MANAGER_TITLE                        :{WHITE}{PRESIDE
+ STR_COMPANY_VIEW_INAUGURATED_TITLE                              :{GOLD}Inaugurated: {WHITE}{NUM}
+ STR_COMPANY_VIEW_COLOUR_SCHEME_TITLE                            :{GOLD}Colour Scheme:
+ STR_COMPANY_VIEW_VEHICLES_TITLE                                 :{GOLD}Vehicles:
+-STR_COMPANY_VIEW_TRAINS                                         :{WHITE}{COMMA} train{P "" s}
+-STR_COMPANY_VIEW_ROAD_VEHICLES                                  :{WHITE}{COMMA} road vehicle{P "" s}
++STR_COMPANY_VIEW_TRAINS                                         :{WHITE}{COMMA} train{P "" s} ({COMMA} loco{P "" s}, {COMMA} wagon{P "" s})
++STR_COMPANY_VIEW_ROAD_VEHICLES                                  :{WHITE}{COMMA} road vehicle{P "" s} ({COMMA} bus{P "" ses}, {COMMA} truck{P "" s})
+ STR_COMPANY_VIEW_AIRCRAFT                                       :{WHITE}{COMMA} aircraft
+ STR_COMPANY_VIEW_SHIPS                                          :{WHITE}{COMMA} ship{P "" s}
+ STR_COMPANY_VIEW_VEHICLES_NONE                                  :{WHITE}None
+@@ -3000,7 +3000,7 @@ STR_ORDERS_TIMETABLE_VIEW_TOOLTIP                               :{BLACK}Switch t
+ 
+ STR_ORDERS_LIST_TOOLTIP                                         :{BLACK}Orders list - click on an order to highlight it. Ctrl+Click scrolls to the station
+ STR_ORDER_INDEX                                                 :{COMMA}:{NBSP}
+-STR_ORDER_TEXT                                                  :{STRING4} {STRING2}
++STR_ORDER_TEXT                                                  :{STRING4} {STRING2} {STRING4}
+ 
+ STR_ORDERS_END_OF_ORDERS                                        :- - End of Orders - -
+ STR_ORDERS_END_OF_SHARED_ORDERS                                 :- - End of Shared Orders - -
+@@ -3030,6 +3030,37 @@ STR_ORDER_TOOLTIP_UNLOAD                                        :{BLACK}Change t
+ STR_ORDER_REFIT                                                 :{BLACK}Refit
+ STR_ORDER_REFIT_TOOLTIP                                         :{BLACK}Select what cargo type to refit to in this order. Ctrl+Click to remove refit instruction
+ 
++STR_ORDER_MODIFY                                                :{BLACK}Split this
++STR_ORDER_MODIFY_OTHER                                          :{BLACK}Split other
++STR_ORDER_DROP_SPLIT_THIS                                       :Split this train
++STR_ORDER_DROP_SPLIT_OTHER                                      :Split other train
++STR_ORDER_DROP_NO_MODIFY                                        :No modification
++STR_ORDER_DROP_COUNT_TAKEN                                      :Count wagons to move
++STR_ORDER_DROP_COUNT_LEFT                                       :Count wagons left
++
++STR_ORDER_TOOLTIP_MODIFY                                        :{BLACK}Enable train consist modification in this order. Wagons are taken from train being split and appended to the other one. Ctrl+Click to remove modify instruction
++STR_ORDER_MODIFY_WAGONS_CAPT                                    :{WHITE}Enter number of wagons to move between trains
++STR_ORDER_TOOLTIP_MODIFY_WAGONS                                 :{BLACK}Select which wagons are moved.
++STR_ORDER_TOOLTIP_MODIFY_OTHER_TRAIN                            :{BLACK}Select train to exchange wagons with. If there's no selection (or the other train is not in the same depot when this one arrives) then free wagons in depot are used instead. Ctrl+Click to remove the selection
++STR_ORDER_MODIFY_OTHER_IS_DEPOT                                 :Depot
++STR_ORDER_TOOLTIP_MODIFY_SELECT_CARGO                           :{BLACK}Limit modifications to wagons holding specific cargo type. Ctrl+Click to remove this selection
++
++STR_ORDER_MT_COUNT_TAKEN                                        :take {NUM} wagon{P "" s}
++STR_ORDER_MT_COUNT_LEFT                                         :take but {NUM} wagon{P "" s}
++
++STR_ORDER_MODIFY_ANY_CARGO                                      :all cargo
++STR_ORDER_MT_SELECTED_CARGO                                     : carrying {STRING}
++############ range for modify description begins
++STR_ORDER_MT_TAKE_TO_DEPOT                                      :[leave {NUM} wagon{P "" s}{STRING1} in depot]
++STR_ORDER_MT_LEAVE_TO_DEPOT                                     :[leave but {NUM} wagon{P "" s}{STRING1} in depot]
++STR_ORDER_MT_TAKE_FROM_DEPOT                                    :[take {NUM} wagon{P "" s}{STRING1} from depot]
++STR_ORDER_MT_LEAVE_FROM_DEPOT                                   :[take but {NUM} wagon{P "" s}{STRING1} from depot]
++STR_ORDER_MT_TAKE_TO_TRAIN                                      :[move {NUM} wagon{P "" s}{STRING1} to {VEHICLE}]
++STR_ORDER_MT_LEAVE_TO_TRAIN                                     :[move but {NUM} wagon{P "" s}{STRING1} to {VEHICLE}]
++STR_ORDER_MT_TAKE_FROM_TRAIN                                    :[move {NUM} wagon{P "" s}{STRING1} from {VEHICLE}]
++STR_ORDER_MT_LEAVE_FROM_TRAIN                                   :[move but {NUM} wagon{P "" s}{STRING1} from {VEHICLE}]
++############ range for modify description ends
++
+ STR_ORDER_SERVICE                                               :{BLACK}Service
+ STR_ORDER_DROP_GO_ALWAYS_DEPOT                                  :Always go
+ STR_ORDER_DROP_SERVICE_DEPOT                                    :Service if needed
+@@ -3088,9 +3119,16 @@ STR_ORDER_GO_TO_DEPOT_FORMAT                                    :{STRING} {TOWN}
+ STR_ORDER_GO_TO_NEAREST_DEPOT_FORMAT                            :{STRING} {STRING} {STRING}
+ STR_ORDER_GO_TO_HANGAR_FORMAT                                   :{STRING} {STATION} Hangar
+ 
++############ range for depot orders starts
++STR_ORDER_STOP_NOTHING                                          :
++STR_ORDER_STOP_ORDER                                            :(Stop)
+ STR_ORDER_REFIT_ORDER                                           :(Refit to {STRING})
+ STR_ORDER_REFIT_STOP_ORDER                                      :(Refit to {STRING} and stop)
+-STR_ORDER_STOP_ORDER                                            :(Stop)
++STR_ORDER_MODIFY_TRAIN_ORDER                                    :(Modify train)
++STR_ORDER_MODIFY_TRAIN_STOP_ORDER                               :(Modify train and stop)
++STR_ORDER_MODIFY_REFIT_ORDER                                    :(Modify and refit to {STRING})
++STR_ORDER_MODIFY_REFIT_STOP_ORDER                               :(Modify then refit to {STRING} and stop)
++############ range for depot orders ends
+ 
+ STR_ORDER_GO_TO_STATION                                         :{STRING} {STATION} {STRING}
+ 
+diff --git a/src/order_base.h b/src/order_base.h
+index e75733a..109880f 100644
+--- a/src/order_base.h
++++ b/src/order_base.h
+@@ -20,6 +20,7 @@
+ #include "station_type.h"
+ #include "vehicle_type.h"
+ #include "date_type.h"
++#include "train_ext.h"
+ 
+ typedef Pool<Order, OrderID, 256, 64000> OrderPool;
+ typedef Pool<OrderList, OrderListID, 128, 64000> OrderListPool;
+@@ -44,6 +45,8 @@ private:
+ 	CargoID refit_cargo;  ///< Refit CargoID
+ 	byte refit_subtype;   ///< Refit subtype
+ 
++	ConsistModificationSpec cmod_spec;   ///< Train consist modification spec.
++
+ public:
+ 	Order *next;          ///< Pointer to next order. If NULL, end of list
+ 
+@@ -166,6 +169,14 @@ public:
+ 	 */
+ 	void SetRefit(CargoID cargo, byte subtype = 0);
+ 
++	/**
++	 * Get the consist modification specification for this order.
++	 * @pre IsType(OT_GOTO_DEPOT)
++	 * @return the cargo type.
++	 */
++	inline ConsistModificationSpec& GetConsistModificationSpec() { return this->cmod_spec; }
++	inline const ConsistModificationSpec& GetConsistModificationSpec() const { return this->cmod_spec; }
++
+ 	/** How must the consist be loaded? */
+ 	inline OrderLoadFlags GetLoadType() const { return (OrderLoadFlags)GB(this->flags, 4, 4); }
+ 	/** How must the consist be unloaded? */
+diff --git a/src/order_cmd.cpp b/src/order_cmd.cpp
+index 9172657..3666c1c 100644
+--- a/src/order_cmd.cpp
++++ b/src/order_cmd.cpp
+@@ -67,6 +67,7 @@ void Order::MakeGoToDepot(DepotID destination, OrderDepotTypeFlags order, OrderN
+ 	this->SetNonStopType(non_stop_type);
+ 	this->dest = destination;
+ 	this->SetRefit(cargo, subtype);
++	this->cmod_spec = ConsistModificationSpec();
+ }
+ 
+ void Order::MakeGoToWaypoint(StationID destination)
+@@ -204,6 +205,8 @@ void Order::AssignOrder(const Order &other)
+ 
+ 	this->wait_time   = other.wait_time;
+ 	this->travel_time = other.travel_time;
++
++	this->cmod_spec = other.cmod_spec;
+ }
+ 
+ void OrderList::Initialize(Order *chain, Vehicle *v)
+@@ -1273,6 +1276,57 @@ CommandCost CmdOrderRefit(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32
+ 	return CommandCost();
+ }
+ 
++/** Add/remove refit orders from an order
++ * @param tile Not used
++ * @param flags operation to perform
++ * @param p1
++ *   - bit 0-15 VehicleIndex of the vehicle having the order
++ *   - bit 16-31 VehicleIndex of the other vehicle in the order
++ * @param p2 bitmask
++ *   - bit 0-7 number of order to modify
++ *   - bit 8-15 CargoID
++ *   - bit 16-23 number of wagons
++ *   - bit 24-31 flags
++ * @param text unused
++ * @return the cost of this operation or an error
++ */
++CommandCost CmdOrderModifyConsist(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
++{
++	VehicleID veh = GB(p1, 0, 16);
++	VehicleID veh_other = GB(p1, 16, 16);
++	VehicleOrderID order_number  = GB(p2, 0, 8);
++	CargoID cargo = GB(p2, 8, 8);
++	int wagons = GB(p2, 16, 8);
++	byte cms_flags = GB(p2, 24, 8);
++
++	const Vehicle *v = Vehicle::GetIfValid(veh);
++	if (v == NULL || !CheckOwnership(v->owner)) return CMD_ERROR;
++
++	Order *order = v->GetOrder(order_number);
++	if (order == NULL) return CMD_ERROR;
++
++	const Vehicle *w = Vehicle::GetIfValid(veh_other);
++	if (w != NULL && !CheckOwnership(w->owner)) return CMD_ERROR;
++
++	if (flags & DC_EXEC) {
++		ConsistModificationSpec cms(cms_flags, wagons, veh_other, cargo);
++		order->GetConsistModificationSpec() = cms;
++
++		for (Vehicle *u = v->FirstShared(); u != NULL; u = u->NextShared()) {
++			/* Update any possible open window of the vehicle */
++			InvalidateVehicleOrder(u, -2);
++
++			/* If the vehicle already got the current depot set as current order, then update current order as well */
++			if (u->cur_order_index == order_number && (u->current_order.GetDepotOrderType() & ODTFB_PART_OF_ORDERS)) {
++				u->current_order.GetConsistModificationSpec() = cms;
++			}
++		}
++	}
++
++
++	return CommandCost();
++}
++
+ /**
+  *
+  * Backup a vehicle order-list, so you can replace a vehicle
+diff --git a/src/order_gui.cpp b/src/order_gui.cpp
+index 608ac3d..16ea8d3 100644
+--- a/src/order_gui.cpp
++++ b/src/order_gui.cpp
+@@ -18,6 +18,7 @@
+ #include "vehicle_base.h"
+ #include "vehicle_gui.h"
+ #include "roadveh.h"
++#include "train_ext.h"
+ #include "timetable.h"
+ #include "cargotype.h"
+ #include "strings_func.h"
+@@ -56,6 +57,10 @@ enum OrderWindowWidgets {
+ 	ORDER_WIDGET_SEL_TOP_MIDDLE, ///< #NWID_SELECTION widget for middle part of the top row of the 'your train' order window.
+ 	ORDER_WIDGET_SEL_TOP_RIGHT,  ///< #NWID_SELECTION widget for right part of the top row of the 'your train' order window.
+ 	ORDER_WIDGET_SEL_TOP_ROW,    ///< #NWID_SELECTION widget for the top row of the 'your non-trains' order window.
++	ORDER_WIDGET_MODIFY_SPEC_TYPE,
++	ORDER_WIDGET_MODIFY_SPEC_WAGON,
++	ORDER_WIDGET_MODIFY_SPEC_XTRAIN,
++	ORDER_WIDGET_MODIFY_SPEC_CARGO,
+ 	ORDER_WIDGET_SHARED_ORDER_LIST,
+ };
+ 
+@@ -177,6 +182,30 @@ static int DepotActionStringIndex(const Order *order)
+ 	}
+ }
+ 
++static const StringID _order_train_mod_dropdown[] = {
++	STR_ORDER_DROP_SPLIT_THIS,
++	STR_ORDER_DROP_SPLIT_OTHER,
++	STR_ORDER_DROP_NO_MODIFY,
++	INVALID_STRING_ID
++};
++
++static int TrainModTypeStringIndex(const Order *order)
++{
++	if (!order->GetConsistModificationSpec().IsEnabled()) {
++		return CMT_NONE;
++	} else if (order->GetConsistModificationSpec().IsReversedSplit()) {
++		return CMT_SPLIT_OTHER;
++	} else {
++		return CMT_SPLIT_THIS;
++	}
++}
++
++static const StringID _order_train_mod_count_dropdown[] = {
++	STR_ORDER_DROP_COUNT_TAKEN,
++	STR_ORDER_DROP_COUNT_LEFT,
++	INVALID_STRING_ID
++};
++
+ /**
+  * Draws an order in order or timetable GUI
+  * @param v Vehicle the order belongs to
+@@ -203,6 +232,7 @@ void DrawOrderString(const Vehicle *v, const Order *order, int order_index, int
+ 	DrawString(left, rtl ? right - sprite_size.width - 3 : middle, y, STR_ORDER_INDEX, selected ? TC_WHITE : TC_BLACK, SA_RIGHT | SA_FORCE);
+ 
+ 	SetDParam(5, STR_EMPTY);
++	SetDParam(8, STR_EMPTY);
+ 
+ 	switch (order->GetType()) {
+ 		case OT_DUMMY:
+@@ -261,14 +291,39 @@ void DrawOrderString(const Vehicle *v, const Order *order, int order_index, int
+ 				SetDParam(1, (order->GetNonStopType() & ONSF_NO_STOP_AT_INTERMEDIATE_STATIONS) ? STR_ORDER_GO_NON_STOP_TO : STR_ORDER_GO_TO);
+ 			}
+ 
+-			if (!timetable && (order->GetDepotActionType() & ODATFB_HALT)) {
+-				SetDParam(5, STR_ORDER_STOP_ORDER);
+-			}
++			if (!timetable) {
++				unsigned i = 0;
++
++				if (order->GetDepotActionType() & ODATFB_HALT) SetBit(i, 0);
++
++				if (order->IsRefit()) {
++					SetBit(i, 1);
++					SetDParam(6, CargoSpec::Get(order->GetRefitCargo())->name);
++				}
+ 
+-			if (!timetable && order->IsRefit()) {
+-				SetDParam(5, (order->GetDepotActionType() & ODATFB_HALT) ? STR_ORDER_REFIT_STOP_ORDER : STR_ORDER_REFIT_ORDER);
+-				SetDParam(6, CargoSpec::Get(order->GetRefitCargo())->name);
++				const ConsistModificationSpec& cms = order->GetConsistModificationSpec();
++				if (cms.IsEnabled()) {
++					SetBit(i, 2);
++
++					unsigned j = 0;
++					if (cms.CountingWagonsLeft()) SetBit(j, 0);
++					if (cms.IsReversedSplit()) SetBit(j, 1);
++					if (cms.HasOtherTrain()) SetBit(j, 2);
++
++					SetDParam(8, STR_ORDER_MT_TAKE_TO_DEPOT + j);
++					SetDParam(9, cms.GetWagonNumber());
++					if (cms.IsCargoSelected()) {
++						SetDParam(10, STR_ORDER_MT_SELECTED_CARGO);
++						SetDParam(11, CargoSpec::Get(cms.GetCargoType())->name);
++					} else {
++						SetDParam(10, STR_EMPTY);
++					}
++					SetDParam(12, cms.GetOtherTrain());
++				}
++
++				SetDParam(5, STR_ORDER_STOP_NOTHING + i);
+ 			}
++
+ 			break;
+ 
+ 		case OT_GOTO_WAYPOINT:
+@@ -415,6 +470,13 @@ static Order GetOrderCmdFromTile(const Vehicle *v, TileIndex tile)
+  * +-----------------+-----------------+-----------------+
+  * \endverbatim
+  *
++ * For depot orders, trains have another row of buttons:
++ * \verbatim
++ * +--------------+--------------+---------------+-----------+
++ * |  SPLIT_TYPE  |   WAGON_NR   |  OTHER_TRAIN  |   CARGO   |
++ * +--------------+--------------+---------------+-----------+
++ * \endverbatim
++ *
+  * Airplanes and ships have one of the following three top-row button rows:
+  * \verbatim
+  * +--------------------------+--------------------------+
+@@ -442,6 +504,7 @@ private:
+ 	enum OrderPlaceObjectState {
+ 		OPOS_GOTO,
+ 		OPOS_CONDITIONAL,
++		OPOS_MODIFY_XTRAIN,
+ 	};
+ 
+ 	/** Displayed planes of the #NWID_SELECTION widgets. */
+@@ -680,6 +743,81 @@ private:
+ 			ShowVehicleRefitWindow(this->vehicle, this->OrderGetSel(), this);
+ 		}
+ 	}
++
++	void UpdateTCMS(int field, uint value)
++	{
++		Order *order = this->vehicle->GetOrder(this->OrderGetSel());
++		const ConsistModificationSpec& cms = order->GetConsistModificationSpec();
++
++		uint32 p1 = this->vehicle->index;
++		uint32 p2 = this->OrderGetSel();
++
++		SB(p1, 16, 16, cms.GetOtherTrain());
++		SB(p2, 8, 8, cms.GetCargoType());
++		SB(p2, 16, 8, cms.GetWagonNumber());
++		SB(p2, 24, 1, cms.IsEnabled());
++		SB(p2, 25, 1, cms.IsReversedSplit());
++		SB(p2, 26, 1, cms.CountingWagonsLeft());
++
++		switch (field) {
++			case CMSF_TYPE:	// spec. type
++				if (value == CMT_NONE) {
++					SB(p2, 24, 1, 0);
++					this->UpdateCMSWidgetsState();
++				} else {
++					SB(p2, 24, 1, 1);
++					SB(p2, 25, 1, value == CMT_SPLIT_OTHER);
++					this->UpdateCMSWidgetsState(order);
++				}
++				break;
++
++			case CMSF_COUNTING:	// counting type
++				SB(p2, 26, 1, value);
++				break;
++
++			case CMSF_WAGONS:	// wagons
++				SB(p2, 16, 8, value);
++				break;
++
++			case CMSF_XTRAIN:	// other train
++				SB(p1, 16, 16, value);
++				break;
++
++			case CMSF_CARGO: // cargo
++				SB(p2, 8, 8, value);
++				break;
++
++			default: NOT_REACHED();
++		}
++
++		DoCommandP(this->vehicle->tile, p1, p2, CMD_ORDER_MODIFY_TRAIN);
++	}
++
++	/**
++	 * Handle the click on the modify button.
++	 * If ctrl is pressed, cancel modifications, else set new type.
++	 * @param i Dummy parameter.
++	 */
++	void OrderClick_Modify(int i)
++	{
++		Order *order = this->vehicle->GetOrder(this->OrderGetSel());
++		const ConsistModificationSpec& cms = order->GetConsistModificationSpec();
++
++		if (_ctrl_pressed) {
++			i = CMT_NONE;
++		} else if (cms.IsEnabled()) {
++			i = cms.IsReversedSplit() ? CMT_SPLIT_THIS : CMT_SPLIT_OTHER;
++		} else {
++			i = cms.IsReversedSplit() ? CMT_SPLIT_OTHER : CMT_SPLIT_THIS;
++		}
++
++		this->UpdateTCMS(CMSF_TYPE, i);
++	}
++
++	void OrderClick_ModifyOtherTrain(int i)
++	{
++	}
++
+ 	typedef void (OrdersWindow::*Handler)(int);
+ 	struct KeyToEvent {
+ 		uint16 keycode;
+@@ -802,6 +940,25 @@ public:
+ 		this->UpdateButtonState();
+ 	}
+ 
++	void UpdateCMSWidgetsState(const Order *order = NULL)
++	{
++		if (order != NULL) {
++			this->EnableWidget(ORDER_WIDGET_MODIFY_SPEC_TYPE);
++		} else {
++			this->DisableWidget(ORDER_WIDGET_MODIFY_SPEC_TYPE);
++		}
++
++		if (order != NULL && order->GetConsistModificationSpec().IsEnabled()) {
++			this->EnableWidget(ORDER_WIDGET_MODIFY_SPEC_WAGON);
++			this->EnableWidget(ORDER_WIDGET_MODIFY_SPEC_XTRAIN);
++			this->EnableWidget(ORDER_WIDGET_MODIFY_SPEC_CARGO);
++		} else {
++			this->DisableWidget(ORDER_WIDGET_MODIFY_SPEC_WAGON);
++			this->DisableWidget(ORDER_WIDGET_MODIFY_SPEC_XTRAIN);
++			this->DisableWidget(ORDER_WIDGET_MODIFY_SPEC_CARGO);
++		}
++	}
++
+ 	void UpdateButtonState()
+ 	{
+ 		if (this->vehicle->owner != _local_company) return; // No buttons are displayed with competitor order windows.
+@@ -843,6 +1000,7 @@ public:
+ 				this->DisableWidget(ORDER_WIDGET_NON_STOP);
+ 				this->RaiseWidget(ORDER_WIDGET_NON_STOP);
+ 			}
++			this->UpdateCMSWidgetsState();
+ 			this->DisableWidget(ORDER_WIDGET_FULL_LOAD);
+ 			this->DisableWidget(ORDER_WIDGET_UNLOAD);
+ 		} else {
+@@ -860,6 +1018,7 @@ public:
+ 						this->EnableWidget(ORDER_WIDGET_NON_STOP);
+ 						this->SetWidgetLoweredState(ORDER_WIDGET_NON_STOP, order->GetNonStopType() & ONSF_NO_STOP_AT_INTERMEDIATE_STATIONS);
+ 					}
++					this->UpdateCMSWidgetsState();
+ 					this->SetWidgetLoweredState(ORDER_WIDGET_FULL_LOAD, order->GetLoadType() == OLF_FULL_LOAD_ANY);
+ 					this->SetWidgetLoweredState(ORDER_WIDGET_UNLOAD, order->GetUnloadType() == OUFB_UNLOAD);
+ 					break;
+@@ -873,6 +1032,7 @@ public:
+ 						right_sel->SetDisplayedPlane(DP_RIGHT_UNLOAD);
+ 						this->SetWidgetLoweredState(ORDER_WIDGET_NON_STOP, order->GetNonStopType() & ONSF_NO_STOP_AT_INTERMEDIATE_STATIONS);
+ 					}
++					this->UpdateCMSWidgetsState();
+ 					this->DisableWidget(ORDER_WIDGET_FULL_LOAD);
+ 					this->DisableWidget(ORDER_WIDGET_UNLOAD);
+ 					break;
+@@ -886,6 +1046,7 @@ public:
+ 						right_sel->SetDisplayedPlane(DP_RIGHT_SERVICE);
+ 						this->SetWidgetLoweredState(ORDER_WIDGET_NON_STOP, order->GetNonStopType() & ONSF_NO_STOP_AT_INTERMEDIATE_STATIONS);
+ 					}
++					this->UpdateCMSWidgetsState(order);
+ 					this->SetWidgetLoweredState(ORDER_WIDGET_SERVICE, order->GetDepotOrderType() & ODTFB_SERVICE);
+ 					break;
+ 
+@@ -897,6 +1058,7 @@ public:
+ 						middle_sel->SetDisplayedPlane(DP_MIDDLE_COMPARE);
+ 						right_sel->SetDisplayedPlane(DP_RIGHT_CONDVAL);
+ 					}
++					this->UpdateCMSWidgetsState();
+ 					OrderConditionVariable ocv = order->GetConditionVariable();
+ 					/* Set the strings for the dropdown boxes. */
+ 					this->GetWidget<NWidgetCore>(ORDER_WIDGET_COND_VARIABLE)->widget_data   = _order_conditional_variable[order == NULL ? 0 : ocv];
+@@ -915,6 +1077,7 @@ public:
+ 						right_sel->SetDisplayedPlane(DP_RIGHT_UNLOAD);
+ 						this->DisableWidget(ORDER_WIDGET_NON_STOP);
+ 					}
++					this->UpdateCMSWidgetsState();
+ 					this->DisableWidget(ORDER_WIDGET_FULL_LOAD);
+ 					this->DisableWidget(ORDER_WIDGET_UNLOAD);
+ 					break;
+@@ -981,6 +1144,50 @@ public:
+ 			case ORDER_WIDGET_CAPTION:
+ 				SetDParam(0, this->vehicle->index);
+ 				break;
++
++			default: {
++				int sel = this->OrderGetSel();
++				const Order *order = this->vehicle->GetOrder(sel);
++				const ConsistModificationSpec *cms = NULL;
++
++				if (order) cms = &order->GetConsistModificationSpec();
++
++				switch (widget) {
++					case ORDER_WIDGET_MODIFY_SPEC_TYPE: {
++						StringID str = STR_ORDER_MODIFY;
++						if (cms && cms->IsReversedSplit()) str = STR_ORDER_MODIFY_OTHER;
++
++						SetDParam(0, str);
++					}	break;
++
++					case ORDER_WIDGET_MODIFY_SPEC_WAGON:
++						if (!cms) {
++							SetDParam(0, STR_EMPTY);
++							break;
++						}
++
++						SetDParam(0, !cms->CountingWagonsLeft() ? STR_ORDER_MT_COUNT_TAKEN : STR_ORDER_MT_COUNT_LEFT);
++						SetDParam(1, cms->GetWagonNumber());
++						break;
++
++					case ORDER_WIDGET_MODIFY_SPEC_XTRAIN:
++						if (cms && cms->HasOtherTrain()) {
++							SetDParam(0, STR_TINY_BLACK_VEHICLE);
++							SetDParam(1, cms->GetOtherTrain());
++						} else {
++							SetDParam(0, STR_ORDER_MODIFY_OTHER_IS_DEPOT);
++						}
++						break;
++
++					case ORDER_WIDGET_MODIFY_SPEC_CARGO:
++						if (cms && cms->IsCargoSelected()) {
++							SetDParam(0, CargoSpec::Get(cms->GetCargoType())->name);
++						} else {
++							SetDParam(0, STR_ORDER_MODIFY_ANY_CARGO);
++						}
++						break;
++				}
++			} break;
+ 		}
+ 	}
+ 
+@@ -1091,6 +1298,50 @@ public:
+ 				this->OrderClick_Refit(0);
+ 				break;
+ 
++			case ORDER_WIDGET_MODIFY_SPEC_TYPE:
++				if (GetWidget<NWidgetLeaf>(widget)->ButtonHit(pt)) {
++					this->OrderClick_Modify(-1);
++				} else {
++					ShowDropDownMenu(this, _order_train_mod_dropdown, TrainModTypeStringIndex(this->vehicle->GetOrder(this->OrderGetSel())), ORDER_WIDGET_MODIFY_SPEC_TYPE, 0, 0);
++				}
++				break;
++
++			case ORDER_WIDGET_MODIFY_SPEC_WAGON: {
++				const Order *order = this->vehicle->GetOrder(this->OrderGetSel());
++				const ConsistModificationSpec& cms = order->GetConsistModificationSpec();
++
++				if (GetWidget<NWidgetLeaf>(widget)->ButtonHit(pt)) {
++					SetDParam(0, cms.GetWagonNumber());
++					ShowQueryString(STR_JUST_INT, STR_ORDER_MODIFY_WAGONS_CAPT, 5, 100, this, CS_NUMERAL, QSF_NONE);
++				} else {
++					ShowDropDownMenu(this, _order_train_mod_count_dropdown,
++						cms.CountingWagonsLeft(), ORDER_WIDGET_MODIFY_SPEC_WAGON, 0, 0);
++				}
++			}	break;
++
++			case ORDER_WIDGET_MODIFY_SPEC_XTRAIN:
++				this->OrderClick_ModifyOtherTrain(-1);
++				break;
++
++			case ORDER_WIDGET_MODIFY_SPEC_CARGO:
++				if (_ctrl_pressed) {
++					UpdateTCMS(CMSF_CARGO, CT_INVALID);
++				} else {
++					const Order *order = this->vehicle->GetOrder(this->OrderGetSel());
++					const ConsistModificationSpec& cms = order->GetConsistModificationSpec();
++
++					StringID order_train_mod_cargo_list[NUM_CARGO+1];
++					order_train_mod_cargo_list[32] = INVALID_STRING_ID;
++					for (int i = 0; i < 32; ++i) {
++						StringID name = HasBit(_cargo_mask, i) ? CargoSpec::Get(i)->name : STR_NULL;
++						order_train_mod_cargo_list[i] = name;
++					}
++
++					ShowDropDownMenu(this, order_train_mod_cargo_list, cms.GetCargoType(),
++						ORDER_WIDGET_MODIFY_SPEC_CARGO, 0, (uint32)~_cargo_mask);
++				}
++				break;
++
+ 			case ORDER_WIDGET_SERVICE:
+ 				if (GetWidget<NWidgetLeaf>(widget)->ButtonHit(pt)) {
+ 					this->OrderClick_Service(-1);
+@@ -1128,23 +1379,42 @@ public:
+ 
+ 	virtual void OnQueryTextFinished(char *str)
+ 	{
+-		if (!StrEmpty(str)) {
+-			VehicleOrderID sel = this->OrderGetSel();
+-			uint value = atoi(str);
++		if (StrEmpty(str))
++			return;
+ 
+-			switch (this->vehicle->GetOrder(sel)->GetConditionVariable()) {
+-				case OCV_MAX_SPEED:
+-					value = ConvertDisplaySpeedToSpeed(value);
+-					break;
++		VehicleOrderID sel = this->OrderGetSel();
++		Order *order = this->vehicle->GetOrder(sel);
++		uint value = atoi(str);
+ 
+-				case OCV_RELIABILITY:
+-				case OCV_LOAD_PERCENTAGE:
+-					value = Clamp(value, 0, 100);
++		if (order == NULL)
++			return;
+ 
+-				default:
+-					break;
+-			}
+-			DoCommandP(this->vehicle->tile, this->vehicle->index + (sel << 16), MOF_COND_VALUE | Clamp(value, 0, 2047) << 4, CMD_MODIFY_ORDER | CMD_MSG(STR_ERROR_CAN_T_MODIFY_THIS_ORDER));
++		switch (order->GetType()) {
++			case OT_CONDITIONAL:
++				switch (this->vehicle->GetOrder(sel)->GetConditionVariable()) {
++					case OCV_MAX_SPEED:
++						value = ConvertDisplaySpeedToSpeed(value);
++						break;
++
++					case OCV_RELIABILITY:
++					case OCV_LOAD_PERCENTAGE:
++						value = Clamp(value, 0, 100);
++
++					default:
++						break;
++				}
++				DoCommandP(this->vehicle->tile, this->vehicle->index + (sel << 16),
++					MOF_COND_VALUE | Clamp(value, 0, 2047) << 4,
++					CMD_MODIFY_ORDER | CMD_MSG(STR_ERROR_CAN_T_MODIFY_THIS_ORDER));
++				break;
++
++			case OT_GOTO_DEPOT:
++				value = Clamp(value, 0, 255);
++				this->UpdateTCMS(CMSF_WAGONS, value);
++				break;
++
++			default:
++				break; // NOT_REACHED() ?
+ 		}
+ 	}
+ 
+@@ -1159,6 +1429,18 @@ public:
+ 				this->OrderClick_FullLoad(index);
+ 				break;
+ 
++			case ORDER_WIDGET_MODIFY_SPEC_TYPE:
++				this->UpdateTCMS(CMSF_TYPE, index);
++				break;
++
++			case ORDER_WIDGET_MODIFY_SPEC_WAGON:
++				this->UpdateTCMS(CMSF_COUNTING, index);
++				break;
++
++			case ORDER_WIDGET_MODIFY_SPEC_CARGO:
++				this->UpdateTCMS(CMSF_CARGO, index);
++				break;
++
+ 			case ORDER_WIDGET_UNLOAD:
+ 				this->OrderClick_Unload(index);
+ 				break;
+@@ -1294,10 +1576,12 @@ public:
+ 
+ 	virtual void OnTimeout()
+ 	{
+-		/* unclick all buttons except for the 'goto' button (ORDER_WIDGET_GOTO), which is 'persistent' */
++		/* unclick all buttons except for the 'goto' and 'other train' buttons
++		 * (ORDER_WIDGET_GOTO, ORDER_WIDGET_MODIFY_SPEC_XTRAIN), which are 'persistent' */
+ 		for (uint i = 0; i < this->nested_array_size; i++) {
+ 			if (this->nested_array[i] != NULL && i != ORDER_WIDGET_GOTO &&
+ 					i != ORDER_WIDGET_SEL_TOP_LEFT && i != ORDER_WIDGET_SEL_TOP_MIDDLE && i != ORDER_WIDGET_SEL_TOP_RIGHT &&
++					i != ORDER_WIDGET_MODIFY_SPEC_XTRAIN &&
+ 					i != ORDER_WIDGET_SEL_TOP_ROW && this->IsWidgetLowered(i)) {
+ 				this->RaiseWidget(i);
+ 				this->SetWidgetDirty(i);
+@@ -1351,6 +1635,21 @@ static const NWidgetPart _nested_orders_train_widgets[] = {
+ 	/* Second button row. */
+ 	NWidget(NWID_HORIZONTAL),
+ 		NWidget(NWID_HORIZONTAL, NC_EQUALSIZE),
++			NWidget(NWID_BUTTON_DROPDOWN, COLOUR_GREY, ORDER_WIDGET_MODIFY_SPEC_TYPE), SetMinimalSize(124, 12), SetFill(1, 0),
++													SetDataTip(STR_BLACK_STRING, STR_ORDER_TOOLTIP_MODIFY), SetResize(1, 0),
++			NWidget(NWID_BUTTON_DROPDOWN, COLOUR_GREY, ORDER_WIDGET_MODIFY_SPEC_WAGON), SetMinimalSize(124, 12), SetFill(1, 0),
++													SetDataTip(STR_BLACK_STRING, STR_ORDER_TOOLTIP_MODIFY_WAGONS), SetResize(1, 0),
++			NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, ORDER_WIDGET_MODIFY_SPEC_XTRAIN), SetMinimalSize(124, 12), SetFill(1, 0),
++													SetDataTip(STR_BLACK_STRING, STR_ORDER_TOOLTIP_MODIFY_OTHER_TRAIN), SetResize(1, 0),
++			NWidget(NWID_BUTTON_DROPDOWN, COLOUR_GREY, ORDER_WIDGET_MODIFY_SPEC_CARGO), SetMinimalSize(124, 12), SetFill(1, 0),
++													SetDataTip(STR_BLACK_STRING, STR_ORDER_TOOLTIP_MODIFY_SELECT_CARGO), SetResize(1, 0),
++		EndContainer(),
++		NWidget(NWID_SPACER), SetMinimalSize(12, 12),
++	EndContainer(),
++
++	/* Third button row. */
++	NWidget(NWID_HORIZONTAL),
++		NWidget(NWID_HORIZONTAL, NC_EQUALSIZE),
+ 			NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, ORDER_WIDGET_SKIP), SetMinimalSize(124, 12), SetFill(1, 0),
+ 													SetDataTip(STR_ORDERS_SKIP_BUTTON, STR_ORDERS_SKIP_TOOLTIP), SetResize(1, 0),
+ 			NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, ORDER_WIDGET_DELETE), SetMinimalSize(124, 12), SetFill(1, 0),
+diff --git a/src/saveload/order_sl.cpp b/src/saveload/order_sl.cpp
+index 05e7ece..87b7329 100644
+--- a/src/saveload/order_sl.cpp
++++ b/src/saveload/order_sl.cpp
+@@ -12,6 +12,7 @@
+ #include "../stdafx.h"
+ #include "../order_base.h"
+ #include "../settings_type.h"
++#include "../train_ext.h"
+ 
+ #include "saveload.h"
+ 
+@@ -103,6 +104,10 @@ const SaveLoad *GetOrderDescription()
+ 		 SLE_CONDVAR(Order, refit_subtype,  SLE_UINT8,   36, SL_MAX_VERSION),
+ 		 SLE_CONDVAR(Order, wait_time,      SLE_UINT16,  67, SL_MAX_VERSION),
+ 		 SLE_CONDVAR(Order, travel_time,    SLE_UINT16,  67, SL_MAX_VERSION),
++		 SLE_CONDVAR(Order, cmod_spec.flags,          SLE_UINT8,  132, SL_MAX_VERSION),
++		 SLE_CONDVAR(Order, cmod_spec.wagons,         SLE_UINT8,  132, SL_MAX_VERSION),
++		 SLE_CONDVAR(Order, cmod_spec.xchg_with,      SLE_UINT16, 132, SL_MAX_VERSION),
++		 SLE_CONDVAR(Order, cmod_spec.selected_cargo, SLE_UINT8,  132, SL_MAX_VERSION),
+ 
+ 		/* Leftover from the minor savegame version stuff
+ 		 * We will never use those free bytes, but we have to keep this line to allow loading of old savegames */
+diff --git a/src/saveload/saveload.cpp b/src/saveload/saveload.cpp
+index d00aefd..b501885 100644
+--- a/src/saveload/saveload.cpp
++++ b/src/saveload/saveload.cpp
+@@ -47,7 +47,7 @@
+ 
+ #include "saveload_internal.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 131;
++extern const uint16 SAVEGAME_VERSION = 132;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+diff --git a/src/train.h b/src/train.h
+index be0239d..e1ed825 100644
+--- a/src/train.h
++++ b/src/train.h
+@@ -358,6 +358,26 @@ struct Train : public SpecializedVehicle<Train, VEH_TRAIN> {
+ 
+ 		return v;
+ 	}
++
++	/**
++	 * Get the last real (non-articulated part and non rear part of dualheaded engine) vehicle in the consist.
++	 * @return Last vehicle in the consist.
++	 */
++	FORCEINLINE Train *GetLastUnit()
++	{
++		Train *u, *v = this;
++
++		while ((u = v->GetNextUnit()) != NULL) {
++			v = u;
++		}
++
++		return v;
++	}
++
++	FORCEINLINE const Train *GetLastUnit() const
++	{
++		return const_cast<Train *>(this)->GetLastUnit();
++	}
+ };
+ 
+ #define FOR_ALL_TRAINS(var) FOR_ALL_VEHICLES_OF_TYPE(Train, var)
+diff --git a/src/train_cmd.cpp b/src/train_cmd.cpp
+index 3cd80ed..72b7454 100644
+--- a/src/train_cmd.cpp
++++ b/src/train_cmd.cpp
+@@ -38,6 +38,7 @@
+ #include "gamelog.h"
+ #include "network/network.h"
+ #include "spritecache.h"
++#include "train_ext.h"
+ 
+ #include "table/strings.h"
+ #include "table/train_cmd.h"
+@@ -1304,6 +1305,9 @@ static void NormaliseTrainHead(Train *head)
+ 	head->unitnumber = GetFreeUnitNumber(VEH_TRAIN);
+ }
+ 
++/* just to keep CmdMoveRailVehicle() code ordering */
++static CommandCost MoveRailVehicle(Train *dst_head, Train *dst, Train *src_head, Train *src, DoCommandFlag flags = DC_EXEC, bool move_chain = false);
++
+ /** Move a rail vehicle around inside the depot.
+  * @param tile unused
+  * @param flags type of operation
+@@ -1374,6 +1378,11 @@ CommandCost CmdMoveRailVehicle(TileIndex tile, DoCommandFlag flags, uint32 p1, u
+ 	/* Check if all vehicles in the destination train are stopped inside a depot. */
+ 	if (dst_head != NULL && !dst_head->IsStoppedInDepot()) return_cmd_error(STR_ERROR_TRAINS_CAN_ONLY_BE_ALTERED_INSIDE_A_DEPOT);
+ 
++	return MoveRailVehicle(dst_head, dst, src_head, src, flags, move_chain);
++}
++
++static CommandCost MoveRailVehicle(Train *dst_head, Train *dst, Train *src_head, Train *src, DoCommandFlag flags, bool move_chain)
++{
+ 	/* First make a backup of the order of the trains. That way we can do
+ 	 * whatever we want with the order and later on easily revert. */
+ 	TrainList original_src;
+@@ -4190,3 +4199,120 @@ Trackdir Train::GetVehicleTrackdir() const
+ 
+ 	return TrackDirectionToTrackdir(FindFirstTrack(this->track), this->direction);
+ }
++
++static inline CommandCost TrainMoveWagon(Train *src, Train *dst)
++{
++	if (dst == NULL) dst = FindGoodVehiclePos(src);
++
++	Train *dst_head = NULL;
++	if (dst != NULL) {
++		dst_head = dst->First();
++		dst = dst->GetLastEnginePart();
++	}
++
++	/* it's allowed to auto-modify non-stopped trains in depots and
++	 * all other conditions in CmdMoveRailVehicle() are already verified */
++	return MoveRailVehicle(dst_head, dst, src->First(), src);
++}
++
++inline bool ConsistModificationSpec::IsWagonSelected(const Train *v) const
++{
++	/* TODO: more conditions? */
++
++	return !this->IsCargoSelected() || v->cargo_type == this->GetCargoType();
++}
++
++static void BuildFreeWagonList(TileIndex tile, const ConsistModificationSpec& cmod_spec, TrainList& wagons)
++{
++	Train *v;
++
++	FOR_ALL_TRAINS(v) {
++		if (v->tile != tile) continue;
++		if (v->IsEngine()) continue;
++		if (!v->First()->IsFreeWagon()) continue;
++
++		/* free wagon chains are always stopped, BTW */
++		if (cmod_spec.IsWagonSelected(v)) *wagons.Append() = v;
++	}
++}
++
++static void BuildTrainWagonList(Train *v, const ConsistModificationSpec& cmod_spec, TrainList& wagons)
++{
++	/* check all wagons */
++	do {
++		if (v->IsEngine()) continue;
++		if (cmod_spec.IsWagonSelected(v)) *wagons.Append() = v;
++	} while ((v = v->GetNextUnit()));
++}
++
++CommandCost ModifyTrainConsist(Train *v, const ConsistModificationSpec& cmod_spec)
++{
++	TileIndex depot = v->tile;
++	TrainList wagons;
++
++	DEBUG(misc, 1, "MTC: %u %s %u, %d wagons, cargoid %u",
++		v->index, cmod_spec.IsReversedSplit() ? "<-" : "->",
++		cmod_spec.GetOtherTrain(), cmod_spec.GetWagonNumber(),
++		cmod_spec.GetCargoType());
++
++	/* we know already that (v) is in a depot because we're called
++	 * from the callback */
++	Train *w = Train::GetIfValid(cmod_spec.GetOtherTrain());
++	if (w != NULL) {
++		/* missed the other train? */
++		if (w->tile != depot || !w->IsInDepot()) return CommandCost();	// TODO: generate news?
++		/* don't mess with self */
++		if (v == w) return CommandCost();	// TODO: change to assert()
++	}
++
++	if (cmod_spec.IsReversedSplit()) Swap(v, w);
++
++	if (w != NULL) w = w->GetLastUnit();
++
++	if (v != NULL) {
++		BuildTrainWagonList(v, cmod_spec, wagons);
++	} else {
++		BuildFreeWagonList(depot, cmod_spec, wagons);
++	}
++
++	uint begin = 0;
++	uint end = wagons.Length();
++
++	uint n = cmod_spec.GetWagonNumber();
++	if (cmod_spec.CountingWagonsLeft()) {
++		begin = min(n, end);
++	} else if (n < end) {
++		end = n;
++	}
++
++	DEBUG(misc, 1, "MTC: moving %d wagons", end - begin);
++
++	for (; begin < end; ++begin) {
++		v = Train::From(wagons[begin]);
++		CommandCost ret = TrainMoveWagon(v, w);
++
++		if (ret.Failed()) {
++			VehicleID v1 = INVALID_VEHICLE, v2 = INVALID_VEHICLE;
++			VehicleID w1 = INVALID_VEHICLE, w2 = INVALID_VEHICLE;
++			char msg[1024];
++
++			if (wagons[end]) {
++				v1 = v->index;
++				v2 = v->First()->index;
++			}
++			if (w) {
++				w1 = w->index;
++				w2 = w->First()->index;
++			}
++
++			GetString(msg, ret.GetErrorMessage(), lastof(msg));
++			DEBUG(misc, 1, "MTC: wagon move failed: %u(%u) -> %u(%u) [msg 0x%X: %s]",
++				v1, v2, w1, w2, ret.GetErrorMessage(), msg);
++		}
++
++		if (!ret.Failed()) w = v;
++	}
++
++	return CommandCost();
++}
++
+diff --git a/src/train_ext.h b/src/train_ext.h
+new file mode 100644
+index 0000000..3c8df70
+--- /dev/null
++++ b/src/train_ext.h
+@@ -0,0 +1,70 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/** @file train_ext.h Train orders extensions. */
++
++#ifndef TRAIN_EXT_H
++#define TRAIN_EXT_H
++
++#include "debug.h"
++#include "core/bitmath_func.hpp"
++#include "saveload/saveload.h"
++#include "command_type.h"
++
++enum CMS_Type {
++	CMT_SPLIT_THIS,
++	CMT_SPLIT_OTHER,
++	CMT_NONE,
++	CMT_END
++};
++
++enum CMS_Field {
++	CMSF_TYPE,
++	CMSF_COUNTING,
++	CMSF_WAGONS,
++	CMSF_XTRAIN,
++	CMSF_CARGO,
++	CMSF_END
++};
++
++enum CMS_Flags {
++	CMF_ENABLED,
++	CMF_SPLIT_OTHER,
++	CMF_COUNT_STAYING,
++	CMF_END
++};
++
++struct ConsistModificationSpec {
++private:
++	friend const SaveLoad *GetOrderDescription();    ///< Saving and loading of specs.
++
++	VehicleID xchg_with;	///< train to append split wagons to/from
++	byte wagons;		///< number of wagons to take or leave
++	CargoID selected_cargo;	///< move only wagons carrying this type of cargo
++	byte flags;		///< flags (CMS_Flags)
++
++public:
++	ConsistModificationSpec(byte flags_ = 0, int8 wagons_ = 0, VehicleID xchg_with_ = INVALID_VEHICLE, CargoID cargo_ = CT_INVALID)
++		: xchg_with(xchg_with_), wagons(wagons_), selected_cargo(cargo_), flags(flags_) {}
++
++	inline bool IsEnabled() const { return HasBit(this->flags, CMF_ENABLED); }
++	inline bool IsReversedSplit() const { return HasBit(this->flags, CMF_SPLIT_OTHER); }
++	inline bool CountingWagonsLeft() const { return HasBit(this->flags, CMF_COUNT_STAYING); }
++	inline int GetWagonNumber() const { return this->wagons; }
++	inline bool HasOtherTrain() const { return this->xchg_with != INVALID_VEHICLE; }
++	inline VehicleID GetOtherTrain() const { return this->xchg_with; }
++	inline bool IsCargoSelected() const { return this->selected_cargo != CT_INVALID; }
++	inline CargoID GetCargoType() const { return this->selected_cargo; }
++
++	bool IsWagonSelected(const Train *v) const;
++};
++
++CommandCost ModifyTrainConsist(Train *v, const ConsistModificationSpec& cmod_spec);
++
++#endif /* TRAIN_EXT_H */
+diff --git a/src/vehicle.cpp b/src/vehicle.cpp
+index 9e0e7b8..3227289 100644
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -995,6 +995,10 @@ void VehicleEnterDepot(Vehicle *v)
+ 			return;
+ 		}
+ 
++		if (v->type == VEH_TRAIN && t.GetConsistModificationSpec().IsEnabled()) {
++			ModifyTrainConsist(Train::From(v), t.GetConsistModificationSpec());
++		}
++
+ 		if (t.IsRefit()) {
+ 			_current_company = v->owner;
+ 			CommandCost cost = DoCommand(v->tile, v->index, t.GetRefitCargo() | t.GetRefitSubtype() << 8, DC_EXEC, GetCmdRefitVeh(v));
+diff --git a/src/widgets/dropdown.cpp b/src/widgets/dropdown.cpp
+index 72bc308..875a2c3 100644
+--- a/src/widgets/dropdown.cpp
++++ b/src/widgets/dropdown.cpp
+@@ -400,8 +400,8 @@ void ShowDropDownList(Window *w, DropDownList *list, int selected, int button, u
+  * @param strings       Menu list, end with #INVALID_STRING_ID
+  * @param selected      Index of initial selected item.
+  * @param button        Button widget number of the parent window #w that wants the dropdown menu.
+- * @param disabled_mask Bitmask for diabled items (items with their bit set are not copied to the dropdown list).
+- * @param hidden_mask   Bitmask for hidden items (items with their bit set are displayed, but not selectable in the dropdown list).
++ * @param disabled_mask Bitmask for disabled items (items with their bit set are displayed, but not selectable in the dropdown list).
++ * @param hidden_mask   Bitmask for hidden items (items with their bit set are not copied to the dropdown list).
+  * @param width         Width of the dropdown menu. If \c 0, use the width of parent widget #button.
+  */
+ void ShowDropDownMenu(Window *w, const StringID *strings, int selected, int button, uint32 disabled_mask, uint32 hidden_mask, uint width)

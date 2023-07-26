@@ -1,0 +1,79 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 17167)
++++ src/lang/english.txt	(working copy)
+@@ -1834,7 +1834,7 @@
+ STR_RAIL_TOOLBAR_TOOLTIP_BUILD_RAILROAD_SIGNALS                 :{BLACK}Build railway signals
+ STR_RAIL_TOOLBAR_TOOLTIP_BUILD_RAILROAD_BRIDGE                  :{BLACK}Build railway bridge
+ STR_RAIL_TOOLBAR_TOOLTIP_BUILD_RAILROAD_TUNNEL                  :{BLACK}Build railway tunnel
+-STR_RAIL_TOOLBAR_TOOLTIP_TOGGLE_BUILD_REMOVE_FOR                :{BLACK}Toggle build/remove for railway track and signals
++STR_RAIL_TOOLBAR_TOOLTIP_TOGGLE_BUILD_REMOVE_FOR                :{BLACK}Toggle build/remove for railway track, signals, waypoints and stations. Ctrl+Click will leave track when removing station.
+ STR_RAIL_TOOLBAR_TOOLTIP_CONVERT_RAIL                           :{BLACK}Convert/Upgrade the type of rail
+ 
+ # Rail depot construction window
+Index: src/station_cmd.cpp
+===================================================================
+--- src/station_cmd.cpp	(revision 17167)
++++ src/station_cmd.cpp	(working copy)
+@@ -1190,6 +1190,7 @@
+ {
+ 	/* Count of the number of tiles removed */
+ 	int quantity = 0;
++	CommandCost total_cost(EXPENSES_CONSTRUCTION);
+ 
+ 	/* Do the action for every tile into the area */
+ 	TILE_LOOP(tile, ta.w, ta.h, ta.tile) {
+@@ -1252,7 +1253,13 @@
+ 				for (; v->Next() != NULL; v = v->Next()) ;
+ 				if (IsRailStationTile(v->tile)) SetRailStationPlatformReservation(v->tile, TrackdirToExitdir(ReverseTrackdir(v->GetVehicleTrackdir())), true);
+ 			}
++			if (flags & DC_NO_RAIL_OVERLAP) {
++				CommandCost ret = DoCommand(tile, rt, track, flags & ~DC_NO_RAIL_OVERLAP, CMD_BUILD_SINGLE_RAIL);
++				if (CmdFailed(ret)) return ret;
++			}
+ 		}
++		if (flags & DC_NO_RAIL_OVERLAP) total_cost.AddCost(-_price.remove_rail); // Instead of building cost, use cost of not removing.
++
+ 	}
+ 
+ 	if (quantity == 0) return CMD_ERROR;
+@@ -1275,7 +1282,8 @@
+ 		}
+ 	}
+ 
+-	return CommandCost(EXPENSES_CONSTRUCTION, quantity * removal_cost);
++	total_cost.AddCost(quantity * removal_cost);
++	return total_cost;
+ }
+ 
+ /** Remove a single tile from a rail station.
+@@ -1283,7 +1291,7 @@
+  * @param start tile of station piece to remove
+  * @param flags operation to perform
+  * @param p1 start_tile
+- * @param p2 unused
++ * @param p2 bit 0: was control pressed?
+  * @param text unused
+  * @return cost of operation or error
+  */
+@@ -1295,6 +1303,7 @@
+ 	TileArea ta(start, end);
+ 	SmallVector<Station *, 4> affected_stations;
+ 
++	if (HasBit(p2, 0)) flags |= DC_NO_RAIL_OVERLAP;
+ 	CommandCost ret = RemoveFromRailBaseStation(ta, affected_stations, flags, _price.remove_rail_station);
+ 	if (ret.Failed()) return ret;
+ 
+Index: src/rail_gui.cpp
+===================================================================
+--- src/rail_gui.cpp	(revision 17167)
++++ src/rail_gui.cpp	(working copy)
+@@ -762,7 +762,7 @@
+ 					if (this->IsWidgetLowered(RTW_BUILD_STATION)) {
+ 						/* Station */
+ 						if (_remove_button_clicked) {
+-							DoCommandP(end_tile, start_tile, 0, CMD_REMOVE_FROM_RAIL_STATION | CMD_MSG(STR_ERROR_CAN_T_REMOVE_PART_OF_STATION), CcPlaySound1E);
++							DoCommandP(end_tile, start_tile, _ctrl_pressed ? 1 : 0, CMD_REMOVE_FROM_RAIL_STATION | CMD_MSG(STR_ERROR_CAN_T_REMOVE_PART_OF_STATION), CcPlaySound1E);
+ 						} else {
+ 							HandleStationPlacement(start_tile, end_tile);
+ 						}

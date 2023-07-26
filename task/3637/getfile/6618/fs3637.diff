@@ -1,0 +1,124 @@
+Index: src/station_cmd.cpp
+===================================================================
+--- src/station_cmd.cpp	(revision 20838)
++++ src/station_cmd.cpp	(working copy)
+@@ -3188,8 +3188,15 @@
+ 	}
+ }
+ 
+-static void UpdateStationWaiting(Station *st, CargoID type, uint amount, SourceType source_type, SourceID source_id)
++static uint UpdateStationWaiting(Station *st, CargoID type, uint amount, SourceType source_type, SourceID source_id)
+ {
++	amount += st->goods[type].amount_fract;
++	st->goods[type].amount_fract = GB(amount, 0, 8);
++
++	amount >>= 8;
++	/* No new "real" cargo item yet. */
++	if (amount == 0) return 0;
++
+ 	st->goods[type].cargo.Append(new CargoPacket(st->index, st->xy, amount, source_type, source_id));
+ 	SetBit(st->goods[type].acceptance_pickup, GoodsEntry::PICKUP);
+ 
+@@ -3198,6 +3205,7 @@
+ 
+ 	SetWindowDirty(WC_STATION_VIEW, st->index);
+ 	st->MarkTilesDirty(true);
++	return amount;
+ }
+ 
+ static bool IsUniqueStationName(const char *name)
+@@ -3328,11 +3336,13 @@
+ 	/* no stations around at all? */
+ 	if (st1 == NULL) return 0;
+ 
++	/* From now we'll calculate with fractal cargo amounts.
++	 * First determine how much cargo we really have. */
++	amount *= best_rating1 + 1;
++
+ 	if (st2 == NULL) {
+ 		/* only one station around */
+-		uint moved = amount * best_rating1 / 256 + 1;
+-		UpdateStationWaiting(st1, type, moved, source_type, source_id);
+-		return moved;
++		return UpdateStationWaiting(st1, type, amount, source_type, source_id);
+ 	}
+ 
+ 	/* several stations around, the best two (highest rating) are in st1 and st2 */
+@@ -3340,26 +3350,19 @@
+ 	assert(st2 != NULL);
+ 	assert(best_rating1 != 0 || best_rating2 != 0);
+ 
+-	/* the 2nd highest one gets a penalty */
+-	best_rating2 >>= 1;
++	/* Then determine the amount the worst station gets. We do it this way as the
++	 * best should get a bonus, which in this case is the rounding difference from
++	 * this calculation. In reality that will mean the bonus will be pretty low.
++	 * Nevertheless, the best station should always get the most cargo regardless
++	 * of rounding issues. */
++	uint worst_cargo = amount * best_rating2 / (best_rating1 + best_rating2);
++	assert(worst_cargo <= (amount - worst_cargo));
+ 
+-	/* amount given to station 1 */
+-	uint t = (best_rating1 * (amount + 1)) / (best_rating1 + best_rating2);
+-
+-	uint moved = 0;
+-	if (t != 0) {
+-		moved = t * best_rating1 / 256 + 1;
+-		amount -= t;
+-		UpdateStationWaiting(st1, type, moved, source_type, source_id);
+-	}
+-
+-	if (amount != 0) {
+-		amount = amount * best_rating2 / 256 + 1;
+-		moved += amount;
+-		UpdateStationWaiting(st2, type, amount, source_type, source_id);
+-	}
+-
+-	return moved;
++	/* And then send the cargo to the stations! */
++	uint moved = UpdateStationWaiting(st1, type, amount - worst_cargo, source_type, source_id);
++	/* These two UpdateStationWaiting's can't be in the statement as then the order
++	 * of execution would be undefined and that could cause desyncs with callbacks. */
++	return moved + UpdateStationWaiting(st2, type, worst_cargo, source_type, source_id);
+ }
+ 
+ void BuildOilRig(TileIndex tile)
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 20838)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -212,8 +212,9 @@
+  *  147   20621
+  *  148   20659
+  *  149   20832
++ *  150   TODO
+  */
+-extern const uint16 SAVEGAME_VERSION = 149; ///< current savegame version of OpenTTD
++extern const uint16 SAVEGAME_VERSION = 150; ///< current savegame version of OpenTTD
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/saveload/station_sl.cpp
+===================================================================
+--- src/saveload/station_sl.cpp	(revision 20838)
++++ src/saveload/station_sl.cpp	(working copy)
+@@ -238,6 +238,7 @@
+ 		     SLE_VAR(GoodsEntry, last_age,            SLE_UINT8),
+ 		SLEG_CONDVAR(            _cargo_feeder_share, SLE_FILE_U32 | SLE_VAR_I64, 14, 64),
+ 		SLEG_CONDVAR(            _cargo_feeder_share, SLE_INT64,                  65, 67),
++		 SLE_CONDVAR(GoodsEntry, amount_fract,        SLE_UINT8,                 150, SL_MAX_VERSION),
+ 		 SLE_CONDLST(GoodsEntry, cargo.packets,       REF_CARGO_PACKET,           68, SL_MAX_VERSION),
+ 
+ 		SLE_END()
+Index: src/station_base.h
+===================================================================
+--- src/station_base.h	(revision 20838)
++++ src/station_base.h	(working copy)
+@@ -42,6 +42,7 @@
+ 	byte rating;
+ 	byte last_speed;
+ 	byte last_age;
++	byte amount_fract;      ///< Fractional part of the amount in the cargo list
+ 	StationCargoList cargo; ///< The cargo packets of cargo waiting in this station
+ };
+ 

@@ -1,0 +1,128 @@
+From af3957cf4ad4b706a86227d06a1283989e950c6f Mon Sep 17 00:00:00 2001
+From: skidd13 <skidd13@gmx.de>
+Date: Fri, 5 Mar 2010 18:19:34 +0100
+Subject: [PATCH 3/9] -Codechange: Reorganise Init and Free
+
+---
+ src/misc/blob.hpp |   49 ++++++++++++++-----------------------------------
+ 1 files changed, 14 insertions(+), 35 deletions(-)
+
+diff --git a/src/misc/blob.hpp b/src/misc/blob.hpp
+index 4feb116..5065eb2 100644
+--- a/src/misc/blob.hpp
++++ b/src/misc/blob.hpp
+@@ -72,11 +72,11 @@ public:
+ 	static const uint header_size = sizeof(BlobHeader);
+ 
+ 	/** default constructor - initializes empty blob */
+-	FORCEINLINE ByteBlob() { InitEmpty(); }
++	FORCEINLINE ByteBlob() { Init(); }
+ 
+ 	/** copy constructor */
+ 	FORCEINLINE ByteBlob(const ByteBlob &src) {
+-		InitEmpty();
++		Init();
+ 		Append(src.Begin(), src.Length());
+ 	}
+ 
+@@ -91,7 +91,7 @@ public:
+ 	/** destructor */
+ 	FORCEINLINE ~ByteBlob()
+ 	{
+-		Free();
++		Free(header);
+ 	}
+ 
+ protected:
+@@ -105,7 +105,7 @@ protected:
+ 	 * both items and capacity containing zero */
+ 	static FORCEINLINE BlobHeader *Zero()
+ 	{
+-		return const_cast<BlobHeader *>(&ByteBlob::hdrEmpty[1]);
++		return const_cast<BlobHeader *>(ByteBlob::hdrEmpty);
+ 	}
+ 
+ 	/** simple allocation policy - can be optimized later */
+@@ -128,23 +128,18 @@ protected:
+ 	}
+ 
+ 	/** all deallocations should happen here */
+-	static FORCEINLINE void RawFree(BlobHeader *p)
++	static FORCEINLINE void Free(BlobHeader *p)
+ 	{
+-		/* Just to silence an unsilencable GCC 4.4+ warning. */
+-		assert(p != ByteBlob::hdrEmpty);
++		p--;
++		if (p != ByteBlob::hdrEmpty)
++			free(p);
+ 
+-		/* In case GCC warns about the following, see GCC's PR38509 why it is bogus. */
+-		free(p);
++		p = NULL;
+ 	}
+ 
+-	/** initialize the empty blob */
+-	FORCEINLINE void InitEmpty()
+-	{
+-		header = Zero();
+-	}
+-
+-	/** initialize blob by attaching it to the given header followed by data */
+-	FORCEINLINE void Init(BlobHeader *src)
++	/** initialize blob by attaching it to the given header followed by data
++	 *  if no header is given use empty header */
++	FORCEINLINE void Init(BlobHeader *src = Zero())
+ 	{
+ 		header = &src[1];
+ 	}
+@@ -204,15 +199,6 @@ public:
+ 		LengthRef() = 0;
+ 	}
+ 
+-	/** free the blob's memory */
+-	FORCEINLINE void Free()
+-	{
+-		if (Capacity() != 0) {
+-			RawFree(&Hdr());
+-			InitEmpty();
+-		}
+-	}
+-
+ 	/** append new bytes at the end of existing data bytes - reallocates if necessary */
+ 	FORCEINLINE void Append(const void *p, uint num_bytes)
+ 	{
+@@ -257,8 +243,7 @@ public:
+ 			memcpy(tmp + 1, data, tmp->items);
+ 
+ 		/* replace our block with new one */
+-		if (Capacity() != 0)
+-			RawFree(&Hdr());
++		Free(header);
+ 		Init(tmp);
+ 	}
+ 
+@@ -291,7 +276,7 @@ public:
+ 	struct OnTransfer {
+ 		typename base::BlobHeader *header;
+ 		OnTransfer(const OnTransfer& src) : header(src.header) {assert(src.header != NULL); *const_cast<typename base::BlobHeader**>(&src.header) = NULL;}
+-		OnTransfer(CBlobT& src) : header(src.header) {src.InitEmpty();}
++		OnTransfer(CBlobT& src) : header(src.header) {src.Init();}
+ 		~OnTransfer() {assert(header == NULL);}
+ 	};
+ 
+@@ -305,12 +290,6 @@ public:
+ 		: base(ot.header)
+ 	{}
+ 
+-	/** Destructor - ensures that allocated memory (if any) is freed */
+-	FORCEINLINE ~CBlobT()
+-	{
+-		Free();
+-	}
+-
+ 	/** Return pointer to the first data item - non-const version */
+ 	FORCEINLINE T *Begin()
+ 	{
+-- 
+1.6.6.1
+

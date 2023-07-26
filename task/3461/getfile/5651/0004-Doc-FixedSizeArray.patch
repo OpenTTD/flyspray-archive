@@ -1,0 +1,243 @@
+From 23c49894d5d62bce470eec682f7f7f97891a2736 Mon Sep 17 00:00:00 2001
+From: Skidd13 <skidd13@gmx.de>
+Date: Fri, 5 Feb 2010 16:02:03 +0100
+Subject: [PATCH 4/4] -Doc: FixedSizeArray
+ -Codechange: Apply coding style and this-> where appropriate
+
+---
+ src/misc/fixedsizearray.hpp |  181 ++++++++++++++++++++++++++++++++----------
+ 1 files changed, 138 insertions(+), 43 deletions(-)
+
+diff --git a/src/misc/fixedsizearray.hpp b/src/misc/fixedsizearray.hpp
+index 16e8847..f7470a5 100644
+--- a/src/misc/fixedsizearray.hpp
++++ b/src/misc/fixedsizearray.hpp
+@@ -17,7 +17,16 @@
+ /** fixed size array
+  *  Upon construction it preallocates fixed size block of memory
+  *  for all items, but doesn't construct them. Item's construction
+- *  is delayed. */
++ *  is delayed. By using the copy constructor the data will be
++ *  shared between the arrays.
++ *
++ * @note Header and items use the same allocated block of memory.
++ *       The header is placed rigth before the first item. Therefore
++ *       the pointer to the first item is moved one ahead.
++ *
++ * @tparam T The type of the items stored
++ * @tparam C The maximum number of items to be stored in the array
++ */
+ template <class T, uint C>
+ struct FixedSizeArray {
+ protected:
+@@ -28,55 +37,86 @@ protected:
+ 		uint reference_count; ///< block reference counter (used by copy constructor and by destructor)
+ 	};
+ 
+-	/* make constants visible from outside */
+ 	static const uint Tsize = sizeof(T);                // size of item
+ 	static const uint HeaderSize = sizeof(ArrayHeader); // size of header
+ 
++	/* Store header right before items */
+ 	union {
+-		T *data;
+ 		ArrayHeader *header;
++		T *data;
+ 	};
+ 
+-	/** return reference to the array header (non-const) */
+-	FORCEINLINE ArrayHeader& Hdr() { return *(header - 1); }
+-	/** return reference to the array header (const) */
+-	FORCEINLINE const ArrayHeader& Hdr() const { return *(header - 1); }
+-	/** return reference to the block reference counter */
+-	FORCEINLINE uint& RefCnt() { return Hdr().reference_count; }
+-	/** return reference to number of used items */
+-	FORCEINLINE uint& SizeRef() { return Hdr().items; }
++	/**
++	 * Get the header of the array.
++	 *
++	 * @return reference to the array header
++	 */
++	FORCEINLINE ArrayHeader &Hdr() { return *(header - 1); }
++
++	/**
++	 * Get the header of the array. (const)
++	 *
++	 * @return reference to the array header
++	 */
++	FORCEINLINE const ArrayHeader &Hdr() const { return *(header - 1); }
++
++	/**
++	 * Get the refference to reference count of the array.
++	 *
++	 * @return reference to the reference count
++	 */
++	FORCEINLINE uint &RefCnt() { return Hdr().reference_count; }
++
++	/**
++	 * Get the refference to the number of items.
++	 *
++	 * @return reference to the number of items
++	 */
++	FORCEINLINE uint &SizeRef() { return Hdr().items; }
+ 
+ public:
+-	/** Default constructor. Preallocate space for items and header, then initialize header. */
++	/**
++	 * Default constructor. Preallocate memory for items AND header,
++	 * but don't construct items. After that initialize header.
++	 */
+ 	FixedSizeArray()
+ 	{
+-		/* allocate block for header + items (don't construct items) */
+-		header = (ArrayHeader*)MallocT<byte>(HeaderSize + C * Tsize) + 1;
+-		SizeRef() = 0; // initial number of items
+-		RefCnt() = 1; // initial reference counter
++		this->header = (ArrayHeader*)MallocT<byte>(HeaderSize + C * Tsize) + 1;
++
++		/* Set initial header values */
++		this->SizeRef() = 0;
++		this->RefCnt() = 1;
+ 	}
+ 
+-	/** Copy constructor. Preallocate space for items and header, then initialize header. */
+-	FixedSizeArray(const FixedSizeArray<T, C>& src)
++	/**
++	 * Copy constructor. Add the reference to the source array data.
++	 * Share memory block (header + items) with the source array.
++	 *
++	 * @param src The source array
++	 */
++	FixedSizeArray(const FixedSizeArray<T, C> &src)
+ 	{
+-		/* share block (header + items) with the source array */
+-		data = src.data;
+-		RefCnt()++; // now we share block with the source
++		this->data = src.data;
++		this->RefCnt()++; // Update reference counter
+ 	}
+ 
+-	/** destroy remaining items and free the memory block */
++	/**
++	 * Destroy remaining items and free the memory block or just release
++	 * reference to data if the array is shared.
++	 */
+ 	~FixedSizeArray()
+ 	{
+-		/* release one reference to the shared block */
+-		if ((--RefCnt()) > 0) return; // and return if there is still some owner
++		/* Release one reference to the shared block and
++		 * return if there is still some owner */
++		if ((--this->RefCnt()) > 0) return;
+ 
+-		Clear();
++		this->Clear();
+ 		/* free the memory block occupied by items */
+-		free((byte*)(header - 1));
+-		data = NULL;
++		free((byte*)(this->header - 1));
++		this->data = NULL;
+ 	}
+ 
+-	/** Clear (destroy) all items */
++	/** Clear (destroy) all items by using their destructor. */
+ 	FORCEINLINE void Clear()
+ 	{
+ 		/* Walk through all allocated items backward and destroy them
+@@ -86,23 +126,78 @@ public:
+ 			pItem->~T();
+ 		}
+ 		/* number of items become zero */
+-		SizeRef() = 0;
++		this->SizeRef() = 0;
+ 	}
+ 
+-	/** return number of used items */
+-	FORCEINLINE uint Length() const { return Hdr().items; }
+-	/** return true if array is full */
+-	FORCEINLINE bool IsFull() const { return Length() >= C; };
+-	/** return true if array is empty */
+-	FORCEINLINE bool IsEmpty() const { return Length() <= 0; };
+-	/** add (allocate), but don't construct item */
+-	FORCEINLINE T *Append() { assert(!IsFull()); return &data[SizeRef()++]; }
+-	/** add and construct item using default constructor */
+-	FORCEINLINE T *AppendC() { T *item = Append(); new(item)T; return item; }
+-	/** return item by index (non-const version) */
+-	FORCEINLINE T& operator [] (uint index) { assert(index < Length()); return data[index]; }
+-	/** return item by index (const version) */
+-	FORCEINLINE const T& operator [] (uint index) const { assert(index < Length()); return data[index]; }
++	/**
++	 * Get the number of items in the list.
++	 *
++	 * @return the number of items
++	 */
++	FORCEINLINE uint Length() const { return this->Hdr().items; }
++
++	/**
++	 * Tests whether the array is full.
++	 *
++	 * @return true if array is full
++	 */
++	FORCEINLINE bool IsFull() const { return this->Length() >= C; };
++
++	/**
++	 * Tests whether the array is empty.
++	 *
++	 * @return true if array is empty
++	 */
++	FORCEINLINE bool IsEmpty() const { return this->Length() != 0; };
++
++	/**
++	 * Append ("allocate"), but don't construct an item
++	 * and return it.
++	 *
++	 * @return pointer to the memory for the new item
++	 */
++	FORCEINLINE T *Append()
++	{
++		assert(!this->IsFull());
++		return this->data + this->SizeRef()++;
++	}
++
++	/**
++	 * Append and construct item using the default
++	 * constructor and return it.
++	 *
++	 * @return pointer to the new item
++	 */
++	FORCEINLINE T *AppendC()
++	{
++		T *item = this->Append();
++		new (item) T;
++		return item;
++	}
++
++	/**
++	 * Get item "number"
++	 *
++	 * @param index the positon of the item
++	 * @return the item
++	 */
++	FORCEINLINE T &operator[](uint index)
++	{
++		assert(index < this->Length());
++		return this->data[index];
++	}
++
++	/**
++	 * Get item "number" (const)
++	 *
++	 * @param index the positon of the item
++	 * @return the item
++	 */
++	FORCEINLINE const T &operator[](uint index) const
++	{
++		assert(index < this->Length());
++		return this->data[index];
++	}
+ };
+ 
+ #endif /* FIXEDSIZEARRAY_HPP */
+-- 
+1.6.6
+

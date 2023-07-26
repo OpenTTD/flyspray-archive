@@ -1,0 +1,116 @@
+Index: src/depot_base.h
+===================================================================
+--- src/depot_base.h	(revision 19825)
++++ src/depot_base.h	(working copy)
+@@ -23,7 +23,7 @@
+ 	char *name;
+ 
+ 	TileIndex xy;
+-	uint16 town_cn;    ///< The Nth depot for this town (consecutive number)
++	uint16 town_cn;    ///< The N-1th depot for this town (consecutive number)
+ 
+ 	Depot(TileIndex xy = INVALID_TILE) : xy(xy) {}
+ 	~Depot();
+Index: src/town.h
+===================================================================
+--- src/town.h	(revision 19825)
++++ src/town.h	(working copy)
+@@ -266,9 +266,6 @@
+ template <class T>
+ void MakeDefaultName(T *obj)
+ {
+-	/* We only want to set names if it hasn't been set before. */
+-	assert(obj->name == NULL);
+-
+ 	obj->town = ClosestTownFromTile(obj->xy, UINT_MAX);
+ 
+ 	/* Find first unused number belonging to this town. This can never fail,
+@@ -292,8 +289,8 @@
+ 
+ 		/* check only valid waypoints... */
+ 		if (lobj != NULL && obj != lobj) {
+-			/* only objects with 'generic' name within the same city and with the same type*/
+-			if (lobj->name == NULL && lobj->town == obj->town && lobj->IsOfType(obj)) {
++			/* only objects within the same city and with the same type */
++			if (lobj->town == obj->town && lobj->IsOfType(obj)) {
+ 				/* if lobj->town_cn < next, uint will overflow to '+inf' */
+ 				uint i = (uint)lobj->town_cn - next;
+ 
+Index: src/waypoint_base.h
+===================================================================
+--- src/waypoint_base.h	(revision 19825)
++++ src/waypoint_base.h	(working copy)
+@@ -15,7 +15,7 @@
+ #include "base_station_base.h"
+ 
+ struct Waypoint : SpecializedStation<Waypoint, true> {
+-	uint16 town_cn;    ///< The Nth waypoint for this town (consecutive number)
++	uint16 town_cn;    ///< The N-1th waypoint for this town (consecutive number)
+ 
+ 	Waypoint(TileIndex tile = INVALID_TILE) : SpecializedStation<Waypoint, true>(tile) { }
+ 	~Waypoint();
+Index: src/waypoint_cmd.cpp
+===================================================================
+--- src/waypoint_cmd.cpp	(revision 19825)
++++ src/waypoint_cmd.cpp	(working copy)
+@@ -398,14 +398,8 @@
+ 
+ 	if (flags & DC_EXEC) {
+ 		free(wp->name);
++		wp->name = reset ? NULL : strdup(text);
+ 
+-		if (reset) {
+-			wp->name = NULL;
+-			MakeDefaultName(wp);
+-		} else {
+-			wp->name = strdup(text);
+-		}
+-
+ 		wp->UpdateVirtCoord();
+ 	}
+ 	return CommandCost();
+Index: src/saveload/afterload.cpp
+===================================================================
+--- src/saveload/afterload.cpp	(revision 19825)
++++ src/saveload/afterload.cpp	(working copy)
+@@ -2114,6 +2114,19 @@
+ 		FOR_ALL_DEPOTS(d) d->town_cn = UINT16_MAX;
+ 
+ 		FOR_ALL_DEPOTS(d) MakeDefaultName(d);
++
++		/* Waypoints with custom name may have a non-unique town_cn,
++		 * renumber those. First set all affected waypoints to the
++		 * highest possible number to get them numbered in the
++		 * order they have in the pool. */
++		Waypoint *wp;
++		FOR_ALL_WAYPOINTS(wp) {
++			if (wp->name != NULL) wp->town_cn = UINT16_MAX;
++		}
++
++		FOR_ALL_WAYPOINTS(wp) {
++			if (wp->name != NULL) MakeDefaultName(wp);
++		}
+ 	}
+ 
+ 	/* Road stops is 'only' updating some caches */
+Index: src/waypoint_gui.cpp
+===================================================================
+--- src/waypoint_gui.cpp	(revision 19825)
++++ src/waypoint_gui.cpp	(working copy)
+@@ -106,7 +106,7 @@
+ 
+ 		int x = TileX(this->wp->xy) * TILE_SIZE;
+ 		int y = TileY(this->wp->xy) * TILE_SIZE;
+-		ScrollWindowTo(x, y, -1, this);
++		ScrollWindowTo(x, y, -1, this, true);
+ 	}
+ 
+ 	virtual void OnResize()
+@@ -114,6 +114,7 @@
+ 		if (this->viewport != NULL) {
+ 			NWidgetViewport *nvp = this->GetWidget<NWidgetViewport>(WAYPVW_VIEWPORT);
+ 			nvp->UpdateViewportCoordinates(this);
++			this->wp->UpdateVirtCoord();
+ 		}
+ 	}
+ 

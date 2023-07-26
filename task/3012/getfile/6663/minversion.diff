@@ -1,0 +1,77 @@
+# HG changeset patch
+# Parent e564bcfda6734c83df54f5b0b6a799753a196f68
+Codechange: Introduce a minimum compatible version for NewGRFs
+
+diff --git a/src/newgrf_config.cpp b/src/newgrf_config.cpp
+--- a/src/newgrf_config.cpp
++++ b/src/newgrf_config.cpp
+@@ -448,7 +448,7 @@
+ 
+ 			/* If we have not found the exactly matching GRF try to find one with the
+ 			 * same grfid, as it most likely is compatible */
+-			f = FindGRFConfig(c->ident.grfid);
++			f = FindGRFConfig(c->ident.grfid, NULL, c->version);
+ 			if (f != NULL) {
+ 				md5sumToString(buf, lastof(buf), c->ident.md5sum);
+ 				DEBUG(grf, 1, "NewGRF %08X (%s) not found; checksum %s. Compatibility mode on", BSWAP32(c->ident.grfid), c->filename, buf);
+@@ -485,6 +485,7 @@
+ 				if (c->info == NULL) c->info = DuplicateGRFText(f->info);
+ 				c->error = NULL;
+ 				c->version = f->version;
++				c->min_loadable_version = f->min_loadable_version;
+ 				c->num_valid_params = f->num_valid_params;
+ 				c->has_param_defaults = f->has_param_defaults;
+ 				for (uint i = 0; i < f->param_info.Length(); i++) {
+@@ -615,14 +616,19 @@
+  * Find a NewGRF in the scanned list.
+  * @param grfid GRFID to look for,
+  * @param md5sum Expected MD5 sum (set to \c NULL if not relevant).
++ * @param desired_version Requested version (set to 0 if not relevant).
+  * @return The matching grf, if it exists in #_all_grfs, else \c NULL.
+  */
+-const GRFConfig *FindGRFConfig(uint32 grfid, const uint8 *md5sum)
++const GRFConfig *FindGRFConfig(uint32 grfid, const uint8 *md5sum, uint32 desired_version)
+ {
+ 	const GRFConfig *best = NULL;
+ 	for (const GRFConfig *c = _all_grfs; c != NULL; c = c->next) {
++		/* if md5sum is set, we look for an exact match and continue if not found */
+ 		if (!c->ident.HasGrfIdentifier(grfid, md5sum)) continue;
++		/* return it, if the exact same newgrf is found */
+ 		if (md5sum != NULL) return c;
++		/* don't consider it, if this version is too old or too new */
++		if (c->version < desired_version || c->min_loadable_version > desired_version) continue;
+ 		if (best == NULL || c->version > best->version) best = c;
+ 	}
+ 
+diff --git a/src/newgrf_config.h b/src/newgrf_config.h
+--- a/src/newgrf_config.h
++++ b/src/newgrf_config.h
+@@ -143,6 +143,7 @@
+ 	GRFError *error;           ///< NOSAVE: Error/Warning during GRF loading (Action 0x0B)
+ 
+ 	uint32 version;            ///< NOSAVE: Version a NewGRF can set so only the newest NewGRF is shown
++	uint32 min_loadable_version;                   ///< NOSAVE: Minimum compatible version a NewGRF can define
+ 	uint8 flags;               ///< NOSAVE: GCF_Flags, bitset
+ 	GRFStatus status;          ///< NOSAVE: GRFStatus, enum
+ 	uint32 grf_bugs;           ///< NOSAVE: bugs in this GRF in this run, @see enum GRFBugs
+@@ -171,7 +172,7 @@
+ 
+ void ScanNewGRFFiles();
+ void CheckForMissingSprites();
+-const GRFConfig *FindGRFConfig(uint32 grfid, const uint8 *md5sum = NULL);
++const GRFConfig *FindGRFConfig(uint32 grfid, const uint8 *md5sum = NULL, uint32 minversion = 0);
+ GRFConfig *GetGRFConfig(uint32 grfid, uint32 mask = 0xFFFFFFFF);
+ GRFConfig **CopyGRFConfigList(GRFConfig **dst, const GRFConfig *src, bool init_only);
+ void AppendStaticGRFConfigs(GRFConfig **dst);
+diff --git a/src/newgrf_gui.cpp b/src/newgrf_gui.cpp
+--- a/src/newgrf_gui.cpp
++++ b/src/newgrf_gui.cpp
+@@ -1211,7 +1211,7 @@
+ 			if (_settings_client.gui.newgrf_show_old_versions) {
+ 				*this->avails.Append() = c;
+ 			} else {
+-				const GRFConfig *best = FindGRFConfig(c->ident.grfid, NULL);
++				const GRFConfig *best = FindGRFConfig(c->ident.grfid, NULL, c->version);
+ 				/*
+ 				 * If the best version is 0, then all NewGRF with this GRF ID
+ 				 * have version 0, so for backward compatability reasons we

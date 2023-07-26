@@ -1,0 +1,131 @@
+Index: src/newgrf.cpp
+===================================================================
+--- src/newgrf.cpp	(revision 19055)
++++ src/newgrf.cpp	(working copy)
+@@ -2325,6 +2325,8 @@
+ 									grfmsg(2, "IndustriesChangeInfo: Attempt to use industry tile %u with industry id %u, not yet defined. Ignoring.", local_tile_id, indid);
+ 								} else {
+ 									/* Declared as been valid, can be used */
++									itt[k].ti.x = (int8)GB(itt[k].ti.x, 0, 8);
++									itt[k].ti.y = (int8)GB(itt[k].ti.y, 0, 8);
+ 									itt[k].gfx = tempid;
+ 									size = k + 1;
+ 									copy_from = itt;
+Index: src/industrytype.h
+===================================================================
+--- src/industrytype.h	(revision 19055)
++++ src/industrytype.h	(working copy)
+@@ -84,6 +84,7 @@
+ enum IndustryTileSpecialFlags {
+ 	INDTILE_SPECIAL_NONE                  = 0,
+ 	INDTILE_SPECIAL_NEXTFRAME_RANDOMBITS  = 1 << 0, ///< Callback 0x26 needs random bits
++	INDTILE_SPECIAL_DONT_BUILD            = 1 << 1, ///< Tile is not actually built (intended for checking clearance on layouts)
+ };
+ DECLARE_ENUM_AS_BIT_SET(IndustryTileSpecialFlags);
+ 
+Index: src/industry_cmd.cpp
+===================================================================
+--- src/industry_cmd.cpp	(revision 19055)
++++ src/industry_cmd.cpp	(working copy)
+@@ -1288,43 +1288,47 @@
+ 				return false;
+ 			}
+ 		} else {
+-			if (!EnsureNoVehicleOnGround(cur_tile)) return false;
+-			if (MayHaveBridgeAbove(cur_tile) && IsBridgeAbove(cur_tile)) return false;
++			const IndustryTileSpec *its = GetIndustryTileSpec(gfx);		
++			if (!(its->special_flags & INDTILE_SPECIAL_DONT_BUILD) && ((it->ti.x < 0) || (it->ti.y < 0))) {
++				return false;  // The newgrf author has specified negative offset without setting prop 12 bit 1.  Wrong.
++			} else {
++				
++				if (!EnsureNoVehicleOnGround(cur_tile)) return false;
++				if (MayHaveBridgeAbove(cur_tile) && IsBridgeAbove(cur_tile)) return false;
+ 
+-			const IndustryTileSpec *its = GetIndustryTileSpec(gfx);
++				IndustryBehaviour ind_behav = GetIndustrySpec(type)->behaviour;
+ 
+-			IndustryBehaviour ind_behav = GetIndustrySpec(type)->behaviour;
++				/* Perform land/water check if not disabled */
++				if (!HasBit(its->slopes_refused, 5) && (IsWaterTile(cur_tile) == !(ind_behav & INDUSTRYBEH_BUILT_ONWATER))) return false;
+ 
+-			/* Perform land/water check if not disabled */
+-			if (!HasBit(its->slopes_refused, 5) && (IsWaterTile(cur_tile) == !(ind_behav & INDUSTRYBEH_BUILT_ONWATER))) return false;
++				if (HasBit(its->callback_mask, CBM_INDT_SHAPE_CHECK)) {
++					custom_shape = true;
++					if (!PerformIndustryTileSlopeCheck(tile, cur_tile, its, type, gfx, itspec_index)) return false;
++				} else {
++					Slope tileh = GetTileSlope(cur_tile, NULL);
++					refused_slope |= IsSlopeRefused(tileh, its->slopes_refused);
++				}
+ 
+-			if (HasBit(its->callback_mask, CBM_INDT_SHAPE_CHECK)) {
+-				custom_shape = true;
+-				if (!PerformIndustryTileSlopeCheck(tile, cur_tile, its, type, gfx, itspec_index)) return false;
+-			} else {
+-				Slope tileh = GetTileSlope(cur_tile, NULL);
+-				refused_slope |= IsSlopeRefused(tileh, its->slopes_refused);
+-			}
++				if ((ind_behav & (INDUSTRYBEH_ONLY_INTOWN | INDUSTRYBEH_TOWN1200_MORE)) || // Tile must be a house
++						((ind_behav & INDUSTRYBEH_ONLY_NEARTOWN) && IsTileType(cur_tile, MP_HOUSE))) { // Tile is allowed to be a house (and it is a house)
++					if (!IsTileType(cur_tile, MP_HOUSE)) {
++						_error_message = STR_ERROR_CAN_ONLY_BE_BUILT_IN_TOWNS;
++						return false;
++					}
+ 
+-			if ((ind_behav & (INDUSTRYBEH_ONLY_INTOWN | INDUSTRYBEH_TOWN1200_MORE)) || // Tile must be a house
+-					((ind_behav & INDUSTRYBEH_ONLY_NEARTOWN) && IsTileType(cur_tile, MP_HOUSE))) { // Tile is allowed to be a house (and it is a house)
+-				if (!IsTileType(cur_tile, MP_HOUSE)) {
+-					_error_message = STR_ERROR_CAN_ONLY_BE_BUILT_IN_TOWNS;
+-					return false;
+-				}
++					/* Clear the tiles as OWNER_TOWN to not affect town rating, and to not clear protected buildings */
++					CompanyID old_company = _current_company;
++					_current_company = OWNER_TOWN;
++					bool not_clearable = DoCommand(cur_tile, 0, 0, DC_NONE, CMD_LANDSCAPE_CLEAR).Failed();
++					_current_company = old_company;
+ 
+-				/* Clear the tiles as OWNER_TOWN to not affect town rating, and to not clear protected buildings */
+-				CompanyID old_company = _current_company;
+-				_current_company = OWNER_TOWN;
+-				bool not_clearable = DoCommand(cur_tile, 0, 0, DC_NONE, CMD_LANDSCAPE_CLEAR).Failed();
+-				_current_company = old_company;
++					if (not_clearable) return false;
++				} else {
++					/* Clear the tiles, but do not affect town ratings */
++					bool not_clearable = DoCommand(cur_tile, 0, 0, DC_AUTO | DC_NO_TEST_TOWN_RATING | DC_NO_MODIFY_TOWN_RATING, CMD_LANDSCAPE_CLEAR).Failed();
+ 
+-				if (not_clearable) return false;
+-			} else {
+-				/* Clear the tiles, but do not affect town ratings */
+-				bool not_clearable = DoCommand(cur_tile, 0, 0, DC_AUTO | DC_NO_TEST_TOWN_RATING | DC_NO_MODIFY_TOWN_RATING, CMD_LANDSCAPE_CLEAR).Failed();
+-
+-				if (not_clearable) return false;
++					if (not_clearable) return false;
++				}
+ 			}
+ 		}
+ 	} while ((++it)->ti.x != -0x80);
+@@ -1598,8 +1602,11 @@
+ 
+ 	do {
+ 		TileIndex cur_tile = tile + ToTileIndexDiff(it->ti);
+-
+-		if (it->gfx != GFX_WATERTILE_SPECIALCHECK) {
++		/* it->gfx is stored in the map. But the translated ID cur_gfx is the interesting one */
++		IndustryGfx cur_gfx = GetTranslatedIndustryTileID(it->gfx);
++		const IndustryTileSpec *its = GetIndustryTileSpec(cur_gfx);
++		
++		if (it->gfx != GFX_WATERTILE_SPECIALCHECK  && !(its->special_flags & INDTILE_SPECIAL_DONT_BUILD) && (it->ti.x >= 0) && (it->ti.y >= 0)) {
+ 			i->location.Add(cur_tile);
+ 
+ 			WaterClass wc = (IsWaterTile(cur_tile) ? GetWaterClass(cur_tile) : WATER_CLASS_INVALID);
+@@ -1613,9 +1620,6 @@
+ 				SetIndustryConstructionStage(cur_tile, 2);
+ 			}
+ 
+-			/* it->gfx is stored in the map. But the translated ID cur_gfx is the interesting one */
+-			IndustryGfx cur_gfx = GetTranslatedIndustryTileID(it->gfx);
+-			const IndustryTileSpec *its = GetIndustryTileSpec(cur_gfx);
+ 			if (its->animation_info != 0xFFFF) AddAnimatedTile(cur_tile);
+ 		}
+ 	} while ((++it)->ti.x != -0x80);

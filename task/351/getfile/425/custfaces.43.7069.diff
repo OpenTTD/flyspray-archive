@@ -1,0 +1,1135 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 7069)
++++ lang/english.txt	(working copy)
+@@ -3107,4 +3107,38 @@
+ STR_MEASURE_LENGTH_HEIGHTDIFF                                   :{BLACK}Length: {NUM}{}Height difference: {NUM} m
+ STR_MEASURE_AREA_HEIGHTDIFF                                     :{BLACK}Area: {NUM} x {NUM}{}Height difference: {NUM} m
+ 
++############ New face screen
++STR_FACE_CHIN                                                   :{GOLD}Chin:
++STR_FACE_CHIN_TIP                                               :{BLACK}Change chin
++STR_FACE_EYES                                                   :{GOLD}Eyes:
++STR_FACE_EYES_TIP                                               :{BLACK}Change eyes
++STR_FACE_EYECOLOUR                                              :{GOLD}Eye Colour:
++STR_FACE_EYECOLOUR_TIP                                          :{BLACK}Change eye colour
++STR_FACE_MOUTHNOSE                                              :{GOLD}Mouth & Nose:
++STR_FACE_MOUTHNOSE_TIP                                          :{BLACK}Change mouth & nose
++STR_FACE_HAIR                                                   :{GOLD}Hair:
++STR_FACE_HAIR_TIP                                               :{BLACK}Change hair
++STR_FACE_SUITCOLLAR                                             :{GOLD}Suit & Collar:
++STR_FACE_SUITCOLLAR_TIP                                         :{BLACK}Change suit & collar
++STR_FACE_TIEEARRING                                             :{GOLD}Tie / Earring:
++STR_FACE_TIEEARRING_TIP                                         :{BLACK}Change tie / earring
++STR_FACE_GLASSES                                                :{GOLD}Glasses:
++STR_FACE_GLASSES_TIP                                            :{BLACK}Change glasses
++STR_FACE_GENDERETH                                              :{GOLD}Gender & Ethnicity:
++STR_FACE_GENDERETH_TIP                                          :{BLACK}Change gender & ethnicity
++STR_FACE_RANDOMIZE                                              :{BLACK}Randomize
++STR_FACE_RANDOMIZE_TIP                                          :{BLACK}Generate random new face (gender & ethnicity are retained)
++STR_FACE_LOAD                                                   :{BLACK}Load
++STR_FACE_LOAD_TIP                                               :{BLACK}Load favourite face
++STR_FACE_LOAD_DONE                                              :{WHITE}Your favourite face has been loaded from the OpenTTD config file.
++STR_FACE_LOAD_NOFAVE                                            :{WHITE}Couldn't load face - you do not have a favourite face saved!
++STR_FACE_SAVE                                                   :{BLACK}Save
++STR_FACE_SAVE_TIP                                               :{BLACK}Save favourite face
++STR_FACE_SAVE_DONE                                              :{WHITE}This face will be saved as your favourite in the OpenTTD config file.
++STR_FACE_FACECODE                                               :{BLACK}Face Number Code
++STR_FACE_FACECODE_TIP                                           :{BLACK}View / set face number code
++STR_FACE_FACECODE_CAPTION                                       :{WHITE}View / Set Face Number Code
++STR_FACE_FACECODE_SET                                           :{WHITE}New face number code has been set.
++STR_FACE_FACECODE_ERR                                           :{WHITE}Couldn't set face number code - must be numeric, between 0 and 4,294,967,295!
++
+ ########
+Index: openttd.vcproj
+===================================================================
+--- openttd.vcproj	(revision 7069)
++++ openttd.vcproj	(working copy)
+@@ -590,6 +590,9 @@
+ 				RelativePath=".\player.h">
+ 			</File>
+ 			<File
++				RelativePath=".\playerface.h">
++			</File>
++			<File
+ 				RelativePath=".\pool.h">
+ 			</File>
+ 			<File
+Index: openttd_vs80.vcproj
+===================================================================
+--- openttd_vs80.vcproj	(revision 7069)
++++ openttd_vs80.vcproj	(working copy)
+@@ -1080,6 +1080,10 @@
+ 				>
+ 			</File>
+ 			<File
++				RelativePath=".\playerface.h"
++				>
++			</File>
++			<File
+ 				RelativePath=".\pool.h"
+ 				>
+ 			</File>
+Index: player.h
+===================================================================
+--- player.h	(revision 7069)
++++ player.h	(working copy)
+@@ -146,8 +146,8 @@
+ 
+ } PlayerAiNew;
+ 
++typedef uint32 FaceCode;
+ 
+-
+ typedef struct Player {
+ 	uint32 name_2;
+ 	uint16 name_1;
+@@ -155,7 +155,7 @@
+ 	uint16 president_name_1;
+ 	uint32 president_name_2;
+ 
+-	uint32 face;
++	FaceCode face;
+ 
+ 	int32 player_money;
+ 	int32 current_loan;
+@@ -199,6 +199,10 @@
+ 	uint16 num_engines[TOTAL_NUM_ENGINES]; // caches the number of engines of each type the player owns (no need to save this)
+ } Player;
+ 
++
++
++uint32 GetRandomFace(uint32 face, int retain);
++
+ uint16 GetDrawStringPlayerColor(PlayerID player);
+ 
+ void ChangeOwnershipOfPlayerItems(PlayerID old_player, PlayerID new_player);
+Index: player_gui.c
+===================================================================
+--- player_gui.c	(revision 7069)
++++ player_gui.c	(working copy)
+@@ -10,6 +10,7 @@
+ #include "viewport.h"
+ #include "gfx.h"
+ #include "player.h"
++#include "playerface.h"
+ #include "command.h"
+ #include "vehicle.h"
+ #include "economy.h"
+@@ -18,6 +19,9 @@
+ #include "train.h"
+ #include "date.h"
+ #include "newgrf.h"
++#include "strings.h"
++#include <errno.h>
++
+ #include "network_data.h"
+ #include "network_client.h"
+ 
+@@ -504,55 +508,330 @@
+ 	SelectPlayerLiveryWndProc
+ };
+ 
++/* Names of the widgets. Keep them in the same order as in the widget array */
++typedef enum PlayerFaceWindowWidgets {
++	PFW_WIDGET_HAIR = 5,
++	PFW_WIDGET_GLASSES,
++	PFW_WIDGET_EYES,
++	PFW_WIDGET_EYECOLOUR,
++	PFW_WIDGET_MOUTHNOSE,
++	PFW_WIDGET_CHIN,
++	PFW_WIDGET_SUITCOLLAR,
++	PFW_WIDGET_TIEEARRING,
++	PFW_WIDGET_GENDERETH,
++	PFW_WIDGET_HAIR_L,
++	PFW_WIDGET_HAIR_R,
++	PFW_WIDGET_GLASSES_L,
++	PFW_WIDGET_GLASSES_R,
++	PFW_WIDGET_EYES_L,
++	PFW_WIDGET_EYES_R,
++	PFW_WIDGET_EYECOLOUR_L,
++	PFW_WIDGET_EYECOLOUR_R,
++	PFW_WIDGET_MOUTHNOSE_L,
++	PFW_WIDGET_MOUTHNOSE_R,
++	PFW_WIDGET_CHIN_L,
++	PFW_WIDGET_CHIN_R,
++	PFW_WIDGET_SUITCOLLAR_L,
++	PFW_WIDGET_SUITCOLLAR_R,
++	PFW_WIDGET_TIEEARRING_L,
++	PFW_WIDGET_TIEEARRING_R,
++	PFW_WIDGET_GENDERETH_L,
++	PFW_WIDGET_GENDERETH_R,
++	PFW_WIDGET_RANDOMIZE,
++	PFW_WIDGET_LOAD,
++	PFW_WIDGET_SAVE,
++	PFW_WIDGET_FACECODE,
++} PlayerFaceWindowWidget;
++
++static const Widget _select_player_face_widgets[] = {
++{   WWT_CLOSEBOX,   RESIZE_NONE,    14,      0,   10,     0,    13, STR_00C5,                STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,   RESIZE_NONE,    14,     11,  273,     0,    13, STR_7043_FACE_SELECTION, STR_018C_WINDOW_TITLE_DRAG_THIS},
++{      WWT_PANEL,   RESIZE_NONE,    14,      0,  273,    14,   150, 0x0,                     STR_NULL},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,      0,  136,   151,   162, STR_012E_CANCEL,         STR_7047_CANCEL_NEW_FACE_SELECTION},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    137,  273,   151,   162, STR_012F_OK,             STR_7048_ACCEPT_NEW_FACE_SELECTION},
++/* The top 5 widgets are MANDATORY.  The rest comprise the main part of the face selection GUI. */
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    238,  262,    16,    27, STR_EMPTY,               STR_FACE_HAIR_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    238,  262,    28,    39, STR_EMPTY,               STR_FACE_GLASSES_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    238,  262,    40,    51, STR_EMPTY,               STR_FACE_EYES_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    238,  262,    52,    63, STR_EMPTY,               STR_FACE_EYECOLOUR_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    238,  262,    64,    75, STR_EMPTY,               STR_FACE_MOUTHNOSE_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    238,  262,    76,    87, STR_EMPTY,               STR_FACE_CHIN_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    238,  262,    88,    99, STR_EMPTY,               STR_FACE_SUITCOLLAR_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    238,  262,   100,   111, STR_EMPTY,               STR_FACE_TIEEARRING_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    238,  262,   112,   123, STR_EMPTY,               STR_FACE_GENDERETH_TIP},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    229,  237,    16,    27, SPR_ARROW_LEFT,          STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    263,  271,    16,    27, SPR_ARROW_RIGHT,         STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    229,  237,    28,    39, SPR_ARROW_LEFT,          STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    263,  271,    28,    39, SPR_ARROW_RIGHT,         STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    229,  237,    40,    51, SPR_ARROW_LEFT,          STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    263,  271,    40,    51, SPR_ARROW_RIGHT,         STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    229,  237,    52,    63, SPR_ARROW_LEFT,          STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    263,  271,    52,    63, SPR_ARROW_RIGHT,         STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    229,  237,    64,    75, SPR_ARROW_LEFT,          STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    263,  271,    64,    75, SPR_ARROW_RIGHT,         STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    229,  237,    76,    87, SPR_ARROW_LEFT,          STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    263,  271,    76,    87, SPR_ARROW_RIGHT,         STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    229,  237,    88,    99, SPR_ARROW_LEFT,          STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    263,  271,    88,    99, SPR_ARROW_RIGHT,         STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    229,  237,   100,   111, SPR_ARROW_LEFT,          STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    263,  271,   100,   111, SPR_ARROW_RIGHT,         STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    229,  237,   112,   123, SPR_ARROW_LEFT,          STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,    263,  271,   112,   123, SPR_ARROW_RIGHT,         STR_HSCROLL_BAR_SCROLLS_LIST},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,      3,   92,   137,   148, STR_FACE_RANDOMIZE,      STR_FACE_RANDOMIZE_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     95,  183,   125,   136, STR_FACE_LOAD,           STR_FACE_LOAD_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    184,  271,   125,   136, STR_FACE_SAVE,           STR_FACE_SAVE_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     95,  271,   137,   148, STR_FACE_FACECODE,       STR_FACE_FACECODE_TIP},
++{    WIDGETS_END },
++};
++
++static void DrawFaceStringLabel(Window *w, uint32 widgno, StringID attribute, uint32 value) {
++	/* Draw dynamic button string, and label */
++	char buffer[512];
++	uint width, cl;
++	Widget btn;
++
++	snprintf(buffer, 512, "%u", value);
++	width = GetStringBoundingBox(buffer).width;
++	btn = w->widget[widgno];
++	cl = IsWindowWidgetLowered(w, widgno) ? 1 : 0;
++	/*   ^ 1 if clicked, adds 1px to x and y text co-ords */
++	DoDrawString(buffer, (btn.left + (btn.right - btn.left) / 2) - width / 2 + cl, btn.top + 1 + cl, 0xC);
++	if (IsWindowWidgetDisabled(w, widgno)) {
++		GfxFillRect(btn.left + 1, btn.top + 1, btn.right - 1, btn.bottom - 1, _colour_gradient[btn.color&0xF][2] | PALETTE_MODIFIER_GREYOUT);
++	}
++	GetString(buffer, attribute, buffer + lengthof(buffer) * sizeof(*buffer));
++	DrawString(btn.left - 14 - GetStringBoundingBox(buffer).width, btn.top + 1, attribute, 0);
++}
++
++const int8 _face_num_eye_colours_by_gender_ethnicity [FC_GENDER_ETHNICITY_END] = {13, 13,  1,  1};
++const int8 _face_num_chins_by_gender_ethnicity       [FC_GENDER_ETHNICITY_END] = { 4,  1,  2,  2};
++const int8 _face_num_eyes_by_gender_ethnicity        [FC_GENDER_ETHNICITY_END] = {12, 16, 11, 16};
++const int8 _face_num_mouths_by_gender_ethnicity      [FC_GENDER_ETHNICITY_END] = {15, 10, 12,  9};
++const int8 _face_num_noses_by_gender_ethnicity       [FC_GENDER_ETHNICITY_END] = { 8,  3,  4,  5};
++const int8 _face_num_hairs_by_gender_ethnicity       [FC_GENDER_ETHNICITY_END] = { 9,  5,  5,  5};
++const int  _face_num_suit_collars = 12;
++const int8 _face_num_tie_earrings_by_gender_ethnicity[FC_GENDER_ETHNICITY_END] = { 6,  4,  6,  4};
++const int  _face_num_glasses = 3;
++
++FaceCode FaceClampAttribs(FaceCode old_face, FaceGenderEth new_gender_ethnicity)
++{
++	// look for the upper bounds for new gender/ethnicity provided
++	int num_eye_colours  = _face_num_eye_colours_by_gender_ethnicity [new_gender_ethnicity];
++	int num_chins        = _face_num_chins_by_gender_ethnicity       [new_gender_ethnicity];
++	int num_eyes         = _face_num_eyes_by_gender_ethnicity        [new_gender_ethnicity];
++	int num_mouths       = _face_num_mouths_by_gender_ethnicity      [new_gender_ethnicity];
++	int num_noses        = _face_num_noses_by_gender_ethnicity       [new_gender_ethnicity];
++	int num_hairs        = _face_num_hairs_by_gender_ethnicity       [new_gender_ethnicity];
++	int num_suit_collars = _face_num_suit_collars;
++	int num_tie_earrings = _face_num_tie_earrings_by_gender_ethnicity[new_gender_ethnicity];
++	int num_glasses      = _face_num_glasses;
++	int num_mouth_noses  = num_mouths * num_noses;
++
++	// set gender ethnicity for new face
++	FaceCode new_face = 0;
++	FaceSetGenderEthnicity(&new_face, new_gender_ethnicity);
++	// and copy/clamp values from old face to new face
++	FaceSetEyeColour (&new_face, min(num_eye_colours  - 1, FaceGetEyeColour (old_face)));
++	FaceSetChin      (&new_face, min(num_chins        - 1, FaceGetChin      (old_face)));
++	FaceSetEyes      (&new_face, min(num_eyes         - 1, FaceGetEyes      (old_face)));
++	FaceSetMouthNose (&new_face, min(num_mouth_noses  - 1, FaceGetMouthNose (old_face)));
++	FaceSetHair      (&new_face, min(num_hairs        - 1, FaceGetHair      (old_face)));
++	FaceSetSuitCollar(&new_face, min(num_suit_collars - 1, FaceGetSuitCollar(old_face)));
++	FaceSetTieEarring(&new_face, min(num_tie_earrings - 1, FaceGetTieEarring(old_face)));
++	FaceSetGlasses   (&new_face, min(num_glasses      - 1, FaceGetGlasses   (old_face)));
++	return new_face;
++}
++
+ static void SelectPlayerFaceWndProc(Window *w, WindowEvent *e)
+ {
++	unsigned long facecode;
++	char buffer[512];
++	uint32 *face = &WP(w,facesel_d).face;
++	FaceGenderEth gender_ethnicity = FaceGetGenderEthnicity(*face);
++	PlayerFaceWindowWidget widget;
++
+ 	switch (e->event) {
+-	case WE_PAINT: {
+-		Player *p;
+-		LowerWindowWidget(w, WP(w, facesel_d).gender + 5);
+-		DrawWindowWidgets(w);
+-		p = GetPlayer(w->window_number);
+-		DrawPlayerFace(WP(w,facesel_d).face, p->player_color, 2, 16);
+-	} break;
++		case WE_PAINT: {
++			Player *p;
++			/* Keep values within bounds - invoke bounds checking by void Gender/Ethnicity change */
++			FaceChangeGenderEthnicity(face, 0);
++			/* Disable eye colour widgets for the black ethnicity */
++			SetWindowWidgetsDisabledState(w, gender_ethnicity > FC_CF,
++				PFW_WIDGET_EYECOLOUR,
++				PFW_WIDGET_EYECOLOUR_L,
++				PFW_WIDGET_EYECOLOUR_R,
++				WIDGET_LIST_END
++			);
++			/* Disable chin for Western-Caucasian female */
++			SetWindowWidgetsDisabledState(w, gender_ethnicity == FC_CF,
++				PFW_WIDGET_CHIN,
++				PFW_WIDGET_CHIN_L,
++				PFW_WIDGET_CHIN_R,
++				WIDGET_LIST_END
++			);
+ 
+-	case WE_CLICK:
+-		switch (e->we.click.widget) {
+-		case 3: DeleteWindow(w); break;
+-		case 4: /* ok click */
+-			DoCommandP(0, 0, WP(w,facesel_d).face, NULL, CMD_SET_PLAYER_FACE);
+-			DeleteWindow(w);
+-			break;
+-		case 5: /* male click */
+-		case 6: /* female click */
+-			RaiseWindowWidget(w, WP(w, facesel_d).gender + 5);
+-			WP(w, facesel_d).gender = e->we.click.widget - 5;
+-			LowerWindowWidget(w, WP(w, facesel_d).gender + 5);
+-			SetWindowDirty(w);
+-			break;
+-		case 7:
+-			WP(w,facesel_d).face = (WP(w,facesel_d).gender << 31) + GB(InteractiveRandom(), 0, 31);
+-			SetWindowDirty(w);
+-			break;
+-		}
++			DrawWindowWidgets(w);
++
++			/* Draw dynamic button strings, and labels */
++			DrawFaceStringLabel(w, PFW_WIDGET_HAIR      , STR_FACE_HAIR      ,            FaceGetHair(*face) + 1);
++			DrawFaceStringLabel(w, PFW_WIDGET_GLASSES   , STR_FACE_GLASSES   ,         FaceGetGlasses(*face) + 1);
++			DrawFaceStringLabel(w, PFW_WIDGET_EYES      , STR_FACE_EYES      ,            FaceGetEyes(*face) + 1);
++			DrawFaceStringLabel(w, PFW_WIDGET_EYECOLOUR , STR_FACE_EYECOLOUR ,       FaceGetEyeColour(*face) + 1);
++			DrawFaceStringLabel(w, PFW_WIDGET_MOUTHNOSE , STR_FACE_MOUTHNOSE ,       FaceGetMouthNose(*face) + 1);
++			DrawFaceStringLabel(w, PFW_WIDGET_CHIN      , STR_FACE_CHIN      ,            FaceGetChin(*face) + 1);
++			DrawFaceStringLabel(w, PFW_WIDGET_SUITCOLLAR, STR_FACE_SUITCOLLAR,      FaceGetSuitCollar(*face) + 1);
++			DrawFaceStringLabel(w, PFW_WIDGET_TIEEARRING, STR_FACE_TIEEARRING,      FaceGetTieEarring(*face) + 1);
++			DrawFaceStringLabel(w, PFW_WIDGET_GENDERETH , STR_FACE_GENDERETH , FaceGetGenderEthnicity(*face) + 1);
++
++			p = GetPlayer(w->window_number);
++			DrawPlayerFace(*face, p->player_color, 2, 16);
++		} break;
++
++		case WE_CLICK:
++			widget = e->we.click.widget;
++
++			switch (widget) {
++				case 3: /* Cancel click */
++					DeleteWindow(w);
++					break;
++
++				case 4: /* OK click */
++					DoCommandP(0, 0, *face, NULL, CMD_SET_PLAYER_FACE);
++					DeleteWindow(w);
++					break;
++
++				case PFW_WIDGET_HAIR:
++				case PFW_WIDGET_HAIR_R:
++				case PFW_WIDGET_HAIR_L: // (back)
++					FaceChangeHair(face, (widget == PFW_WIDGET_HAIR_L) ? -1 : 1);
++					SetWindowDirty(w);
++					break;
++
++				case PFW_WIDGET_GLASSES:
++				case PFW_WIDGET_GLASSES_R:
++				case PFW_WIDGET_GLASSES_L: // (back)
++					FaceChangeGlasses(face, (widget == PFW_WIDGET_GLASSES_L) ? -1 : 1);
++					SetWindowDirty(w);
++					break;
++
++				case PFW_WIDGET_EYES:
++				case PFW_WIDGET_EYES_R:
++				case PFW_WIDGET_EYES_L: // (back)
++					FaceChangeEyes(face, (widget == PFW_WIDGET_EYES_L) ? -1 : 1);
++					SetWindowDirty(w);
++					break;
++
++				case PFW_WIDGET_EYECOLOUR:
++				case PFW_WIDGET_EYECOLOUR_R:
++				case PFW_WIDGET_EYECOLOUR_L: // (back)
++					FaceChangeEyeColour(face, (widget == PFW_WIDGET_EYECOLOUR_L) ? -1 : 1);
++					SetWindowDirty(w);
++					break;
++
++				case PFW_WIDGET_MOUTHNOSE:
++				case PFW_WIDGET_MOUTHNOSE_R:
++				case PFW_WIDGET_MOUTHNOSE_L: // (back)
++					FaceChangeMouthNose(face, (widget == PFW_WIDGET_MOUTHNOSE_L) ? -1 : 1);
++					SetWindowDirty(w);
++					break;
++
++				case PFW_WIDGET_CHIN:
++				case PFW_WIDGET_CHIN_R:
++				case PFW_WIDGET_CHIN_L: // (back)
++					FaceChangeChin(face, (widget == PFW_WIDGET_CHIN_L) ? -1 : 1);
++					SetWindowDirty(w);
++					break;
++
++				case PFW_WIDGET_SUITCOLLAR:
++				case PFW_WIDGET_SUITCOLLAR_R:
++				case PFW_WIDGET_SUITCOLLAR_L: // (back)
++					FaceChangeSuitCollar(face, (widget == PFW_WIDGET_SUITCOLLAR_L) ? -1 : 1);
++					SetWindowDirty(w);
++					break;
++
++				case PFW_WIDGET_TIEEARRING:
++				case PFW_WIDGET_TIEEARRING_R:
++				case PFW_WIDGET_TIEEARRING_L: // (back)
++					FaceChangeTieEarring(face, (widget == PFW_WIDGET_TIEEARRING_L) ? -1 : 1);
++					SetWindowDirty(w);
++					break;
++
++				case PFW_WIDGET_GENDERETH:
++				case PFW_WIDGET_GENDERETH_R:
++				case PFW_WIDGET_GENDERETH_L: // (back)
++					FaceChangeGenderEthnicity(face, (widget == PFW_WIDGET_GENDERETH_L) ? -1 : 1);
++					SetWindowDirty(w);
++					break;
++					
++				case PFW_WIDGET_RANDOMIZE: /* Randomize click */
++					*face = GetRandomFace(*face, 1);
++					SetWindowDirty(w);
++					break;
++				// Obscure GUI bug: Save different face as default, leave errormsg window
++				//                  open.  Close face window, open face window, click Load.
++				//                  Window isn't set dirty first time. :-S
++				case PFW_WIDGET_LOAD: /* Load click */
++					if (_player_face == 0) {ShowErrorMessage(INVALID_STRING_ID, STR_FACE_LOAD_NOFAVE, 0, 0);}
++					else {
++						*face = _player_face;
++						ShowErrorMessage(INVALID_STRING_ID, STR_FACE_LOAD_DONE, 0, 0);
++						SetWindowDirty(w);
++					}
++					break;
++
++				case PFW_WIDGET_SAVE: /* Save click */
++					_player_face = *face;
++					ShowErrorMessage(INVALID_STRING_ID, STR_FACE_SAVE_DONE, 0, 0);
++					break;
++
++				case PFW_WIDGET_FACECODE: /* Face Number Code click */
++					WP(w,facesel_d).qdID = 0;	// Query dialog ID
++					snprintf(buffer, 512, "%u", *face);
++					ShowQueryString(BindCString(buffer), STR_FACE_FACECODE_CAPTION, 10 + 1, 0, w->window_class, w->window_number, CS_NUMERAL);
++					break;
++			}
+ 		break;
++
++		case WE_ON_EDIT_TEXT:
++			if (WP(w,facesel_d).qdID == 0) { // Face Number Code query dialog ID
++				/* Must not be higher than 4,294,967,295 */
++				errno = 0;
++				facecode = strtoul(e->we.edittext.str, NULL, 10);
++				if (errno == ERANGE) {
++					ShowErrorMessage(INVALID_STRING_ID, STR_FACE_FACECODE_ERR, 0, 0);
++				}
++				else {
++					*face = facecode;
++					ShowErrorMessage(INVALID_STRING_ID, STR_FACE_FACECODE_SET, 0, 0);
++					SetWindowDirty(w);
++				}
++			}
++		break;
+ 	}
+ }
+ 
+-static const Widget _select_player_face_widgets[] = {
+-{   WWT_CLOSEBOX,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,                STR_018B_CLOSE_WINDOW},
+-{    WWT_CAPTION,   RESIZE_NONE,    14,    11,   189,     0,    13, STR_7043_FACE_SELECTION, STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{      WWT_PANEL,   RESIZE_NONE,    14,     0,   189,    14,   136, 0x0,                     STR_NULL},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    94,   137,   148, STR_012E_CANCEL,         STR_7047_CANCEL_NEW_FACE_SELECTION},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    95,   189,   137,   148, STR_012F_OK,             STR_7048_ACCEPT_NEW_FACE_SELECTION},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,    95,   187,    25,    36, STR_7044_MALE,           STR_7049_SELECT_MALE_FACES},
+-{    WWT_TEXTBTN,   RESIZE_NONE,    14,    95,   187,    37,    48, STR_7045_FEMALE,         STR_704A_SELECT_FEMALE_FACES},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    95,   187,    79,    90, STR_7046_NEW_FACE,       STR_704B_GENERATE_RANDOM_NEW_FACE},
+-{   WIDGETS_END},
+-};
++FaceCode GetRandomFace(FaceCode face, int retain)
++{
++	/* Retain or randomize gender & ethnicity? */
++	int gender_ethnicity = retain ? FaceGetGenderEthnicity(face) : RandomRange(FC_GENDER_ETHNICITY_END);
++	face = 0;
++	FaceSetGenderEthnicity(&face, gender_ethnicity);
++	/* Randomize other attributes, utilizing wrapping */
++	FaceChangeChin(&face, Random());
++	FaceChangeEyeColour(&face, Random());
++	FaceChangeEyes(&face, Random());
++	FaceChangeGlasses(&face, Random());
++	FaceChangeHair(&face, Random());
++	FaceChangeMouthNose(&face, Random());
++	FaceChangeSuitCollar(&face, Random());
++	FaceChangeTieEarring(&face, Random());
++	return face;
++}
+ 
++/* Player face window description */
+ static const WindowDesc _select_player_face_desc = {
+-	-1,-1, 190, 149,
+-	WC_PLAYER_FACE,0,
++	-1, -1, 274, 163,
++	WC_PLAYER_FACE, 0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS,
+ 	_select_player_face_widgets,
+ 	SelectPlayerFaceWndProc
+@@ -745,7 +1024,6 @@
+ 					if (wf != NULL) {
+ 						wf->caption_color = w->window_number;
+ 						WP(wf,facesel_d).face = GetPlayer(wf->window_number)->face;
+-						WP(wf,facesel_d).gender = 0;
+ 					}
+ 					break;
+ 				}
+@@ -1129,3 +1407,5 @@
+ 		}
+ 	}
+ }
++
++
+Index: playerface.h
+===================================================================
+--- playerface.h	(revision 0)
++++ playerface.h	(revision 0)
+@@ -0,0 +1,320 @@
++/* $Id$ */
++
++#ifndef PLAYERFACE_H
++#define PLAYERFACE_H
++
++/** Four gender/ethnicity combinations */
++typedef enum FaceGenderEths {
++	FC_CM = 0,  ///< Western-Caucasian male
++	FC_CF,      ///< Western-Caucasian female
++	FC_BM,      ///< Black male
++	FC_BF,      ///< Black female
++	FC_GENDER_ETHNICITY_END,
++	FC_FEMALE_MASK = 1, ///< when (value & FC_FEMALE_MASK) != 0 then it is female
++	FC_BLACK_MASK  = 2  ///< when (value & FC_BLACK_MASK ) != 0 then it is black ethnicity
++} FaceGenderEth;
++
++
++
++
++/* Player face (FaceCode) accessor functions - provide low level access
++*  to the virtual bitfields inside the variable of FaceCode type (uint32)
++*
++* Bit layout inside the FaceCode:
++*--------------------------------------------
++*  bit    33222222 22221111 11111100 00000000
++*  number 10987654 32109876 54321098 76543210
++*--------------------------------------------
++*         EGggTTTS SCCHHHHN NNMMMMEE EECCeeee
++*         || |  |  | |   |   |   |    | |   |
++*         || |  |  | |   |   |   |    | |   `--- Eye colour (4)
++*         || |  |  | |   |   |   |    | `------- Chin (2)
++*         || |  |  | |   |   |   |    `--------- Eyes (4)
++*         || |  |  | |   |   |   `-------------- Mouth (4)
++*         || |  |  | |   |   `------------------ Nose (3)
++*         || |  |  | |   `---------------------- Hair (4)
++*         || |  |  | `-------------------------- Collar (2)
++*         || |  |  `---------------------------- Suit (2)
++*         || |  `------------------------------- Tie/Earring (3)
++*         || `---------------------------------- Glasses (2)
++*         |`------------------------------------ Gender (1) - 0=Male,
++*         |                                                   1=Female
++*         `------------------------------------- Ethnicity (1) - 0=Western-Caucasian,
++*                                                                1=Black
++*/
++
++/** Read FaceCode accessor for the eye color bitfield. */
++static inline int FaceGetEyeColour(FaceCode face)
++{
++	return GB(face, 0, 4);
++}
++
++/** Write FaceCode accessor for the eye color bitfield. */
++static inline void FaceSetEyeColour(FaceCode *face, int value)
++{
++	assert(IS_INT_INSIDE(value, 0, 16));
++	SB(*face, 0, 4, value);
++}
++
++/** Read FaceCode accessor for the chin bitfield. */
++static inline int FaceGetChin(FaceCode face)
++{
++	return GB(face, 4, 2);
++}
++
++/** Write FaceCode accessor for the chin bitfield. */
++static inline void FaceSetChin(FaceCode *face, int value)
++{
++	assert(IS_INT_INSIDE(value, 0, 4));
++	SB(*face, 4, 2, value);
++}
++
++/** Read FaceCode accessor for the eyes bitfield. */
++static inline int FaceGetEyes(FaceCode face)
++{
++	return GB(face, 6, 4);
++}
++
++/** Write FaceCode accessor for the eyes bitfield. */
++static inline void FaceSetEyes(FaceCode *face, int value)
++{
++	assert(IS_INT_INSIDE(value, 0, 16));
++	SB(*face, 6, 4, value);
++}
++
++/** Read FaceCode accessor for the mouth bitfield. */
++static inline int FaceGetMouth(FaceCode face)
++{
++	return GB(face, 10, 4);
++}
++
++/** Write FaceCode accessor for the mouth bitfield. */
++static inline void FaceSetMouth(FaceCode *face, int value)
++{
++	assert(IS_INT_INSIDE(value, 0, 16));
++	SB(*face, 10, 4, value);
++}
++
++/** Read FaceCode accessor for the nose bitfield. */
++static inline int FaceGetNose(FaceCode face)
++{
++	return GB(face, 14, 3);
++}
++
++/** Write FaceCode accessor for the nose bitfield. */
++static inline void FaceSetNose(FaceCode *face, int value)
++{
++	assert(IS_INT_INSIDE(value, 0, 8));
++	SB(*face, 14, 3, value);
++}
++
++/** Read FaceCode accessor for the hair bitfield. */
++static inline int FaceGetHair(FaceCode face)
++{
++	return GB(face, 17, 4);
++}
++
++/** Write FaceCode accessor for the hair bitfield. */
++static inline void FaceSetHair(FaceCode *face, int value)
++{
++	assert(IS_INT_INSIDE(value, 0, 16));
++	SB(*face, 17, 4, value);
++}
++
++/** Read FaceCode accessor for the collar bitfield. */
++static inline int FaceGetCollar(FaceCode face)
++{
++	return GB(face, 21, 2);
++}
++
++/** Read FaceCode accessor for the suit bitfield. */
++static inline int FaceGetSuit(FaceCode face)
++{
++	return GB(face, 23, 2);
++}
++
++/** Read FaceCode accessor for the suit/collar bitfields. */
++static inline int FaceGetSuitCollar(FaceCode face)
++{
++	return GB(face, 21, 4);
++}
++
++/** Write FaceCode accessor for the suit/collar bitfields. */
++static inline void FaceSetSuitCollar(FaceCode *face, int value)
++{
++	assert(IS_INT_INSIDE(value, 0, 16));
++	SB(*face, 21, 4, value);
++}
++
++/** Read FaceCode accessor for the tie/earring bitfield. */
++static inline int FaceGetTieEarring(FaceCode face)
++{
++	return GB(face, 25, 3);
++}
++
++/** Write FaceCode accessor for the tie/earring bitfield. */
++static inline void FaceSetTieEarring(FaceCode *face, int value)
++{
++	assert(IS_INT_INSIDE(value, 0, 8));
++	SB(*face, 25, 3, value);
++}
++
++/** Read FaceCode accessor for the glasses bitfield. */
++static inline int FaceGetGlasses(FaceCode face)
++{
++	return GB(face, 28, 2);
++}
++
++/** Write FaceCode accessor for the glasses bitfield. */
++static inline void FaceSetGlasses(FaceCode *face, int value)
++{
++	assert(IS_INT_INSIDE(value, 0, 4));
++	SB(*face, 28, 2, value);
++}
++
++/** Read FaceCode accessor for the gender/ethnicity bitfields. */
++static inline FaceGenderEth FaceGetGenderEthnicity(FaceCode face)
++{
++	return (FaceGenderEth)GB(face, 30, 2);
++}
++
++/** Write FaceCode accessor for the gender/ethnicity bitfields. */
++static inline void FaceSetGenderEthnicity(FaceCode *face, FaceGenderEth value)
++{
++	assert(IS_INT_INSIDE(value, 0, 4));
++	SB(*face, 30, 2, value);
++}
++
++
++/** Integer wrapping helper function. Used by FaceCode high level accessors
++*   to wrap integer values into the range 0..<modulo-1>. */
++static inline int WrapInt(int i, int modulo)
++{
++	if (i >= 0) i %= modulo;
++	else {
++		i = -(-i % modulo);
++		if (i < 0) i += modulo;
++	}
++	return i;
++}
++
++/* ---------------------------------------------------
++*      Higher level FaceCode accessor functions
++*  ---------------------------------------------------*/
++
++/** Change FaceCode accessor for the eye colour bitfield */
++static inline void FaceChangeEyeColour(FaceCode *face, int amount)
++{
++	extern const int8 _face_num_eye_colours_by_gender_ethnicity[FC_GENDER_ETHNICITY_END];
++	int num_eye_colours = _face_num_eye_colours_by_gender_ethnicity[FaceGetGenderEthnicity(*face)];
++	int eye_colour = FaceGetEyeColour(*face);
++	eye_colour = WrapInt(eye_colour + amount, num_eye_colours);
++	FaceSetEyeColour(face, eye_colour);
++}
++
++/** Change FaceCode accessor for the chin bitfield */
++static inline void FaceChangeChin(FaceCode *face, int amount)
++{
++	extern const int8 _face_num_chins_by_gender_ethnicity[FC_GENDER_ETHNICITY_END];
++	int num_chins = _face_num_chins_by_gender_ethnicity[FaceGetGenderEthnicity(*face)];
++	int chin = FaceGetChin(*face);
++	chin = WrapInt(chin + amount, num_chins);
++	FaceSetChin(face, chin);
++}
++
++/** Change FaceCode accessor for the eyes bitfield */
++static inline void FaceChangeEyes(FaceCode *face, int amount)
++{
++	extern const int8 _face_num_eyes_by_gender_ethnicity[FC_GENDER_ETHNICITY_END];
++	int num_eyes = _face_num_eyes_by_gender_ethnicity[FaceGetGenderEthnicity(*face)];
++	int eyes = FaceGetEyes(*face);
++	eyes = WrapInt(eyes + amount, num_eyes);
++	FaceSetEyes(face, eyes);
++}
++
++/** Obtain the mouth/nose index from the contiguous range to display in face customization dialog
++@param face The encoded face
++@return index of mouth/nose combination from contiguous range */
++static inline int FaceGetMouthNose(FaceCode face)
++{
++	extern const int8 _face_num_mouths_by_gender_ethnicity[FC_GENDER_ETHNICITY_END];
++	int num_mouths = _face_num_mouths_by_gender_ethnicity[FaceGetGenderEthnicity(face)];
++	int mouth = FaceGetMouth(face);
++	int nose = FaceGetNose(face);
++	/* Make attribute indexes display contiguously even though duplicates are being skipped */
++	return mouth + nose * num_mouths;
++}
++
++/** Set the mouth/nose index
++@param face The encoded face
++@param mouthnose The index of mouth/nose combination from contiguous range */
++static inline void FaceSetMouthNose(FaceCode *face, int mouthnose)
++{
++	extern const int8 _face_num_mouths_by_gender_ethnicity[FC_GENDER_ETHNICITY_END];
++	extern const int8 _face_num_noses_by_gender_ethnicity [FC_GENDER_ETHNICITY_END];
++	int num_mouths = _face_num_mouths_by_gender_ethnicity[FaceGetGenderEthnicity(*face)];
++	int num_noses  = _face_num_noses_by_gender_ethnicity [FaceGetGenderEthnicity(*face)];
++	mouthnose = WrapInt(mouthnose, num_mouths * num_noses);
++	FaceSetMouth(face, mouthnose % num_mouths);
++	FaceSetNose (face, mouthnose / num_mouths);
++}
++
++/** Change FaceCode accessor for the mouth/nose bitfields */
++static inline void FaceChangeMouthNose(FaceCode *face, int amount)
++{
++	int mouthnose = FaceGetMouthNose(*face);
++	FaceSetMouthNose(face, mouthnose + amount);
++}
++
++/** Change FaceCode accessor for the hair bitfield */
++static inline void FaceChangeHair(FaceCode *face, int amount)
++{
++	extern const int8 _face_num_hairs_by_gender_ethnicity[FC_GENDER_ETHNICITY_END];
++	int num_hairs = _face_num_hairs_by_gender_ethnicity[FaceGetGenderEthnicity(*face)];
++	int hair = FaceGetHair(*face);
++	hair = WrapInt(hair + amount, num_hairs);
++	FaceSetHair(face, hair);
++}
++
++/** Change FaceCode accessor for the suit/collar bitfields */
++static inline void FaceChangeSuitCollar(FaceCode *face, int amount)
++{
++	extern const int _face_num_suit_collars;
++	int suit_collar = FaceGetSuitCollar(*face);
++	suit_collar = WrapInt(suit_collar + amount, _face_num_suit_collars);
++	FaceSetSuitCollar(face, suit_collar);
++}
++
++/** Change FaceCode accessor for the tie/earring bitfield */
++static inline void FaceChangeTieEarring(FaceCode *face, int amount)
++{
++	extern const int8 _face_num_tie_earrings_by_gender_ethnicity[FC_GENDER_ETHNICITY_END];
++	int num_tie_earrings = _face_num_tie_earrings_by_gender_ethnicity[FaceGetGenderEthnicity(*face)];
++	int tie_earring = FaceGetTieEarring(*face);
++	tie_earring = WrapInt(tie_earring + amount, num_tie_earrings);
++	FaceSetTieEarring(face, tie_earring);
++}
++
++/** Change FaceCode accessor for the tie/earring bitfield */
++static inline void FaceChangeGlasses(FaceCode *face, int amount)
++{
++	extern const int _face_num_glasses;
++	int glasses = FaceGetGlasses(*face);
++	glasses = WrapInt(glasses + amount, _face_num_glasses);
++	FaceSetGlasses(face, glasses);
++}
++
++/** Takes attributes from old_face param and combine them with the given
++*   gender/ethnicity vale while clamping old attribute values to the new
++*   ranges. Used when gender/ethnicity changes */
++FaceCode FaceClampAttribs(FaceCode old_face, FaceGenderEth new_gender_ehtnicity);
++
++/** Change FaceCode accessor for the gender/ethnicity bitfields */
++static inline void FaceChangeGenderEthnicity(FaceCode *face, int amount)
++{
++	int gender_ethnicity = FaceGetGenderEthnicity(*face);
++	gender_ethnicity = (gender_ethnicity + amount) & 3;
++	*face = FaceClampAttribs(*face, gender_ethnicity);
++}
++
++#endif /* PLAYERFACE_H */
+
+Property changes on: playerface.h
+___________________________________________________________________
+Name: svn:keywords
+   + Id
+Name: svn:eol-style
+   + native
+
+Index: players.c
+===================================================================
+--- players.c	(revision 7069)
++++ players.c	(working copy)
+@@ -1,7 +1,7 @@
+ /* $Id$ */
+ 
+ /** @file players.c
+- * @todo Cleanup the messy DrawPlayerFace function asap
++ * 
+  */
+ #include "stdafx.h"
+ #include "openttd.h"
+@@ -13,6 +13,7 @@
+ #include "table/sprites.h"
+ #include "map.h"
+ #include "player.h"
++#include "playerface.h"
+ #include "town.h"
+ #include "vehicle.h"
+ #include "station.h"
+@@ -37,157 +38,93 @@
+ }
+ 
+ 
+-static const SpriteID cheeks_table[4] = {
+-	0x325, 0x326,
+-	0x390, 0x3B0,
+-};
+-
+-static const SpriteID mouth_table[3] = {
+-	0x34C, 0x34D, 0x34F
+-};
+-
+-void DrawPlayerFace(uint32 face, int color, int x, int y)
++void DrawPlayerFace(FaceCode face, int color, int x, int y)
+ {
+-	byte flag = 0;
++	static const SpriteID cheek_sprites            [FC_GENDER_ETHNICITY_END] = {805, 806, 912, 944};
++	static const SpriteID first_chin_sprites       [FC_GENDER_ETHNICITY_END] = {807, 807, 913, 945};
++	static const SpriteID first_eyes_sprites       [FC_GENDER_ETHNICITY_END] = {811, 823, 922, 952};
++	static const int      first_moustache_mouth    [FC_GENDER_ETHNICITY_END] = { 12,  10,   9,   9};
++	static const SpriteID first_mouth_sprites      [FC_GENDER_ETHNICITY_END] = {859, 849, 933, 968};
++	static const SpriteID first_moustaches_sprites [FC_GENDER_ETHNICITY_END] = {871,   0, 919,   0};
++	static const SpriteID first_nose_sprites       [FC_GENDER_ETHNICITY_END] = {841,   0, 915, 947};
++	static const SpriteID white_female_nose_sprites[3]                       = {844, 845, 847};
++	static const SpriteID first_hair_sprites       [FC_GENDER_ETHNICITY_END] = {898, 907, 980, 985};
++	static const SpriteID first_suit_sprites       [FC_GENDER_ETHNICITY_END] = {875, 888, 875, 888};
++	static const SpriteID first_collar_sprites     [FC_GENDER_ETHNICITY_END] = {878, 891, 878, 891};
++	static const SpriteID first_tie_earring_sprites[FC_GENDER_ETHNICITY_END] = {882, 895, 882, 977};
++	static const SpriteID first_glasses_sprites    [FC_GENDER_ETHNICITY_END] = {839, 839, 942, 942};
+ 
+-	if ( (int32)face < 0)
+-		flag |= 1;
+-	if ((((((face >> 7) ^ face) >> 7) ^ face) & 0x8080000) == 0x8000000)
+-		flag |= 2;
++	/* cache the gender/ethnicity values */
++	byte gender_ethnicity = FaceGetGenderEthnicity(face);
+ 
+-	/* draw the gradient */
++	/* Validate other face attributes if they are out of range */
++	FaceChangeGenderEthnicity(&face, 0);
++
++	/* Draw the background gradient */
+ 	DrawSprite(GENERAL_SPRITE_COLOR(color) + SPRITE_PALETTE(SPR_GRADIENT), x, y);
+ 
+-	/* draw the cheeks */
+-	DrawSprite(cheeks_table[flag&3], x, y);
++	/* Draw the cheeks, ears, and scalp */
++	DrawSprite(cheek_sprites[gender_ethnicity], x, y);
+ 
+-	/* draw the chin */
+-	/* FIXME: real code uses -2 in zoomlevel 1 */
++	/* Draw the chin */
++	DrawSprite(first_chin_sprites[gender_ethnicity] + FaceGetChin(face), x, y);
++
++	/* Draw the eyes */
+ 	{
+-		uint val = GB(face, 4, 2);
+-		if (!(flag & 2)) {
+-			DrawSprite(0x327 + (flag&1?0:val), x, y);
+-		} else {
+-			DrawSprite((flag&1?0x3B1:0x391) + (val>>1), x, y);
+-		}
++		int eyes = FaceGetEyes(face);
++		int color = FaceGetEyeColour(face);
++		SpriteID eyes_sprite = first_eyes_sprites[gender_ethnicity] + eyes;
++		/* skip RED and ORANGE colors (white doesn't need to be skipped as it has the highest value) */
++		if (color >= COLOUR_RED) color++;  // skip red
++		if (color >= COLOUR_ORANGE) color++;  // skip orange
++		DrawSprite(GENERAL_SPRITE_COLOR(color) + SPRITE_PALETTE(eyes_sprite), x, y);
+ 	}
+-	/* draw the eyes */
+-	{
+-		uint val1 = GB(face,  6, 4);
+-		uint val2 = GB(face, 20, 3);
+-		uint32 high = 0x314 << PALETTE_SPRITE_START;
+ 
+-		if (val2 >= 6) {
+-			high = 0x30F << PALETTE_SPRITE_START;
+-			if (val2 != 6)
+-				high = 0x30D << PALETTE_SPRITE_START;
+-		}
+-
+-		if (!(flag & 2)) {
+-			if (!(flag & 1)) {
+-				DrawSprite(high+((val1 * 12 >> 4) + SPRITE_PALETTE(0x32B)), x, y);
+-			} else {
+-				DrawSprite(high+(val1 + SPRITE_PALETTE(0x337)), x, y);
+-			}
+-		} else {
+-			if (!(flag & 1)) {
+-				DrawSprite(high+((val1 * 11 >> 4) + SPRITE_PALETTE(0x39A)), x, y);
+-			} else {
+-				DrawSprite(high+(val1 + SPRITE_PALETTE(0x3B8)), x, y);
+-			}
+-		}
+-	}
+-
+-	/* draw the mouth */
++	/* Draw the mouth and nose */
+ 	{
+-		uint val = GB(face, 10, 6);
+-		uint val2;
+-
+-		if (!(flag&1)) {
+-			val2 = ((val&0xF) * 15 >> 4);
+-
+-			if (val2 < 3) {
+-				DrawSprite((flag&2 ? 0x397 : 0x367) + val2, x, y);
+-				/* skip the rest */
+-				goto skip_mouth;
+-			}
+-
+-			val2 -= 3;
+-			if (flag & 2) {
+-				if (val2 > 8) val2 = 0;
+-				val2 += 0x3A5 - 0x35B;
+-			}
+-			DrawSprite(val2 + 0x35B, x, y);
+-		} else if (!(flag&2)) {
+-			DrawSprite(((val&0xF) * 10 >> 4) + 0x351, x, y);
+-		} else {
+-			DrawSprite(((val&0xF) * 9 >> 4) + 0x3C8, x, y);
++		/* Mouth */
++		int mouth = FaceGetMouth(face);
++		/* Male can have combined mouth/nose (moustache) */
++		int first_moustache = first_moustache_mouth[gender_ethnicity];
++		bool is_moustache = (mouth >= first_moustache);
++		/* Find the first appropriate mouth or combined mouth/nose sprite */
++		SpriteID first_mouth_sprite = is_moustache ? first_moustaches_sprites[gender_ethnicity] : first_mouth_sprites[gender_ethnicity];
++		if (is_moustache) {
++			/* offset the mouth to contain moustache index */
++			mouth -= first_moustache;
+ 		}
++		DrawSprite(first_mouth_sprite + mouth, x, y);
+ 
+-		val >>= 3;
+-
+-		if (!(flag&2)) {
+-			if (!(flag&1)) {
+-				DrawSprite(0x349 + val, x, y);
+-			} else {
+-				DrawSprite( mouth_table[(val*3>>3)], x, y);
+-			}
+-		} else {
+-			if (!(flag&1)) {
+-				DrawSprite(0x393 + (val&3), x, y);
+-			} else {
+-				DrawSprite(0x3B3 + (val*5>>3), x, y);
+-			}
++		/* Nose */
++		if (!is_moustache) { // skip drawing nose if it was already drawn
++			int nose = FaceGetNose(face);
++			SpriteID nose_sprite = (gender_ethnicity != FC_CF) ? (first_nose_sprites[gender_ethnicity] + nose) : white_female_nose_sprites[nose];
++			DrawSprite(nose_sprite, x, y);
+ 		}
+-
+-		skip_mouth:;
+ 	}
+ 
++	/* Draw the hair */
++	DrawSprite(first_hair_sprites[gender_ethnicity] + FaceGetHair(face), x, y);
+ 
+-	/* draw the hair */
+-	{
+-		uint val = GB(face, 16, 4);
+-		if (flag & 2) {
+-			if (flag & 1) {
+-				DrawSprite(0x3D9 + (val * 5 >> 4), x, y);
+-			} else {
+-				DrawSprite(0x3D4 + (val * 5 >> 4), x, y);
+-			}
+-		} else {
+-			if (flag & 1) {
+-				DrawSprite(0x38B + (val * 5 >> 4), x, y);
+-			} else {
+-				DrawSprite(0x382 + (val * 9 >> 4), x, y);
+-			}
+-		}
+-	}
++	/* Draw the suit & collar */
++	DrawSprite(first_suit_sprites[gender_ethnicity] + FaceGetSuit(face), x, y);     // Suit
++	DrawSprite(first_collar_sprites[gender_ethnicity] + FaceGetCollar(face), x, y); // Collar
+ 
+-	/* draw the tie */
++	/* Draw the tie or earring */
+ 	{
+-		uint val = GB(face, 20, 8);
+-
+-		if (!(flag&1)) {
+-			DrawSprite(0x36B + (GB(val, 0, 2) * 3 >> 2), x, y);
+-			DrawSprite(0x36E + (GB(val, 2, 2) * 4 >> 2), x, y);
+-			DrawSprite(0x372 + (GB(val, 4, 4) * 6 >> 4), x, y);
+-		} else {
+-			DrawSprite(0x378 + (GB(val, 0, 2) * 3 >> 2), x, y);
+-			DrawSprite(0x37B + (GB(val, 2, 2) * 4 >> 2), x, y);
+-
+-			val >>= 4;
+-			if (val < 3) DrawSprite((flag & 2 ? 0x3D1 : 0x37F) + val, x, y);
++		int tie_earring = FaceGetTieEarring(face);
++		bool is_male = (gender_ethnicity & FC_FEMALE_MASK) == 0;
++		if (is_male || tie_earring > 0) {
++			/* female earring #0 is void so it is skipped */
++			DrawSprite(first_tie_earring_sprites[gender_ethnicity] + tie_earring - (is_male ? 0 : 1), x, y);
+ 		}
+ 	}
+ 
+-	/* draw the glasses */
++	/* Draw the glasses */
+ 	{
+-		uint val = GB(face, 28, 3);
+-
+-		if (flag & 2) {
+-			if (val <= 1) DrawSprite(0x3AE + val, x, y);
+-		} else {
+-			if (val <= 1) DrawSprite(0x347 + val, x, y);
+-		}
++		int glasses = FaceGetGlasses(face);
++		/* first glasses (#0) means no glasses */
++		if (glasses > 0) DrawSprite(first_glasses_sprites[gender_ethnicity] + glasses - 1, x, y);
+ 	}
+ }
+ 
+@@ -501,7 +438,7 @@
+ 
+ 	p->avail_railtypes = GetPlayerRailtypes(p->index);
+ 	p->inaugurated_year = _cur_year;
+-	p->face = Random();
++	p->face = GetRandomFace(0, 0);
+ 
+ 	/* Engine renewal settings */
+ 	p->engine_renew_list = NULL;
+Index: settings.c
+===================================================================
+--- settings.c	(revision 7069)
++++ settings.c	(working copy)
+@@ -1184,6 +1184,7 @@
+ 	  SDTG_STR("screenshot_format",SLE_STRB, S, 0, _screenshot_format_name,NULL,    STR_NULL, NULL),
+ 	  SDTG_STR("savegame_format",  SLE_STRB, S, 0, _savegame_format,       NULL,    STR_NULL, NULL),
+ 	 SDTG_BOOL("rightclick_emulate",         S, 0, _rightclick_emulate,   false,    STR_NULL, NULL),
++	  SDTG_VAR("player_face",    SLE_UINT32, S, 0, _player_face, 0,0,0xFFFFFFFF,0,  STR_NULL, NULL),
+ 	  SDTG_END()
+ };
+ 
+Index: variables.h
+===================================================================
+--- variables.h	(revision 7069)
++++ variables.h	(working copy)
+@@ -413,6 +413,7 @@
+ /* misc */
+ VARDEF char _screenshot_name[128];
+ VARDEF byte _vehicle_design_names;
++VARDEF uint32 _player_face;
+ 
+ /* Forking stuff */
+ VARDEF bool _dedicated_forks;
+Index: window.h
+===================================================================
+--- window.h	(revision 7069)
++++ window.h	(working copy)
+@@ -452,7 +452,7 @@
+ 
+ typedef struct {
+ 	uint32 face;
+-	byte gender;
++	uint qdID;
+ } facesel_d;
+ assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(facesel_d));
+ 

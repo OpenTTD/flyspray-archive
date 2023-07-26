@@ -1,0 +1,599 @@
+Index: src/core/math_func.hpp
+===================================================================
+--- src/core/math_func.hpp	(revision 18781)
++++ src/core/math_func.hpp	(working copy)
+@@ -104,6 +104,8 @@
+  * @param x The min value
+  * @param n The base of the number we are searching
+  * @return The smallest multiple of n equal or greater than x
++ *
++ * @see AlignAny
+  */
+ template <typename T>
+ static FORCEINLINE T Align(const T x, uint n)
+@@ -114,6 +116,71 @@
+ }
+ 
+ /**
++ * Return the smallest multiple of n equal or greater than x.
++ * AlignAny is a little slower then Align but n doesn't need to be a power of 2.
++ *
++ * @param x The min value. Must be non-negative.
++ * @param n The base of the number we are searching.
++ * @return x rounded up to the nearest multiple of n.
++ *
++ * @see Align
++ */
++template <typename T, uint N, bool Tn_is_pow_2>
++struct Aligner;
++
++template <typename T, uint N>
++struct Aligner<T, N, true> {
++	assert_compile((N & (N - 1)) == 0 && N != 0);
++
++	FORCEINLINE static T Align(T x)
++	{
++		return (T)((x + (N - 1)) & ~(T)(N - 1));
++	}
++};
++
++template <typename T, uint N>
++struct Aligner<T, N, false> {
++	assert_compile(N != 0);
++
++	FORCEINLINE static T Align(T x)
++	{
++		x = (T)(x + N - 1);
++		return x - x % N;
++	}
++};
++
++/**
++ * Return the smallest multiple of N equal or greater than x.
++ * N doesn't need to be a power of 2, if it is then a little faster algorithm is used.
++ *
++ * @tparam T Type of the x.
++ * @tparam N The base of the number we are searching.
++ *
++ * @param x The min value. Must be non-negative.
++ * @return x rounded up to the nearest multiple of N.
++ */
++template <typename T, uint N>
++static FORCEINLINE T Align(T x) { return Aligner<T, N, (N & (N - 1)) == 0>::Align(x); }
++
++/**
++ * Return the smallest multiple of n equal or greater than x.
++ * AlignAny is a little slower then Align but n doesn't need to be a power of 2.
++ *
++ * @param x The min value. Must be non-negative.
++ * @param n The base of the number we are searching.
++ * @return x rounded up to the nearest multiple of n.
++ *
++ * @see Align
++ */
++template <typename T>
++static FORCEINLINE T AlignAny(T x, uint n)
++{
++	assert(n != 0);
++	x = (T)(x + n - 1);
++	return x - x % n;
++}
++
++/**
+  * Return the smallest multiple of n equal or greater than x
+  * Applies to pointers only
+  *
+Index: src/core/smallvec_type.hpp
+===================================================================
+--- src/core/smallvec_type.hpp	(revision 18781)
++++ src/core/smallvec_type.hpp	(working copy)
+@@ -15,84 +15,57 @@
+ #include "alloc_func.hpp"
+ #include "math_func.hpp"
+ 
++/** Type of the SmallVector capacity growth. */
++enum SmallVectorGrowth {
++	SVG_LINEAR,     ///< Linear growth.
++	SVG_EXPONENTIAL ///< Exponential growth.
++};
++
+ /**
+- * Simple vector template class.
++ * Very-base class of SmallVector implementing all features
++ * except those related to buffer capacity growth.
+  *
+- * @note There are no asserts in the class so you have
+- *       to care about that you grab an item which is
+- *       inside the list.
+- *
+- * @param T The type of the items stored
+- * @param S The steps of allocation
++ * @note This is an internal class, it shouldn't be used outside the header.
++ * @see SmallVector
+  */
+-template <typename T, uint S>
+-class SmallVector {
++template <typename T>
++class SmallVectorBase {
+ protected:
+ 	T *data;       ///< The pointer to the first item
+ 	uint items;    ///< The number of items stored
+ 	uint capacity; ///< The avalible space for storing items
+ 
++	SmallVectorBase() : data(NULL), items(0), capacity(0) { }
++
+ public:
+-	SmallVector() : data(NULL), items(0), capacity(0) { }
+-
+-	~SmallVector()
++	~SmallVectorBase()
+ 	{
+ 		free(this->data);
+ 	}
+ 
+-	/**
+-	 * Remove all items from the list.
+-	 */
++	/** Remove all items from the vector. */
+ 	FORCEINLINE void Clear()
+ 	{
+ 		/* In fact we just reset the item counter avoiding the need to
+-		 * probably reallocate the same amount of memory the list was
++		 * probably reallocate the same amount of memory the vector was
+ 		 * previously using. */
+ 		this->items = 0;
+ 	}
+ 
+-	/**
+-	 * Remove all items from the list and free allocated memory.
+-	 */
++	/** Remove all items from the vector and free allocated memory. */
+ 	FORCEINLINE void Reset()
+ 	{
+ 		this->items = 0;
+ 		this->capacity = 0;
+-		free(data);
+-		data = NULL;
++		free(this->data);
++		this->data = NULL;
+ 	}
+ 
+ 	/**
+-	 * Compact the list down to the smallest block size boundary.
+-	 */
+-	FORCEINLINE void Compact()
+-	{
+-		uint capacity = Align(this->items, S);
+-		if (capacity >= this->capacity) return;
+-
+-		this->capacity = capacity;
+-		this->data = ReallocT(this->data, this->capacity);
+-	}
+-
+-	/**
+-	 * Append an item and return it.
+-	 * @return pointer to newly allocated item
+-	 */
+-	FORCEINLINE T *Append()
+-	{
+-		if (this->items == this->capacity) {
+-			this->capacity += S;
+-			this->data = ReallocT(this->data, this->capacity);
+-		}
+-
+-		return &this->data[this->items++];
+-	}
+-
+-	/**
+ 	 * Search for the first occurence of an item.
+ 	 * The '!=' operator of T is used for comparison.
+-	 * @param item Item to search for
+-	 * @return The position of the item, or End() when not present
++	 * @param item Item to search for.
++	 * @return The position of the item, or End() when not present.
+ 	 */
+ 	FORCEINLINE const T *Find(const T &item) const
+ 	{
+@@ -105,8 +78,8 @@
+ 	/**
+ 	 * Search for the first occurence of an item.
+ 	 * The '!=' operator of T is used for comparison.
+-	 * @param item Item to search for
+-	 * @return The position of the item, or End() when not present
++	 * @param item Item to search for.
++	 * @return The position of the item, or End() when not present.
+ 	 */
+ 	FORCEINLINE T *Find(const T &item)
+ 	{
+@@ -119,8 +92,8 @@
+ 	/**
+ 	 * Search for the first occurence of an item.
+ 	 * The '!=' operator of T is used for comparison.
+-	 * @param item Item to search for
+-	 * @return The position of the item, or -1 when not present
++	 * @param item Item to search for.
++	 * @return The position of the item, or -1 when not present.
+ 	 */
+ 	FORCEINLINE int FindIndex(const T &item)
+ 	{
+@@ -135,18 +108,17 @@
+ 	}
+ 
+ 	/**
+-	 * Tests whether a item is present in the vector.
+-	 * The '!=' operator of T is used for comparison.
+-	 * @param item Item to test for
+-	 * @return true iff the item is present
++	 * Test whether an item is present in the vector.
++	 * @param item The item to search for.
++	 * @return true if the item is present, false otherwise.
++	 * @note The '!=' operator of T is used for comparison.
+ 	 */
+ 	FORCEINLINE bool Contains(const T &item) const
+ 	{
+ 		return this->Find(item) != this->End();
+ 	}
+ 
+-	/**
+-	 * Removes given item from this vector
++	/** Removes given item from this map
+ 	 * @param item item to remove
+ 	 * @note it has to be pointer to item in this map. It is overwritten by the last item.
+ 	 */
+@@ -157,30 +129,17 @@
+ 	}
+ 
+ 	/**
+-	 * Tests whether a item is present in the vector, and appends it to the end if not.
+-	 * The '!=' operator of T is used for comparison.
+-	 * @param item Item to test for
+-	 * @return true iff the item is was already present
++	 * Get the number of items in the vector.
++	 * @return The number of items.
+ 	 */
+-	FORCEINLINE bool Include(const T &item)
+-	{
+-		bool is_member = this->Contains(item);
+-		if (!is_member) *this->Append() = item;
+-		return is_member;
+-	}
+-
+-	/**
+-	 * Get the number of items in the list.
+-	 */
+ 	FORCEINLINE uint Length() const
+ 	{
+ 		return this->items;
+ 	}
+ 
+ 	/**
+-	 * Get the pointer to the first item (const)
+-	 *
+-	 * @return the pointer to the first item
++	 * Get the pointer to the first item (const).
++	 * @return The pointer to the first item.
+ 	 */
+ 	FORCEINLINE const T *Begin() const
+ 	{
+@@ -188,9 +147,8 @@
+ 	}
+ 
+ 	/**
+-	 * Get the pointer to the first item
+-	 *
+-	 * @return the pointer to the first item
++	 * Get the pointer to the first item.
++	 * @return The pointer to the first item.
+ 	 */
+ 	FORCEINLINE T *Begin()
+ 	{
+@@ -198,9 +156,8 @@
+ 	}
+ 
+ 	/**
+-	 * Get the pointer behind the last valid item (const)
+-	 *
+-	 * @return the pointer behind the last valid item
++	 * Get the pointer behind the last item (const).
++	 * @return The pointer behind the last item.
+ 	 */
+ 	FORCEINLINE const T *End() const
+ 	{
+@@ -208,9 +165,8 @@
+ 	}
+ 
+ 	/**
+-	 * Get the pointer behind the last valid item
+-	 *
+-	 * @return the pointer behind the last valid item
++	 * Get the pointer behind the last item.
++	 * @return The pointer behind the last item.
+ 	 */
+ 	FORCEINLINE T *End()
+ 	{
+@@ -218,10 +174,9 @@
+ 	}
+ 
+ 	/**
+-	 * Get the pointer to item "number" (const)
+-	 *
+-	 * @param index the position of the item
+-	 * @return the pointer to the item
++	 * Get the pointer to the item at given position (const).
++	 * @param index The position of the item.
++	 * @return The pointer to the item.
+ 	 */
+ 	FORCEINLINE const T *Get(uint index) const
+ 	{
+@@ -231,10 +186,9 @@
+ 	}
+ 
+ 	/**
+-	 * Get the pointer to item "number"
+-	 *
+-	 * @param index the position of the item
+-	 * @return the pointer to the item
++	 * Get the pointer to the item at given position.
++	 * @param index The position of the item.
++	 * @return The pointer to the item.
+ 	 */
+ 	FORCEINLINE T *Get(uint index)
+ 	{
+@@ -244,10 +198,9 @@
+ 	}
+ 
+ 	/**
+-	 * Get item "number" (const)
+-	 *
+-	 * @param index the positon of the item
+-	 * @return the item
++	 * Get the reference to the item at given position (const).
++	 * @param index The position of the item.
++	 * @return The reference to the item.
+ 	 */
+ 	FORCEINLINE const T &operator[](uint index) const
+ 	{
+@@ -256,10 +209,9 @@
+ 	}
+ 
+ 	/**
+-	 * Get item "number"
+-	 *
+-	 * @param index the positon of the item
+-	 * @return the item
++	 * Get the reference to the item at given position.
++	 * @param index The position of the item.
++	 * @return The reference to the item.
+ 	 */
+ 	FORCEINLINE T &operator[](uint index)
+ 	{
+@@ -268,16 +220,213 @@
+ 	}
+ };
+ 
++/**
++ * Base class of SmallVector implementing buffer capacity growth.
++ * @note This is an internal class, it shouldn't be used outside the header.
++ * @see SmallVector
++ */
++template <typename T, uint S, SmallVectorGrowth Tgrowth>
++class GrowingSmallVector;
+ 
++template <typename T, uint S>
++class GrowingSmallVector<T, S, SVG_LINEAR> : public SmallVectorBase<T> {
++protected:
++	/**
++	 * Set the capacity aligned to a multiple of S.
++	 * @param capacity The capacity.
++	 */
++	void SetCapacity(uint capacity)
++	{
++		capacity = Align<uint, S>(capacity);
++		this->capacity = capacity;
++		this->data = ReallocT<T>(this->data, capacity);
++	}
++
++public:
++	/**
++	 * Resize the vector.
++	 * @param length New length.
++	 */
++	void Resize(uint length)
++	{
++		this->items = length;
++		if (length > this->capacity) this->SetCapacity(length);
++	}
++};
++
++template <typename T, uint S>
++class GrowingSmallVector<T, S, SVG_EXPONENTIAL> : public SmallVectorBase<T> {
++protected:
++	static const uint FACTOR_PER_256 = (S << 8) / 100; ///< S (growth factor) normalized from 1/100 units to 1/256 units.
++
++	/**
++	 * Set the capacity.
++	 * @param capacity The capacity.
++	 */
++	void SetCapacity(uint capacity)
++	{
++		this->capacity = capacity;
++		this->data = ReallocT<T>(this->data, capacity);
++	}
++
++public:
++	/**
++	 * Resize the vector.
++	 * @param length New length.
++	 */
++	void Resize(uint length)
++	{
++		this->items = length;
++		if (length > this->capacity) {
++			this->SetCapacity(max(length, this->capacity + ((this->capacity * FACTOR_PER_256) >> 8)));
++		}
++	}
++};
++
+ /**
++ * Simple vector template class.
++ * Two kinds of capacity growth can be used - linear or exponential.
++ *
++ * @note There are no asserts in the class so you have to care about that you grab an item
++ *       which is inside the vector.
++ *
++ * @tparam T The type of the items stored.
++ * @tparam S For linear growth S is the allocation step. Size of memory block will always
++ *           be aligned to a multiply of S.
++ *           For exponential growth S is the growth factor in 1/100 units i.e. if S is 50
++ *           then size of allocated memory block will grow at least by 50% each time more
++ *           storage space is needed. No alignment is done.
++ * @tparam Tgrowth The type of growth. SVG_LINEAR for linear growth or SVG_EXPONENTIAL for
++ *                 exponential growth.
++ */
++template <typename T, uint S, SmallVectorGrowth Tgrowth = SVG_LINEAR>
++class SmallVector : public GrowingSmallVector<T, S, Tgrowth> {
++public:
++	/** Create an empty SmallVector. */
++	FORCEINLINE SmallVector() { }
++
++	/**
++	 * Create SmallVector reserving storage space for a given number of items.
++	 * @param capacity The number of items to reserve.
++	 */
++	FORCEINLINE SmallVector(uint capacity) { this->SetCapacity(capacity); }
++
++	/** Compact the vector down to the smallest block size boundary. */
++	FORCEINLINE void Compact()
++	{
++		this->SetCapacity(this->items);
++	}
++
++	/** Append an item and return it. */
++	T *Append()
++	{
++		this->Resize(this->items + 1);
++		return &this->data[this->items - 1];
++	}
++
++	/**
++	 * Test whether an item is present in the vector and append it to the end if not.
++	 * @param item The item to search for.
++	 * @return true if the item is present, false otherwise.
++	 * @note The '!=' operator of T is used for comparison.
++	 */
++	FORCEINLINE bool Include(const T &item)
++	{
++		bool is_member = this->Contains(item);
++		if (!is_member) *this->Append() = item;
++		return is_member;
++	}
++
++	/**
++	 * Reserve storage space to avoid multiple memory reallocation.
++	 * @param capacity Number of all items in the vector to reserve.
++	 */
++	FORCEINLINE void Reserve(uint capacity)
++	{
++		if (capacity > this->capacity) this->SetCapacity(capacity);
++	}
++};
++
++/**
++ * SmallVector extension allowing to insert, remove or move an item preserving items order.
++ *
++ * @note There are no asserts in the class so you have to care about that you grab an item
++ *       which is inside the vector.
++ *
++ * @tparam T The type of the items stored.
++ * @tparam S For linear growth S is the allocation step (must be a power of 2). Size of
++ *           memory block will always be aligned to a multiply of S.
++ *           For exponential growth S is the growth factor in 1/256 units i.e. if S is 128
++ *           then size of allocated memory block will grow at least by 50% each time more
++ *           storage space is needed. No alignment is done.
++ * @tparam Tgrowth The type of growth. SVG_LINEAR for linear growth or SVG_EXPONENTIAL for
++ *                 exponential growth.
++ */
++template <typename T, uint S, SmallVectorGrowth Tgrowth = SVG_LINEAR>
++class OrderedSmallVector : public SmallVector<T, S, Tgrowth> {
++public:
++	/**
++	 * Removes given item from this vector preserving items order.
++	 * Some items are shifted left to fill gap after removed item.
++	 * @param item Item to remove.
++	 */
++	FORCEINLINE void Erase(T *item)
++	{
++		MemMoveT(item, item + 1, this->End() - item - 1);
++		this->items--;
++	}
++
++	/**
++	 * Inserts new item into specified position preserving items order.
++	 * Some items are shifted right to make a space for the new item.
++	 * @param pos Position where to insert new item.
++	 * @return Pointer to inserted item (can be other then pos if reallocation takes place).
++	 */
++	FORCEINLINE T* Insert(T *pos)
++	{
++		if (this->items == this->capacity) {
++			ptrdiff_t pos_offset = pos - this->data;
++			this->Resize(this->capacity + 1);
++			pos = this->data + pos_offset;
++		}
++
++		MemMoveT(pos + 1, pos, this->End() - pos);
++		this->items++;
++		return pos;
++	}
++
++	/**
++	 * Move an item into given position preserving other items order.
++	 * Some items are shifted right or left to make new and fill old space for moved item.
++	 * @param source Item to move.
++	 * @param dest Position where to move item.
++	 */
++	FORCEINLINE void Move(T *source, T *dest)
++	{
++		T item = *source;
++		if (source < dest) {
++			MemMoveT(source, source + 1, dest - source);
++		} else {
++			MemMoveT(dest + 1, dest, source - dest);
++		}
++		*dest = item;
++	}
++};
++
++/**
+  * Simple vector template class, with automatic free.
+  *
+- * @note There are no asserts in the class so you have
+- *       to care about that you grab an item which is
+- *       inside the list.
++ * @note There are no asserts in the class so you have to care about that you grab an item
++ *       which is inside the vector.
+  *
+- * @param T The type of the items stored, must be a pointer
+- * @param S The steps of allocation
++ * @tparam T The type of the items stored.
++ * @tparam S For linear growth S is the allocation step (must be a power of 2). Size of
++ *           memory block will always be aligned to a multiply of S.
++ *           For exponential growth S is the growth factor in 1/256 units i.e. if S is 128
++ *           then size of allocated memory block will grow at least by 50% each time more
++ *           storage space is needed. No alignment is done.
++ * @tparam Tgrowth The type of growth. SVG_LINEAR for linear growth or SVG_EXPONENTIAL for
++ *                 exponential growth.
+  */
+ template <typename T, uint S>
+ class AutoFreeSmallVector : public SmallVector<T, S> {
+@@ -287,9 +436,7 @@
+ 		this->Clear();
+ 	}
+ 
+-	/**
+-	 * Remove all items from the list.
+-	 */
++	/** Remove all items from the vector. */
+ 	FORCEINLINE void Clear()
+ 	{
+ 		for (uint i = 0; i < this->items; i++) {

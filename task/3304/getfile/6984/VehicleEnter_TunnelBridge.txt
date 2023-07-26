@@ -1,0 +1,71 @@
+/**
+ * Frame when the 'enter tunnel' sound should be played. This is the second
+ * frame on a tile, so the sound is played shortly after entering the tunnel
+ * tile, while the vehicle is still visible.
+ */
+static const byte TUNNEL_SOUND_FRAME = 1;
+
+/**
+ * Frame when a vehicle should be hidden in a tunnel with a certain direction.
+ * This differs per direction, because of visibility / bounding box issues.
+ * Note that direction, in this case, is the direction of tunnel or bridge tile.
+ * When entering a tunnel, hide the vehicle when it reaches the given frame.
+ * When leaving a tunnel, show the vehicle when it is one frame further
+ * to the 'outside', i.e. at (TILE_SIZE-1) - (frame) + 1
+ * frame counts from the outside towards wormhole so frame (TILE_SIZE-1) is border to wormhole 
+ */
+extern const byte _tunnel_visibility_frame[DIAGDIR_END] = {TILE_SIZE - (TILE_SIZE / 4), TILE_SIZE / 2, TILE_SIZE / 2, TILE_SIZE - (TILE_SIZE / 4)};
+
+static VehicleEnterTileStatus VehicleEnter_TunnelBridge(Vehicle *v, TileIndex tile, int x, int y)
+{
+	int z = GetSlopeZ(x, y) - v->z_pos;
+
+	if (abs(z) > 2) return VETSB_CANNOT_ENTER;
+
+	/* Direction into the wormhole */
+	const DiagDirection dir = GetTunnelBridgeDirection(tile);
+	byte pos = (DiagDirToAxis(dir) == AXIS_X ? x : y) & TILE_UNIT_MASK;
+	/* Number of units moved by the vehicle since entering the tile */
+	byte frame = (dir == DIAGDIR_NE || dir == DIAGDIR_NW) ? TILE_SIZE - 1 - pos : pos;
+
+	if (IsTunnel(tile)) {
+		/* Handle visibility */
+		if (v->vehstatus & VS_HIDDEN) {
+			if (frame + 1 == _tunnel_visibility_frame[dir] && z == 0) v->vehstatus &= ~VS_HIDDEN;
+		} else {
+			if (frame == _tunnel_visibility_frame[dir]) v->vehstatus |= VS_HIDDEN;
+
+			if (frame == TUNNEL_SOUND_FRAME &&
+					v->type == VEH_TRAIN &&
+					v->Previous() == NULL &&
+					DirToDiagDir(v->direction) == dir &&
+					!PlayVehicleSound(v, VSE_TUNNEL) &&
+					RailVehInfo(v->engine_type)->engclass == EC_STEAM
+				) {
+				SndPlayVehicleFx(SND_05_TRAIN_THROUGH_TUNNEL, v);
+			}
+		}
+	} else { // IsBridge(tile)
+		if (v->type != VEH_SHIP) {
+			/* modify speed of vehicle */
+			uint16 spd = GetBridgeSpec(GetBridgeType(tile))->speed;
+
+			if (v->type == VEH_ROAD) spd *= 2;
+			Vehicle *first = v->First();
+			first->cur_speed = min(first->cur_speed, spd);
+		}
+	}
+
+	if (frame == TILE_SIZE - 1) {
+		/* If vehicle has wormhole flag leave wormhole and set flag to tell controller
+		 * that vehicle is going to leave wormhole. */
+		switch (v->type) {
+			default: NOT_REACHED();
+			case VEH_TRAIN: if (Train::From(v)->track       == TRACK_BIT_WORMHOLE) return VETSB_LEAVING_WORMHOLE; break;
+			case VEH_ROAD : if (RoadVehicle::From(v)->state == RVSB_WORMHOLE)      return VETSB_LEAVING_WORMHOLE; break;
+			case VEH_SHIP : if (Ship::From(v)->state        == TRACK_BIT_WORMHOLE) return VETSB_LEAVING_WORMHOLE; break;
+		}
+	}
+
+	return VETSB_CONTINUE;
+}

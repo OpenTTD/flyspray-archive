@@ -1,0 +1,415 @@
+diff --git a/src/cargopacket.cpp b/src/cargopacket.cpp
+index 355cabe..af11e5d 100644
+--- a/src/cargopacket.cpp
++++ b/src/cargopacket.cpp
+@@ -45,6 +45,21 @@ CargoPacket::CargoPacket(StationID source, uint16 count, SourceType source_type,
+ 	}
+ }
+ 
++/**
++ * cargo sorter compare method
++ */
++bool CargoSorter::operator()(const CargoPacket *cp1, const CargoPacket *cp2) const
++{
++	if (cp1->source_xy < cp2->source_xy) return true;
++	if (cp1->source_xy > cp2->source_xy) return false;
++	if (cp1->days_in_transit < cp2->days_in_transit) return true;
++	if (cp1->days_in_transit > cp2->days_in_transit) return false;
++	if (cp1->source_type < cp2->source_type) return true;
++	if (cp1->source_type > cp2->source_type) return false;
++
++	return false; // SameSource holds
++}
++
+ /*
+  *
+  * Cargo list implementation
+@@ -53,12 +68,22 @@ CargoPacket::CargoPacket(StationID source, uint16 count, SourceType source_type,
+ 
+ CargoList::~CargoList()
+ {
+-	while (!packets.empty()) {
+-		delete packets.front();
+-		packets.pop_front();
++	for (List::iterator i = packets.begin(); i != packets.end(); ++i) {
++		delete *i;
+ 	}
+ }
+ 
++void CargoList::Import(std::list<CargoPacket *> &imp) {
++	std::list<CargoPacket *>::iterator i = imp.begin();
++	for(;i != imp.end(); ++i) {
++		Append(*i);
++	}
++}
++
++void CargoList::Export(std::list<CargoPacket *> &exp) {
++	exp.insert(exp.begin(), packets.begin(), packets.end());
++}
++
+ void CargoList::AgeCargo()
+ {
+ 	if (empty) return;
+@@ -75,65 +100,71 @@ void CargoList::Append(CargoPacket *cp)
+ {
+ 	assert(cp != NULL);
+ 
+-	for (List::iterator it = packets.begin(); it != packets.end(); it++) {
+-		if ((*it)->SameSource(cp) && (*it)->count + cp->count <= 65535) {
+-			(*it)->count        += cp->count;
+-			(*it)->feeder_share += cp->feeder_share;
+-			delete cp;
+-
+-			InvalidateCache();
+-			return;
++	List::iterator it = packets.find(cp);
++	if (it != packets.end()) {
++		CargoPacket *old = *it;
++		if (old->count + cp->count > 65535) {
++			/* if a packet is that large it is simply truncated.
++			 * if that happens often, the "count" field needs to be extended.
++			 */
++			old->count = 65535;
++		} else {
++			old->count += cp->count;
+ 		}
++		old->feeder_share += cp->feeder_share;
++		delete cp;
++	} else {
++		/* The packet could not be merged with another one */
++		packets.insert(cp);
+ 	}
+-
+-	/* The packet could not be merged with another one */
+-	packets.push_back(cp);
+ 	InvalidateCache();
+ }
+ 
+ 
+ void CargoList::Truncate(uint count)
+ {
+-	for (List::iterator it = packets.begin(); it != packets.end(); it++) {
+-		uint local_count = (*it)->count;
+-		if (local_count <= count) {
+-			count -= local_count;
+-			continue;
++	bool cache_invalid = false;
++	for (List::iterator it = packets.begin(); it != packets.end();) {
++		if (count == 0) {
++			delete (*it);
++			packets.erase(it++);
++			cache_invalid = true;
++		} else {
++			uint16 &local_count = (*it)->count;
++			if (local_count <= count) {
++				count -= local_count;
++			} else {
++				local_count = count;
++				count = 0;
++				cache_invalid = true;
++			}
++			++it;
+ 		}
+-
+-		(*it)->count = count;
+-		count = 0;
+-	}
+-
+-	while (!packets.empty()) {
+-		CargoPacket *cp = packets.back();
+-		if (cp->count != 0) break;
+-		delete cp;
+-		packets.pop_back();
+ 	}
+ 
+-	InvalidateCache();
++	if (cache_invalid) InvalidateCache();
+ }
+ 
+ bool CargoList::MoveTo(CargoList *dest, uint count, CargoList::MoveToAction mta, CargoPayment *payment, uint data)
+ {
+ 	assert(mta == MTA_FINAL_DELIVERY || dest != NULL);
+ 	assert(mta == MTA_UNLOAD || mta == MTA_CARGO_LOAD || payment != NULL);
+-	CargoList tmp;
+ 
+-	while (!packets.empty() && count > 0) {
+-		CargoPacket *cp = *packets.begin();
++	uint orig_count = count;
++	List::iterator p_it = packets.begin();
++	while (p_it != packets.end() && count > 0) {
++		CargoPacket *cp = *p_it;
+ 		if (cp->count <= count) {
+ 			/* Can move the complete packet */
+-			packets.remove(cp);
+ 			switch (mta) {
+ 				case MTA_FINAL_DELIVERY:
+ 					if (cp->source == data) {
+-						tmp.Append(cp);
++						++p_it;
+ 					} else {
+ 						payment->PayFinalDelivery(cp, cp->count);
+ 						count -= cp->count;
+ 						delete cp;
++						packets.erase(p_it++);
+ 					}
+ 					continue; // of the loop
+ 
+@@ -148,8 +179,9 @@ bool CargoList::MoveTo(CargoList *dest, uint count, CargoList::MoveToAction mta,
+ 				case MTA_UNLOAD:
+ 					break;
+ 			}
++			packets.erase(p_it++);
+ 			count -= cp->count;
+-			dest->packets.push_back(cp);
++			dest->Append(cp);
+ 		} else {
+ 			/* Can move only part of the packet, so split it into two pieces */
+ 			if (mta != MTA_FINAL_DELIVERY) {
+@@ -169,7 +201,7 @@ bool CargoList::MoveTo(CargoList *dest, uint count, CargoList::MoveToAction mta,
+ 				cp_new->source_id       = cp->source_id;
+ 
+ 				cp_new->count = count;
+-				dest->packets.push_back(cp_new);
++				dest->Append(cp_new);
+ 
+ 				if (mta == MTA_TRANSFER) payment->PayTransfer(cp_new, count);
+ 			} else {
+@@ -181,18 +213,12 @@ bool CargoList::MoveTo(CargoList *dest, uint count, CargoList::MoveToAction mta,
+ 		}
+ 	}
+ 
+-	bool remaining = !packets.empty();
+-
+-	if (mta == MTA_FINAL_DELIVERY && !tmp.Empty()) {
+-		/* There are some packets that could not be delivered at the station, put them back */
+-		tmp.MoveTo(this, UINT_MAX, MTA_UNLOAD, NULL);
+-		tmp.packets.clear();
++	if (count != orig_count) {
++		if(dest != NULL) dest->InvalidateCache();
++		InvalidateCache();
+ 	}
+ 
+-	if (dest != NULL) dest->InvalidateCache();
+-	InvalidateCache();
+-
+-	return remaining;
++	return p_it != packets.end();
+ }
+ 
+ void CargoList::InvalidateCache()
+diff --git a/src/cargopacket.h b/src/cargopacket.h
+index de8268a..6818f46 100644
+--- a/src/cargopacket.h
++++ b/src/cargopacket.h
+@@ -10,6 +10,7 @@
+ #include "tile_type.h"
+ #include "station_type.h"
+ #include "cargo_type.h"
++#include <set>
+ #include <list>
+ 
+ typedef uint32 CargoPacketID;
+@@ -76,12 +77,21 @@ struct CargoPacket : CargoPacketPool::PoolItem<&_cargopacket_pool> {
+ extern const struct SaveLoad *GetGoodsDesc();
+ 
+ /**
++ * comparator for CargoList. Sorts cargo in the same way as CargoPacket::SameSource.
++ * Enables fast lookup of packets that can be merged.
++ */
++class CargoSorter {
++public:
++	bool operator()(const CargoPacket *cp1, const CargoPacket *cp2) const;
++};
++
++/**
+  * Simple collection class for a list of cargo packets
+  */
+ class CargoList {
+ public:
+ 	/** List of cargo packets */
+-	typedef std::list<CargoPacket *> List;
++	typedef std::set<CargoPacket *, CargoSorter> List;
+ 
+ 	/** Kind of actions that could be done with packets on move */
+ 	enum MoveToAction {
+@@ -103,6 +113,12 @@ private:
+ public:
+ 	friend const struct SaveLoad *GetGoodsDesc();
+ 
++	/** import cargo packets from a list (usually on loading) */
++	void Import(std::list<CargoPacket *> &imp);
++
++	/** export cargo packets into a list (usually on saving) */
++	void Export(std::list<CargoPacket *> &exp);
++
+ 	/** Create the cargo list */
+ 	FORCEINLINE CargoList() { this->InvalidateCache(); }
+ 	/** And destroy it ("frees" all cargo packets) */
+diff --git a/src/saveload/station_sl.cpp b/src/saveload/station_sl.cpp
+index e1b5470..a138181 100644
+--- a/src/saveload/station_sl.cpp
++++ b/src/saveload/station_sl.cpp
+@@ -16,6 +16,9 @@
+ #include "saveload.h"
+ #include "table/strings.h"
+ 
++#include <list>
++#include <map>
++
+ /**
+  * Update the buoy orders to be waypoint orders.
+  * @param o the order 'list' to check.
+@@ -185,6 +188,8 @@ static uint16 _cargo_source;
+ static uint32 _cargo_source_xy;
+ static uint16 _cargo_days;
+ static Money  _cargo_feeder_share;
++static std::list<CargoPacket *> _tmp_cargo;
++static std::map<StationID, std::map<CargoID, std::list<CargoPacket *> > > _tmp_cargo_lists;
+ 
+ static const SaveLoad _station_speclist_desc[] = {
+ 	SLE_CONDVAR(StationSpecList, grfid,    SLE_UINT32, 27, SL_MAX_VERSION),
+@@ -209,7 +214,7 @@ const SaveLoad *GetGoodsDesc()
+ 		     SLE_VAR(GoodsEntry, last_age,            SLE_UINT8),
+ 		SLEG_CONDVAR(            _cargo_feeder_share, SLE_FILE_U32 | SLE_VAR_I64, 14, 64),
+ 		SLEG_CONDVAR(            _cargo_feeder_share, SLE_INT64,                  65, 67),
+-		 SLE_CONDLST(GoodsEntry, cargo.packets,       REF_CARGO_PACKET,           68, SL_MAX_VERSION),
++		SLEG_CONDLST(            _tmp_cargo,          REF_CARGO_PACKET,           68, SL_MAX_VERSION),
+ 
+ 		SLE_END()
+ 	};
+@@ -229,9 +234,12 @@ static void Load_STNS()
+ 		_waiting_acceptance = 0;
+ 
+ 		uint num_cargo = CheckSavegameVersion(55) ? 12 : NUM_CARGO;
++		std::map<CargoID, std::list<CargoPacket *> > &cargo = _tmp_cargo_lists[st->index];
+ 		for (CargoID i = 0; i < num_cargo; i++) {
+ 			GoodsEntry *ge = &st->goods[i];
++			assert(_tmp_cargo.empty());
+ 			SlObject(ge, GetGoodsDesc());
++			_tmp_cargo.swap(cargo[i]);
+ 			if (CheckSavegameVersion(68)) {
+ 				SB(ge->acceptance_pickup, GoodsEntry::ACCEPTANCE, 1, HasBit(_waiting_acceptance, 15));
+ 				if (GB(_waiting_acceptance, 0, 12) != 0) {
+@@ -269,13 +277,19 @@ void Ptrs_STNS()
+ 	Station *st;
+ 	FOR_ALL_STATIONS(st) {
+ 		if (!CheckSavegameVersion(68)) {
++			std::map<CargoID, std::list<CargoPacket *> > &cargo = _tmp_cargo_lists[st->index];
+ 			for (CargoID i = 0; i < NUM_CARGO; i++) {
++				_tmp_cargo.swap(cargo[i]);
+ 				GoodsEntry *ge = &st->goods[i];
+ 				SlObject(ge, GetGoodsDesc());
++				ge->cargo.Import(_tmp_cargo);
+ 			}
+ 		}
+ 		SlObject(st, _old_station_desc);
+ 	}
++
++	_tmp_cargo.clear();
++	_tmp_cargo_lists.clear();
+ }
+ 
+ 
+@@ -353,7 +367,10 @@ static void RealSave_STNN(BaseStation *bst)
+ 	if (!waypoint) {
+ 		Station *st = Station::From(bst);
+ 		for (CargoID i = 0; i < NUM_CARGO; i++) {
+-			SlObject(&st->goods[i], GetGoodsDesc());
++			GoodsEntry *ge = &st->goods[i];
++			ge->cargo.Export(_tmp_cargo);
++			SlObject(ge, GetGoodsDesc());
++			_tmp_cargo.clear();
+ 		}
+ 	}
+ 
+@@ -384,8 +401,11 @@ static void Load_STNN()
+ 
+ 		if (!waypoint) {
+ 			Station *st = Station::From(bst);
++			std::map<CargoID, std::list<CargoPacket *> > &cargo = _tmp_cargo_lists[st->index];
+ 			for (CargoID i = 0; i < NUM_CARGO; i++) {
++				assert(_tmp_cargo.empty());
+ 				SlObject(&st->goods[i], GetGoodsDesc());
++				_tmp_cargo.swap(cargo[i]);
+ 			}
+ 		}
+ 
+@@ -406,9 +426,12 @@ static void Ptrs_STNN()
+ 
+ 	Station *st;
+ 	FOR_ALL_STATIONS(st) {
++		std::map<CargoID, std::list<CargoPacket *> > &cargo = _tmp_cargo_lists[st->index];
+ 		for (CargoID i = 0; i < NUM_CARGO; i++) {
++			_tmp_cargo.swap(cargo[i]);
+ 			GoodsEntry *ge = &st->goods[i];
+ 			SlObject(ge, GetGoodsDesc());
++			ge->cargo.Import(_tmp_cargo);
+ 		}
+ 		SlObject(st, _station_desc);
+ 	}
+@@ -417,6 +440,9 @@ static void Ptrs_STNN()
+ 	FOR_ALL_WAYPOINTS(wp) {
+ 		SlObject(wp, _waypoint_desc);
+ 	}
++
++	_tmp_cargo.clear();
++	_tmp_cargo_lists.clear();
+ }
+ 
+ static void Save_ROADSTOP()
+diff --git a/src/saveload/vehicle_sl.cpp b/src/saveload/vehicle_sl.cpp
+index fca25a6..893cb21 100644
+--- a/src/saveload/vehicle_sl.cpp
++++ b/src/saveload/vehicle_sl.cpp
+@@ -387,6 +387,8 @@ static uint16 _cargo_count;
+ static uint16 _cargo_paid_for;
+ static Money  _cargo_feeder_share;
+ static uint32 _cargo_loaded_at_xy;
++static std::list<CargoPacket *> _tmp_cargo;
++static std::map<VehicleID, std::list<CargoPacket *> > _tmp_cargo_lists;
+ 
+ /**
+  * Make it possible to make the saveload tables "friends" of other classes.
+@@ -440,7 +442,7 @@ const SaveLoad *GetVehicleDescription(VehicleType vt)
+ 		SLEG_CONDVAR(         _cargo_source_xy,      SLE_UINT32,                  44,  67),
+ 		     SLE_VAR(Vehicle, cargo_cap,             SLE_UINT16),
+ 		SLEG_CONDVAR(         _cargo_count,          SLE_UINT16,                   0,  67),
+-		 SLE_CONDLST(Vehicle, cargo,                 REF_CARGO_PACKET,            68, SL_MAX_VERSION),
++		SLEG_CONDLST(         _tmp_cargo,            REF_CARGO_PACKET,            68, SL_MAX_VERSION),
+ 
+ 		     SLE_VAR(Vehicle, day_counter,           SLE_UINT8),
+ 		     SLE_VAR(Vehicle, tick_counter,          SLE_UINT8),
+@@ -680,7 +682,9 @@ static void Save_VEHS()
+ 	/* Write the vehicles */
+ 	FOR_ALL_VEHICLES(v) {
+ 		SlSetArrayIndex(v->index);
++		v->cargo.Export(_tmp_cargo);
+ 		SlObject(v, GetVehicleDescription(v->type));
++		_tmp_cargo.clear();
+ 	}
+ }
+ 
+@@ -706,7 +710,9 @@ void Load_VEHS()
+ 			default: NOT_REACHED();
+ 		}
+ 
++		assert(_tmp_cargo.empty());
+ 		SlObject(v, GetVehicleDescription(vtype));
++		_tmp_cargo.swap(_tmp_cargo_lists[v->index]);
+ 
+ 		if (_cargo_count != 0 && IsCompanyBuildableVehicleType(v)) {
+ 			/* Don't construct the packet with station here, because that'll fail with old savegames */
+@@ -740,8 +746,13 @@ void Ptrs_VEHS()
+ {
+ 	Vehicle *v;
+ 	FOR_ALL_VEHICLES(v) {
++		_tmp_cargo.swap(_tmp_cargo_lists[v->index]);
+ 		SlObject(v, GetVehicleDescription(v->type));
++		v->cargo.Import(_tmp_cargo);
+ 	}
++
++	_tmp_cargo.clear();
++	_tmp_cargo_lists.clear();
+ }
+ 
+ extern const ChunkHandler _veh_chunk_handlers[] = {

@@ -1,0 +1,86 @@
+Index: src/misc_gui.cpp
+===================================================================
+--- src/misc_gui.cpp	(revision 18684)
++++ src/misc_gui.cpp	(working copy)
+@@ -1284,7 +1284,12 @@
+ 
+ HandleEditBoxResult QueryStringBaseWindow::HandleEditBoxKey(int wid, uint16 key, uint16 keycode, EventState &state)
+ {
+-	return this->QueryString::HandleEditBoxKey(this, wid, key, keycode, state);
++	HandleEditBoxResult result = this->QueryString::HandleEditBoxKey(this, wid, key, keycode, state);
++
++	if (result == HEBR_CANCEL)
++		this->UnfocusFocusedWidget();
++
++	return result;
+ }
+ 
+ void QueryStringBaseWindow::HandleEditBox(int wid)
+Index: src/window.cpp
+===================================================================
+--- src/window.cpp	(revision 18684)
++++ src/window.cpp	(working copy)
+@@ -166,6 +166,29 @@
+ }
+ 
+ /**
++ * Focus the next widget that accepts keyboard input.
++ */
++void Window::FocusNextEditWidget()
++{
++	/* Start looking for next edit box on the next widget index or first if no widget has focus */
++	const uint start_find_at = this->nested_focus == NULL? 0 : this->nested_focus->index + 1;
++
++	/* If there is no focused widget, one more widget has to be searched */
++	const uint num_loops = this->nested_focus == NULL? this->nested_array_size : this->nested_array_size - 1;
++
++	for (uint i = 0; i < num_loops; i++) {
++		const uint widget_index = (start_find_at + i) % this->nested_array_size;
++		const NWidgetCore *widget = this->GetWidget<NWidgetCore>(widget_index);
++
++		/* Focus next edit box */
++		if (widget != NULL && widget->type == WWT_EDITBOX) {
++			this->SetFocusedWidget(widget_index);
++			return;
++		}
++	}
++}
++
++/**
+  * Sets the enabled/disabled status of a list of widgets.
+  * By default, widgets are enabled.
+  * On certain conditions, they have to be disabled.
+@@ -1919,7 +1942,20 @@
+ 	Window *w;
+ 	FOR_ALL_WINDOWS_FROM_FRONT(w) {
+ 		if (w->window_class == WC_MAIN_TOOLBAR) continue;
+-		if (w->OnKeyPress(key, keycode) == Window::ES_HANDLED) return;
++		if (_focused_window == w) {
++			switch (keycode) {
++				case WKC_CTRL | WKC_TAB:
++					w->FocusNextEditWidget();
++					break;
++
++				default:
++					if (w->OnKeyPress(key, keycode) == Window::ES_HANDLED) return;
++			}
++		}
++		else
++		{
++			if (w->OnKeyPress(key, keycode) == Window::ES_HANDLED) return;
++		}
+ 	}
+ 
+ 	w = FindWindowById(WC_MAIN_TOOLBAR, 0);
+Index: src/window_gui.h
+===================================================================
+--- src/window_gui.h	(revision 18684)
++++ src/window_gui.h	(working copy)
+@@ -521,6 +521,7 @@
+ 
+ 	void UnfocusFocusedWidget();
+ 	bool SetFocusedWidget(byte widget_index);
++	void FocusNextEditWidget();
+ 
+ 	void HandleButtonClick(byte widget);
+ 

@@ -1,0 +1,598 @@
+Index: viewport.c
+===================================================================
+--- viewport.c	(revision 6470)
++++ viewport.c	(working copy)
+@@ -2227,7 +2227,6 @@
+ 	_thd.make_square_red = false;
+ 
+ 	if (mode == VHM_DRAG) { // mode 4 is for dragdropping trains in the depot window
+-		mode = 0;
+ 		_special_mouse_mode = WSM_DRAGDROP;
+ 	} else {
+ 		_special_mouse_mode = WSM_NONE;
+@@ -2248,5 +2247,7 @@
+ 
+ void ResetObjectToPlace(void)
+ {
++	// just 1 cursor sprite
++	_cursor.num_sprites = 0;
+ 	SetObjectToPlace(SPR_CURSOR_MOUSE, VHM_NONE, 0, 0);
+ }
+Index: gfx.c
+===================================================================
+--- gfx.c	(revision 6470)
++++ gfx.c	(working copy)
+@@ -25,7 +25,6 @@
+ 
+ FontSize _cur_fontsize;
+ static FontSize _last_fontsize;
+-static Pixel _cursor_backup[64 * 64];
+ static Rect _invalid_rect;
+ static const byte *_color_remap_ptr;
+ static byte _string_colorremap[3];
+@@ -1660,6 +1659,7 @@
+ 	int y;
+ 	int w;
+ 	int h;
++	int extra_sprite = 0;
+ 
+ 	/* Redraw mouse cursor but only when it's inside the window */
+ 	if (!_cursor.in_window) return;
+@@ -1700,10 +1700,16 @@
+ 		_screen.dst_ptr + _cursor.draw_pos.x + _cursor.draw_pos.y * _screen.pitch,
+ 		_cursor.draw_size.x, _cursor.draw_size.y, _screen.pitch, _cursor.draw_size.x);
+ 
+-	// Draw cursor on screen
++	// Draw the main cursor sprite on screen
+ 	_cur_dpi = &_screen;
++
+ 	DrawSprite(_cursor.sprite, _cursor.pos.x, _cursor.pos.y);
+ 
++	// draw extra cursor sprites on screen
++	for (extra_sprite = 0; extra_sprite < _cursor.num_sprites; extra_sprite++) {
++		DrawSprite(_cursor.sprite2[extra_sprite], _cursor.pos.x + _cursor.sprite2_offs[extra_sprite].x, _cursor.pos.y + _cursor.sprite2_offs[extra_sprite].y);
++	}
++
+ 	_video_driver->make_dirty(_cursor.draw_pos.x, _cursor.draw_pos.y, _cursor.draw_size.x, _cursor.draw_size.y);
+ 
+ 	_cursor.visible = true;
+@@ -1921,17 +1927,20 @@
+ static void SetCursorSprite(CursorID cursor)
+ {
+ 	CursorVars *cv = &_cursor;
+-	const Sprite *p;
+ 
+ 	if (cv->sprite == cursor) return;
+-
+-	p = GetSprite(cursor & SPRITE_MASK);
+ 	cv->sprite = cursor;
+-	cv->size.y = p->height;
+-	cv->size.x = p->width;
+-	cv->offs.x = p->x_offs;
+-	cv->offs.y = p->y_offs;
+ 
++	if (!_cursor.num_sprites) {
++	// no extra cursor sprites so reset cursor variables
++		const Sprite *p;
++		p = GetSprite(cursor & SPRITE_MASK);
++		cv->size.y = p->height;
++		cv->size.x = p->width;
++		cv->offs.x = p->x_offs;
++		cv->offs.y = p->y_offs;
++	}
++
+ 	cv->dirty = true;
+ }
+ 
+Index: gfx.h
+===================================================================
+--- gfx.h	(revision 6470)
++++ gfx.h	(working copy)
+@@ -12,11 +12,16 @@
+ 	uint16 zoom;
+ };
+ 
+-
++enum {
++	MAX_CURSOR_SPRITES = 12,	// arbitrary choice
++};
+ typedef struct CursorVars {
+ 	Point pos, size, offs, delta; ///< position, size, offset from top-left, and movement
+ 	Point draw_pos, draw_size;    ///< position and size bounding-box for drawing
+-	CursorID sprite; ///< current image of cursor
++	CursorID sprite; ///< current, (main) cursor image
++	int num_sprites; ///< number of extra cursor sprites
++	CursorID sprite2[MAX_CURSOR_SPRITES]; ///< array of extra cursor sprites
++	Point sprite2_offs[MAX_CURSOR_SPRITES]; ///< array of extra cursor sprites' offsets
+ 
+ 	int wheel;       ///< mouse wheel movement
+ 	const CursorID *animate_list, *animate_cur; ///< in case of animated cursor, list of frames
+@@ -36,7 +41,6 @@
+ 	FS_END,
+ } FontSize;
+ 
+-
+ void RedrawScreenRect(int left, int top, int right, int bottom);
+ void GfxScroll(int left, int top, int width, int height, int xo, int yo);
+ 
+@@ -164,4 +168,6 @@
+ extern bool _dbg_screen_rect;
+ #endif
+ 
++VARDEF Pixel _cursor_backup[64 * 64];
++
+ #endif /* GFX_H */
+Index: aircraft_gui.c
+===================================================================
+--- aircraft_gui.c	(revision 6470)
++++ aircraft_gui.c	(working copy)
+@@ -812,16 +812,16 @@
+ 
+ 	case WE_CLICK:
+ 		switch (e->click.widget) {
+-			case 5: /* click aircraft */
++			case 5: // click aircraft
+ 				AircraftDepotClickAircraft(w, e->click.pt.x, e->click.pt.y);
+ 				break;
+ 
+-			case 7: /* show build aircraft window */
++			case 7: // show build aircraft window
+ 				ResetObjectToPlace();
+ 				ShowBuildAircraftWindow(w->window_number);
+ 				break;
+ 
+-			case 8: /* clone button */
++			case 8: // clone button
+ 				InvalidateWidget(w, 8);
+ 				TOGGLEBIT(w->click_state, 8);
+ 
+@@ -842,8 +842,13 @@
+ 		break;
+ 
+ 	case WE_ABORT_PLACE_OBJ:
++		// abort clone object mode
+ 		CLRBIT(w->click_state, 8);
+ 		InvalidateWidget(w, 8);
++
++		// cancel dragging
++		WP(w, traindepot_d).sel = INVALID_VEHICLE;
++		SetWindowDirty(w);
+ 		break;
+ 
+ 	// check if a vehicle in a depot was clicked..
+@@ -894,6 +899,7 @@
+ 					_backup_orders_tile = 0;
+ 			}
+ 			break;
++
+ 		default:
+ 			WP(w,traindepot_d).sel = INVALID_VEHICLE;
+ 			SetWindowDirty(w);
+Index: roadveh_gui.c
+===================================================================
+--- roadveh_gui.c	(revision 6470)
++++ roadveh_gui.c	(working copy)
+@@ -770,19 +770,19 @@
+ 			ShowBuildRoadVehWindow(w->window_number);
+ 			break;
+ 
+-		case 8: /* clone button */
++		case 8: // clone button
+ 			InvalidateWidget(w, 8);
+-				TOGGLEBIT(w->click_state, 8);
++			TOGGLEBIT(w->click_state, 8);
+ 
+-				if (HASBIT(w->click_state, 8)) {
+-					_place_clicked_vehicle = NULL;
+-					SetObjectToPlaceWnd(SPR_CURSOR_CLONE, VHM_RECT, w);
+-				} else {
+-					ResetObjectToPlace();
+-				}
+-					break;
++			if (HASBIT(w->click_state, 8)) {
++				_place_clicked_vehicle = NULL;
++				SetObjectToPlaceWnd(SPR_CURSOR_CLONE, VHM_RECT, w);
++			} else {
++				ResetObjectToPlace();
++			}
++			break;
+ 
+-			case 9: ScrollMainWindowToTile(w->window_number); break;
++		case 9: ScrollMainWindowToTile(w->window_number); break;
+ 		}
+ 	} break;
+ 
+@@ -791,8 +791,13 @@
+ 		break;
+ 
+ 	case WE_ABORT_PLACE_OBJ:
++		// abort clone object mode
+ 		CLRBIT(w->click_state, 8);
+ 		InvalidateWidget(w, 8);
++
++		// cancel dragging
++		WP(w,traindepot_d).sel = INVALID_VEHICLE;
++		SetWindowDirty(w);
+ 		break;
+ 
+ 	// check if a vehicle in a depot was clicked..
+@@ -851,12 +856,11 @@
+ 		break;
+ 
+ 	case WE_RESIZE:
+-		/* Update the scroll + matrix */
++		// Update the scroll + matrix
+ 		w->vscroll.cap += e->sizing.diff.y / 14;
+ 		w->hscroll.cap += e->sizing.diff.x / 56;
+ 		w->widget[5].data = (w->vscroll.cap << 8) + w->hscroll.cap;
+ 		break;
+-
+ 	}
+ }
+ 
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 6470)
++++ train_gui.c	(working copy)
+@@ -22,6 +22,7 @@
+ #include "train.h"
+ #include "newgrf_engine.h"
+ #include "date.h"
++#include "spritecache.h"
+ 
+ /**
+  * Draw the purchase info details of train engine at a given location.
+@@ -357,7 +358,7 @@
+ {
+ 	DrawPixelInfo tmp_dpi, *old_dpi;
+ 	int dx = -(skip * 8) / _traininfo_vehicle_width;
+-	/* Position of highlight box */
++	// position of highlight box
+ 	int highlight_l = 0;
+ 	int highlight_r = 0;
+ 
+@@ -376,9 +377,13 @@
+ 				PalSpriteID pal = (v->vehstatus & VS_CRASHED) ? PALETTE_CRASH : GetVehiclePalette(v);
+ 				DrawSprite(GetTrainImage(v, DIR_W) | pal, 16 + WagonLengthToPixels(dx), 7 + (is_custom_sprite(RailVehInfo(v->engine_type)->image_index) ? _traininfo_vehicle_pitch : 0));
+ 				if (v->index == selection) {
+-					/* Set the highlight position */
++					// set the highlight position
+ 					highlight_l = WagonLengthToPixels(dx) + 1;
+-					highlight_r = WagonLengthToPixels(dx + width) + 1;
++
++					if (!_ctrl_pressed) {
++						// set highlight_r immediately if ctrl key is not pressed
++						highlight_r = WagonLengthToPixels(dx + width) + 1;
++					}
+ 				}
+ 			}
+ 		}
+@@ -388,8 +393,11 @@
+ 	} while (dx < count && v != NULL);
+ 
+ 	if (highlight_l != highlight_r) {
+-		/* Draw the highlight. Now done after drawing all the engines, as
+-		 * the next engine after the highlight could overlap it. */
++		// if ctrl key was pressed, we need to set highlight_r
++		if (highlight_r == 0) highlight_r = WagonLengthToPixels(dx) + 1;
++
++		/* draw the highlight; done after drawing all the vehicles, as 
++		the next vehicle after the highlight could overlap it */
+ 		DrawFrameRect(highlight_l, 0, highlight_r, 13, 15, FR_BORDERONLY);
+ 	}
+ 
+@@ -482,6 +490,88 @@
+ 	}
+ }
+ 
++static void SetDepotWndDragCursor(Window *w, Vehicle *v) {
++	// loop and array index
++	int extra_sprite = 0;
++	// train length
++	int train_x = 0;
++	// new cursor sprite offset
++	int y_offs;
++
++	Vehicle *u;
++	const Sprite *head_sprite, *current_sprite;
++	SpriteID head = GetTrainImage(v, DIR_W);
++
++	// the main cursor sprite
++	head_sprite = GetSprite(head & SPRITE_MASK);
++
++	u = v;
++	// set the cursor attributes based on the main sprite
++	_cursor.size.y = head_sprite->height;
++	_cursor.offs.x = head_sprite->x_offs;
++	_cursor.offs.y = head_sprite->y_offs;
++	y_offs = head_sprite->y_offs;
++	// move to next vehicle in train
++	u = u->next;
++	// update the depot window ctrl key status
++	WP(w,traindepot_d).ctrl_key_status = _ctrl_pressed;
++	if (_ctrl_pressed && u != NULL) {
++	// ctrl key is pressed and there is another vehicle in the train
++		do {
++			int required_cursor_backup_size, required_cursor_size_y;
++			// get the size of the cursor buffer space
++			int sizeof_cursor_backup = (int)sizeof(_cursor_backup);
++			int width = u->u.rail.cached_veh_length;
++
++			// get the current vehicle's sprite
++			SpriteID s = GetTrainImage(u, DIR_W);
++			current_sprite = GetSprite(s & SPRITE_MASK);
++
++			// check if _cursor.size.y would need to be bigger to accommodate the current sprite
++			required_cursor_size_y = clamp(_cursor.size.y, current_sprite->height, _cursor.size.y);
++			// calculate the required cursor buffer size, if the latest sprite is to be included
++			required_cursor_backup_size = WagonLengthToPixels(v->u.rail.cached_veh_length + train_x + width) * required_cursor_size_y;
++			if (required_cursor_backup_size < sizeof_cursor_backup) {
++			// we have enough cursor buffer space for this sprite
++				_cursor.sprite2[extra_sprite] = GetVehiclePalette(u) | s;
++				_cursor.sprite2_offs[extra_sprite].x = WagonLengthToPixels(v->u.rail.cached_veh_length + train_x);
++				_cursor.sprite2_offs[extra_sprite].y = is_custom_sprite(RailVehInfo(u->engine_type)->image_index) ? _traininfo_vehicle_pitch : 0;
++
++				_cursor.size.y = required_cursor_size_y;
++
++				// use the latest sprite's y_offs if it is lower
++				if (y_offs > current_sprite->y_offs) y_offs = current_sprite->y_offs;
++
++				// next iteration
++				extra_sprite++;
++				u = u->next;
++				// increase train sprites' cumulative width
++				train_x += width;
++			} else {
++			// we have filled up the cursor buffer space
++				break;
++			}
++		} while ((extra_sprite < MAX_CURSOR_SPRITES) && (u != NULL));
++		// while we have slots available for more sprites and there is another vehicle in the train
++	}
++
++	_cursor.num_sprites = extra_sprite;
++
++	// add any difference, if we looped through extra vehicle sprites
++	_cursor.offs.y += y_offs - head_sprite->y_offs;
++
++	// set another cursor attribute
++	_cursor.size.x = WagonLengthToPixels(v->u.rail.cached_veh_length + train_x);
++
++	if (_cursor.sprite != (GetVehiclePalette(v) | head)) {
++	// main cursor sprite needs setting
++		SetObjectToPlaceWnd(GetVehiclePalette(v) | head, 4, w);
++	} else {
++	// cursor is dirty
++		_cursor.dirty = true;
++	}
++}
++
+ typedef struct GetDepotVehiclePtData {
+ 	Vehicle *head;
+ 	Vehicle *wagon;
+@@ -599,7 +689,8 @@
+ 			TrainDepotMoveVehicle(v, sel, gdvp.head);
+ 		} else if (v != NULL) {
+ 			WP(w,traindepot_d).sel = v->index;
+-			SetObjectToPlaceWnd(GetVehiclePalette(v) | GetTrainImage(v, DIR_W), 4, w);
++			// set the cursor sprite(s)
++			SetDepotWndDragCursor(w, v);
+ 			SetWindowDirty(w);
+ 		}
+ 		break;
+@@ -659,12 +750,13 @@
+ 			ShowBuildTrainWindow(w->window_number);
+ 			break;
+ 
+-			case 10: ScrollMainWindowToTile(w->window_number); break;
++		case 10: ScrollMainWindowToTile(w->window_number); break;
+ 
+ 		case 6:
+ 			TrainDepotClickTrain(w, e->click.pt.x, e->click.pt.y);
+ 			break;
+-		case 9: /* clone button */
++
++		case 9: // clone button
+ 			InvalidateWidget(w, 9);
+ 			TOGGLEBIT(w->click_state, 9);
+ 
+@@ -675,7 +767,6 @@
+ 				ResetObjectToPlace();
+ 			}
+ 			break;
+-
+ 		}
+ 	} break;
+ 
+@@ -684,8 +775,14 @@
+ 		break;
+ 
+ 	case WE_ABORT_PLACE_OBJ:
++		// abort clone object mode
+ 		CLRBIT(w->click_state, 9);
+ 		InvalidateWidget(w, 9);
++
++		// cancel dragging
++		WP(w, traindepot_d).sel = INVALID_VEHICLE;
++		_cursor.num_sprites = 0;
++		SetWindowDirty(w);
+ 		break;
+ 
+ 	// check if a vehicle in a depot was clicked..
+@@ -697,9 +794,24 @@
+ 			_place_clicked_vehicle = NULL;
+ 			HandleCloneVehClick(v, w);
+ 		}
++
++		if (_ctrl_pressed != WP(w,traindepot_d).ctrl_key_status) {
++		// XXX: WE_KEYPRESS is not triggered by toggling of ctrl key, so test for it here
++			VehicleID selection = WP(w,traindepot_d).sel;
++
++			WP(w,traindepot_d).ctrl_key_status = _ctrl_pressed;
++
++			if (selection != INVALID_VEHICLE) {
++				Vehicle *x;
++				x = GetVehicle(selection);
++				// update the cursor sprite(s)
++				SetDepotWndDragCursor(w, x);
++				// redraw highlight around selected vehicle(s) for drag/drop
++				SetWindowDirty(w);
++			}
++		}
+ 	} break;
+ 
+-
+ 	case WE_DESTROY:
+ 		DeleteWindowById(WC_BUILD_VEHICLE, w->window_number);
+ 		break;
+@@ -710,7 +822,7 @@
+ 			Vehicle *v;
+ 			int sell_cmd;
+ 
+-			/* sell vehicle */
++			// sell vehicle
+ 			if (w->disabled_state & (1 << e->click.widget))
+ 				return;
+ 
+@@ -760,9 +872,10 @@
+ 			SetWindowDirty(w);
+ 			break;
+ 		}
+-		} break;
++	} break;
++
+ 	case WE_RESIZE: {
+-		/* Update the scroll + matrix */
++		// Update the scroll + matrix
+ 		w->vscroll.cap += e->sizing.diff.y / 14;
+ 		w->hscroll.cap += e->sizing.diff.x;
+ 		w->widget[6].data = (w->vscroll.cap << 8) + 1;
+Index: window.c
+===================================================================
+--- window.c	(revision 6470)
++++ window.c	(working copy)
+@@ -426,7 +426,7 @@
+ 
+ 	/* XXX - This very strange construction makes sure that the chatbar is always
+ 	 * on top of other windows. Why? It is created as last_window (so, on top).
+-	 * Any other window will go below toolbar/statusbar/news window, which implicitely
++	 * Any other window will go below toolbar/statusbar/news window, which implicitly
+ 	 * also means it is below the chatbar. Very likely needs heavy improvement
+ 	 * to de-braindeadize */
+ 	if (w != _windows && cls != WC_SEND_NETWORK_MSG) {
+@@ -795,8 +795,6 @@
+ 
+ 	w = GetCallbackWnd();
+ 
+-	ResetObjectToPlace();
+-
+ 	if (w != NULL) {
+ 		// send an event in client coordinates.
+ 		e.event = WE_DRAGDROP;
+@@ -805,6 +803,9 @@
+ 		e.dragdrop.widget = GetWidgetFromPos(w, e.dragdrop.pt.x, e.dragdrop.pt.y);
+ 		w->wndproc(w, &e);
+ 	}
++
++	ResetObjectToPlace();
++
+ 	return false;
+ }
+ 
+@@ -1271,12 +1272,12 @@
+ {
+ 	Window *w;
+ 	WindowEvent we;
+-	/* Stores if a window with a textfield for typing is open
+-	 * If this is the case, keypress events are only passed to windows with text fields and
+-	 * to thein this main toolbar. */
++	/* stores if a window with a text-field for typing is open
++	 * If this is the case, keypress events are only passed to windows with text-fields and
++	 * to the main toolbar. */
+ 	bool query_open = false;
+ 
+-	// Setup event
++	// setup event
+ 	we.keypress.event = WE_KEYPRESS;
+ 	we.keypress.ascii = key & 0xFF;
+ 	we.keypress.keycode = key >> 16;
+@@ -1291,7 +1292,7 @@
+ 		query_open = true;
+ 	}
+ 
+-	// Call the event, start with the uppermost window.
++	// call the event; start with the uppermost window
+ 	for (w = _last_window; w != _windows;) {
+ 		--w;
+ 		// if a query window is open, only call the event for certain window types
+Index: ship_gui.c
+===================================================================
+--- ship_gui.c	(revision 6470)
++++ ship_gui.c	(working copy)
+@@ -761,29 +761,33 @@
+ 			ShowBuildShipWindow(w->window_number);
+ 			break;
+ 
+-			case 8: /* clone button */
++		case 8: // clone button
+ 			InvalidateWidget(w, 8);
+-				TOGGLEBIT(w->click_state, 8);
++			TOGGLEBIT(w->click_state, 8);
+ 
+-				if (HASBIT(w->click_state, 8)) {
+-					_place_clicked_vehicle = NULL;
+-					SetObjectToPlaceWnd(SPR_CURSOR_CLONE, VHM_RECT, w);
+-				} else {
+-					ResetObjectToPlace();
+-				}
+-					break;
++			if (HASBIT(w->click_state, 8)) {
++				_place_clicked_vehicle = NULL;
++				SetObjectToPlaceWnd(SPR_CURSOR_CLONE, VHM_RECT, w);
++			} else {
++				ResetObjectToPlace();
++			}
++			break;
+ 
+-			case 9: ScrollMainWindowToTile(w->window_number); break;
+-		}
+-		break;
++		case 9: ScrollMainWindowToTile(w->window_number); break;
++		} break;
+ 
+ 	case WE_PLACE_OBJ: {
+ 		ClonePlaceObj(w);
+ 	} break;
+ 
+ 	case WE_ABORT_PLACE_OBJ: {
++		// abort clone object mode
+ 		CLRBIT(w->click_state, 8);
+ 		InvalidateWidget(w, 8);
++
++		// cancel dragging
++		WP(w, traindepot_d).sel = INVALID_VEHICLE;
++		SetWindowDirty(w);
+ 	} break;
+ 
+ 	// check if a vehicle in a depot was clicked..
+@@ -834,6 +838,7 @@
+ 					_backup_orders_tile = 0;
+ 			}
+ 			break;
++
+ 		default:
+ 			WP(w,traindepot_d).sel = INVALID_VEHICLE;
+ 			SetWindowDirty(w);
+Index: window.h
+===================================================================
+--- window.h	(revision 6470)
++++ window.h	(working copy)
+@@ -379,6 +379,8 @@
+ 
+ typedef struct {
+ 	VehicleID sel;
++	// used to track whether the ctrl key was toggled, so that drap/drop highlight can be redrawn
++	bool ctrl_key_status;
+ } traindepot_d;
+ assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(traindepot_d));
+ 

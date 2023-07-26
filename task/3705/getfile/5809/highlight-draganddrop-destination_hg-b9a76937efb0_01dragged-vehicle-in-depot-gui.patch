@@ -1,0 +1,119 @@
+diff -r 50c89d44e35c src/depot_gui.cpp
+--- a/src/depot_gui.cpp	Fri Mar 19 13:54:58 2010 +0100
++++ b/src/depot_gui.cpp	Fri Mar 19 13:55:01 2010 +0100
+@@ -212,6 +212,7 @@
+ 	bool generate_list;
+ 	VehicleList vehicle_list;
+ 	VehicleList wagon_list;
++	VehicleID vehicle_over;
+ 
+ 	DepotWindow(const WindowDesc *desc, TileIndex tile, VehicleType type) : Window()
+ 	{
+@@ -220,6 +221,7 @@
+ 		this->sel = INVALID_VEHICLE;
+ 		this->generate_list = true;
+ 		this->type = type;
++		this->vehicle_over = INVALID_VEHICLE;
+ 
+ 		this->CreateNestedTree(desc);
+ 		this->SetupWidgetData(type);
+@@ -256,7 +258,7 @@
+ 				free_wagon = u->IsFreeWagon();
+ 
+ 				uint x_space = free_wagon ? TRAININFO_DEFAULT_VEHICLE_WIDTH : 0;
+-				DrawTrainImage(u, image_left + (rtl ? 0 : x_space), image_right - (rtl ? x_space : 0), sprite_y - 1, this->sel, free_wagon ? 0 : this->hscroll.GetPosition());
++				DrawTrainImage(u, image_left + (rtl ? 0 : x_space), image_right - (rtl ? x_space : 0), sprite_y - 1, this->sel, free_wagon ? 0 : this->hscroll.GetPosition(), this->vehicle_over);
+ 
+ 				/* Number of wagons relative to a standard length wagon (rounded up) */
+ 				SetDParam(0, (u->tcache.cached_total_length + 7) / 8);
+@@ -855,6 +857,7 @@
+ 
+ 		/* abort drag & drop */
+ 		this->sel = INVALID_VEHICLE;
++		this->vehicle_over = INVALID_VEHICLE;
+ 		this->SetWidgetDirty(DEPOT_WIDGET_MATRIX);
+ 	};
+ 
+@@ -870,6 +873,36 @@
+ 		}
+ 	}
+ 
++	virtual void OnMouseDrag(Point pt, int widget)
++	{
++		if (this->type == VEH_TRAIN && this->sel != INVALID_VEHICLE) {
++			/* We are dragging a rail vehicle. */
++
++			if (widget != DEPOT_WIDGET_MATRIX) return;
++
++			NWidgetBase *nwi = this->GetWidget<NWidgetBase>(widget);
++			const Vehicle *v = NULL;
++			GetDepotVehiclePtData gdvp = { NULL, NULL };
++
++			if (this->GetVehicleFromDepotWndPt(pt.x - nwi->pos_x, pt.y - nwi->pos_y, &v, &gdvp) != MODE_DRAG_VEHICLE) return;
++
++			VehicleID new_vehicle_over = INVALID_VEHICLE;
++
++			if (gdvp.head != NULL && gdvp.wagon != NULL && 
++					gdvp.head != gdvp.wagon && 
++					gdvp.wagon->index != this->sel && 
++					gdvp.wagon->Previous()->index != this->sel) {
++				/* Drag over an existing wagon */
++				new_vehicle_over = gdvp.wagon->index;
++			}
++
++			if (this->vehicle_over == new_vehicle_over) return;
++
++			this->vehicle_over = new_vehicle_over;
++			this->SetWidgetDirty(DEPOT_WIDGET_MATRIX);
++		}
++	}
++
+ 	virtual void OnDragDrop(Point pt, int widget)
+ 	{
+ 		switch (widget) {
+@@ -889,6 +922,7 @@
+ 							DoCommandP(Vehicle::Get(sel)->tile, Vehicle::Get(sel)->index, true,
+ 									CMD_REVERSE_TRAIN_DIRECTION | CMD_MSG(STR_ERROR_CAN_T_REVERSE_DIRECTION_RAIL_VEHICLE));
+ 						} else if (gdvp.wagon == NULL || gdvp.wagon->index != sel) {
++							this->vehicle_over = INVALID_VEHICLE;
+ 							TrainDepotMoveVehicle(gdvp.wagon, sel, gdvp.head);
+ 						} else if (gdvp.head != NULL && Train::From(gdvp.head)->IsFrontEngine()) {
+ 							ShowVehicleViewWindow(gdvp.head);
+diff -r 50c89d44e35c src/train_gui.cpp
+--- a/src/train_gui.cpp	Fri Mar 19 13:54:58 2010 +0100
++++ b/src/train_gui.cpp	Fri Mar 19 13:55:01 2010 +0100
+@@ -56,8 +56,9 @@
+  * @param y         Vertical position to draw at
+  * @param selection Selected vehicle to draw a frame around
+  * @param skip      Number of pixels to skip at the front (for scrolling)
++ * @param drag_dest The vehicle we are currently dragging another one over
+  */
+-void DrawTrainImage(const Train *v, int left, int right, int y, VehicleID selection, int skip)
++void DrawTrainImage(const Train *v, int left, int right, int y, VehicleID selection, int skip, VehicleID drag_dest)
+ {
+ 	bool rtl = _dynlang.text_dir == TD_RTL;
+ 	Direction dir = rtl ? DIR_E : DIR_W;
+@@ -79,6 +80,11 @@
+ 		Point offset;
+ 		int width = Train::From(v)->GetDisplayImageWidth(&offset);
+ 
++		if (drag_dest != INVALID_VEHICLE && drag_dest == v->index) {
++			/* Highlight the drag & drop destination inside train: insert a 5px wide space. */
++			px += rtl ? -5 : 5;
++		}
++
+ 		if (rtl ? px + width > 0 : px - width < max_width) {
+ 			PaletteID pal = (v->vehstatus & VS_CRASHED) ? PALETTE_CRASH : GetVehiclePalette(v);
+ 			DrawSprite(v->GetImage(dir), pal, px + (rtl ? -offset.x : offset.x), 7 + offset.y);
+diff -r 50c89d44e35c src/vehicle_gui.h
+--- a/src/vehicle_gui.h	Fri Mar 19 13:54:58 2010 +0100
++++ b/src/vehicle_gui.h	Fri Mar 19 13:55:01 2010 +0100
+@@ -64,7 +64,7 @@
+ 
+ int DrawVehiclePurchaseInfo(int left, int right, int y, EngineID engine_number);
+ 
+-void DrawTrainImage(const Train *v, int left, int right, int y, VehicleID selection, int skip);
++void DrawTrainImage(const Train *v, int left, int right, int y, VehicleID selection, int skip, VehicleID drag_destination = INVALID_VEHICLE);
+ void DrawRoadVehImage(const Vehicle *v, int left, int right, int y, VehicleID selection);
+ void DrawShipImage(const Vehicle *v, int left, int right, int y, VehicleID selection);
+ void DrawAircraftImage(const Vehicle *v, int left, int right, int y, VehicleID selection);

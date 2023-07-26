@@ -1,0 +1,115 @@
+Index: src/fileio_func.h
+===================================================================
+--- src/fileio_func.h	(revision 19775)
++++ src/fileio_func.h	(working copy)
+@@ -57,7 +57,7 @@
+ char *FioGetDirectory(char *buf, size_t buflen, Subdirectory subdir);
+ 
+ void SanitizeFilename(char *filename);
+-void AppendPathSeparator(char *buf, size_t buflen);
++bool AppendPathSeparator(char *buf, size_t buflen);
+ void DeterminePaths(const char *exe);
+ void *ReadFileToMem(const char *filename, size_t *lenp, size_t maxsize);
+ bool FileExists(const char *filename);
+Index: src/os/unix/unix.cpp
+===================================================================
+--- src/os/unix/unix.cpp	(revision 19775)
++++ src/os/unix/unix.cpp	(working copy)
+@@ -92,18 +92,21 @@
+ bool FiosIsValidFile(const char *path, const struct dirent *ent, struct stat *sb)
+ {
+ 	char filename[MAX_PATH];
+-
++	int res;
+ #if defined(__MORPHOS__) || defined(__AMIGAOS__)
+ 	/* On MorphOS or AmigaOS paths look like: "Volume:directory/subdirectory" */
+ 	if (FiosIsRoot(path)) {
+-		snprintf(filename, lengthof(filename), "%s:%s", path, ent->d_name);
++		res = snprintf(filename, lengthof(filename), "%s:%s", path, ent->d_name);
+ 	} else // XXX - only next line!
+ #else
+ 	assert(path[strlen(path) - 1] == PATHSEPCHAR);
+ 	if (strlen(path) > 2) assert(path[strlen(path) - 2] != PATHSEPCHAR);
+ #endif
+-	snprintf(filename, lengthof(filename), "%s%s", path, ent->d_name);
++	res = snprintf(filename, lengthof(filename), "%s%s", path, ent->d_name);
+ 
++	/* Could we fully concatenate the path and filename? */
++	if (res >= (int)lengthof(filename) || res < 0) return false;
++
+ 	return stat(filename, sb) == 0;
+ }
+ 
+Index: src/fileio.cpp
+===================================================================
+--- src/fileio.cpp	(revision 19775)
++++ src/fileio.cpp	(working copy)
+@@ -448,16 +448,21 @@
+  * It does not add the path separator to zero-sized strings.
+  * @param buf    string to append the separator to
+  * @param buflen the length of the buf
++ * @return true iff the operation succeeded
+  */
+-void AppendPathSeparator(char *buf, size_t buflen)
++bool AppendPathSeparator(char *buf, size_t buflen)
+ {
+ 	size_t s = strlen(buf);
+ 
+ 	/* Length of string + path separator + '\0' */
+-	if (s != 0 && buf[s - 1] != PATHSEPCHAR && s + 2 < buflen) {
++	if (s != 0 && buf[s - 1] != PATHSEPCHAR) {
++		if (s + 2 >= buflen) return false;
++
+ 		buf[s]     = PATHSEPCHAR;
+ 		buf[s + 1] = '\0';
+ 	}
++
++	return true;
+ }
+ 
+ /**
+@@ -842,7 +847,7 @@
+ 		if (S_ISDIR(sb.st_mode)) {
+ 			/* Directory */
+ 			if (strcmp(d_name, ".") == 0 || strcmp(d_name, "..") == 0) continue;
+-			AppendPathSeparator(filename, lengthof(filename));
++			if (!AppendPathSeparator(filename, lengthof(filename))) continue;
+ 			num += ScanPathForTarFiles(filename, basepath_length);
+ 		} else if (S_ISREG(sb.st_mode)) {
+ 			/* File */
+@@ -1158,7 +1163,7 @@
+ 			/* Directory */
+ 			if (!recursive) continue;
+ 			if (strcmp(d_name, ".") == 0 || strcmp(d_name, "..") == 0) continue;
+-			AppendPathSeparator(filename, lengthof(filename));
++			if (!AppendPathSeparator(filename, lengthof(filename))) continue;
+ 			num += ScanPath(fs, extension, filename, basepath_length, recursive);
+ 		} else if (S_ISREG(sb.st_mode)) {
+ 			/* File */
+@@ -1245,6 +1250,6 @@
+ {
+ 	char path[MAX_PATH];
+ 	strecpy(path, directory, lastof(path));
+-	AppendPathSeparator(path, lengthof(path));
++	if (!AppendPathSeparator(path, lengthof(path))) return 0;
+ 	return ScanPath(this, extension, path, strlen(path), recursive);
+ }
+Index: src/stdafx.h
+===================================================================
+--- src/stdafx.h	(revision 19775)
++++ src/stdafx.h	(working copy)
+@@ -416,7 +416,13 @@
+ 	#define _stricmp strcasecmp
+ #endif
+ 
+-#if !defined(MAX_PATH)
++#if defined(MAX_PATH)
++	/* It's already defined, no need to override */
++#elif defined(PATH_MAX) && PATH_MAX > 0
++	/* Use the value from PATH_MAX, if it exists */
++	#define MAX_PATH PATH_MAX
++#else
++	/* If all else fails, hardcode something :( */
+ 	#define MAX_PATH 260
+ #endif
+ 

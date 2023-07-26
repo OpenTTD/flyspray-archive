@@ -1,0 +1,116 @@
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 22732)
++++ src/settings_gui.cpp	(working copy)
+@@ -32,6 +32,7 @@
+ #include "core/geometry_func.hpp"
+ #include "ai/ai.hpp"
+ #include "language.h"
++#include "video/video_driver.hpp"
+ 
+ #include "table/sprites.h"
+ #include "table/strings.h"
+@@ -494,6 +495,7 @@
+ 
+ 			case GOW_LANG_DROPDOWN: // Change interface language
+ 				ReadLanguagePack(&_languages[index]);
++				if (_video_driver != NULL) _video_driver->OnLanguageChange();
+ 				DeleteWindowByClass(WC_QUERY_STRING);
+ 				CheckForMissingGlyphsInLoadedLanguagePack();
+ 				UpdateAllVirtCoords();
+Index: src/video/video_driver.hpp
+===================================================================
+--- src/video/video_driver.hpp	(revision 22732)
++++ src/video/video_driver.hpp	(working copy)
+@@ -46,6 +46,11 @@
+ 	 * @return True if the change succeeded.
+ 	 */
+ 	virtual bool ToggleFullscreen(bool fullscreen) = 0;
++
++	/**
++	 * Receive notification that the game language has changed.
++	 */
++	virtual void OnLanguageChange() {}
+ };
+ 
+ /** Base of the factory for the video drivers. */
+Index: src/video/win32_v.cpp
+===================================================================
+--- src/video/win32_v.cpp	(revision 22732)
++++ src/video/win32_v.cpp	(working copy)
+@@ -19,9 +19,15 @@
+ #include "../core/math_func.hpp"
+ #include "../core/random_func.hpp"
+ #include "../texteff.hpp"
++#include "../strings_func.h"
+ #include "win32_v.h"
+ #include <windows.h>
+ 
++/* The selected Win32 header version will not have the WS_EX_LAYOUTRTL extended style defined, so define it here */
++#if !defined(WS_EX_LAYOUTRTL)
++#define WS_EX_LAYOUTRTL 0x400000
++#endif
++
+ static struct {
+ 	HWND main_wnd;
+ 	HBITMAP dib_sect;
+@@ -310,7 +316,7 @@
+ 
+ 			_sntprintf(Windowtitle, lengthof(Windowtitle), _T("OpenTTD %s"), MB_TO_WIDE(_openttd_revision));
+ 
+-			_wnd.main_wnd = CreateWindow(_T("OTTD"), Windowtitle, style, x, y, w, h, 0, 0, GetModuleHandle(NULL), 0);
++			_wnd.main_wnd = CreateWindowEx(_current_text_dir == TD_RTL ? WS_EX_LAYOUTRTL : 0, _T("OTTD"), Windowtitle, style, x, y, w, h, 0, 0, GetModuleHandle(NULL), 0);
+ 			if (_wnd.main_wnd == NULL) usererror("CreateWindow failed");
+ 			ShowWindow(_wnd.main_wnd, showstyle);
+ 		}
+@@ -434,6 +440,12 @@
+ 			int y = (int16)HIWORD(lParam);
+ 			POINT pt;
+ 
++			if ((GetWindowLong(_wnd.main_wnd, GWL_EXSTYLE) & WS_EX_LAYOUTRTL) != 0) {
++				RECT rc;
++				GetClientRect(hwnd, &rc);
++				x = rc.right - x;
++			}
++
+ 			/* If the mouse was not in the window and it has moved it means it has
+ 			 * come into the window, so start drawing the mouse. Also start
+ 			 * tracking the mouse for exiting the window */
+@@ -828,6 +840,13 @@
+ {
+ 	RECT r = { left, top, left + width, top + height };
+ 
++	if ((GetWindowLong(_wnd.main_wnd, GWL_EXSTYLE) & WS_EX_LAYOUTRTL) != 0) {
++		RECT rc;
++		GetClientRect(_wnd.main_wnd, &rc);
++		r.left = rc.right - r.left;
++		r.right = rc.right - r.right;
++	}
++
+ 	InvalidateRect(_wnd.main_wnd, &r, FALSE);
+ }
+ 
+@@ -927,3 +946,9 @@
+ {
+ 	return this->MakeWindow(full_screen);
+ }
++
++void VideoDriver_Win32::OnLanguageChange()
++{
++	LONG style = GetWindowLong(_wnd.main_wnd, GWL_EXSTYLE);
++	SetWindowLong(_wnd.main_wnd, GWL_EXSTYLE, _current_text_dir == TD_RTL ? style | WS_EX_LAYOUTRTL : style & ~WS_EX_LAYOUTRTL);
++}
+Index: src/video/win32_v.h
+===================================================================
+--- src/video/win32_v.h	(revision 22732)
++++ src/video/win32_v.h	(working copy)
+@@ -28,6 +28,9 @@
+ 	/* virtual */ bool ChangeResolution(int w, int h);
+ 
+ 	/* virtual */ bool ToggleFullscreen(bool fullscreen);
++
++	/* virtual */ void OnLanguageChange();
++
+ 	/* virtual */ const char *GetName() const { return "win32"; }
+ 
+ 	bool MakeWindow(bool full_screen);

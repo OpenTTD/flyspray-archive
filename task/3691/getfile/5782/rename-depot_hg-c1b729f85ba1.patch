@@ -1,0 +1,490 @@
+diff -r c1b729f85ba1 source.list
+--- a/source.list	Sat Mar 13 10:18:57 2010 +0000
++++ b/source.list	Sat Mar 13 15:43:31 2010 +0100
+@@ -424,6 +424,7 @@
+ autoreplace_cmd.cpp
+ clear_cmd.cpp
+ company_cmd.cpp
++depot_cmd.cpp
+ disaster_cmd.cpp
+ dummy_land.cpp
+ group_cmd.cpp
+diff -r c1b729f85ba1 src/command.cpp
+--- a/src/command.cpp	Sat Mar 13 10:18:57 2010 +0000
++++ b/src/command.cpp	Sat Mar 13 15:43:31 2010 +0100
+@@ -112,6 +112,7 @@
+ CommandProc CmdRenamePresident;
+ 
+ CommandProc CmdRenameStation;
++CommandProc CmdRenameDepot;
+ 
+ CommandProc CmdSellAircraft;
+ CommandProc CmdBuildAircraft;
+@@ -260,6 +261,7 @@
+ 	{CmdRenamePresident,                            0}, // CMD_RENAME_PRESIDENT
+ 
+ 	{CmdRenameStation,                              0}, // CMD_RENAME_STATION
++	{CmdRenameDepot,                                0}, // CMD_RENAME_DEPOT
+ 
+ 	{CmdSellAircraft,                               0}, // CMD_SELL_AIRCRAFT
+ 
+diff -r c1b729f85ba1 src/command_type.h
+--- a/src/command_type.h	Sat Mar 13 10:18:57 2010 +0000
++++ b/src/command_type.h	Sat Mar 13 15:43:31 2010 +0100
+@@ -222,6 +222,7 @@
+ 	CMD_RENAME_COMPANY,               ///< change the company name
+ 	CMD_RENAME_PRESIDENT,             ///< change the president name
+ 	CMD_RENAME_STATION,               ///< rename a station
++	CMD_RENAME_DEPOT,                 ///< rename a depot
+ 
+ 	CMD_SELL_AIRCRAFT,                ///< sell an aircraft
+ 	CMD_BUILD_AIRCRAFT,               ///< build an aircraft
+diff -r c1b729f85ba1 src/depot_base.h
+--- a/src/depot_base.h	Sat Mar 13 10:18:57 2010 +0000
++++ b/src/depot_base.h	Sat Mar 13 15:43:31 2010 +0100
+@@ -21,6 +21,7 @@
+ struct Depot : DepotPool::PoolItem<&_depot_pool> {
+ 	TileIndex xy;
+ 	TownID town_index;
++	char *name; ///< custom name
+ 
+ 	Depot(TileIndex xy = INVALID_TILE) : xy(xy) {}
+ 	~Depot();
+diff -r c1b729f85ba1 src/depot_cmd.cpp
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/depot_cmd.cpp	Sat Mar 13 15:43:31 2010 +0100
+@@ -0,0 +1,55 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/** @file depot_cmd.cpp Command Handling for depots. */
++
++#include "stdafx.h"
++
++#include "command_func.h"
++#include "functions.h"
++#include "string_func.h"
++#include "depot_base.h"
++#include "window_type.h"
++#include "window_func.h"
++
++/**
++ * Rename a depot.
++ * @param tile where the depot to be renamed sit
++ * @param flags type of operation
++ * @param p1 unused
++ * @param p2 unused
++ * @param text the new name or an empty string when resetting to the default
++ * @return the cost of this operation or an error
++ */
++CommandCost CmdRenameDepot(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
++{
++	Depot *dp = Depot::GetByTile(tile);
++
++	if (dp == NULL || !CheckOwnership(GetTileOwner(dp->xy))) return CMD_ERROR;
++
++	bool reset = StrEmpty(text);
++
++	if (!reset && strlen(text) >= MAX_LENGTH_DEPOT_NAME_BYTES) return CMD_ERROR;
++
++	if (flags & DC_EXEC) {
++		free(dp->name);
++		if (reset) {
++			dp->name = NULL;
++		} else {
++			dp->name = strdup(text);
++		}
++
++		SetWindowDirty(WC_VEHICLE_DEPOT, (WindowNumber) tile);
++		SetWindowClassesDirty(WC_VEHICLE_ORDERS);
++		if (IsRailDepotTile(tile)) SetWindowClassesDirty(WC_TRAINS_LIST);
++		else if (IsRoadDepotTile(tile)) SetWindowClassesDirty(WC_ROADVEH_LIST);
++		else if (IsShipDepotTile(tile)) SetWindowClassesDirty(WC_SHIPS_LIST);
++	}
++	return CommandCost();
++}
+diff -r c1b729f85ba1 src/depot_gui.cpp
+--- a/src/depot_gui.cpp	Sat Mar 13 10:18:57 2010 +0000
++++ b/src/depot_gui.cpp	Sat Mar 13 15:43:31 2010 +0100
+@@ -53,6 +53,8 @@
+ 	DEPOT_WIDGET_BUILD,
+ 	DEPOT_WIDGET_CLONE,
+ 	DEPOT_WIDGET_LOCATION,
++	DEPOT_WIDGET_SHOW_RENAME,
++	DEPOT_WIDGET_RENAME,
+ 	DEPOT_WIDGET_VEHICLE_LIST,
+ 	DEPOT_WIDGET_STOP_ALL,
+ 	DEPOT_WIDGET_START_ALL,
+@@ -83,6 +85,9 @@
+ 		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, DEPOT_WIDGET_BUILD), SetDataTip(0x0, STR_NULL), SetFill(1, 1), SetResize(1, 0),
+ 		NWidget(WWT_TEXTBTN, COLOUR_GREY, DEPOT_WIDGET_CLONE), SetDataTip(0x0, STR_NULL), SetFill(1, 1), SetResize(1, 0),
+ 		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, DEPOT_WIDGET_LOCATION), SetDataTip(STR_BUTTON_LOCATION, STR_NULL), SetFill(1, 1), SetResize(1, 0),
++		NWidget(NWID_SELECTION, INVALID_COLOUR, DEPOT_WIDGET_SHOW_RENAME), // rename button
++			NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, DEPOT_WIDGET_RENAME), SetDataTip(STR_BUTTON_RENAME, STR_DEPOT_RENAME_TOOLTIP), SetFill(1, 1), SetResize(1, 0),
++		EndContainer(),
+ 		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, DEPOT_WIDGET_VEHICLE_LIST), SetDataTip(0x0, STR_NULL), SetFill(0, 1),
+ 		NWidget(WWT_PUSHIMGBTN, COLOUR_GREY, DEPOT_WIDGET_STOP_ALL), SetDataTip(SPR_FLAG_VEH_STOPPED, STR_NULL), SetFill(0, 1),
+ 		NWidget(WWT_PUSHIMGBTN, COLOUR_GREY, DEPOT_WIDGET_START_ALL), SetDataTip(SPR_FLAG_VEH_RUNNING, STR_NULL), SetFill(0, 1),
+@@ -222,7 +227,9 @@
+ 		this->type = type;
+ 
+ 		this->CreateNestedTree(desc);
+-		this->SetupWidgetData(type);
++		/* Don't show 'rename button' of aircraft hangar */
++		this->GetWidget<NWidgetStacked>(DEPOT_WIDGET_SHOW_RENAME)->SetDisplayedPlane(type == VEH_AIRCRAFT ? SZSP_NONE : 0);
++		this->SetupWidgetData(type, tile);
+ 		this->FinishInitNested(desc, tile);
+ 
+ 		this->owner = GetTileOwner(tile);
+@@ -346,7 +353,7 @@
+ 			Depot *depot = Depot::GetByTile(tile);
+ 			assert(depot != NULL);
+ 
+-			SetDParam(0, depot->town_index);
++			SetDParam(0, (depot->name != NULL) ? depot->index : depot->town_index);
+ 		}
+ 	}
+ 
+@@ -544,15 +551,35 @@
+ 		ResetObjectToPlace();
+ 	}
+ 
++	/* Returns the caption string id. Depends of the vehicle type and the use of named depot. If asked also set the correct DParam #0. */
++	static StringID GetCaptionStringID(VehicleType type, TileIndex tile, bool set_dparam = false)
++	{
++		StringID caption_id = STR_DEPOT_TRAIN_CAPTION + type;
++
++		if (type != VEH_AIRCRAFT) {
++			const Depot *depot = Depot::GetByTile(tile);
++			if (depot->name != NULL) {
++				caption_id = STR_DEPOT_CAPTION;
++				if (set_dparam) SetDParam(0, depot->index);
++			} else if(set_dparam) {
++				SetDParam(0, depot->town_index);
++			}
++		} else if (set_dparam) {
++			SetDParam(0, GetStationIndex(tile));
++		}
++
++		return caption_id;
++	}
++
+ 	/* Function to set up vehicle specific widgets (mainly sprites and strings).
+ 	 * Only use this if it's the same widget, that's used for more than one vehicle type and it needs different text/sprites
+ 	 * Vehicle specific text/sprites, that's in a widget, that's only shown for one vehicle type (like sell whole train) is set in the nested widget array
+ 	 */
+-	void SetupWidgetData(VehicleType type)
++	void SetupWidgetData(VehicleType type, TileIndex tile)
+ 	{
+ 		if (type != VEH_TRAIN) this->GetWidget<NWidgetCore>(DEPOT_WIDGET_SELL_CHAIN)->fill_y = 0; // Disable vertical filling of chain-sell widget for non-train windows.
+ 
+-		this->GetWidget<NWidgetCore>(DEPOT_WIDGET_CAPTION)->widget_data   = STR_DEPOT_TRAIN_CAPTION + type;
++		this->GetWidget<NWidgetCore>(DEPOT_WIDGET_CAPTION)->widget_data   = this->GetCaptionStringID(type, tile);
+ 		this->GetWidget<NWidgetCore>(DEPOT_WIDGET_STOP_ALL)->tool_tip     = STR_DEPOT_MASS_STOP_DEPOT_TRAIN_TOOLTIP + type;
+ 		this->GetWidget<NWidgetCore>(DEPOT_WIDGET_START_ALL)->tool_tip    = STR_DEPOT_MASS_START_DEPOT_TRAIN_TOOLTIP + type;
+ 		this->GetWidget<NWidgetCore>(DEPOT_WIDGET_SELL)->tool_tip         = STR_DEPOT_TRAIN_SELL_TOOLTIP + type;
+@@ -705,9 +732,15 @@
+ 			DEPOT_WIDGET_SELL_ALL,
+ 			DEPOT_WIDGET_BUILD,
+ 			DEPOT_WIDGET_CLONE,
++			DEPOT_WIDGET_RENAME,
+ 			DEPOT_WIDGET_AUTOREPLACE,
+ 			WIDGET_LIST_END);
+ 
++		if (this->type != VEH_AIRCRAFT) {
++			/* The depot eventually was renamed, updates caption string id. */
++			this->GetWidget<NWidgetCore>(DEPOT_WIDGET_CAPTION)->widget_data = this->GetCaptionStringID(type, tile);
++		}
++
+ 		this->DrawWidgets();
+ 	}
+ 
+@@ -750,6 +783,19 @@
+ 				}
+ 				break;
+ 
++			case DEPOT_WIDGET_RENAME: { // Rename button
++				StringID depot_name;
++				const Depot *depot = Depot::GetByTile((TileIndex) this->window_number);
++				if (depot->name != NULL) {
++					depot_name = STR_DEPOT_NAME;
++					SetDParam(0, depot->index);
++				} else {
++					depot_name = STR_DEPOT_TRAIN_NAME + this->type;
++					SetDParam(0, depot->town_index);
++				}
++				ShowQueryString(depot_name, STR_DEPOT_RENAME_DEPOT_CAPTION, MAX_LENGTH_DEPOT_NAME_BYTES, MAX_LENGTH_DEPOT_NAME_PIXELS, this, CS_ALPHANUMERAL, QSF_ENABLE_DEFAULT);
++			} break;
++
+ 			case DEPOT_WIDGET_STOP_ALL:
+ 			case DEPOT_WIDGET_START_ALL:
+ 				DoCommandP(this->window_number, 0, this->type | (widget == DEPOT_WIDGET_START_ALL ? (1 << 5) : 0), CMD_MASS_START_STOP);
+@@ -758,12 +804,9 @@
+ 			case DEPOT_WIDGET_SELL_ALL:
+ 				/* Only open the confimation window if there are anything to sell */
+ 				if (this->vehicle_list.Length() != 0 || this->wagon_list.Length() != 0) {
+-					TileIndex tile = this->window_number;
+-					byte vehtype = this->type;
+-
+-					SetDParam(0, (vehtype == VEH_AIRCRAFT) ? GetStationIndex(tile) : Depot::GetByTile(tile)->town_index);
++					StringID caption_id = this->GetCaptionStringID(this->type, (TileIndex) this->window_number, true);
+ 					ShowQuery(
+-						STR_DEPOT_TRAIN_CAPTION + vehtype,
++						caption_id,
+ 						STR_DEPOT_SELL_CONFIRMATION_TEXT,
+ 						this,
+ 						DepotSellAllConfirmationCallback
+@@ -782,6 +825,14 @@
+ 		}
+ 	}
+ 
++	virtual void OnQueryTextFinished(char *str)
++	{
++		if (str == NULL) return;
++
++		/* Do depot renaming */
++		DoCommandP((TileIndex) this->window_number, 0, 0, CMD_RENAME_DEPOT | CMD_MSG(STR_ERROR_CAN_T_RENAME_DEPOT), NULL, str);
++	}
++
+ 	virtual void OnRightClick(Point pt, int widget)
+ 	{
+ 		if (widget != DEPOT_WIDGET_MATRIX) return;
+diff -r c1b729f85ba1 src/depot_type.h
+--- a/src/depot_type.h	Sat Mar 13 10:18:57 2010 +0000
++++ b/src/depot_type.h	Sat Mar 13 15:43:31 2010 +0100
+@@ -15,4 +15,9 @@
+ typedef uint16 DepotID;
+ struct Depot;
+ 
++enum {
++	MAX_LENGTH_DEPOT_NAME_BYTES  =  31, ///< The maximum length of a depot name in bytes including '\0'
++	MAX_LENGTH_DEPOT_NAME_PIXELS = 180, ///< The maximum length of a depot name in pixels
++};
++
+ #endif /* DEPOT_TYPE_H */
+diff -r c1b729f85ba1 src/lang/english.txt
+--- a/src/lang/english.txt	Sat Mar 13 10:18:57 2010 +0000
++++ b/src/lang/english.txt	Sat Mar 13 15:43:31 2010 +0100
+@@ -2751,11 +2751,16 @@
+ STR_QUERY_RENAME_AIRCRAFT_TYPE_CAPTION                          :{WHITE}Rename aircraft type
+ 
+ # Depot window
++STR_DEPOT_CAPTION                                               :{WHITE}{DEPOT}
+ STR_DEPOT_TRAIN_CAPTION                                         :{WHITE}{TOWN} Train Depot
+ STR_DEPOT_ROAD_VEHICLE_CAPTION                                  :{WHITE}{TOWN} Road Vehicle Depot
+ STR_DEPOT_SHIP_CAPTION                                          :{WHITE}{TOWN} Ship Depot
+ STR_DEPOT_AIRCRAFT_CAPTION                                      :{WHITE}{STATION} Aircraft Hangar
+ 
++STR_DEPOT_RENAME_TOOLTIP                                        :{BLACK}Change name of depot
++STR_DEPOT_RENAME_DEPOT_CAPTION                                  :Rename depot
++STR_ERROR_CAN_T_RENAME_DEPOT                                    :{WHITE}Can't rename depot...
++
+ STR_DEPOT_NO_ENGINE                                             :{BLACK}-
+ STR_DEPOT_VEHICLE_TOOLTIP                                       :{BLACK}{ENGINE}{RAW_STRING}
+ STR_DEPOT_VEHICLE_TOOLTIP_CHAIN                                 :{BLACK}{NUM} vehicle{P "" s}{RAW_STRING}
+@@ -2934,6 +2939,8 @@
+ STR_VEHICLE_STATUS_HEADING_FOR_WAYPOINT                         :{LTBLUE}Heading for {WAYPOINT}
+ STR_VEHICLE_STATUS_HEADING_FOR_WAYPOINT_VEL                     :{LTBLUE}Heading for {WAYPOINT}, {VELOCITY}
+ 
++STR_VEHICLE_STATUS_HEADING_FOR_DEPOT                            :{ORANGE}Heading for {DEPOT}
++STR_VEHICLE_STATUS_HEADING_FOR_DEPOT_VEL                        :{ORANGE}Heading for {DEPOT}, {VELOCITY}
+ STR_VEHICLE_STATUS_HEADING_FOR_TRAIN_DEPOT                      :{ORANGE}Heading for {TOWN} Train Depot
+ STR_VEHICLE_STATUS_HEADING_FOR_TRAIN_DEPOT_VEL                  :{ORANGE}Heading for {TOWN} Train Depot, {VELOCITY}
+ STR_VEHICLE_STATUS_HEADING_FOR_ROAD_VEHICLE_DEPOT               :{ORANGE}Heading for {TOWN} Road Depot
+@@ -2943,6 +2950,8 @@
+ STR_VEHICLE_STATUS_HEADING_FOR_HANGAR                           :{ORANGE}Heading for {STATION} Hangar
+ STR_VEHICLE_STATUS_HEADING_FOR_HANGAR_VEL                       :{ORANGE}Heading for {STATION} Hangar, {VELOCITY}
+ 
++STR_VEHICLE_STATUS_HEADING_FOR_DEPOT_SERVICE                    :{LTBLUE}Service at {DEPOT}
++STR_VEHICLE_STATUS_HEADING_FOR_DEPOT_SERVICE_VEL                :{LTBLUE}Service at {DEPOT}, {VELOCITY}
+ STR_VEHICLE_STATUS_HEADING_FOR_TRAIN_DEPOT_SERVICE              :{LTBLUE}Service at {TOWN} Train Depot
+ STR_VEHICLE_STATUS_HEADING_FOR_TRAIN_DEPOT_SERVICE_VEL          :{LTBLUE}Service at {TOWN} Train Depot, {VELOCITY}
+ STR_VEHICLE_STATUS_HEADING_FOR_ROAD_VEHICLE_DEPOT_SERVICE       :{LTBLUE}Service at {TOWN} Road Depot
+@@ -3125,6 +3134,7 @@
+ STR_ORDER_TRAIN_DEPOT                                           :Train Depot
+ STR_ORDER_ROAD_VEHICLE_DEPOT                                    :Road Vehicle Depot
+ STR_ORDER_SHIP_DEPOT                                            :Ship Depot
++STR_ORDER_GO_TO_DEPOT_CUSTOM_NAME_FORMAT                        :{STRING} {DEPOT}
+ STR_ORDER_GO_TO_DEPOT_FORMAT                                    :{STRING} {TOWN} {STRING}
+ STR_ORDER_GO_TO_NEAREST_DEPOT_FORMAT                            :{STRING} {STRING} {STRING}
+ STR_ORDER_GO_TO_HANGAR_FORMAT                                   :{STRING} {STATION} Hangar
+@@ -4060,6 +4070,10 @@
+ STR_PRESIDENT_NAME                                              :{PRESIDENTNAME}
+ STR_SIGN_NAME                                                   :{SIGN}
+ STR_STATION_NAME                                                :{STATION}
++STR_DEPOT_NAME                                                  :{DEPOT}
++STR_DEPOT_TRAIN_NAME                                            :{TOWN} Train Depot
++STR_DEPOT_ROAD_VEHICLE_NAME                                     :{TOWN} Road Vehicle Depot
++STR_DEPOT_SHIP_NAME                                             :{TOWN} Ship Depot
+ STR_TOWN_NAME                                                   :{TOWN}
+ STR_VEHICLE_NAME                                                :{VEHICLE}
+ STR_WAYPOINT_NAME                                               :{WAYPOINT}
+diff -r c1b729f85ba1 src/order_gui.cpp
+--- a/src/order_gui.cpp	Sat Mar 13 10:18:57 2010 +0000
++++ b/src/order_gui.cpp	Sat Mar 13 15:43:31 2010 +0100
+@@ -245,12 +245,18 @@
+ 				if (order->GetDepotActionType() & ODATFB_NEAREST_DEPOT) {
+ 					SetDParam(0, STR_ORDER_GO_TO_NEAREST_DEPOT_FORMAT);
+ 					SetDParam(2, STR_ORDER_NEAREST_DEPOT);
++					SetDParam(3, STR_ORDER_TRAIN_DEPOT + v->type);
+ 				} else {
+-					SetDParam(0, STR_ORDER_GO_TO_DEPOT_FORMAT);
+-					SetDParam(2, Depot::Get(order->GetDestination())->town_index);
++					const Depot *depot = Depot::Get(order->GetDestination());
++					if (depot->name != NULL) { // use custom depot name
++						SetDParam(0, STR_ORDER_GO_TO_DEPOT_CUSTOM_NAME_FORMAT);
++						SetDParam(2, depot->index);
++					} else { // use default depot name
++						SetDParam(0, STR_ORDER_GO_TO_DEPOT_FORMAT);
++						SetDParam(2, depot->town_index);
++						SetDParam(3, STR_ORDER_TRAIN_DEPOT + v->type);
++					}
+ 				}
+-
+-				SetDParam(3, STR_ORDER_TRAIN_DEPOT + v->type);
+ 			}
+ 
+ 			if (order->GetDepotOrderType() & ODTFB_SERVICE) {
+diff -r c1b729f85ba1 src/saveload/depot_sl.cpp
+--- a/src/saveload/depot_sl.cpp	Sat Mar 13 10:18:57 2010 +0000
++++ b/src/saveload/depot_sl.cpp	Sat Mar 13 15:43:31 2010 +0100
+@@ -18,6 +18,7 @@
+ 	SLE_CONDVAR(Depot, xy,         SLE_FILE_U16 | SLE_VAR_U32, 0, 5),
+ 	SLE_CONDVAR(Depot, xy,         SLE_UINT32,                 6, SL_MAX_VERSION),
+ 	    SLE_VAR(Depot, town_index, SLE_UINT16),
++	SLE_CONDSTR(Depot, name,       SLE_STR, 0,               141, SL_MAX_VERSION),
+ 	SLE_END()
+ };
+ 
+diff -r c1b729f85ba1 src/saveload/saveload.cpp
+--- a/src/saveload/saveload.cpp	Sat Mar 13 10:18:57 2010 +0000
++++ b/src/saveload/saveload.cpp	Sat Mar 13 15:43:31 2010 +0100
+@@ -46,7 +46,7 @@
+ 
+ #include "saveload_internal.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 140;
++extern const uint16 SAVEGAME_VERSION = 141;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+diff -r c1b729f85ba1 src/strings.cpp
+--- a/src/strings.cpp	Sat Mar 13 10:18:57 2010 +0000
++++ b/src/strings.cpp	Sat Mar 13 15:43:31 2010 +0100
+@@ -33,6 +33,7 @@
+ #include "townname_func.h"
+ #include "string_func.h"
+ #include "company_base.h"
++#include "depot_base.h"
+ 
+ #include "table/strings.h"
+ #include "table/control_codes.h"
+@@ -922,6 +923,13 @@
+ 				break;
+ 			}
+ 
++			case SCC_DEPOT_NAME: { // {DEPOT}
++				const Depot *depot = Depot::Get(GetInt32(&argv));
++				assert(depot != NULL);
++				buff = strecpy(buff, depot->name, last);
++				break;
++			}
++
+ 			case SCC_TOWN_NAME: { // {TOWN}
+ 				const Town *t = Town::Get(GetInt32(&argv));
+ 
+diff -r c1b729f85ba1 src/table/control_codes.h
+--- a/src/table/control_codes.h	Sat Mar 13 10:18:57 2010 +0000
++++ b/src/table/control_codes.h	Sat Mar 13 15:43:31 2010 +0100
+@@ -36,6 +36,7 @@
+ 	SCC_INDUSTRY_NAME,
+ 	SCC_WAYPOINT_NAME,
+ 	SCC_STATION_NAME,
++	SCC_DEPOT_NAME,
+ 	SCC_TOWN_NAME,
+ 	SCC_GROUP_NAME,
+ 	SCC_VEHICLE_NAME,
+diff -r c1b729f85ba1 src/table/strgen_tables.h
+--- a/src/table/strgen_tables.h	Sat Mar 13 10:18:57 2010 +0000
++++ b/src/table/strgen_tables.h	Sat Mar 13 15:43:31 2010 +0100
+@@ -99,6 +99,7 @@
+ 
+ 	{"WAYPOINT",        EmitSingleChar, SCC_WAYPOINT_NAME,      1, C_NONE | C_GENDER}, // waypoint name
+ 	{"STATION",         EmitSingleChar, SCC_STATION_NAME,       1, C_NONE | C_GENDER},
++	{"DEPOT",           EmitSingleChar, SCC_DEPOT_NAME,         1, C_NONE | C_GENDER}, // depot name
+ 	{"TOWN",            EmitSingleChar, SCC_TOWN_NAME,          1, C_NONE | C_GENDER},
+ 	{"GROUP",           EmitSingleChar, SCC_GROUP_NAME,         1, C_NONE | C_GENDER},
+ 	{"SIGN",            EmitSingleChar, SCC_SIGN_NAME,          1, C_NONE | C_GENDER},
+diff -r c1b729f85ba1 src/vehicle_gui.cpp
+--- a/src/vehicle_gui.cpp	Sat Mar 13 10:18:57 2010 +0000
++++ b/src/vehicle_gui.cpp	Sat Mar 13 15:43:31 2010 +0100
+@@ -1054,11 +1054,18 @@
+ 				break;
+ 
+ 			case VLW_DEPOT_LIST:
+-				SetDParam(0, STR_DEPOT_TRAIN_CAPTION + this->vehicle_type);
+ 				if (this->vehicle_type == VEH_AIRCRAFT) {
++					SetDParam(0, STR_DEPOT_AIRCRAFT_CAPTION);
+ 					SetDParam(1, index); // Airport name
+ 				} else {
+-					SetDParam(1, Depot::Get(index)->town_index);
++					const Depot *depot = Depot::Get(index);
++					if (depot->name != NULL) {
++						SetDParam(0, STR_DEPOT_CAPTION);
++						SetDParam(1, depot->index); // Custom depot name
++					} else {
++						SetDParam(0, STR_DEPOT_TRAIN_CAPTION + this->vehicle_type);
++						SetDParam(1, depot->town_index);
++					}
+ 				}
+ 				SetDParam(2, this->vscroll.GetCount());
+ 				break;
+@@ -1109,6 +1116,11 @@
+ 		/* Set text of sort by dropdown widget. */
+ 		this->GetWidget<NWidgetCore>(VLW_WIDGET_SORT_BY_PULLDOWN)->widget_data = this->vehicle_sorter_names[this->vehicles.SortType()];
+ 
++		if ((this->window_number & VLW_MASK) == VLW_DEPOT_LIST && this->vehicle_type != VEH_AIRCRAFT) {
++			/* The depot eventually was renamed, updates caption string id. */
++			this->SetStringParameters(VLW_WIDGET_CAPTION);
++		}
++
+ 		this->DrawWidgets();
+ 	}
+ 
+@@ -1995,20 +2007,27 @@
+ 				} break;
+ 
+ 				case OT_GOTO_DEPOT: {
++					bool named_depot = false;
+ 					if (v->type == VEH_AIRCRAFT) {
+ 						/* Aircrafts always go to a station, even if you say depot */
+ 						SetDParam(0, v->current_order.GetDestination());
+ 						SetDParam(1, v->GetDisplaySpeed());
+ 					} else {
+ 						Depot *depot = Depot::Get(v->current_order.GetDestination());
+-						SetDParam(0, depot->town_index);
++						if (depot->name != NULL) {
++							named_depot = true; // use custom depot name
++							SetDParam(0, depot->index);
++						} else {
++							SetDParam(0, depot->town_index); // use default depot name
++						}
+ 						SetDParam(1, v->GetDisplaySpeed());
+ 					}
+ 					if (v->current_order.GetDepotActionType() & ODATFB_HALT) {
+-						str = STR_VEHICLE_STATUS_HEADING_FOR_TRAIN_DEPOT + 2 * v->type + _settings_client.gui.vehicle_speed;
++						str = named_depot ? STR_VEHICLE_STATUS_HEADING_FOR_DEPOT : STR_VEHICLE_STATUS_HEADING_FOR_TRAIN_DEPOT + 2 * v->type;
+ 					} else {
+-						str = STR_VEHICLE_STATUS_HEADING_FOR_TRAIN_DEPOT_SERVICE + 2 * v->type + _settings_client.gui.vehicle_speed;
++						str = named_depot ? STR_VEHICLE_STATUS_HEADING_FOR_DEPOT_SERVICE : STR_VEHICLE_STATUS_HEADING_FOR_TRAIN_DEPOT_SERVICE + 2 * v->type;
+ 					}
++					str += _settings_client.gui.vehicle_speed;
+ 				} break;
+ 
+ 				case OT_LOADING:

@@ -1,0 +1,280 @@
+Index: src/ai/ai.hpp
+===================================================================
+--- src/ai/ai.hpp	(revision 18960)
++++ src/ai/ai.hpp	(working copy)
+@@ -65,6 +65,15 @@
+ 	static void Stop(CompanyID company);
+ 
+ 	/**
++	 * Suspend an AI for the reminder of the current tick. If the AI is
++	 * in a state when it cannot be suspended, it will continue to run
++	 * until it can be suspended.
++	 * @param company The company for which the AI should be suspended.
++	 * @pre Company::IsValidAiID(company)
++	 */
++	static void Suspend(CompanyID company);
++
++	/**
+ 	 * Kill any and all AIs we manage.
+ 	 */
+ 	static void KillAll();
+Index: src/ai/ai_core.cpp
+===================================================================
+--- src/ai/ai_core.cpp	(revision 18960)
++++ src/ai/ai_core.cpp	(working copy)
+@@ -108,6 +108,19 @@
+ 	DeleteWindowById(WC_AI_SETTINGS, company);
+ }
+ 
++/* static */ void AI::Suspend(CompanyID company)
++{
++	if (_networking && !_network_server) return;
++
++	CompanyID old_company = _current_company;
++	_current_company = company;
++	Company *c = Company::Get(company);
++
++	c->ai_instance->Suspend();
++
++	_current_company = old_company;
++}
++
+ /* static */ void AI::KillAll()
+ {
+ 	/* It might happen there are no companies .. than we have nothing to loop */
+Index: src/ai/ai_gui.cpp
+===================================================================
+--- src/ai/ai_gui.cpp	(revision 18960)
++++ src/ai/ai_gui.cpp	(working copy)
+@@ -13,6 +13,7 @@
+ #include "../openttd.h"
+ #include "../gui.h"
+ #include "../window_gui.h"
++#include "../querystring_gui.h"
+ #include "../company_func.h"
+ #include "../company_base.h"
+ #include "../company_gui.h"
+@@ -24,6 +25,7 @@
+ #include "../textbuf_gui.h"
+ #include "../settings_func.h"
+ #include "../network/network_content.h"
++#include "../openttd.h"
+ 
+ #include "ai.hpp"
+ #include "api/ai_log.hpp"
+@@ -701,12 +703,14 @@
+ 	AID_WIDGET_SCROLLBAR,
+ 	AID_WIDGET_COMPANY_BUTTON_START,
+ 	AID_WIDGET_COMPANY_BUTTON_END = AID_WIDGET_COMPANY_BUTTON_START + 14,
++	AID_WIDGET_BREAK_POINT_EDIT_BOX,
++	AID_WIDGET_CONTINUE_BTN,
+ };
+ 
+ /**
+  * Window with everything an AI prints via AILog.
+  */
+-struct AIDebugWindow : public Window {
++struct AIDebugWindow : public QueryStringBaseWindow {
+ 	static const int top_offset;    ///< Offset of the text at the top of the #AID_WIDGET_LOG_PANEL.
+ 	static const int bottom_offset; ///< Offset of the text at the bottom of the #AID_WIDGET_LOG_PANEL.
+ 
+@@ -714,8 +718,11 @@
+ 	int redraw_timer;
+ 	int last_vscroll_pos;
+ 	bool autoscroll;
++	int ai_highlight_row;
+ 
+-	AIDebugWindow(const WindowDesc *desc, WindowNumber number) : Window()
++	static const unsigned int MAX_BREAK_POINT_STRING_LENGTH = 256;
++
++	AIDebugWindow(const WindowDesc *desc, WindowNumber number) : QueryStringBaseWindow(MAX_BREAK_POINT_STRING_LENGTH)
+ 	{
+ 		this->InitNested(desc, number);
+ 		/* Disable the companies who are not active or not an AI */
+@@ -724,9 +731,12 @@
+ 		}
+ 		this->DisableWidget(AID_WIDGET_RELOAD_TOGGLE);
+ 		this->DisableWidget(AID_WIDGET_SETTINGS);
++		this->DisableWidget(AID_WIDGET_CONTINUE_BTN);
+ 
+ 		this->last_vscroll_pos = 0;
+ 		this->autoscroll = true;
++		this->ai_highlight_row = -1;
++		InitializeTextBuffer(&this->text, this->edit_str_buf, this->edit_str_size, MAX_BREAK_POINT_STRING_LENGTH);
+ 
+ 		if (ai_debug_company != INVALID_COMPANY) this->LowerWidget(ai_debug_company + AID_WIDGET_COMPANY_BUTTON_START);
+ 	}
+@@ -774,6 +784,8 @@
+ 
+ 		if (this->IsShaded()) return; // Don't draw anything when the window is shaded.
+ 
++		this->DrawEditBox(AID_WIDGET_BREAK_POINT_EDIT_BOX);
++
+ 		/* If there are no active companies, don't display anything else. */
+ 		if (ai_debug_company == INVALID_COMPANY) return;
+ 
+@@ -884,6 +896,13 @@
+ 						default:                  colour = TC_BLACK;  break;
+ 					}
+ 
++					if (i == this->ai_highlight_row) {
++						/* While currently this->resize.step_height - WD_PAR_VSEP_NORMAL == FONT_HEIGHT_NORMAL,
++						 * that code is located some 160 lines above so it could eaisily get changed without noticing this code
++						 */
++						GfxFillRect(r.left + 1, r.top + y, r.right - 1, r.top + y + this->resize.step_height - WD_PAR_VSEP_NORMAL - 1, TC_WHITE);
++					}
++
+ 					DrawString(r.left + 7, r.right - 7, r.top + y, log->lines[pos], colour, SA_LEFT | SA_FORCE);
+ 					y += this->resize.step_height;
+ 				}
+@@ -931,6 +950,13 @@
+ 			case AID_WIDGET_SETTINGS:
+ 				ShowAISettingsWindow(ai_debug_company);
+ 				break;
++
++			case AID_WIDGET_CONTINUE_BTN:
++				/* Unpause */
++				DoCommand(0, PM_PAUSED_NORMAL, 0, DC_EXEC, CMD_PAUSE);
++				this->DisableWidget(AID_WIDGET_CONTINUE_BTN);
++				this->RaiseWidget(AID_WIDGET_CONTINUE_BTN); // Disabled widgets don't raise themself
++				break;
+ 		}
+ 	}
+ 
+@@ -941,9 +967,63 @@
+ 		this->SetDirty();
+ 	}
+ 
++	virtual void OnMouseLoop()
++	{
++		this->HandleEditBox(AID_WIDGET_BREAK_POINT_EDIT_BOX);
++
++		/* Zuu: [regarding this patch] I think this check is a bit expansive.
++		 *      Or at least there will be many many unnecessary checks. Maybe
++		 *      there is some code somewhere that is executed only when pause
++		 *      state changes. That code could ivalidate data of this window
++		 *      with data parameter := -2.
++		 */
++
++		/* The continue button should be disabled when the game is unpaused */
++		if ((_pause_mode & PM_PAUSED_NORMAL) == PM_UNPAUSED) {
++			this->DisableWidget(AID_WIDGET_CONTINUE_BTN);
++			this->SetWidgetDirty(AID_WIDGET_CONTINUE_BTN);
++			this->ai_highlight_row = -1;
++		}
++	}
++
++	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
++	{
++		EventState state;
++		this->HandleEditBoxKey(AID_WIDGET_BREAK_POINT_EDIT_BOX, key, keycode, state);
++		return state;
++	}
++
+ 	virtual void OnInvalidateData(int data = 0)
+ 	{
+ 		if (data == -1 || ai_debug_company == data) this->SetDirty();
++
++		/* If the log message is related to the active company tab, check the break string */
++		if (data == ai_debug_company && !StrEmpty(this->edit_str_buf))
++		{
++			/* Get the log instance of the active company */
++			CompanyID old_company = _current_company;
++			_current_company = ai_debug_company;
++			AILog::LogData *log = (AILog::LogData *)AIObject::GetLogPointer();
++			_current_company = old_company;
++			if (log != NULL)
++			{
++				if (strstr(log->lines[log->pos], this->edit_str_buf) != 0)
++				{
++					/* the break string was found in the last log mesage -> pause */
++					if ((_pause_mode & PM_PAUSED_NORMAL) == PM_UNPAUSED) {
++						AI::Suspend(ai_debug_company);
++						DoCommand(0, PM_PAUSED_NORMAL, 1, DC_EXEC, CMD_PAUSE);
++
++						/* Make it possible to click on the continue button */
++						this->EnableWidget(AID_WIDGET_CONTINUE_BTN);
++						this->SetWidgetDirty(AID_WIDGET_CONTINUE_BTN);
++
++						/* Highlight row that matched */
++						this->ai_highlight_row = log->pos;
++					}
++				}
++			}
++		}
+ 	}
+ 
+ 	virtual void OnResize()
+@@ -1010,7 +1090,20 @@
+ 		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, AID_WIDGET_RELOAD_TOGGLE), SetMinimalSize(100, 20), SetDataTip(STR_AI_DEBUG_RELOAD, STR_AI_DEBUG_RELOAD_TOOLTIP),
+ 	EndContainer(),
+ 	NWidget(NWID_HORIZONTAL),
+-		NWidget(WWT_PANEL, COLOUR_GREY, AID_WIDGET_LOG_PANEL), SetMinimalSize(287, 180), SetResize(1, 1),
++		NWidget(NWID_VERTICAL),
++			/* Log panel */
++			NWidget(WWT_PANEL, COLOUR_GREY, AID_WIDGET_LOG_PANEL), SetMinimalSize(287, 180), SetResize(1, 1),
++			EndContainer(),
++			/* Break string widgets */
++			NWidget(NWID_HORIZONTAL),
++				NWidget(WWT_PANEL, COLOUR_GREY),
++					NWidget(NWID_HORIZONTAL),
++						NWidget(WWT_LABEL, COLOUR_GREY), SetPadding(2, 2, 2, 4), SetDataTip(STR_AI_DEBUG_BREAK_ON_LABEL, 0x0),
++						NWidget(WWT_EDITBOX, COLOUR_WHITE, AID_WIDGET_BREAK_POINT_EDIT_BOX), SetFill(1, 1), SetResize(1, 0), SetPadding(2, 2, 2, 2), SetDataTip(STR_AI_DEBUG_BREAK_POINT_OSKTITLE, STR_AI_DEBUG_BREAK_POINT_TOOLTIP),
++					EndContainer(),
++				EndContainer(),
++				NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, AID_WIDGET_CONTINUE_BTN), SetDataTip(STR_AI_DEBUG_CONTINUE, STR_AI_DEBUG_CONTINUE_TOOLTIP),
++			EndContainer(),
+ 		EndContainer(),
+ 		NWidget(NWID_VERTICAL),
+ 			NWidget(WWT_SCROLLBAR, COLOUR_GREY, AID_WIDGET_SCROLLBAR),
+Index: src/ai/ai_instance.cpp
+===================================================================
+--- src/ai/ai_instance.cpp	(revision 18960)
++++ src/ai/ai_instance.cpp	(working copy)
+@@ -658,6 +658,12 @@
+ 
+ }
+ 
++void AIInstance::Suspend()
++{
++	HSQUIRRELVM vm = this->engine->GetVM();
++	sq_decreaseops(vm, _settings_game.ai.ai_max_opcode_till_suspend);
++}
++
+ /* static */ bool AIInstance::LoadObjects(HSQUIRRELVM vm)
+ {
+ 	SlObject(NULL, _ai_byte);
+Index: src/ai/ai_instance.hpp
+===================================================================
+--- src/ai/ai_instance.hpp	(revision 18960)
++++ src/ai/ai_instance.hpp	(working copy)
+@@ -137,6 +137,13 @@
+ 	 */
+ 	static void LoadEmpty();
+ 
++	/**
++	 * Reduces the number of opcodes the AI have left to zero. Unless
++	 * the AI is in a state where it cannot suspend it will be suspended
++	 * for the reminder of the current tick. This function is safe to
++	 * call from within a function called by the AI.
++	 */
++	void Suspend();
+ private:
+ 	class AIController *controller;
+ 	class AIStorage *storage;
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 18960)
++++ src/lang/english.txt	(working copy)
+@@ -3217,6 +3217,11 @@
+ STR_AI_DEBUG_SETTINGS_TOOLTIP                                   :{BLACK}Change the settings of the AI
+ STR_AI_DEBUG_RELOAD                                             :{BLACK}Reload AI
+ STR_AI_DEBUG_RELOAD_TOOLTIP                                     :{BLACK}Kill the AI, reload the script, and restart the AI
++STR_AI_DEBUG_BREAK_ON_LABEL                                     :{BLACK}Break on:
++STR_AI_DEBUG_BREAK_POINT_OSKTITLE                               :{BLACK}Break on
++STR_AI_DEBUG_BREAK_POINT_TOOLTIP                                :{BLACK}When an AILog message matches this string, the game is paused.
++STR_AI_DEBUG_CONTINUE                                           :{BLACK}Continue
++STR_AI_DEBUG_CONTINUE_TOOLTIP                                   :{BLACK}Unpause and continue the AI
+ 
+ STR_ERROR_AI_NO_AI_FOUND                                        :No suitable AI found to load.{}This AI is a dummy AI and won't do anything.{}You can download several AIs via the 'Online Content' system.
+ STR_ERROR_AI_PLEASE_REPORT_CRASH                                :{WHITE}One of the running AIs crashed. Please report this to the AI author with a screenshot of the AI Debug Window.

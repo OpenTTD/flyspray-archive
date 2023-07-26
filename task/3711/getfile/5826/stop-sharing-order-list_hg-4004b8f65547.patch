@@ -1,0 +1,120 @@
+diff -r 4004b8f65547 src/lang/english.txt
+--- a/src/lang/english.txt	Fri Mar 19 22:46:22 2010 +0000
++++ b/src/lang/english.txt	Sat Mar 20 10:07:43 2010 +0100
+@@ -3104,6 +3104,8 @@
+ 
+ STR_ORDERS_DELETE_BUTTON                                        :{BLACK}Delete
+ STR_ORDERS_DELETE_TOOLTIP                                       :{BLACK}Delete the highlighted order
++STR_ORDERS_STOP_SHARING_BUTTON                                  :{BLACK}Stop sharing
++STR_ORDERS_STOP_SHARING_TOOLTIP                                 :{BLACK}Stop sharing the order list. Ctrl+Click also deletes the order list
+ 
+ STR_ORDERS_GO_TO_BUTTON                                         :{BLACK}Go To
+ STR_ORDER_GO_TO_NEAREST_DEPOT                                   :Go to nearest depot
+@@ -3626,6 +3628,7 @@
+ STR_ERROR_CAN_T_ADD_ORDER_SHARED                                :{WHITE}... a vehicle sharing this order can't go to that station
+ 
+ STR_ERROR_CAN_T_SHARE_ORDER_LIST                                :{WHITE}Can't share order list...
++STR_ERROR_CAN_T_STOP_SHARING_ORDER_LIST                         :{WHITE}Can't stop sharing order list...
+ STR_ERROR_CAN_T_COPY_ORDER_LIST                                 :{WHITE}Can't copy order list...
+ STR_ERROR_TOO_FAR_FROM_PREVIOUS_DESTINATION                     :{WHITE}... too far from previous destination
+ 
+diff -r 4004b8f65547 src/order_cmd.cpp
+--- a/src/order_cmd.cpp	Fri Mar 19 22:46:22 2010 +0000
++++ b/src/order_cmd.cpp	Sat Mar 20 10:07:43 2010 +0100
+@@ -1165,8 +1165,8 @@
+  * @param flags operation to perform
+  * @param p1 various bitstuffed elements
+  * - p1 = (bit  0-15) - destination vehicle to clone orders to (p1 & 0xFFFF)
+- * - p1 = (bit 16-31) - source vehicle to clone orders from, if any (none for CO_UNSHARE)
+- * @param p2 mode of cloning: CO_SHARE, CO_COPY, or CO_UNSHARE
++ * - p1 = (bit 16-31) - source vehicle to clone orders from, if any (none for CO_UNSHARE and CO_STOP_SHARING)
++ * @param p2 mode of cloning: CO_SHARE, CO_COPY, CO_UNSHARE or CO_STOP_SHARING
+  * @param text unused
+  * @return the cost of this operation or an error
+  */
+@@ -1283,6 +1283,16 @@
+ 		} break;
+ 
+ 		case CO_UNSHARE: return DecloneOrder(dst, flags);
++
++		case CO_STOP_SHARING: {
++			/* Stops sharing the vehicle order list, that is CO_COPY the order list of another shared vehicle. */
++			if (!dst->IsOrderListShared()) return CMD_ERROR;
++
++			Vehicle *src = (dst->FirstShared() == dst) ? dst->NextShared() : dst->PreviousShared();
++
++			return CmdCloneOrder(tile, flags, veh_dst | (src->index << 16), CO_COPY, text);
++		} break;
++
+ 		default: return CMD_ERROR;
+ 	}
+ 
+diff -r 4004b8f65547 src/order_gui.cpp
+--- a/src/order_gui.cpp	Fri Mar 19 22:46:22 2010 +0000
++++ b/src/order_gui.cpp	Sat Mar 20 10:07:43 2010 +0100
+@@ -652,16 +652,25 @@
+ 
+ 	/**
+ 	 * Handle the click on the delete button.
++	 * If 'End Of Shared Orders' is selected, only stops sharing orders. Otherwise, delete selected order or order list.
+ 	 * @param i Dummy parameter.
+ 	 */
+ 	void OrderClick_Delete(int i)
+ 	{
+-		/* When networking, move one order lower */
+-		int selected = this->selected_order + (int)_networking;
+-
+-		if (DoCommandP(this->vehicle->tile, this->vehicle->index, this->OrderGetSel(), CMD_DELETE_ORDER | CMD_MSG(STR_ERROR_CAN_T_DELETE_THIS_ORDER))) {
+-			this->selected_order = selected >= this->vehicle->GetNumOrders() ? -1 : selected;
+-			this->UpdateButtonState();
++		if (!_ctrl_pressed && this->vehicle->IsOrderListShared() && this->selected_order == this->vehicle->GetNumOrders()) {
++			/* Clicked (not Ctrl+Click) delete button with 'End Of Shared Orders' selected. */
++			if (DoCommandP(this->vehicle->tile, this->vehicle->index, CO_STOP_SHARING, CMD_CLONE_ORDER | CMD_MSG(STR_ERROR_CAN_T_STOP_SHARING_ORDER_LIST))) {
++				this->selected_order = this->vehicle->GetNumOrders();
++				this->UpdateButtonState();
++			}
++		} else {
++			/* Clicked delete button with any order selected or Ctrl-Clicked with 'End Of Shared Orders' selected. */
++			if (DoCommandP(this->vehicle->tile, this->vehicle->index, this->OrderGetSel(), CMD_DELETE_ORDER | CMD_MSG(STR_ERROR_CAN_T_DELETE_THIS_ORDER))) {
++				/* When networking, move one order lower */
++				int selected = this->selected_order + (int)_networking;
++				this->selected_order = selected >= this->vehicle->GetNumOrders() ? -1 : selected;
++				this->UpdateButtonState();
++			}
+ 		}
+ 	}
+ 
+@@ -813,9 +822,18 @@
+ 		/* skip */
+ 		this->SetWidgetDisabledState(ORDER_WIDGET_SKIP, this->vehicle->GetNumOrders() <= 1);
+ 
+-		/* delete */
+-		this->SetWidgetDisabledState(ORDER_WIDGET_DELETE,
++		/* delete / stop sharing */
++		NWidgetCore *delete_btn = this->GetWidget<NWidgetCore>(ORDER_WIDGET_DELETE);
++		if (this->vehicle->IsOrderListShared() && this->selected_order == this->vehicle->GetNumOrders()) {
++			/* 'Stop Sharing' button */
++			delete_btn->SetDataTip(STR_ORDERS_STOP_SHARING_BUTTON, STR_ORDERS_STOP_SHARING_TOOLTIP);
++			this->SetWidgetDisabledState(ORDER_WIDGET_DELETE, false);
++		} else {
++			/* 'Delete' button */
++			delete_btn->SetDataTip(STR_ORDERS_DELETE_BUTTON, STR_ORDERS_DELETE_TOOLTIP);
++			this->SetWidgetDisabledState(ORDER_WIDGET_DELETE,
+ 				(uint)this->vehicle->GetNumOrders() + ((shared_orders || this->vehicle->GetNumOrders() != 0) ? 1 : 0) <= (uint)this->selected_order);
++		}
+ 
+ 		/* First row. */
+ 		this->RaiseWidget(ORDER_WIDGET_FULL_LOAD);
+diff -r 4004b8f65547 src/order_type.h
+--- a/src/order_type.h	Fri Mar 19 22:46:22 2010 +0000
++++ b/src/order_type.h	Sat Mar 20 10:07:43 2010 +0100
+@@ -165,7 +165,8 @@
+ enum {
+ 	CO_SHARE   = 0,
+ 	CO_COPY    = 1,
+-	CO_UNSHARE = 2
++	CO_UNSHARE = 2,
++	CO_STOP_SHARING = 3,
+ };
+ 
+ struct Order;

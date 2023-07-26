@@ -1,0 +1,122 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 22854)
++++ src/lang/english.txt	(working copy)
+@@ -274,7 +274,7 @@
+ STR_SORT_BY_MODEL                                               :Model
+ STR_SORT_BY_VALUE                                               :Value
+ STR_SORT_BY_LENGTH                                              :Length
+-STR_SORT_BY_LIFE_TIME                                           :Remaining life time
++STR_SORT_BY_LIFE_TIME                                           :Remaining lifetime
+ STR_SORT_BY_TIMETABLE_DELAY                                     :Timetable delay
+ STR_SORT_BY_FACILITY                                            :Station type
+ STR_SORT_BY_WAITING                                             :Waiting cargo value
+@@ -3198,10 +3198,13 @@
+ STR_ORDER_SERVICE_TOOLTIP                                       :{BLACK}Skip this order unless a service is needed
+ 
+ STR_ORDER_CONDITIONAL_VARIABLE_TOOLTIP                          :{BLACK}Vehicle data to base jumping on
++
++# Conditional order variables, must follow order of OrderConditionVariable enum
+ STR_ORDER_CONDITIONAL_LOAD_PERCENTAGE                           :Load percentage
+ STR_ORDER_CONDITIONAL_RELIABILITY                               :Reliability
+ STR_ORDER_CONDITIONAL_MAX_SPEED                                 :Maximum speed
+-STR_ORDER_CONDITIONAL_AGE                                       :Vehicle age (years)
++STR_ORDER_CONDITIONAL_AGE                                       :Age (years)
++STR_ORDER_CONDITIONAL_REMAINING_LIFETIME                        :Remaining lifetime (years)
+ STR_ORDER_CONDITIONAL_REQUIRES_SERVICE                          :Requires service
+ STR_ORDER_CONDITIONAL_UNCONDITIONALLY                           :Always
+ 
+Index: src/order_cmd.cpp
+===================================================================
+--- src/order_cmd.cpp	(revision 22854)
++++ src/order_cmd.cpp	(working copy)
+@@ -1799,12 +1799,13 @@
+ 	uint16 value = order->GetConditionValue();
+ 
+ 	switch (order->GetConditionVariable()) {
+-		case OCV_LOAD_PERCENTAGE:  skip_order = OrderConditionCompare(occ, CalcPercentVehicleFilled(v, NULL), value); break;
+-		case OCV_RELIABILITY:      skip_order = OrderConditionCompare(occ, ToPercent16(v->reliability),       value); break;
+-		case OCV_MAX_SPEED:        skip_order = OrderConditionCompare(occ, v->GetDisplayMaxSpeed() * 10 / 16, value); break;
+-		case OCV_AGE:              skip_order = OrderConditionCompare(occ, v->age / DAYS_IN_LEAP_YEAR,        value); break;
+-		case OCV_REQUIRES_SERVICE: skip_order = OrderConditionCompare(occ, v->NeedsServicing(),               value); break;
+-		case OCV_UNCONDITIONALLY:  skip_order = true; break;
++		case OCV_LOAD_PERCENTAGE:    skip_order = OrderConditionCompare(occ, CalcPercentVehicleFilled(v, NULL), value); break;
++		case OCV_RELIABILITY:        skip_order = OrderConditionCompare(occ, ToPercent16(v->reliability),       value); break;
++		case OCV_MAX_SPEED:          skip_order = OrderConditionCompare(occ, v->GetDisplayMaxSpeed() * 10 / 16, value); break;
++		case OCV_AGE:                skip_order = OrderConditionCompare(occ, v->age / DAYS_IN_LEAP_YEAR,        value); break;
++		case OCV_REMAINING_LIFETIME: skip_order = OrderConditionCompare(occ, max(v->max_age - v->age + DAYS_IN_LEAP_YEAR - 1, 0) / DAYS_IN_LEAP_YEAR, value); break;
++		case OCV_REQUIRES_SERVICE:   skip_order = OrderConditionCompare(occ, v->NeedsServicing(),               value); break;
++		case OCV_UNCONDITIONALLY:    skip_order = true; break;
+ 		default: NOT_REACHED();
+ 	}
+ 
+Index: src/order_gui.cpp
+===================================================================
+--- src/order_gui.cpp	(revision 22854)
++++ src/order_gui.cpp	(working copy)
+@@ -139,6 +139,7 @@
+ 	STR_ORDER_CONDITIONAL_RELIABILITY,
+ 	STR_ORDER_CONDITIONAL_MAX_SPEED,
+ 	STR_ORDER_CONDITIONAL_AGE,
++	STR_ORDER_CONDITIONAL_REMAINING_LIFETIME,
+ 	STR_ORDER_CONDITIONAL_REQUIRES_SERVICE,
+ 	STR_ORDER_CONDITIONAL_UNCONDITIONALLY,
+ 	INVALID_STRING_ID,
+Index: src/order_type.h
+===================================================================
+--- src/order_type.h	(revision 22854)
++++ src/order_type.h	(working copy)
+@@ -110,12 +110,13 @@
+  * Variables (of a vehicle) to 'cause' skipping on.
+  */
+ enum OrderConditionVariable {
+-	OCV_LOAD_PERCENTAGE,  ///< Skip based on the amount of load
+-	OCV_RELIABILITY,      ///< Skip based on the reliability
+-	OCV_MAX_SPEED,        ///< Skip based on the maximum speed
+-	OCV_AGE,              ///< Skip based on the age
+-	OCV_REQUIRES_SERVICE, ///< Skip when the vehicle requires service
+-	OCV_UNCONDITIONALLY,  ///< Always skip
++	OCV_LOAD_PERCENTAGE,    ///< Skip based on the amount of load
++	OCV_RELIABILITY,        ///< Skip based on the reliability
++	OCV_MAX_SPEED,          ///< Skip based on the maximum speed
++	OCV_AGE,                ///< Skip based on the age
++	OCV_REMAINING_LIFETIME, ///< Skip based on the remaining lifetime
++	OCV_REQUIRES_SERVICE,   ///< Skip when the vehicle requires service
++	OCV_UNCONDITIONALLY,    ///< Always skip
+ 	OCV_END
+ };
+ 
+Index: src/saveload/afterload.cpp
+===================================================================
+--- src/saveload/afterload.cpp	(revision 22854)
++++ src/saveload/afterload.cpp	(working copy)
+@@ -2647,6 +2647,14 @@
+ 		}
+ 	}
+ 
++	if (IsSavegameVersionBefore(164)) {
++		/* OCV_REMAINING_LIFETIME OrderConditionVariable was added. */
++		Order *order;
++		FOR_ALL_ORDERS(order) {
++			if (order->IsType(OT_CONDITIONAL) && order->GetConditionVariable() >= OCV_REMAINING_LIFETIME) order->SetConditionVariable((OrderConditionVariable)(order->GetConditionVariable() + 1));
++		}
++	}
++
+ 	/* Road stops is 'only' updating some caches */
+ 	AfterLoadRoadStops();
+ 	AfterLoadLabelMaps();
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 22854)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -228,8 +228,9 @@
+  *  161   22567
+  *  162   22713
+  *  163   22767
++ *  164   xxxxx
+  */
+-extern const uint16 SAVEGAME_VERSION = 163; ///< Current savegame version of OpenTTD.
++extern const uint16 SAVEGAME_VERSION = 164; ///< Current savegame version of OpenTTD.
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 

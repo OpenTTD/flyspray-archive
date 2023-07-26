@@ -1,0 +1,344 @@
+diff --git a/src/blitter/32bpp_anim.cpp b/src/blitter/32bpp_anim.cpp
+index 1c72a13..427c261 100644
+--- a/src/blitter/32bpp_anim.cpp
++++ b/src/blitter/32bpp_anim.cpp
+@@ -18,8 +18,8 @@ inline void Blitter_32bppAnim::Draw(const Blitter::BlitterParams *bp, ZoomLevel
+ {
+ 	const SpriteData *src = (const SpriteData *)bp->sprite;
+ 
+-	const Colour *src_px = (const Colour *)(src->data + src->offset[zoom][0]);
+-	const uint8  *src_n  = (const uint8  *)(src->data + src->offset[zoom][1]);
++	const Colour *src_px = (const Colour *)(src->data + src->offset[zoom - ZOOM_LVL_BLITTER_MIN][0]);
++	const uint8  *src_n  = (const uint8  *)(src->data + src->offset[zoom - ZOOM_LVL_BLITTER_MIN][1]);
+ 
+ 	for (uint i = bp->skip_top; i != 0; i--) {
+ 		src_px = (const Colour *)((const byte *)src_px + *(const uint32 *)src_px);
+diff --git a/src/blitter/32bpp_optimized.cpp b/src/blitter/32bpp_optimized.cpp
+index d4827e7..8e5892e 100644
+--- a/src/blitter/32bpp_optimized.cpp
++++ b/src/blitter/32bpp_optimized.cpp
+@@ -25,11 +25,11 @@ inline void Blitter_32bppOptimized::Draw(const Blitter::BlitterParams *bp, ZoomL
+ 
+ 	/* src_px : each line begins with uint32 n = 'number of bytes in this line',
+ 	 *          then n times is the Colour struct for this line */
+-	const Colour *src_px = (const Colour *)(src->data + src->offset[zoom][0]);
++	const Colour *src_px = (const Colour *)(src->data + src->offset[zoom - ZOOM_LVL_BLITTER_MIN][0]);
+ 	/* src_n  : each line begins with uint32 n = 'number of bytes in this line',
+ 	 *          then interleaved stream of 'm' and 'n' channels. 'm' is remap,
+ 	 *          'n' is number of bytes with the same alpha channel class */
+-	const uint8  *src_n  = (const uint8  *)(src->data + src->offset[zoom][1]);
++	const uint8  *src_n  = (const uint8  *)(src->data + src->offset[zoom - ZOOM_LVL_BLITTER_MIN][1]);
+ 
+ 	/* skip upper lines in src_px and src_n */
+ 	for (uint i = bp->skip_top; i != 0; i--) {
+@@ -255,7 +255,7 @@ Sprite *Blitter_32bppOptimized::Encode(SpriteLoader::Sprite *sprite, Blitter::Al
+ 	/* streams of pixels (a, r, g, b channels)
+ 	 *
+ 	 * stored in separated stream so data are always aligned on 4B boundary */
+-	Colour *dst_px_orig[ZOOM_LVL_COUNT];
++	Colour *dst_px_orig[ZOOM_LVL_BLITTER_COUNT];
+ 
+ 	/* interleaved stream of 'm' channel and 'n' channel
+ 	 * 'n' is number if following pixels with the same alpha channel class
+@@ -263,21 +263,22 @@ Sprite *Blitter_32bppOptimized::Encode(SpriteLoader::Sprite *sprite, Blitter::Al
+ 	 *
+ 	 * it has to be stored in one stream so fewer registers are used -
+ 	 * x86 has problems with register allocation even with this solution */
+-	uint8  *dst_n_orig[ZOOM_LVL_COUNT];
++	uint8  *dst_n_orig[ZOOM_LVL_BLITTER_COUNT];
+ 
+ 	/* lengths of streams */
+-	uint32 lengths[ZOOM_LVL_COUNT][2];
++	uint32 lengths[ZOOM_LVL_BLITTER_COUNT][2];
+ 
+-	for (ZoomLevel z = ZOOM_LVL_BEGIN; z < ZOOM_LVL_END; z++) {
+-		const SpriteLoader::Sprite *src_orig = ResizeSprite(sprite, z);
++	ZoomLevel zoom_value = ZOOM_LVL_BLITTER_MIN;
++	for (int zoom_index = 0; zoom_index < ZOOM_LVL_BLITTER_COUNT; zoom_index++, zoom_value++) {
++		const SpriteLoader::Sprite *src_orig = ResizeSprite(sprite, zoom_value);
+ 
+ 		uint size = src_orig->height * src_orig->width;
+ 
+-		dst_px_orig[z] = CallocT<Colour>(size + src_orig->height * 2);
+-		dst_n_orig[z]  = CallocT<uint8>(size * 2 + src_orig->height * 4 * 2);
++		dst_px_orig[zoom_index] = CallocT<Colour>(size + src_orig->height * 2);
++		dst_n_orig[zoom_index]  = CallocT<uint8>(size * 2 + src_orig->height * 4 * 2);
+ 
+-		uint32 *dst_px_ln = (uint32 *)dst_px_orig[z];
+-		uint32 *dst_n_ln  = (uint32 *)dst_n_orig[z];
++		uint32 *dst_px_ln = (uint32 *)dst_px_orig[zoom_index];
++		uint32 *dst_n_ln  = (uint32 *)dst_n_orig[zoom_index];
+ 
+ 		const SpriteLoader::CommonPixel *src = (const SpriteLoader::CommonPixel *)src_orig->data;
+ 
+@@ -344,15 +345,15 @@ Sprite *Blitter_32bppOptimized::Encode(SpriteLoader::Sprite *sprite, Blitter::Al
+ 			dst_n_ln =  (uint32 *)dst_n;
+ 		}
+ 
+-		lengths[z][0] = (byte *)dst_px_ln - (byte *)dst_px_orig[z]; // all are aligned to 4B boundary
+-		lengths[z][1] = (byte *)dst_n_ln  - (byte *)dst_n_orig[z];
++		lengths[zoom_index][0] = (byte *)dst_px_ln - (byte *)dst_px_orig[zoom_index]; // all are aligned to 4B boundary
++		lengths[zoom_index][1] = (byte *)dst_n_ln  - (byte *)dst_n_orig[zoom_index];
+ 
+ 		free(src_orig->data);
+ 		free((void *)src_orig);
+ 	}
+ 
+ 	uint len = 0; // total length of data
+-	for (ZoomLevel z = ZOOM_LVL_BEGIN; z < ZOOM_LVL_END; z++) {
++	for (int z = 0; z < ZOOM_LVL_BLITTER_COUNT; z++) {
+ 		len += lengths[z][0] + lengths[z][1];
+ 	}
+ 
+@@ -365,8 +366,8 @@ Sprite *Blitter_32bppOptimized::Encode(SpriteLoader::Sprite *sprite, Blitter::Al
+ 
+ 	SpriteData *dst = (SpriteData *)dest_sprite->data;
+ 
+-	for (ZoomLevel z = ZOOM_LVL_BEGIN; z < ZOOM_LVL_END; z++) {
+-		dst->offset[z][0] = z == ZOOM_LVL_BEGIN ? 0 : lengths[z - 1][1] + dst->offset[z - 1][1];
++	for (int z = 0; z < ZOOM_LVL_BLITTER_COUNT; z++) {
++		dst->offset[z][0] = z == 0 ? 0 : lengths[z - 1][1] + dst->offset[z - 1][1];
+ 		dst->offset[z][1] = lengths[z][0] + dst->offset[z][0];
+ 
+ 		memcpy(dst->data + dst->offset[z][0], dst_px_orig[z], lengths[z][0]);
+diff --git a/src/blitter/32bpp_optimized.hpp b/src/blitter/32bpp_optimized.hpp
+index 344659c..82516fd 100644
+--- a/src/blitter/32bpp_optimized.hpp
++++ b/src/blitter/32bpp_optimized.hpp
+@@ -11,7 +11,7 @@
+ class Blitter_32bppOptimized : public Blitter_32bppSimple {
+ public:
+ 	struct SpriteData {
+-		uint32 offset[ZOOM_LVL_COUNT][2];
++		uint32 offset[ZOOM_LVL_BLITTER_COUNT][2];
+ 		byte data[];
+ 	};
+ 
+diff --git a/src/blitter/8bpp_optimized.cpp b/src/blitter/8bpp_optimized.cpp
+index 62fae35..dcd95db 100644
+--- a/src/blitter/8bpp_optimized.cpp
++++ b/src/blitter/8bpp_optimized.cpp
+@@ -14,7 +14,7 @@ void Blitter_8bppOptimized::Draw(Blitter::BlitterParams *bp, BlitterMode mode, Z
+ {
+ 	/* Find the offset of this zoom-level */
+ 	const SpriteData *sprite_src = (const SpriteData *)bp->sprite;
+-	uint offset = sprite_src->offset[zoom];
++	uint offset = sprite_src->offset[zoom - ZOOM_LVL_BLITTER_MIN];
+ 
+ 	/* Find where to start reading in the source sprite */
+ 	const uint8 *src = sprite_src->data + offset;
+@@ -107,7 +107,7 @@ Sprite *Blitter_8bppOptimized::Encode(SpriteLoader::Sprite *sprite, Blitter::All
+ 	/* Make memory for all zoom-levels */
+ 	uint memory = sizeof(SpriteData);
+ 
+-	for (ZoomLevel i = ZOOM_LVL_BEGIN; i < ZOOM_LVL_END; i++) {
++	for (ZoomLevel i = ZOOM_LVL_BLITTER_MIN; i <= ZOOM_LVL_BLITTER_MAX; i++) {
+ 		memory += UnScaleByZoom(sprite->height, i) * UnScaleByZoom(sprite->width, i);
+ 	}
+ 
+@@ -122,15 +122,16 @@ Sprite *Blitter_8bppOptimized::Encode(SpriteLoader::Sprite *sprite, Blitter::All
+ 	byte *dst = temp_dst->data;
+ 
+ 	/* Make the sprites per zoom-level */
+-	for (ZoomLevel i = ZOOM_LVL_BEGIN; i < ZOOM_LVL_END; i++) {
++	ZoomLevel zoom_value = ZOOM_LVL_BLITTER_MIN;
++	for (int zoom_index = 0; zoom_index < ZOOM_LVL_BLITTER_COUNT; zoom_index++, zoom_value++) {
+ 		/* Store the index table */
+ 		uint offset = dst - temp_dst->data;
+-		temp_dst->offset[i] = offset;
++		temp_dst->offset[zoom_index] = offset;
+ 
+ 		/* cache values, because compiler can't cache it */
+-		int scaled_height = UnScaleByZoom(sprite->height, i);
+-		int scaled_width  = UnScaleByZoom(sprite->width,  i);
+-		int scaled_1      =   ScaleByZoom(1,              i);
++		int scaled_height = UnScaleByZoom(sprite->height, zoom_value);
++		int scaled_width  = UnScaleByZoom(sprite->width,  zoom_value);
++		int scaled_1      =   ScaleByZoom(1,              zoom_value);
+ 
+ 		for (int y = 0; y < scaled_height; y++) {
+ 			uint trans = 0;
+@@ -139,7 +140,7 @@ Sprite *Blitter_8bppOptimized::Encode(SpriteLoader::Sprite *sprite, Blitter::All
+ 			byte *count_dst = NULL;
+ 
+ 			/* Store the scaled image */
+-			const SpriteLoader::CommonPixel *src = &sprite->data[ScaleByZoom(y, i) * sprite->width];
++			const SpriteLoader::CommonPixel *src = &sprite->data[ScaleByZoom(y, zoom_value) * sprite->width];
+ 			const SpriteLoader::CommonPixel *src_end = &src[sprite->width];
+ 
+ 			for (int x = 0; x < scaled_width; x++) {
+diff --git a/src/blitter/8bpp_optimized.hpp b/src/blitter/8bpp_optimized.hpp
+index a7c8ea1..333cf45 100644
+--- a/src/blitter/8bpp_optimized.hpp
++++ b/src/blitter/8bpp_optimized.hpp
+@@ -11,8 +11,8 @@
+ class Blitter_8bppOptimized : public Blitter_8bppBase {
+ public:
+ 	struct SpriteData {
+-		uint32 offset[ZOOM_LVL_COUNT]; ///< offsets (from .data) to streams for different zoom levels
+-		byte data[];                   ///< data, all zoomlevels
++		uint32 offset[ZOOM_LVL_BLITTER_COUNT]; ///< offsets (from .data) to streams for different zoom levels
++		byte data[];                           ///< data, all zoomlevels
+ 	};
+ 
+ 	/* virtual */ void Draw(Blitter::BlitterParams *bp, BlitterMode mode, ZoomLevel zoom);
+diff --git a/src/main_gui.cpp b/src/main_gui.cpp
+index 0e04b60..fe6c2a1 100644
+--- a/src/main_gui.cpp
++++ b/src/main_gui.cpp
+@@ -132,7 +132,7 @@ bool DoZoomInOutWindow(int how, Window *w)
+ 
+ 	switch (how) {
+ 		case ZOOM_IN:
+-			if (vp->zoom == ZOOM_LVL_MIN) return false;
++			if (vp->zoom == ZOOM_LVL_BLITTER_MIN) return false;
+ 			vp->zoom = (ZoomLevel)((int)vp->zoom - 1);
+ 			vp->virtual_width >>= 1;
+ 			vp->virtual_height >>= 1;
+@@ -143,7 +143,7 @@ bool DoZoomInOutWindow(int how, Window *w)
+ 			w->viewport->dest_scrollpos_y = w->viewport->scrollpos_y;
+ 			break;
+ 		case ZOOM_OUT:
+-			if (vp->zoom == ZOOM_LVL_MAX) return false;
++			if (vp->zoom == ZOOM_LVL_BLITTER_MAX) return false;
+ 			vp->zoom = (ZoomLevel)((int)vp->zoom + 1);
+ 
+ 			w->viewport->scrollpos_x -= vp->virtual_width >> 1;
+@@ -171,7 +171,7 @@ void ZoomInOrOutToCursorWindow(bool in, Window *w)
+ 
+ 	if (_game_mode != GM_MENU) {
+ 		ViewPort *vp = w->viewport;
+-		if ((in && vp->zoom == ZOOM_LVL_MIN) || (!in && vp->zoom == ZOOM_LVL_MAX))
++		if ((in && vp->zoom == ZOOM_LVL_BLITTER_MIN) || (!in && vp->zoom == ZOOM_LVL_BLITTER_MAX))
+ 			return;
+ 
+ 		Point pt = GetTileZoomCenterWindow(in, w);
+diff --git a/src/saveload/misc_sl.cpp b/src/saveload/misc_sl.cpp
+index 1ded1b7..7721a74 100644
+--- a/src/saveload/misc_sl.cpp
++++ b/src/saveload/misc_sl.cpp
+@@ -45,7 +45,8 @@ void ResetViewportAfterLoadGame()
+ 	w->viewport->dest_scrollpos_y = _saved_scrollpos_y;
+ 
+ 	ViewPort *vp = w->viewport;
+-	vp->zoom = min(_saved_scrollpos_zoom, ZOOM_LVL_MAX);
++	vp->zoom = min(_saved_scrollpos_zoom, ZOOM_LVL_BLITTER_MAX);
++	vp->zoom = max(_saved_scrollpos_zoom, ZOOM_LVL_BLITTER_MIN);
+ 	vp->virtual_width = ScaleByZoom(vp->width, vp->zoom);
+ 	vp->virtual_height = ScaleByZoom(vp->height, vp->zoom);
+ 
+diff --git a/src/sound.cpp b/src/sound.cpp
+index 0e4b705..22d3ba1 100644
+--- a/src/sound.cpp
++++ b/src/sound.cpp
+@@ -147,7 +147,7 @@ static void StartSound(SoundID sound_id, int panning, uint volume)
+ 
+ 
+ static const byte _vol_factor_by_zoom[] = {255, 190, 134, 87};
+-assert_compile(lengthof(_vol_factor_by_zoom) == ZOOM_LVL_COUNT);
++assert_compile(lengthof(_vol_factor_by_zoom) == ZOOM_LVL_BLITTER_COUNT);
+ 
+ static const byte _sound_base_vol[] = {
+ 	128,  90, 128, 128, 128, 128, 128, 128,
+@@ -211,7 +211,7 @@ static void SndPlayScreenCoordFx(SoundID sound, int left, int right, int top, in
+ 			StartSound(
+ 				sound,
+ 				panning,
+-				(msf.effect_vol * _vol_factor_by_zoom[vp->zoom - ZOOM_LVL_BEGIN]) / 256
++				(msf.effect_vol * _vol_factor_by_zoom[vp->zoom - ZOOM_LVL_BLITTER_MIN]) / 256
+ 			);
+ 			return;
+ 		}
+diff --git a/src/viewport.cpp b/src/viewport.cpp
+index f26e708..a62f092 100644
+--- a/src/viewport.cpp
++++ b/src/viewport.cpp
+@@ -454,10 +454,10 @@ Point GetTileZoomCenterWindow(bool in, Window * w)
+  * @param widget_zoom_out widget index for window with zoom-out button */
+ void HandleZoomMessage(Window *w, const ViewPort *vp, byte widget_zoom_in, byte widget_zoom_out)
+ {
+-	w->SetWidgetDisabledState(widget_zoom_in, vp->zoom == ZOOM_LVL_MIN);
++	w->SetWidgetDisabledState(widget_zoom_in, vp->zoom == ZOOM_LVL_BLITTER_MIN);
+ 	w->InvalidateWidget(widget_zoom_in);
+ 
+-	w->SetWidgetDisabledState(widget_zoom_out, vp->zoom == ZOOM_LVL_MAX);
++	w->SetWidgetDisabledState(widget_zoom_out, vp->zoom == ZOOM_LVL_BLITTER_MAX);
+ 	w->InvalidateWidget(widget_zoom_out);
+ }
+ 
+@@ -1290,14 +1290,14 @@ void ViewportSign::UpdatePosition(int center, int top, StringID str)
+  */
+ void ViewportSign::MarkDirty() const
+ {
+-	/* We use ZOOM_LVL_MAX here, as every viewport can have an other zoom,
++	/* We use ZOOM_LVL_BLITTER_MAX here, as every viewport can have an other zoom,
+ 	 *  and there is no way for us to know which is the biggest. So make the
+ 	 *  biggest area dirty, and we are safe for sure. */
+ 	MarkAllViewportsDirty(
+ 		this->left - 6,
+ 		this->top  - 3,
+-		this->left + ScaleByZoom(this->width_normal + 12, ZOOM_LVL_MAX),
+-		this->top  + ScaleByZoom(12, ZOOM_LVL_MAX));
++		this->left + ScaleByZoom(this->width_normal + 12, ZOOM_LVL_BLITTER_MAX),
++		this->top  + ScaleByZoom(12, ZOOM_LVL_BLITTER_MAX));
+ }
+ 
+ static void ViewportDrawTileSprites(const TileSpriteToDrawVector *tstdv)
+diff --git a/src/waypoint_gui.cpp b/src/waypoint_gui.cpp
+index 70aafeb..ba6b06b 100644
+--- a/src/waypoint_gui.cpp
++++ b/src/waypoint_gui.cpp
+@@ -53,7 +53,7 @@ public:
+ 
+ 		this->flags4 |= WF_DISABLE_VP_SCROLL;
+ 		NWidgetViewport *nvp = (NWidgetViewport *)this->nested_array[WAYPVW_VIEWPORT];
+-		nvp->InitializeViewport(this, this->wp->xy, ZOOM_LVL_MIN);
++		nvp->InitializeViewport(this, this->wp->xy, ZOOM_LVL_BLITTER_MIN);
+ 
+ 		this->OnInvalidateData(0);
+ 	}
+diff --git a/src/zoom_type.h b/src/zoom_type.h
+index af314ad..4225dd4 100644
+--- a/src/zoom_type.h
++++ b/src/zoom_type.h
+@@ -9,15 +9,10 @@
+ 
+ enum ZoomLevel {
+ 	/* Our possible zoom-levels */
+-	ZOOM_LVL_BEGIN  = 0,
+-	ZOOM_LVL_NORMAL = 0,
++	ZOOM_LVL_NORMAL,
+ 	ZOOM_LVL_OUT_2X,
+ 	ZOOM_LVL_OUT_4X,
+ 	ZOOM_LVL_OUT_8X,
+-	ZOOM_LVL_END,
+-
+-	/* Number of zoom levels */
+-	ZOOM_LVL_COUNT = ZOOM_LVL_END - ZOOM_LVL_BEGIN,
+ 
+ 	/* Here we define in which zoom viewports are */
+ 	ZOOM_LVL_VIEWPORT = ZOOM_LVL_NORMAL,
+@@ -30,10 +25,22 @@ enum ZoomLevel {
+ 	ZOOM_LVL_ROADVEH  = ZOOM_LVL_NORMAL,
+ 	ZOOM_LVL_WORLD_SCREENSHOT = ZOOM_LVL_NORMAL,
+ 
+-	ZOOM_LVL_DETAIL   = ZOOM_LVL_OUT_2X, ///< All zoomlevels below or equal to this, will result in details on the screen, like road-work, ...
++	ZOOM_LVL_DETAIL   = ZOOM_LVL_OUT_2X, ///< All zoomlevels with higher resolution or equal to this, will result in details on the screen, like road-work, ...
+ 
++	/* min/max for all zoom levels */
+ 	ZOOM_LVL_MIN      = ZOOM_LVL_NORMAL,
+ 	ZOOM_LVL_MAX      = ZOOM_LVL_OUT_8X,
++	ZOOM_LVL_COUNT    = ZOOM_LVL_MAX + 1 - ZOOM_LVL_MIN,
++
++	/* min/max for zoom levels the blitter can handle
++	 *
++	 * This distinction makes it possible to introduce more zoom levels for other windows.
++	 * For example the smallmap is drawn independently from the main viewport and thus
++	 * could support different zoom levels.
++	 */
++	ZOOM_LVL_BLITTER_MIN   = ZOOM_LVL_NORMAL,
++	ZOOM_LVL_BLITTER_MAX   = ZOOM_LVL_OUT_8X,
++	ZOOM_LVL_BLITTER_COUNT = ZOOM_LVL_BLITTER_MAX + 1 - ZOOM_LVL_BLITTER_MIN,
+ };
+ DECLARE_POSTFIX_INCREMENT(ZoomLevel)
+ 

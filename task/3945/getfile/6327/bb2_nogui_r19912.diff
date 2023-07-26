@@ -1,0 +1,254 @@
+Index: src/table/settings.h
+===================================================================
+--- src/table/settings.h	(revision 19912)
++++ src/table/settings.h	(working copy)
+@@ -642,6 +642,7 @@
+ 	  SDTC_STR(network.last_host,              SLE_STRB, S,  0,    "",                        STR_NULL,                                       NULL),
+ 	  SDTC_VAR(network.last_port,            SLE_UINT16, S,  0,     0,     0,  UINT16_MAX, 0, STR_NULL,                                       NULL),
+ 	 SDTC_BOOL(network.no_http_content_downloads,        S,  0, false,                        STR_NULL,                                       NULL),
++	 SDTC_BOOL(network.log_all,                          S, NO, false,                        STR_NULL,                                       NULL),
+ #endif /* ENABLE_NETWORK */
+ 
+ 	/*
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revision 19912)
++++ src/command.cpp	(working copy)
+@@ -15,6 +15,8 @@
+ #include "gui.h"
+ #include "command_func.h"
+ #include "network/network.h"
++#include "network/network_base.h"
++#include "network/network_func.h"
+ #include "genworld.h"
+ #include "newgrf_storage.h"
+ #include "strings_func.h"
+@@ -189,6 +191,8 @@
+ 
+ #define DEF_CMD(proc, flags) {proc, #proc, flags}
+ 
++#define M(cmd, flags) {cmd, #cmd, flags}
++
+ /**
+  * The master command table
+  *
+@@ -477,9 +481,9 @@
+  * @param my_cmd indicator if the command is from a company or server (to display error messages for a user)
+  * @return true if the command succeeded, else false
+  */
+-bool DoCommandP(const CommandContainer *container, bool my_cmd)
++bool DoCommandP(const CommandContainer *container, ClientID client)
+ {
+-	return DoCommandP(container->tile, container->p1, container->p2, container->cmd, container->callback, container->text, my_cmd);
++	return DoCommandP(container->tile, container->p1, container->p2, container->cmd, container->callback, container->text, client);
+ }
+ 
+ /*!
+@@ -497,8 +501,10 @@
+  * @param my_cmd indicator if the command is from a company or server (to display error messages for a user)
+  * @return \c true if the command succeeded, else \c false.
+  */
+-bool DoCommandP(TileIndex tile, uint32 p1, uint32 p2, uint32 cmd, CommandCallback *callback, const char *text, bool my_cmd)
++bool DoCommandP(TileIndex tile, uint32 p1, uint32 p2, uint32 cmd, CommandCallback *callback, const char *text, ClientID client)
+ {
++	bool my_cmd = (client != INVALID_CLIENT_ID && client == _network_own_client_id) || (!_networking && _current_company == _local_company);
++
+ 	/* Cost estimation is generally only done when the
+ 	 * local user presses shift while doing somthing.
+ 	 * However, in case of incoming network commands,
+@@ -517,7 +523,7 @@
+ 	int x = TileX(tile) * TILE_SIZE;
+ 	int y = TileY(tile) * TILE_SIZE;
+ 
+-	CommandCost res = DoCommandPInternal(tile, p1, p2, cmd, callback, text, my_cmd, estimate_only);
++	CommandCost res = DoCommandPInternal(tile, p1, p2, cmd, callback, text, client, estimate_only);
+ 	if (res.Failed()) {
+ 		/* Only show the error when it's for us. */
+ 		StringID error_part1 = GB(cmd, 16, 16);
+@@ -563,7 +569,7 @@
+  * @param estimate_only whether to give only the estimate or also execute the command
+  * @return the command cost of this function.
+  */
+-CommandCost DoCommandPInternal(TileIndex tile, uint32 p1, uint32 p2, uint32 cmd, CommandCallback *callback, const char *text, bool my_cmd, bool estimate_only)
++CommandCost DoCommandPInternal(TileIndex tile, uint32 p1, uint32 p2, uint32 cmd, CommandCallback *callback, const char *text, ClientID client, bool estimate_only)
+ {
+ 	/* Prevent recursion; it gives a mess over the network */
+ 	assert(_docommand_recursive == 0);
+@@ -680,9 +686,50 @@
+ 	}
+ 
+ 	/* update last build coordinate of company. */
+-	if (tile != 0) {
+-		Company *c = Company::GetIfValid(_current_company);
+-		if (c != NULL) c->last_build_coordinate = tile;
++	Company *c = Company::GetIfValid(_current_company);
++	if (c != NULL) {
++		if (tile != 0) c->last_build_coordinate = tile;
++		NetworkClientInfo *ci = NetworkFindClientInfoFromClientID(client);
++		if (ci != NULL && ci->client_playas == _current_company) {
++			static const uint _no_log_cmds[] = {
++				CMD_BUILD_RAILROAD_TRACK,
++				CMD_REMOVE_RAILROAD_TRACK,
++				CMD_BUILD_SINGLE_RAIL,
++				CMD_REMOVE_SINGLE_RAIL,
++				CMD_BUILD_BRIDGE,
++				CMD_BUILD_TRAIN_DEPOT,
++				CMD_BUILD_SIGNALS,
++				CMD_BUILD_RAIL_WAYPOINT,
++				CMD_RENAME_WAYPOINT,
++				CMD_REMOVE_FROM_RAIL_WAYPOINT,
++				CMD_BUILD_ROAD_STOP,
++				CMD_REMOVE_ROAD_STOP,
++				CMD_BUILD_LONG_ROAD,
++				CMD_REMOVE_LONG_ROAD,
++				CMD_BUILD_ROAD,
++				CMD_BUILD_ROAD_DEPOT,
++				CMD_BUILD_AIRPORT,
++				CMD_BUILD_DOCK,
++				CMD_BUILD_SHIP_DEPOT,
++				CMD_BUILD_BUOY,
++				CMD_PLANT_TREE,
++				CMD_BUILD_SIGNAL_TRACK
++			};
++			bool nolog = false;
++			if (!_settings_client.network.log_all) {
++				for (uint i = 0; i < lengthof(_no_log_cmds); i++) {
++					if (_no_log_cmds[i] == cmd_id) {
++						nolog = true;
++						break;
++					}
++				}
++			}
++			if (!nolog) {
++				YearMonthDay date;
++				ConvertDateToYMD(_date, &date);
++				printf("%s%30s %16s  date:%04u-%02u-%02u  tile:%08X  p1:%08X p2:%08X text:%s price:%lld\n", GetLogPrefix(), _command_proc_table[cmd_id].name, ci->client_name, date.year, date.month + 1, date.day, tile, p1, p2, text,(int64)res2.GetCost());
++			}
++		}
+ 	}
+ 
+ 	SubtractMoneyFromCompany(res2);
+Index: src/command_func.h
+===================================================================
+--- src/command_func.h	(revision 19912)
++++ src/command_func.h	(working copy)
+@@ -13,6 +13,7 @@
+ #define COMMAND_FUNC_H
+ 
+ #include "command_type.h"
++#include "network/network_func.h"
+ #include "company_type.h"
+ 
+ /**
+@@ -43,11 +44,11 @@
+ /**
+  * Execute a network safe DoCommand function
+  */
+-bool DoCommandP(TileIndex tile, uint32 p1, uint32 p2, uint32 cmd, CommandCallback *callback = NULL, const char *text = NULL, bool my_cmd = true);
+-bool DoCommandP(const CommandContainer *container, bool my_cmd = true);
++bool DoCommandP(TileIndex tile, uint32 p1, uint32 p2, uint32 cmd, CommandCallback *callback = NULL, const char *text = NULL, ClientID client = _network_own_client_id);
++bool DoCommandP(const CommandContainer *container, ClientID client = _network_own_client_id);
+ 
+ /** Internal helper function for DoCommandP. Do not use. */
+-CommandCost DoCommandPInternal(TileIndex tile, uint32 p1, uint32 p2, uint32 cmd, CommandCallback *callback, const char *text, bool my_cmd, bool estimate_only);
++CommandCost DoCommandPInternal(TileIndex tile, uint32 p1, uint32 p2, uint32 cmd, CommandCallback *callback, const char *text, ClientID client, bool estimate_only);
+ 
+ #ifdef ENABLE_NETWORK
+ /**
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 19912)
++++ src/settings_type.h	(working copy)
+@@ -152,6 +152,7 @@
+ 	char   last_host[NETWORK_HOSTNAME_LENGTH];            ///< IP address of the last joined server
+ 	uint16 last_port;                                     ///< port of the last joined server
+ 	bool   no_http_content_downloads;                     ///< do not do content downloads over HTTP
++	bool   log_all;                                       ///< log all commands, including those with CMD_NO_LOG?
+ #else /* ENABLE_NETWORK */
+ #endif
+ };
+Index: src/ai/api/ai_object.cpp
+===================================================================
+--- src/ai/api/ai_object.cpp	(revision 19912)
++++ src/ai/api/ai_object.cpp	(working copy)
+@@ -210,7 +210,7 @@
+ 	bool estimate_only = GetDoCommandMode() != NULL && !GetDoCommandMode()();
+ 
+ 	/* Try to perform the command. */
+-	CommandCost res = ::DoCommandPInternal(tile, p1, p2, cmd, _networking ? CcAI : NULL, text, false, estimate_only);
++	CommandCost res = ::DoCommandPInternal(tile, p1, p2, cmd, _networking ? CcAI : NULL, text, INVALID_CLIENT_ID, estimate_only);
+ 
+ 	/* We failed; set the error and bail out */
+ 	if (res.Failed()) {
+Index: src/network/network_server.cpp
+===================================================================
+--- src/network/network_server.cpp	(revision 19912)
++++ src/network/network_server.cpp	(working copy)
+@@ -514,6 +514,7 @@
+ 	cs->Send_Command(p, cp);
+ 	p->Send_uint32(cp->frame);
+ 	p->Send_bool  (cp->my_cmd);
++	p->Send_uint32(cp->client);
+ 
+ 	cs->Send_Packet(p);
+ 	return NETWORK_RECV_STATUS_OKAY;
+@@ -964,12 +965,14 @@
+ 			 *  first place. This filters that out. */
+ 			cp.callback = (new_cs != cs) ? NULL : callback;
+ 			cp.my_cmd = (new_cs == cs);
++			cp.client = ci->client_id;
+ 			NetworkAddCommandQueue(cp, new_cs);
+ 		}
+ 	}
+ 
+ 	cp.callback = NULL;
+ 	cp.my_cmd = false;
++	cp.client = ci->client_id;
+ 	NetworkAddCommandQueue(cp);
+ 	return NETWORK_RECV_STATUS_OKAY;
+ }
+Index: src/network/network_command.cpp
+===================================================================
+--- src/network/network_command.cpp	(revision 19912)
++++ src/network/network_command.cpp	(working copy)
+@@ -111,6 +111,7 @@
+ 		 */
+ 		c.frame = _frame_counter_max + 1;
+ 		c.my_cmd = true;
++		c.client = _network_own_client_id;
+ 
+ 		NetworkAddCommandQueue(c);
+ 
+@@ -170,7 +171,7 @@
+ 		/* We can execute this command */
+ 		_current_company = cp->company;
+ 		cp->cmd |= CMD_NETWORK_COMMAND;
+-		DoCommandP(cp, cp->my_cmd);
++		DoCommandP(cp, cp->client);
+ 
+ 		_local_command_queue = _local_command_queue->next;
+ 		free(cp);
+Index: src/network/network_client.cpp
+===================================================================
+--- src/network/network_client.cpp	(revision 19912)
++++ src/network/network_client.cpp	(working copy)
+@@ -742,6 +742,7 @@
+ 	const char *err = MY_CLIENT->Recv_Command(p, &cp);
+ 	cp.frame    = p->Recv_uint32();
+ 	cp.my_cmd   = p->Recv_bool();
++	cp.client   = p->pos + 4 == p->size ? (ClientID)p->Recv_uint32() : (cp.my_cmd ? _network_own_client_id : INVALID_CLIENT_ID);
+ 	cp.next     = NULL;
+ 
+ 	if (err != NULL) {
+Index: src/network/network_internal.h
+===================================================================
+--- src/network/network_internal.h	(revision 19912)
++++ src/network/network_internal.h	(working copy)
+@@ -158,6 +158,7 @@
+ 	CompanyByte company; ///< company that is executing the command
+ 	uint32 frame;        ///< the frame in which this packet is executed
+ 	bool my_cmd;         ///< did the command originate from "me"
++	ClientID client;
+ };
+ 
+ void NetworkAddCommandQueue(CommandPacket cp, NetworkClientSocket *cs = NULL);

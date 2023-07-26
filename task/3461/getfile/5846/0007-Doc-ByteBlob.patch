@@ -1,0 +1,302 @@
+From cbb35e489a8d04981f7407fb7961df6320917d43 Mon Sep 17 00:00:00 2001
+From: skidd13 <skidd13@gmx.de>
+Date: Fri, 19 Mar 2010 22:20:50 +0100
+Subject: [PATCH 7/9] -Doc: ByteBlob
+
+---
+ src/misc/blob.hpp |  170 +++++++++++++++++++++++++++++++++++++++++-----------
+ 1 files changed, 134 insertions(+), 36 deletions(-)
+
+diff --git a/src/misc/blob.hpp b/src/misc/blob.hpp
+index 86e8f49..8bda7d7 100644
+--- a/src/misc/blob.hpp
++++ b/src/misc/blob.hpp
+@@ -61,45 +61,68 @@ protected:
+ private:
+ 	/**
+ 	 * Just to silence an unsilencable GCC 4.4+ warning
+-	 * Note: This cannot be 'const' as we do a lot of 'hdrEmpty[0]->items += 0;' and 'hdrEmpty[0]->capacity += 0;'
+-	 *       after const_casting.
++	 * @note This cannot be 'const' as we do a lot of 'hdrEmpty[0]->items += 0;'
++	 *       and 'hdrEmpty[0]->capacity += 0;' after const_casting.
+ 	 */
+ 	static BlobHeader hdrEmpty[];
+ 
+ protected:
+-	/** all allocation should happen here */
++	/**
++	 * Allocate memory for a new blob. This memory includes the
++	 * space for header, items and tail.
++	 *
++	 * @param num_bytes the size of the new blob
++	 */
+ 	static FORCEINLINE BlobHeader *Alloc(uint num_bytes)
+ 	{
+ 		return (BlobHeader*)MallocT<byte>(num_bytes);
+ 	}
+ 
+-	/** Return header pointer to the static BlobHeader with
+-	 * both items and capacity containing zero */
++	/**
++	 * Return pointer to a header with no data. This header
++	 * is initialisized once a runtime.
++	 *
++	 * @return Header with no items
++	 */
+ 	static FORCEINLINE BlobHeader *Zero()
+ 	{
+ 		return const_cast<BlobHeader *>(ByteBlob::hdrEmpty);
+ 	}
+ 
+-	/** simple allocation policy - can be optimized later */
++	/**
++	 * Calculate allocation size by given size.
++	 *
++	 * @note can be optimized later
++	 *
++	 * @param min_alloc The needed minimum allocation size
++	 * @return The calculated allocation size
++	 */
+ 	static FORCEINLINE uint AllocPolicy(uint min_alloc)
+ 	{
+ 		if (min_alloc < (1 << 9)) {
+-			if (min_alloc < (1 << 5)) return (1 << 5);
+-			return (min_alloc < (1 << 7)) ? (1 << 7) : (1 << 9);
++			if (min_alloc < (1 << 5)) return (1 << 5);   //        32 byte
++			if (min_alloc < (1 << 7)) return (1 << 7);   //       128 byte
++			return (1 << 9);                             //       512 byte
+ 		}
+ 		if (min_alloc < (1 << 15)) {
+-			if (min_alloc < (1 << 11)) return (1 << 11);
+-			return (min_alloc < (1 << 13)) ? (1 << 13) : (1 << 15);
++			if (min_alloc < (1 << 11)) return (1 << 11); //     2 048 byte
++			if (min_alloc < (1 << 13)) return (1 << 13); //     8 192 byte
++			return (1 << 15);                            //    32 768 byte
+ 		}
+ 		if (min_alloc < (1 << 20)) {
+-			if (min_alloc < (1 << 17)) return (1 << 17);
+-			return (min_alloc < (1 << 19)) ? (1 << 19) : (1 << 20);
++			if (min_alloc < (1 << 17)) return (1 << 17); //   131 072 byte
++			if (min_alloc < (1 << 19)) return (1 << 19); //   524 288 byte
++			return (1 << 20);                            // 1 048 576 byte
+ 		}
+ 		min_alloc = (min_alloc | ((1 << 20) - 1)) + 1;
+ 		return min_alloc;
+ 	}
+ 
+-	/** all deallocations should happen here */
++	/**
++	 * Free given header if it needs to be freed
++	 *
++	 * @param p Pointer right after the header
++	 */
+ 	static FORCEINLINE void Free(BlobHeader *p)
+ 	{
+ 		p--;
+@@ -109,20 +132,40 @@ protected:
+ 		p = NULL;
+ 	}
+ 
+-	/** blob header accessor - use it rather than using the pointer arithmetics directly - non-const version */
++	/**
++	 * Get the header of the Blob.
++	 *
++	 * @return reference to the blob header
++	 */
+ 	FORCEINLINE BlobHeader &Hdr() { return *(this->header - 1); }
+ 
+-	/** blob header accessor - use it rather than using the pointer arithmetics directly - const version */
++	/**
++	 * Get the header of the Blob. (const)
++	 *
++	 * @return reference to the blob header
++	 */
+ 	FORCEINLINE const BlobHeader &Hdr() const { return *(this->header - 1); }
+ 
+-	/** return reference to the actual blob size - used when the size needs to be modified */
++	/**
++	 * Get the reference to the number of items.
++	 *
++	 * @return reference to the number of items
++	 */
+ 	FORCEINLINE uint &LengthRef() { return this->Hdr().items; }
+ 
+-	/** initialize blob by attaching it to the given header followed by data
+-	 *  if no header is given use empty header */
++	/**
++	 * Initialize blob by attaching it a given header or if no
++	 * header is given to the static empty header.
++	 *
++	 * @param src the header for the blob (optional)
++	 */
+ 	FORCEINLINE void Init(BlobHeader *src = Zero()) { this->header = &src[1]; }
+ 
+-	/** reallocate blob data if needed */
++	/**
++	 * Realloc blob data if needed.
++	 *
++	 * @param new_size the requested size
++	 */
+ 	void SmartAlloc(uint new_size)
+ 	{
+ 		if (this->Capacity() >= new_size) return;
+@@ -144,7 +187,10 @@ protected:
+ 		this->Init(tmp);
+ 	}
+ 
+-	/** fixing the four bytes at the end of blob data - useful when blob is used to hold string */
++	/**
++	 * Set four bytes at the end of the blob to zero.
++	 * useful when blob is used to hold string.
++	 */
+ 	FORCEINLINE void FixTail() const
+ 	{
+ 		assert_compile(sizeof(uint32) == tail_reserve);
+@@ -158,13 +204,21 @@ public:
+ 	/** default constructor - initializes empty blob */
+ 	FORCEINLINE ByteBlob() { this->Init(); }
+ 
+-	/** copy constructor */
++	/**
++	 * Copy constructor - copy blob content
++	 *
++	 * @param src the source blob
++	 */
+ 	FORCEINLINE ByteBlob(const ByteBlob &src) {
+ 		this->Init();
+ 		this->Append(src.Begin(), src.Length());
+ 	}
+ 
+-	/** move constructor - take ownership of blob data */
++	/**
++	 * Move constructor - take ownership of blob data
++	 *
++	 * @param src the header of the source blob
++	 */
+ 	FORCEINLINE ByteBlob(BlobHeader *const &src)
+ 	{
+ 		assert(src != NULL);
+@@ -175,29 +229,63 @@ public:
+ 	/** destructor */
+ 	FORCEINLINE ~ByteBlob() { this->Free(this->header); }
+ 
+-	/** return true if blob doesn't contain valid data */
++	/**
++	 * Check if the Blob contains no valid data.
++	 *
++	 * @return true if Blob doesn't contain valid data
++	 */
+ 	FORCEINLINE bool IsEmpty() const { return this->Length() == 0; }
+ 
+-	/** return the number of valid data bytes in the blob */
++	/**
++	 * Get the number of items in the Blob.
++	 *
++	 * @return number of items in the Blob
++	 */
+ 	FORCEINLINE uint Length() const { return this->Hdr().items; }
+ 
+-	/** return the current blob capacity in bytes */
++	/**
++	 * Get the maximum number of items in the Blob.
++	 *
++	 * @return capacity of the Blob
++	 */
+ 	FORCEINLINE uint Capacity() const { return this->Hdr().capacity; }
+ 
+-	/** Return number of additional items that can fit in the Blob without buffer reallocation */
++	/**
++	 * Get the number of additional items that can fit in the Blob
++	 * without buffer reallocation.
++	 *
++	 * @return number of additional items that fit into current capacity
++	 */
+ 	FORCEINLINE uint Reserve() const { return this->Hdr().capacity - this->Hdr().items; }
+ 
+-	/** invalidate blob's data - doesn't free buffer */
++	/**
++	 * Remove all items, but dont free the allocated memory.
++	 * In fact we just reset the item counter avoiding the need to
++	 * probably reallocate the same amount of memory the Blob was
++	 * previously using.
++	 */
+ 	FORCEINLINE void Clear() { this->LengthRef() = 0; }
+ 
+-	/** return pointer to the first byte of data - non-const version */
++	/**
++	 * Get the pointer to the first item
++	 *
++	 * @return the pointer to the first item
++	 */
+ 	FORCEINLINE byte *Begin() { return this->data; }
+ 
+-	/** return pointer to the first byte of data - const version */
++	/**
++	 * Get the pointer to the first item (const)
++	 *
++	 * @return the pointer to the first item
++	 */
+ 	FORCEINLINE const byte *Begin() const { return this->data; }
+ 
+-	/** Reallocate if there is no free space for num_bytes bytes.
+-	 *  @return pointer to the new data to be added */
++	/**
++	 * Prepare addition of num_bytes
++	 *
++	 * @param num_bytes the number of items to append
++	 * @return the pointer to the new data to append
++	 */
+ 	FORCEINLINE byte *Prepare(uint num_bytes)
+ 	{
+ 		num_bytes += this->Length();
+@@ -205,8 +293,12 @@ public:
+ 		return this->data + this->Length();
+ 	}
+ 
+-	/** Increase Length() by num_bytes.
+-	 *  @return pointer to the new data added */
++	/**
++	 * Append a number of items and return the first.
++	 *
++	 * @param num_items the number of items to append
++	 * @return pointer to first newly allocated item
++	 */
+ 	FORCEINLINE byte *Append(uint num_bytes)
+ 	{
+ 		byte *dst = this->Prepare(num_bytes);
+@@ -214,7 +306,12 @@ public:
+ 		return dst;
+ 	}
+ 
+-	/** append new bytes at the end of existing data bytes - reallocates if necessary */
++	/**
++	 * Append (copy) a number of items to the end of the blob.
++	 *
++	 * @param p the pointer to the first item to append
++	 * @param num_bytes the number of items to be append
++	 */
+ 	FORCEINLINE void Append(const void *p, uint num_bytes)
+ 	{
+ 		assert(p != NULL);
+@@ -230,7 +327,7 @@ public:
+  *
+  * @see ByteBlob
+  *
+- * @tparam T the type of items stored in the array
++ * @tparam T the type of items stored in the blob
+  */
+ template <typename T>
+ class SmallBlob : public ByteBlob {
+@@ -348,7 +445,8 @@ public:
+ 	 */
+ 	FORCEINLINE const T &operator[](uint index) const { return *this->Get(index); }
+ 
+-	/** Prepare addition of num_items
++	/**
++	 * Prepare addition of num_items
+ 	 *
+ 	 * @param num_items the number of items to append
+ 	 * @return the pointer to the new data to append
+-- 
+1.6.6.1
+

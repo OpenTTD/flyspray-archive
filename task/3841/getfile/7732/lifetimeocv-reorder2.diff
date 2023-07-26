@@ -1,0 +1,158 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 22855)
++++ src/lang/english.txt	(working copy)
+@@ -274,7 +274,7 @@
+ STR_SORT_BY_MODEL                                               :Model
+ STR_SORT_BY_VALUE                                               :Value
+ STR_SORT_BY_LENGTH                                              :Length
+-STR_SORT_BY_LIFE_TIME                                           :Remaining life time
++STR_SORT_BY_LIFE_TIME                                           :Remaining lifetime
+ STR_SORT_BY_TIMETABLE_DELAY                                     :Timetable delay
+ STR_SORT_BY_FACILITY                                            :Station type
+ STR_SORT_BY_WAITING                                             :Waiting cargo value
+@@ -3198,12 +3198,15 @@
+ STR_ORDER_SERVICE_TOOLTIP                                       :{BLACK}Skip this order unless a service is needed
+ 
+ STR_ORDER_CONDITIONAL_VARIABLE_TOOLTIP                          :{BLACK}Vehicle data to base jumping on
++
++# Conditional order variables, must follow order of OrderConditionVariable enum
+ STR_ORDER_CONDITIONAL_LOAD_PERCENTAGE                           :Load percentage
+ STR_ORDER_CONDITIONAL_RELIABILITY                               :Reliability
+ STR_ORDER_CONDITIONAL_MAX_SPEED                                 :Maximum speed
+-STR_ORDER_CONDITIONAL_AGE                                       :Vehicle age (years)
++STR_ORDER_CONDITIONAL_AGE                                       :Age (years)
+ STR_ORDER_CONDITIONAL_REQUIRES_SERVICE                          :Requires service
+ STR_ORDER_CONDITIONAL_UNCONDITIONALLY                           :Always
++STR_ORDER_CONDITIONAL_REMAINING_LIFETIME                        :Remaining lifetime (years)
+ 
+ STR_ORDER_CONDITIONAL_COMPARATOR_TOOLTIP                        :{BLACK}How to compare the vehicle data to the given value
+ STR_ORDER_CONDITIONAL_COMPARATOR_EQUALS                         :is equal to
+Index: src/order_cmd.cpp
+===================================================================
+--- src/order_cmd.cpp	(revision 22855)
++++ src/order_cmd.cpp	(working copy)
+@@ -1799,12 +1799,13 @@
+ 	uint16 value = order->GetConditionValue();
+ 
+ 	switch (order->GetConditionVariable()) {
+-		case OCV_LOAD_PERCENTAGE:  skip_order = OrderConditionCompare(occ, CalcPercentVehicleFilled(v, NULL), value); break;
+-		case OCV_RELIABILITY:      skip_order = OrderConditionCompare(occ, ToPercent16(v->reliability),       value); break;
+-		case OCV_MAX_SPEED:        skip_order = OrderConditionCompare(occ, v->GetDisplayMaxSpeed() * 10 / 16, value); break;
+-		case OCV_AGE:              skip_order = OrderConditionCompare(occ, v->age / DAYS_IN_LEAP_YEAR,        value); break;
+-		case OCV_REQUIRES_SERVICE: skip_order = OrderConditionCompare(occ, v->NeedsServicing(),               value); break;
+-		case OCV_UNCONDITIONALLY:  skip_order = true; break;
++		case OCV_LOAD_PERCENTAGE:    skip_order = OrderConditionCompare(occ, CalcPercentVehicleFilled(v, NULL), value); break;
++		case OCV_RELIABILITY:        skip_order = OrderConditionCompare(occ, ToPercent16(v->reliability),       value); break;
++		case OCV_MAX_SPEED:          skip_order = OrderConditionCompare(occ, v->GetDisplayMaxSpeed() * 10 / 16, value); break;
++		case OCV_AGE:                skip_order = OrderConditionCompare(occ, v->age / DAYS_IN_LEAP_YEAR,        value); break;
++		case OCV_REQUIRES_SERVICE:   skip_order = OrderConditionCompare(occ, v->NeedsServicing(),               value); break;
++		case OCV_UNCONDITIONALLY:    skip_order = true; break;
++		case OCV_REMAINING_LIFETIME: skip_order = OrderConditionCompare(occ, max(v->max_age - v->age + DAYS_IN_LEAP_YEAR - 1, 0) / DAYS_IN_LEAP_YEAR, value); break;
+ 		default: NOT_REACHED();
+ 	}
+ 
+Index: src/order_gui.cpp
+===================================================================
+--- src/order_gui.cpp	(revision 22855)
++++ src/order_gui.cpp	(working copy)
+@@ -19,6 +19,7 @@
+ #include "strings_func.h"
+ #include "window_func.h"
+ #include "company_func.h"
++#include "widgets/dropdown_type.h"
+ #include "widgets/dropdown_func.h"
+ #include "textbuf_gui.h"
+ #include "string_func.h"
+@@ -134,14 +135,14 @@
+ 	INVALID_STRING_ID
+ };
+ 
+-static const StringID _order_conditional_variable[] = {
+-	STR_ORDER_CONDITIONAL_LOAD_PERCENTAGE,
+-	STR_ORDER_CONDITIONAL_RELIABILITY,
+-	STR_ORDER_CONDITIONAL_MAX_SPEED,
+-	STR_ORDER_CONDITIONAL_AGE,
+-	STR_ORDER_CONDITIONAL_REQUIRES_SERVICE,
+-	STR_ORDER_CONDITIONAL_UNCONDITIONALLY,
+-	INVALID_STRING_ID,
++static const OrderConditionVariable _order_conditional_variable[] = {
++	OCV_LOAD_PERCENTAGE,
++	OCV_RELIABILITY,
++	OCV_MAX_SPEED,
++	OCV_AGE,
++	OCV_REMAINING_LIFETIME,
++	OCV_REQUIRES_SERVICE,
++	OCV_UNCONDITIONALLY,
+ };
+ 
+ static const StringID _order_conditional_condition[] = {
+@@ -783,8 +784,8 @@
+ 
+ 			case ORDER_WIDGET_COND_VARIABLE: {
+ 				Dimension d = {0, 0};
+-				for (int i = 0; _order_conditional_variable[i] != INVALID_STRING_ID; i++) {
+-					d = maxdim(d, GetStringBoundingBox(_order_conditional_variable[i]));
++				for (int i = 0; i < lengthof(_order_conditional_variable); i++) {
++					d = maxdim(d, GetStringBoundingBox(STR_ORDER_CONDITIONAL_LOAD_PERCENTAGE + _order_conditional_variable[i]));
+ 				}
+ 				d.width += padding.width;
+ 				d.height += padding.height;
+@@ -996,7 +997,7 @@
+ 					}
+ 					OrderConditionVariable ocv = order->GetConditionVariable();
+ 					/* Set the strings for the dropdown boxes. */
+-					this->GetWidget<NWidgetCore>(ORDER_WIDGET_COND_VARIABLE)->widget_data   = _order_conditional_variable[order == NULL ? 0 : ocv];
++					this->GetWidget<NWidgetCore>(ORDER_WIDGET_COND_VARIABLE)->widget_data   = STR_ORDER_CONDITIONAL_LOAD_PERCENTAGE + (order == NULL ? 0 : ocv);
+ 					this->GetWidget<NWidgetCore>(ORDER_WIDGET_COND_COMPARATOR)->widget_data = _order_conditional_condition[order == NULL ? 0 : order->GetConditionComparator()];
+ 					this->SetWidgetDisabledState(ORDER_WIDGET_COND_COMPARATOR, ocv == OCV_UNCONDITIONALLY);
+ 					this->SetWidgetDisabledState(ORDER_WIDGET_COND_VALUE, ocv == OCV_REQUIRES_SERVICE || ocv == OCV_UNCONDITIONALLY);
+@@ -1225,9 +1226,14 @@
+ 				ShowTimetableWindow(this->vehicle);
+ 				break;
+ 
+-			case ORDER_WIDGET_COND_VARIABLE:
+-				ShowDropDownMenu(this, _order_conditional_variable, this->vehicle->GetOrder(this->OrderGetSel())->GetConditionVariable(), ORDER_WIDGET_COND_VARIABLE, 0, 0);
++			case ORDER_WIDGET_COND_VARIABLE: {
++				DropDownList *list = new DropDownList();
++				for (int i = 0; i < lengthof(_order_conditional_variable); ++i) {
++					list->push_back(new DropDownListStringItem(STR_ORDER_CONDITIONAL_LOAD_PERCENTAGE + _order_conditional_variable[i], _order_conditional_variable[i], false));
++				}
++				ShowDropDownList(this, list, this->vehicle->GetOrder(this->OrderGetSel())->GetConditionVariable(), ORDER_WIDGET_COND_VARIABLE);
+ 				break;
++			}
+ 
+ 			case ORDER_WIDGET_COND_COMPARATOR: {
+ 				const Order *o = this->vehicle->GetOrder(this->OrderGetSel());
+@@ -1264,6 +1270,7 @@
+ 				case OCV_RELIABILITY:
+ 				case OCV_LOAD_PERCENTAGE:
+ 					value = Clamp(value, 0, 100);
++					break;
+ 
+ 				default:
+ 					break;
+Index: src/order_type.h
+===================================================================
+--- src/order_type.h	(revision 22855)
++++ src/order_type.h	(working copy)
+@@ -110,12 +110,13 @@
+  * Variables (of a vehicle) to 'cause' skipping on.
+  */
+ enum OrderConditionVariable {
+-	OCV_LOAD_PERCENTAGE,  ///< Skip based on the amount of load
+-	OCV_RELIABILITY,      ///< Skip based on the reliability
+-	OCV_MAX_SPEED,        ///< Skip based on the maximum speed
+-	OCV_AGE,              ///< Skip based on the age
+-	OCV_REQUIRES_SERVICE, ///< Skip when the vehicle requires service
+-	OCV_UNCONDITIONALLY,  ///< Always skip
++	OCV_LOAD_PERCENTAGE,    ///< Skip based on the amount of load
++	OCV_RELIABILITY,        ///< Skip based on the reliability
++	OCV_MAX_SPEED,          ///< Skip based on the maximum speed
++	OCV_AGE,                ///< Skip based on the age
++	OCV_REQUIRES_SERVICE,   ///< Skip when the vehicle requires service
++	OCV_UNCONDITIONALLY,    ///< Always skip
++	OCV_REMAINING_LIFETIME, ///< Skip based on the remaining lifetime
+ 	OCV_END
+ };
+ 

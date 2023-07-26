@@ -1,0 +1,405 @@
+From cec769486e77cd7bae0a41bc5b738730c43e261d Mon Sep 17 00:00:00 2001
+From: skidd13 <skidd13@gmx.de>
+Date: Fri, 19 Mar 2010 22:18:37 +0100
+Subject: [PATCH 6/9] -Codechange: Apply coding style to ByteBlob and reorder its code
+
+---
+ src/misc/blob.hpp |  269 ++++++++++++++++++++++------------------------------
+ src/misc/str.hpp  |    2 +-
+ 2 files changed, 115 insertions(+), 156 deletions(-)
+
+diff --git a/src/misc/blob.hpp b/src/misc/blob.hpp
+index a31666c..86e8f49 100644
+--- a/src/misc/blob.hpp
++++ b/src/misc/blob.hpp
+@@ -7,58 +7,57 @@
+  * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
+-/** @file blob.hpp Support for storing random binary data. */
++/** @file blob.hpp Fast byte based dynamic array. */
+ 
+ #ifndef BLOB_HPP
+ #define BLOB_HPP
+ 
+ #include "../core/alloc_func.hpp"
+ #include "../core/mem_func.hpp"
+-#include <new>
+-
+-/** Base class for simple binary blobs.
+- *  Item is byte.
+- *  The word 'simple' means:
+- *    - no configurable allocator type (always made from heap)
+- *    - no smart deallocation - deallocation must be called from the same
+- *        module (DLL) where the blob was allocated
+- *    - no configurable allocation policy (how big blocks should be allocated)
+- *    - no extra ownership policy (i.e. 'copy on write') when blob is copied
+- *    - no thread synchronization at all
++
++/**
++ * Base class for simple binary based blobs.
++ *
++ * @par The concept:
++ *  @li The only class member is pointer to the first item (see union of SmallBlob).
++ *  @li The allocated block contains the blob header (see BlobHeader) followed by the data.
++ *  @li The pointer of the union points behind the header (to the first item).
++ *  @li The allocated size is: sizeof(BlobHeader) + sizeof(item) * capacity.
++ *  @li The allocation size in byte is basically a power of 2.
++ *  @li Construction uses a static empty header.
++ *  @li The main code of SmallBlob is moved to the non-template class ByteBlob
++ *
++ * @par The benefits:
++ *  @li The items are accessed in the simplest possible way - just dereferencing the pointer,
++ *      which is good for performance (assuming that data are accessed most often).
++ *  @li Allocations of 2^n bytes are allocated faster on some systems.
++ *  @li The pointer to header is the same size as the pointer to the first item so
++ *      construction coast is reduced down to the allocation of one pointer.
++ *  @li Since ByteBlob is a non-template class the code needs just to be optimised once.
+  *
+- *  Internal member layout:
+- *  1. The only class member is pointer to the first item (see union).
+- *  2. Allocated block contains the blob header (see BlobHeader) followed by the raw byte data.
+- *     Always, when it allocates memory the allocated size is:
+- *                                                      sizeof(BlobHeader) + <data capacity>
+- *  3. Two 'virtual' members (items and capacity) are stored in the BlobHeader at beginning
+- *     of the alloated block.
+- *  4. The pointer of the union pobsize_ts behind the header (to the first data byte).
+- *     When memory block is allocated, the sizeof(BlobHeader) it added to it.
+- *  5. Benefits of this layout:
+- *     - items are accessed in the simplest possible way - just dereferencing the pointer,
+- *       which is good for performance (assuming that data are accessed most often).
+- *     - sizeof(blob) is the same as the size of any other pointer
+- *  6. Drawbacks of this layout:
+- *     - the fact, that pointer to the alocated block is adjusted by sizeof(BlobHeader) before
+- *       it is stored can lead to several confusions:
+- *         - it is not common pattern so the implementation code is bit harder to read
+- *         - valgrind can generate warning that allocated block is lost (not accessible)
++ * @par The drawbacks:
++ *     The fact, that pointer to the alocated block is adjusted by sizeof(BlobHeader) before
++ *     it is stored can lead to several confusions:
++ *    @li It is not common pattern so the implementation code is bit harder to read.
++ *    @li Valgrind can generate warning that allocated block is lost (not accessible).
+  */
+ class ByteBlob {
+ protected:
+ 	/** header of the allocated memory block */
+ 	struct BlobHeader {
+-		uint    items;      ///< actual blob size in bytes
+-		uint    capacity;  ///< maximum (allocated) size in bytes
++		uint items;    ///< actual blob size in bytes
++		uint capacity; ///< maximum (allocated) size in bytes
+ 	};
+ 
+ 	/** type used as class member */
+ 	union {
+-		byte *data;    ///< ptr to the first byte of data
+-		BlobHeader *header;   ///< ptr just after the BlobHeader holding items and capacity
++		byte *data;         ///< ptr to the first byte of data
++		BlobHeader *header; ///< ptr just after the BlobHeader holding items and capacity
+ 	};
+ 
++	static const uint tail_reserve = 4; // four extra bytes will be always allocated and zeroed at the end
++	static const uint header_size = sizeof(BlobHeader);
++
+ private:
+ 	/**
+ 	 * Just to silence an unsilencable GCC 4.4+ warning
+@@ -67,36 +66,9 @@ private:
+ 	 */
+ 	static BlobHeader hdrEmpty[];
+ 
+-public:
+-	static const uint tail_reserve = 4; ///< four extra bytes will be always allocated and zeroed at the end
+-	static const uint header_size = sizeof(BlobHeader);
+-
+-	/** default constructor - initializes empty blob */
+-	FORCEINLINE ByteBlob() { Init(); }
+-
+-	/** copy constructor */
+-	FORCEINLINE ByteBlob(const ByteBlob &src) {
+-		Init();
+-		Append(src.Begin(), src.Length());
+-	}
+-
+-	/** move constructor - take ownership of blob data */
+-	FORCEINLINE ByteBlob(BlobHeader * const & src)
+-	{
+-		assert(src != NULL);
+-		header = src;
+-		*const_cast<BlobHeader**>(&src) = NULL;
+-	}
+-
+-	/** destructor */
+-	FORCEINLINE ~ByteBlob()
+-	{
+-		Free(header);
+-	}
+-
+ protected:
+ 	/** all allocation should happen here */
+-	static FORCEINLINE BlobHeader *RawAlloc(uint num_bytes)
++	static FORCEINLINE BlobHeader *Alloc(uint num_bytes)
+ 	{
+ 		return (BlobHeader*)MallocT<byte>(num_bytes);
+ 	}
+@@ -137,130 +109,117 @@ protected:
+ 		p = NULL;
+ 	}
+ 
++	/** blob header accessor - use it rather than using the pointer arithmetics directly - non-const version */
++	FORCEINLINE BlobHeader &Hdr() { return *(this->header - 1); }
++
++	/** blob header accessor - use it rather than using the pointer arithmetics directly - const version */
++	FORCEINLINE const BlobHeader &Hdr() const { return *(this->header - 1); }
++
++	/** return reference to the actual blob size - used when the size needs to be modified */
++	FORCEINLINE uint &LengthRef() { return this->Hdr().items; }
++
+ 	/** initialize blob by attaching it to the given header followed by data
+ 	 *  if no header is given use empty header */
+-	FORCEINLINE void Init(BlobHeader *src = Zero())
++	FORCEINLINE void Init(BlobHeader *src = Zero()) { this->header = &src[1]; }
++
++	/** reallocate blob data if needed */
++	void SmartAlloc(uint new_size)
+ 	{
+-		header = &src[1];
++		if (this->Capacity() >= new_size) return;
++		/* calculate minimum block size we need to allocate
++		 * and ask allocation policy for some reasonable block size */
++		new_size = AllocPolicy(header_size + new_size + tail_reserve);
++
++		/* allocate new block and setup header */
++		BlobHeader *tmp = Alloc(new_size);
++		tmp->items = this->Length();
++		tmp->capacity = new_size - (header_size + tail_reserve);
++
++		/* copy existing data */
++		if (tmp->items != 0)
++			memcpy(tmp + 1, this->data, tmp->items);
++
++		/* replace our block with new one */
++		this->Free(this->header);
++		this->Init(tmp);
+ 	}
+ 
+-	/** blob header accessor - use it rather than using the pointer arithmetics directly - non-const version */
+-	FORCEINLINE BlobHeader& Hdr()
++	/** fixing the four bytes at the end of blob data - useful when blob is used to hold string */
++	FORCEINLINE void FixTail() const
+ 	{
+-		return *(header - 1);
++		assert_compile(sizeof(uint32) == tail_reserve);
++		if (this->Capacity() != 0) {
++			uint32 *end = (uint32 *)&this->data[this->Length()];
++			*end = 0;
++		}
+ 	}
+ 
+-	/** blob header accessor - use it rather than using the pointer arithmetics directly - const version */
+-	FORCEINLINE const BlobHeader& Hdr() const
+-	{
+-		return *(header - 1);
++public:
++	/** default constructor - initializes empty blob */
++	FORCEINLINE ByteBlob() { this->Init(); }
++
++	/** copy constructor */
++	FORCEINLINE ByteBlob(const ByteBlob &src) {
++		this->Init();
++		this->Append(src.Begin(), src.Length());
+ 	}
+ 
+-	/** return reference to the actual blob size - used when the size needs to be modified */
+-	FORCEINLINE uint& LengthRef()
++	/** move constructor - take ownership of blob data */
++	FORCEINLINE ByteBlob(BlobHeader *const &src)
+ 	{
+-		return Hdr().items;
+-	};
++		assert(src != NULL);
++		this->header = src;
++		*const_cast<BlobHeader**>(&src) = NULL;
++	}
++
++	/** destructor */
++	FORCEINLINE ~ByteBlob() { this->Free(this->header); }
+ 
+-public:
+ 	/** return true if blob doesn't contain valid data */
+-	FORCEINLINE bool IsEmpty() const
+-	{
+-		return Length() == 0;
+-	}
++	FORCEINLINE bool IsEmpty() const { return this->Length() == 0; }
+ 
+ 	/** return the number of valid data bytes in the blob */
+-	FORCEINLINE uint Length() const
+-	{
+-		return Hdr().items;
+-	};
++	FORCEINLINE uint Length() const { return this->Hdr().items; }
+ 
+ 	/** return the current blob capacity in bytes */
+-	FORCEINLINE uint Capacity() const
+-	{
+-		return Hdr().capacity;
+-	};
++	FORCEINLINE uint Capacity() const { return this->Hdr().capacity; }
+ 
+ 	/** Return number of additional items that can fit in the Blob without buffer reallocation */
+-	FORCEINLINE uint Reserve() const
+-	{
+-		return Hdr().capacity - Hdr().items;
+-	}
++	FORCEINLINE uint Reserve() const { return this->Hdr().capacity - this->Hdr().items; }
++
++	/** invalidate blob's data - doesn't free buffer */
++	FORCEINLINE void Clear() { this->LengthRef() = 0; }
+ 
+ 	/** return pointer to the first byte of data - non-const version */
+-	FORCEINLINE byte *Begin()
+-	{
+-		return data;
+-	}
++	FORCEINLINE byte *Begin() { return this->data; }
+ 
+ 	/** return pointer to the first byte of data - const version */
+-	FORCEINLINE const byte *Begin() const
+-	{
+-		return data;
+-	}
+-
+-	/** invalidate blob's data - doesn't free buffer */
+-	FORCEINLINE void Clear()
+-	{
+-		LengthRef() = 0;
+-	}
+-
+-	/** append new bytes at the end of existing data bytes - reallocates if necessary */
+-	FORCEINLINE void Append(const void *p, uint num_bytes)
+-	{
+-		assert(p != NULL);
+-		if (num_bytes != 0)
+-			memcpy(Append(num_bytes), p, num_bytes);
+-	}
++	FORCEINLINE const byte *Begin() const { return this->data; }
+ 
+ 	/** Reallocate if there is no free space for num_bytes bytes.
+ 	 *  @return pointer to the new data to be added */
+ 	FORCEINLINE byte *Prepare(uint num_bytes)
+ 	{
+-		num_bytes += Length();
+-		if (num_bytes > Capacity()) SmartAlloc(num_bytes);
+-		return data + Length();
++		num_bytes += this->Length();
++		if (num_bytes > this->Capacity()) this->SmartAlloc(num_bytes);
++		return this->data + this->Length();
+ 	}
+ 
+ 	/** Increase Length() by num_bytes.
+ 	 *  @return pointer to the new data added */
+ 	FORCEINLINE byte *Append(uint num_bytes)
+ 	{
+-		byte *pNewData = Prepare(num_bytes);
+-		LengthRef() += num_bytes;
+-		return pNewData;
++		byte *dst = this->Prepare(num_bytes);
++		this->LengthRef() += num_bytes;
++		return dst;
+ 	}
+ 
+-	/** reallocate blob data if needed */
+-	void SmartAlloc(uint new_size)
+-	{
+-		if (Capacity() >= new_size) return;
+-		/* calculate minimum block size we need to allocate
+-		 * and ask allocation policy for some reasonable block size */
+-		new_size = AllocPolicy(header_size + new_size + tail_reserve);
+-
+-		/* allocate new block and setup header */
+-		BlobHeader *tmp = RawAlloc(new_size);
+-		tmp->items = Length();
+-		tmp->capacity = new_size - (header_size + tail_reserve);
+-
+-		/* copy existing data */
+-		if (tmp->items != 0)
+-			memcpy(tmp + 1, data, tmp->items);
+-
+-		/* replace our block with new one */
+-		Free(header);
+-		Init(tmp);
+-	}
+-
+-	/** fixing the four bytes at the end of blob data - useful when blob is used to hold string */
+-	FORCEINLINE void FixTail() const
++	/** append new bytes at the end of existing data bytes - reallocates if necessary */
++	FORCEINLINE void Append(const void *p, uint num_bytes)
+ 	{
+-		assert_compile(sizeof(uint32) == tail_reserve);
+-		if (Capacity() != 0) {
+-			uint32 *end = (uint32 *)&data[Length()];
+-			*end = 0;
+-		}
++		assert(p != NULL);
++		if (num_bytes != 0)
++			memcpy(this->Append(num_bytes), p, num_bytes);
+ 	}
+ };
+ 
+@@ -357,8 +316,8 @@ public:
+ 	 */
+ 	FORCEINLINE T *Get(uint index)
+ 	{
+-		assert(index < Length());
+-		return (Begin() + index);
++		assert(index < this->Length());
++		return this->Begin() + index;
+ 	}
+ 
+ 	/**
+@@ -369,8 +328,8 @@ public:
+ 	 */
+ 	FORCEINLINE const T *Get(uint index) const
+ 	{
+-		assert(index < Length());
+-		return (Begin() + index);
++		assert(index < this->Length());
++		return this->Begin() + index;
+ 	}
+ 
+ 	/**
+@@ -379,7 +338,7 @@ public:
+ 	 * @param index the positon of the item
+ 	 * @return the item
+ 	 */
+-	FORCEINLINE T &operator[](uint index) { return *Get(index); }
++	FORCEINLINE T &operator[](uint index) { return *this->Get(index); }
+ 
+ 	/**
+ 	 * Get item "number" (const)
+@@ -387,7 +346,7 @@ public:
+ 	 * @param index the positon of the item
+ 	 * @return the item
+ 	 */
+-	FORCEINLINE const T &operator[](uint index) const { return *Get(index); }
++	FORCEINLINE const T &operator[](uint index) const { return *this->Get(index); }
+ 
+ 	/** Prepare addition of num_items
+ 	 *
+diff --git a/src/misc/str.hpp b/src/misc/str.hpp
+index 921accb..3f891b7 100644
+--- a/src/misc/str.hpp
++++ b/src/misc/str.hpp
+@@ -60,7 +60,7 @@ struct CStrA : public SmallBlob<char>
+ 	FORCEINLINE void Append(const CStrA &src)
+ 	{
+ 		if (src.Length() > 0) {
+-			ByteBlob::Append(src.Begin(), src.Length());
++			base::Append(src.Begin(), src.Length());
+ 			base::FixTail();
+ 		}
+ 	}
+-- 
+1.6.6.1
+

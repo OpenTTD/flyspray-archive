@@ -1,0 +1,110 @@
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 19452)
++++ src/train_cmd.cpp	(working copy)
+@@ -1542,13 +1542,13 @@
+ 		b->UpdateViewport(true, true);
+ 
+ 		/* call the proper EnterTile function unless we are in a wormhole */
+-		if (a->track != TRACK_BIT_WORMHOLE) VehicleEnterTile(a, a->tile, a->x_pos, a->y_pos);
+-		if (b->track != TRACK_BIT_WORMHOLE) VehicleEnterTile(b, b->tile, b->x_pos, b->y_pos);
++		if (a->track != TRACK_BIT_WORMHOLE || IsTileType(TileVirtXY(a->x_pos, a->y_pos), MP_TUNNELBRIDGE)) VehicleEnterTile(a, a->tile, a->x_pos, a->y_pos);
++		if (b->track != TRACK_BIT_WORMHOLE || IsTileType(TileVirtXY(b->x_pos, b->y_pos), MP_TUNNELBRIDGE)) VehicleEnterTile(b, b->tile, b->x_pos, b->y_pos);
+ 	} else {
+ 		if (a->track != TRACK_BIT_DEPOT) a->direction = ReverseDir(a->direction);
+ 		a->UpdateViewport(true, true);
+ 
+-		if (a->track != TRACK_BIT_WORMHOLE) VehicleEnterTile(a, a->tile, a->x_pos, a->y_pos);
++		if (a->track != TRACK_BIT_WORMHOLE || IsTileType(TileVirtXY(a->x_pos, a->y_pos), MP_TUNNELBRIDGE)) VehicleEnterTile(a, a->tile, a->x_pos, a->y_pos);
+ 	}
+ 
+ 	/* Update train's power incase tiles were different rail type */
+@@ -3143,7 +3143,15 @@
+ 					/* Reverse when we are at the end of the track already, do not move to the new position */
+ 					if (v->IsFrontEngine() && !TrainCheckIfLineEnds(v)) return;
+ 
+-					uint32 r = VehicleEnterTile(v, gp.new_tile, gp.x, gp.y);
++					uint32 r;
++					if (IsTileType(gp.new_tile, MP_TUNNELBRIDGE)) {
++						TIC();
++						r = VehicleEnterTile(v, gp.new_tile, gp.x, gp.y);
++						TOC("WH", 100000);
++					} else {
++						r = VehicleEnterTile(v, gp.new_tile, gp.x, gp.y);
++					}
++
+ 					if (HasBit(r, VETS_CANNOT_ENTER)) {
+ 						goto invalid_rail;
+ 					}
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 19452)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -1503,14 +1503,14 @@
+ 			if (v->cur_speed > spd) v->cur_speed = spd;
+ 		}
+ 
++		switch (dir) {
++			default: NOT_REACHED();
++			case DIAGDIR_NE: if ((x & 0xF) != 0)             return VETSB_CONTINUE; break;
++			case DIAGDIR_SE: if ((y & 0xF) != TILE_SIZE - 1) return VETSB_CONTINUE; break;
++			case DIAGDIR_SW: if ((x & 0xF) != TILE_SIZE - 1) return VETSB_CONTINUE; break;
++			case DIAGDIR_NW: if ((y & 0xF) != 0)             return VETSB_CONTINUE; break;
++		}
+ 		if (DirToDiagDir(v->direction) == dir) {
+-			switch (dir) {
+-				default: NOT_REACHED();
+-				case DIAGDIR_NE: if ((x & 0xF) != 0)             return VETSB_CONTINUE; break;
+-				case DIAGDIR_SE: if ((y & 0xF) != TILE_SIZE - 1) return VETSB_CONTINUE; break;
+-				case DIAGDIR_SW: if ((x & 0xF) != TILE_SIZE - 1) return VETSB_CONTINUE; break;
+-				case DIAGDIR_NW: if ((y & 0xF) != 0)             return VETSB_CONTINUE; break;
+-			}
+ 			switch (v->type) {
+ 				case VEH_TRAIN: {
+ 					Train *t = Train::From(v);
+@@ -1522,7 +1522,6 @@
+ 				case VEH_ROAD: {
+ 					RoadVehicle *rv = RoadVehicle::From(v);
+ 					rv->state = RVSB_WORMHOLE;
+-					/* There are no slopes inside bridges / tunnels. */
+ 					ClrBit(rv->gv_flags, GVF_GOINGUP_BIT);
+ 					ClrBit(rv->gv_flags, GVF_GOINGDOWN_BIT);
+ 				} break;
+@@ -1538,32 +1537,22 @@
+ 			v->tile = tile;
+ 			switch (v->type) {
+ 				case VEH_TRAIN: {
+-					Train *t = Train::From(v);
+-					if (t->track == TRACK_BIT_WORMHOLE) {
+-						t->track = (DiagDirToAxis(dir) == AXIS_X ? TRACK_BIT_X : TRACK_BIT_Y);
+-						return VETSB_ENTERED_WORMHOLE;
+-					}
++					Train::From(v)->track = (DiagDirToAxis(dir) == AXIS_X ? TRACK_BIT_X : TRACK_BIT_Y);
+ 				} break;
+ 
+ 				case VEH_ROAD: {
+ 					RoadVehicle *rv = RoadVehicle::From(v);
+-					if (rv->state == RVSB_WORMHOLE) {
+-						rv->state = _road_exit_tunnel_state[dir];
+-						rv->frame = 0;
+-						return VETSB_ENTERED_WORMHOLE;
+-					}
++					rv->state = _road_exit_tunnel_state[dir];
++					rv->frame = 0;
+ 				} break;
+ 
+ 				case VEH_SHIP: {
+-					Ship *ship = Ship::From(v);
+-					if (ship->state == TRACK_BIT_WORMHOLE) {
+-						ship->state = (DiagDirToAxis(dir) == AXIS_X ? TRACK_BIT_X : TRACK_BIT_Y);
+-						return VETSB_ENTERED_WORMHOLE;
+-					}
++					Ship::From(v)->state = (DiagDirToAxis(dir) == AXIS_X ? TRACK_BIT_X : TRACK_BIT_Y);
+ 				} break;
+ 
+ 				default: NOT_REACHED();
+ 			}
++			return VETSB_ENTERED_WORMHOLE;
+ 		}
+ 	}
+ 	return VETSB_CONTINUE;

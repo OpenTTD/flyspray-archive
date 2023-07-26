@@ -1,0 +1,301 @@
+Index: src/cargotype.h
+===================================================================
+--- src/cargotype.h	(revision 18922)
++++ src/cargotype.h	(working copy)
+@@ -145,4 +145,6 @@
+ 		if ((var = CargoSpec::Get(cargospec_index))->IsValid())
+ #define FOR_ALL_CARGOSPECS(var) FOR_ALL_CARGOSPECS_FROM(var, 0)
+ 
++#define FOR_EACH_SET_CARGO_ID(var, cargo_bits) FOR_EACH_SET_BIT_EX(CargoID, var, uint, cargo_bits)
++
+ #endif /* CARGOTYPE_H */
+Index: src/core/bitmath_func.hpp
+===================================================================
+--- src/core/bitmath_func.hpp	(revision 18922)
++++ src/core/bitmath_func.hpp	(working copy)
+@@ -297,6 +297,30 @@
+ 	for (i = 0; b != 0; i++, b >>= 1) \
+ 		if (b & 1)
+ 
++/**
++ * Do an operation for each set bit in a value.
++ *
++ * This macros is used to do an operation for each set bit in a given bitset value.
++ * Second arguments is the variable that can be reused in the operation due to it's
++ * the bit position counter. The 4th argument is the bitset value.
++ *
++ * In opposition to FOR_EACH_SET_BIT, bitset value can be any expression. This
++ * expression will be evaluated only once.
++ *
++ * @param Tbitpos_type Type of the position counter variable.
++ * @param bitpos_var   The position counter variable.
++ * @param Tbitset_type Type of the bitset value.
++ * @param bitset_value The bitset value which we check for bits, place here any expression.
++ *
++ * @see FOR_EACH_SET_BIT
++ */
++#define FOR_EACH_SET_BIT_EX(Tbitpos_type, bitpos_var, Tbitset_type, bitset_value) \
++	for (                                                                          \
++		Tbitset_type ___FESBE_bits = (bitpos_var = (Tbitpos_type)0, bitset_value);  \
++		___FESBE_bits != (Tbitset_type)0;                                           \
++		___FESBE_bits = (Tbitset_type)(___FESBE_bits >> 1), bitpos_var++            \
++	)                                                                              \
++		if ((___FESBE_bits & 1) != 0)
+ 
+ #if defined(__APPLE__)
+ 	/* Make endian swapping use Apple's macros to increase speed
+Index: src/elrail.cpp
+===================================================================
+--- src/elrail.cpp	(revision 18922)
++++ src/elrail.cpp	(working copy)
+@@ -423,27 +423,26 @@
+ 	SpriteID wire_base = GetWireBase(ti->tile);
+ 
+ 	/* Drawing of pylons is finished, now draw the wires */
+-	for (Track t = TRACK_BEGIN; t < TRACK_END; t++) {
+-		if (HasBit(wireconfig[TS_HOME], t)) {
+-			byte PCPconfig = HasBit(PCPstatus, PCPpositions[t][0]) +
+-				(HasBit(PCPstatus, PCPpositions[t][1]) << 1);
++	Track t;
++	FOR_EACH_SET_TRACK(t, wireconfig[TS_HOME]) {
++		byte PCPconfig = HasBit(PCPstatus, PCPpositions[t][0]) +
++			(HasBit(PCPstatus, PCPpositions[t][1]) << 1);
+ 
+-			const SortableSpriteStruct *sss;
+-			int tileh_selector = !(tileh[TS_HOME] % 3) * tileh[TS_HOME] / 3; // tileh for the slopes, 0 otherwise
++		const SortableSpriteStruct *sss;
++		int tileh_selector = !(tileh[TS_HOME] % 3) * tileh[TS_HOME] / 3; // tileh for the slopes, 0 otherwise
+ 
+-			assert(PCPconfig != 0); // We have a pylon on neither end of the wire, that doesn't work (since we have no sprites for that)
+-			assert(!IsSteepSlope(tileh[TS_HOME]));
+-			sss = &CatenarySpriteData[Wires[tileh_selector][t][PCPconfig]];
++		assert(PCPconfig != 0); // We have a pylon on neither end of the wire, that doesn't work (since we have no sprites for that)
++		assert(!IsSteepSlope(tileh[TS_HOME]));
++		sss = &CatenarySpriteData[Wires[tileh_selector][t][PCPconfig]];
+ 
+-			/*
+-			 * The "wire"-sprite position is inside the tile, i.e. 0 <= sss->?_offset < TILE_SIZE.
+-			 * Therefore it is safe to use GetSlopeZ() for the elevation.
+-			 * Also note, that the result of GetSlopeZ() is very special for bridge-ramps.
+-			 */
+-			AddSortableSpriteToDraw(wire_base + sss->image_offset, PAL_NONE, ti->x + sss->x_offset, ti->y + sss->y_offset,
+-				sss->x_size, sss->y_size, sss->z_size, GetSlopeZ(ti->x + sss->x_offset, ti->y + sss->y_offset) + sss->z_offset,
+-				IsTransparencySet(TO_CATENARY));
+-		}
++		/*
++		 * The "wire"-sprite position is inside the tile, i.e. 0 <= sss->?_offset < TILE_SIZE.
++		 * Therefore it is safe to use GetSlopeZ() for the elevation.
++		 * Also note, that the result of GetSlopeZ() is very special for bridge-ramps.
++		 */
++		AddSortableSpriteToDraw(wire_base + sss->image_offset, PAL_NONE, ti->x + sss->x_offset, ti->y + sss->y_offset,
++			sss->x_size, sss->y_size, sss->z_size, GetSlopeZ(ti->x + sss->x_offset, ti->y + sss->y_offset) + sss->z_offset,
++			IsTransparencySet(TO_CATENARY));
+ 	}
+ }
+ 
+Index: src/pathfinder/follow_track.hpp
+===================================================================
+--- src/pathfinder/follow_track.hpp	(revision 18922)
++++ src/pathfinder/follow_track.hpp	(working copy)
+@@ -160,10 +160,9 @@
+ 		/* Mask already reserved trackdirs. */
+ 		m_new_td_bits &= ~TrackBitsToTrackdirBits(reserved);
+ 		/* Mask out all trackdirs that conflict with the reservation. */
+-		uint bits = (uint)TrackdirBitsToTrackBits(m_new_td_bits);
+-		int i;
+-		FOR_EACH_SET_BIT(i, bits) {
+-			if (TracksOverlap(reserved | TrackToTrackBits((Track)i))) m_new_td_bits &= ~TrackToTrackdirBits((Track)i);
++		Track t;
++		FOR_EACH_SET_TRACK(t, TrackdirBitsToTrackBits(m_new_td_bits)) {
++			if (TracksOverlap(reserved | TrackToTrackBits(t))) m_new_td_bits &= ~TrackToTrackdirBits(t);
+ 		}
+ 		if (m_new_td_bits == TRACKDIR_BIT_NONE) {
+ 			m_err = EC_RESERVED;
+Index: src/pathfinder/npf/npf.cpp
+===================================================================
+--- src/pathfinder/npf/npf.cpp	(revision 18922)
++++ src/pathfinder/npf/npf.cpp	(working copy)
+@@ -921,10 +921,9 @@
+ 		TrackBits reserved = GetReservedTrackbits(dst_tile);
+ 		trackdirbits &= ~TrackBitsToTrackdirBits(reserved);
+ 
+-		uint bits = TrackdirBitsToTrackBits(trackdirbits);
+-		int i;
+-		FOR_EACH_SET_BIT(i, bits) {
+-			if (TracksOverlap(reserved | TrackToTrackBits((Track)i))) trackdirbits &= ~TrackToTrackdirBits((Track)i);
++		Track t;
++		FOR_EACH_SET_TRACK(t, TrackdirBitsToTrackBits(trackdirbits)) {
++			if (TracksOverlap(reserved | TrackToTrackBits(t))) trackdirbits &= ~TrackToTrackdirBits(t);
+ 		}
+ 	}
+ 
+Index: src/road_cmd.cpp
+===================================================================
+--- src/road_cmd.cpp	(revision 18922)
++++ src/road_cmd.cpp	(working copy)
+@@ -923,14 +923,12 @@
+ 
+ 			/* Clear the road if only one piece is on the tile OR we are not using the DC_AUTO flag */
+ 			if ((CountBits(b) == 1 && GetRoadBits(tile, ROADTYPE_TRAM) == ROAD_NONE) || !(flags & DC_AUTO)) {
+-				RoadTypes rts = GetRoadTypes(tile);
+ 				CommandCost ret(EXPENSES_CONSTRUCTION);
+-				for (RoadType rt = ROADTYPE_ROAD; rt < ROADTYPE_END; rt++) {
+-					if (HasBit(rts, rt)) {
+-						CommandCost tmp_ret = RemoveRoad(tile, flags, GetRoadBits(tile, rt), rt, true);
+-						if (tmp_ret.Failed()) return tmp_ret;
+-						ret.AddCost(tmp_ret);
+-					}
++				RoadType rt;
++				FOR_EACH_SET_ROADTYPE(rt, GetRoadTypes(tile)) {
++					CommandCost tmp_ret = RemoveRoad(tile, flags, GetRoadBits(tile, rt), rt, true);
++					if (tmp_ret.Failed()) return tmp_ret;
++					ret.AddCost(tmp_ret);
+ 				}
+ 				return ret;
+ 			}
+Index: src/road_func.h
+===================================================================
+--- src/road_func.h	(revision 18922)
++++ src/road_func.h	(working copy)
+@@ -19,6 +19,17 @@
+ #include "tile_type.h"
+ 
+ /**
++ * Iterate through each set RoadType in a RoadTypes value.
++ * For more informations see FOR_EACH_SET_BIT_EX.
++ *
++ * @param var Loop index variable that stores fallowing set road type. Must be of type RoadType.
++ * @param road_types The value to iterate through (any expression).
++ *
++ * @see FOR_EACH_SET_BIT_EX
++ */
++#define FOR_EACH_SET_ROADTYPE(var, road_types) FOR_EACH_SET_BIT_EX(RoadType, var, RoadTypes, road_types)
++
++/**
+  * Whether the given roadtype is valid.
+  * @param rt the roadtype to check for validness
+  * @return true if and only if valid
+Index: src/station_gui.cpp
+===================================================================
+--- src/station_gui.cpp	(revision 18922)
++++ src/station_gui.cpp	(working copy)
+@@ -45,18 +45,18 @@
+ 	char string[512];
+ 	char *b = InlineString(string, prefix);
+ 
+-	for (CargoID i = 0; i < NUM_CARGO; i++) {
++	CargoID i;
++	FOR_EACH_SET_CARGO_ID(i, cargo_mask) {
+ 		if (b >= lastof(string) - (1 + 2 * 4)) break; // ',' or ' ' and two calls to Utf8Encode()
+-		if (HasBit(cargo_mask, i)) {
+-			if (first) {
+-				first = false;
+-			} else {
+-				/* Add a comma if this is not the first item */
+-				*b++ = ',';
+-				*b++ = ' ';
+-			}
+-			b = InlineString(b, CargoSpec::Get(i)->name);
++
++		if (first) {
++			first = false;
++		} else {
++			/* Add a comma if this is not the first item */
++			*b++ = ',';
++			*b++ = ' ';
+ 		}
++		b = InlineString(b, CargoSpec::Get(i)->name);
+ 	}
+ 
+ 	/* If first is still true then no cargo is accepted */
+@@ -288,8 +288,8 @@
+ 	{
+ 		Money diff = 0;
+ 
+-		for (CargoID j = 0; j < NUM_CARGO; j++) {
+-			if (!HasBit(cargo_filter, j)) continue;
++		CargoID j;
++		FOR_EACH_SET_CARGO_ID(j, cargo_filter) {
+ 			if (!(*a)->goods[j].cargo.Empty()) diff += GetTransportedGoodsIncome((*a)->goods[j].cargo.Count(), 20, 50, j);
+ 			if (!(*b)->goods[j].cargo.Empty()) diff -= GetTransportedGoodsIncome((*b)->goods[j].cargo.Count(), 20, 50, j);
+ 		}
+@@ -303,8 +303,8 @@
+ 		byte maxr1 = 0;
+ 		byte maxr2 = 0;
+ 
+-		for (CargoID j = 0; j < NUM_CARGO; j++) {
+-			if (!HasBit(cargo_filter, j)) continue;
++		CargoID j;
++		FOR_EACH_SET_CARGO_ID(j, cargo_filter) {
+ 			if (HasBit((*a)->goods[j].acceptance_pickup, GoodsEntry::PICKUP)) maxr1 = max(maxr1, (*a)->goods[j].rating);
+ 			if (HasBit((*b)->goods[j].acceptance_pickup, GoodsEntry::PICKUP)) maxr2 = max(maxr2, (*b)->goods[j].rating);
+ 		}
+@@ -351,9 +351,9 @@
+ 		this->InitNested(desc, window_number);
+ 		this->owner = (Owner)this->window_number;
+ 
+-		for (uint i = 0; i < NUM_CARGO; i++) {
+-			const CargoSpec *cs = CargoSpec::Get(i);
+-			if (cs->IsValid() && HasBit(this->cargo_filter, i)) this->LowerWidget(SLW_CARGOSTART + i);
++		CargoID cid;
++		FOR_EACH_SET_CARGO_ID(cid, this->cargo_filter) {
++			if (CargoSpec::Get(cid)->IsValid()) this->LowerWidget(SLW_CARGOSTART + cid);
+ 		}
+ 
+ 		if (this->cargo_filter == this->cargo_filter_max) this->cargo_filter = _cargo_mask;
+Index: src/track_func.h
+===================================================================
+--- src/track_func.h	(revision 18922)
++++ src/track_func.h	(working copy)
+@@ -17,6 +17,17 @@
+ #include "slope_func.h"
+ 
+ /**
++ * Iterate through each set Track in a TrackBits value.
++ * For more informations see FOR_EACH_SET_BIT_EX.
++ *
++ * @param var Loop index variable that stores fallowing set track. Must be of type Track.
++ * @param track_bits The value to iterate through (any expression).
++ *
++ * @see FOR_EACH_SET_BIT_EX
++ */
++#define FOR_EACH_SET_TRACK(var, track_bits) FOR_EACH_SET_BIT_EX(Track, var, TrackBits, track_bits)
++
++/**
+  * Convert an Axis to the corresponding Track
+  * AXIS_X -> TRACK_X
+  * AXIS_Y -> TRACK_Y
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 18922)
++++ src/train_cmd.cpp	(working copy)
+@@ -3628,11 +3628,8 @@
+ 
+ 		/* It is important that these two are the first in the loop, as reservation cannot deal with every trackbit combination */
+ 		assert(TRACK_BEGIN == TRACK_X && TRACK_Y == TRACK_BEGIN + 1);
+-		for (Track t = TRACK_BEGIN; t < TRACK_END; t++) {
+-			if (HasBit(remaining_trackbits, t)) {
+-				TryReserveRailTrack(tile, t);
+-			}
+-		}
++		Track t;
++		FOR_EACH_SET_TRACK(t, remaining_trackbits) TryReserveRailTrack(tile, t);
+ 	}
+ 
+ 	/* check if the wagon was on a road/rail-crossing */
+Index: src/vehicle_gui.cpp
+===================================================================
+--- src/vehicle_gui.cpp	(revision 18922)
++++ src/vehicle_gui.cpp	(working copy)
+@@ -542,9 +542,8 @@
+ 		bool first = true;
+ 
+ 		/* Add each cargo type to the list */
+-		for (CargoID cid = 0; cid < NUM_CARGO; cid++) {
+-			if (!HasBit(cmask, cid)) continue;
+-
++		CargoID cid;
++		FOR_EACH_SET_CARGO_ID(cid, cmask) {
+ 			if (b >= lastof(string) - (2 + 2 * 4)) break; // ", " and two calls to Utf8Encode()
+ 
+ 			if (!first) b = strecpy(b, ", ", lastof(string));

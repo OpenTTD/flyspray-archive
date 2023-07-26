@@ -1,0 +1,41 @@
+Index: src/network/network_content.cpp
+===================================================================
+--- src/network/network_content.cpp	(revision 19613)
++++ src/network/network_content.cpp	(working copy)
+@@ -377,12 +377,35 @@
+ 	}
+ 
+ 	byte buff[8192];
+-	while (!gzeof(fin)) {
++	while (1) {
+ 		int read = gzread(fin, buff, sizeof(buff));
++		if (read == 0) {
++			/* According to documentation, it means either "underlying error"
++			 * or end of input stream. Also, according to zlib 1.2.3.5 changelog,
++			 * "Change gzeof() to return 0 on error instead of -1", we can't trust
++			 * gzeof() in the case of error.
++			 *
++			 * Testing shows 1.2.3.3 sets errnum to Z_STREAM_END and 1.2.4 to 0
++			 * in the case of correct end of input stream.
++			 *
++			 * For both 1.2.3.3 and 1.2.4, gzread() returns -1 for broken
++			 * and truncated files.
++			 *
++			 * XXX: does it always mean we have finished reading?
++			 * This could be a problem when reading data from stream.
++			 */
++			int errnum;
++			gzerror(fin, &errnum);
++			if (errnum != 0 && errnum != Z_STREAM_END) ret = false;
++			break;
++		}
+ 		if (read < 0 || (size_t)read != fwrite(buff, 1, read, fout)) {
+ 			ret = false;
+ 			break;
+ 		}
++		/* DO NOT DO THIS! It will fail to detect broken file with zlib 1.2.3.3!
++		 * We need to wait for gzread() to return -1.
++		 * if (read < sizeof(buff)) break; */
+ 	}
+ 
+ exit:

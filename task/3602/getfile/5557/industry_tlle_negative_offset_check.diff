@@ -1,0 +1,107 @@
+Index: src/newgrf.cpp
+===================================================================
+--- src/newgrf.cpp	(revision 19055)
++++ src/newgrf.cpp	(working copy)
+@@ -2325,6 +2325,8 @@
+ 									grfmsg(2, "IndustriesChangeInfo: Attempt to use industry tile %u with industry id %u, not yet defined. Ignoring.", local_tile_id, indid);
+ 								} else {
+ 									/* Declared as been valid, can be used */
++									itt[k].ti.x = (int8)GB(itt[k].ti.x, 0, 8);
++									itt[k].ti.y = (int8)GB(itt[k].ti.y, 0, 8);
+ 									itt[k].gfx = tempid;
+ 									size = k + 1;
+ 									copy_from = itt;
+@@ -6016,7 +6018,21 @@
+ 		if (industryspec != NULL) {
+ 			for (int i = 0; i < NUM_INDUSTRYTYPES; i++) {
+ 				IndustrySpec *indsp = industryspec[i];
+-
++				if (indsp != NULL) {
++					for (int j = 0; j < indsp->num_table; j++) {
++						const IndustryTileTable *it = indsp->table[j];								
++						do {
++							IndustryGfx gfx = GetTranslatedIndustryTileID(it->gfx);
++							const IndustryTileSpec *its = GetIndustryTileSpec(gfx);
++							if (it->gfx != GFX_WATERTILE_SPECIALCHECK  && !(its->special_flags & INDTILE_SPECIAL_DONT_BUILD)) {
++								if ((it->ti.x < 0) || (it->ti.y < 0)) {
++									indsp->enabled = false;
++								}
++							}							
++						} while ((++it)->ti.x != -0x80);
++					}
++				}
++				
+ 				if (indsp != NULL && indsp->enabled) {
+ 					StringID strid;
+ 					/* process the conversion of text at the end, so to be sure everything will be fine
+Index: src/industrytype.h
+===================================================================
+--- src/industrytype.h	(revision 19055)
++++ src/industrytype.h	(working copy)
+@@ -84,6 +84,7 @@
+ enum IndustryTileSpecialFlags {
+ 	INDTILE_SPECIAL_NONE                  = 0,
+ 	INDTILE_SPECIAL_NEXTFRAME_RANDOMBITS  = 1 << 0, ///< Callback 0x26 needs random bits
++	INDTILE_SPECIAL_DONT_BUILD            = 1 << 1, ///< Tile is not actually built (intended for checking clearance on layouts)
+ };
+ DECLARE_ENUM_AS_BIT_SET(IndustryTileSpecialFlags);
+ 
+Index: src/industry_cmd.cpp
+===================================================================
+--- src/industry_cmd.cpp	(revision 19055)
++++ src/industry_cmd.cpp	(working copy)
+@@ -1288,11 +1288,11 @@
+ 				return false;
+ 			}
+ 		} else {
++			const IndustryTileSpec *its = GetIndustryTileSpec(gfx);		
++			
+ 			if (!EnsureNoVehicleOnGround(cur_tile)) return false;
+ 			if (MayHaveBridgeAbove(cur_tile) && IsBridgeAbove(cur_tile)) return false;
+ 
+-			const IndustryTileSpec *its = GetIndustryTileSpec(gfx);
+-
+ 			IndustryBehaviour ind_behav = GetIndustrySpec(type)->behaviour;
+ 
+ 			/* Perform land/water check if not disabled */
+@@ -1326,6 +1326,7 @@
+ 
+ 				if (not_clearable) return false;
+ 			}
++			
+ 		}
+ 	} while ((++it)->ti.x != -0x80);
+ 
+@@ -1598,8 +1599,18 @@
+ 
+ 	do {
+ 		TileIndex cur_tile = tile + ToTileIndexDiff(it->ti);
++		/* it->gfx is stored in the map. But the translated ID cur_gfx is the interesting one */
++		IndustryGfx cur_gfx = GetTranslatedIndustryTileID(it->gfx);
++		bool build_tile_enabled = false;
++		
++		if (it->gfx == GFX_WATERTILE_SPECIALCHECK) {
++			build_tile_enabled = false;
++		} else {
++			const IndustryTileSpec *its = GetIndustryTileSpec(cur_gfx); // don't call GetIndustryTileSpec on tile 0xFF (water check) 
++			build_tile_enabled = !(its->special_flags & INDTILE_SPECIAL_DONT_BUILD);
++		}
+ 
+-		if (it->gfx != GFX_WATERTILE_SPECIALCHECK) {
++		if (build_tile_enabled) {
+ 			i->location.Add(cur_tile);
+ 
+ 			WaterClass wc = (IsWaterTile(cur_tile) ? GetWaterClass(cur_tile) : WATER_CLASS_INVALID);
+@@ -1612,10 +1623,8 @@
+ 				SetIndustryConstructionCounter(cur_tile, 3);
+ 				SetIndustryConstructionStage(cur_tile, 2);
+ 			}
+-
+-			/* it->gfx is stored in the map. But the translated ID cur_gfx is the interesting one */
+-			IndustryGfx cur_gfx = GetTranslatedIndustryTileID(it->gfx);
+-			const IndustryTileSpec *its = GetIndustryTileSpec(cur_gfx);
++			
++			const IndustryTileSpec *its = GetIndustryTileSpec(cur_gfx); // can't see anyway not to do this twice!? 
+ 			if (its->animation_info != 0xFFFF) AddAnimatedTile(cur_tile);
+ 		}
+ 	} while ((++it)->ti.x != -0x80);

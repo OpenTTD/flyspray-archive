@@ -1,0 +1,1088 @@
+Index: src/aircraft_cmd.cpp
+===================================================================
+--- src/aircraft_cmd.cpp	(revision 17304)
++++ src/aircraft_cmd.cpp	(working copy)
+@@ -261,7 +261,7 @@
+ 
+ 	const AircraftVehicleInfo *avi = AircraftVehInfo(p1);
+ 	const Engine *e = Engine::Get(p1);
+-	CommandCost value(EXPENSES_NEW_VEHICLES, e->GetCost());
++	CommandCost value(EXPENSES_NEW_VEHICLES, e->GetCost(), true);
+ 
+ 	/* Engines without valid cargo should not be available */
+ 	if (e->GetDefaultCargoType() == CT_INVALID) return CMD_ERROR;
+@@ -460,7 +460,7 @@
+ 
+ 	if (v->vehstatus & VS_CRASHED) return_cmd_error(STR_ERROR_CAN_T_SELL_DESTROYED_VEHICLE);
+ 
+-	CommandCost ret(EXPENSES_NEW_VEHICLES, -v->value);
++	CommandCost ret(EXPENSES_NEW_VEHICLES, -v->value, true);
+ 
+ 	if (flags & DC_EXEC) {
+ 		delete v;
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revision 17304)
++++ src/command.cpp	(working copy)
+@@ -421,6 +421,10 @@
+ 		SetTownRatingTestMode(true);
+ 		res = proc(tile, flags & ~DC_EXEC, p1, p2, text);
+ 		SetTownRatingTestMode(false);
++		/* Multiply command cost according to day length balance type. */
++		if (_settings_game.economy.day_length_balance_type == DBT_ALL_COSTS) {
++			res.AffectCost(_settings_game.economy.day_length_balance_factor);
++		}
+ 		if (CmdFailed(res)) {
+ 			res.SetGlobalErrorMessage();
+ 			goto error;
+@@ -443,6 +447,12 @@
+ 	/* Execute the command here. All cost-relevant functions set the expenses type
+ 	 * themselves to the cost object at some point */
+ 	res = proc(tile, flags, p1, p2, text);
++
++	/* Multiply command cost according to day length balance type. */
++	if (_settings_game.economy.day_length_balance_type == DBT_ALL_COSTS) {
++		res.AffectCost(_settings_game.economy.day_length_balance_factor);
++	}
++
+ 	if (CmdFailed(res)) {
+ 		res.SetGlobalErrorMessage();
+ error:
+@@ -553,6 +563,8 @@
+ 		SetTownRatingTestMode(true);
+ 		res = proc(tile, flags, p1, p2, text);
+ 		SetTownRatingTestMode(false);
++		/* Already multiplied in DoCommand, so just flag that affected by day length. */
++		res.AffectCost();
+ 		if (CmdFailed(res)) {
+ 			res.SetGlobalErrorMessage();
+ 			ShowErrorMessage(_error_message, error_part1, x, y);
+@@ -571,6 +583,8 @@
+ 		SetTownRatingTestMode(true);
+ 		res = proc(tile, flags, p1, p2, text);
+ 		SetTownRatingTestMode(false);
++		/* Already multiplied in DoCommand, so just flag that affected by day length. */
++		res.AffectCost();
+ 		assert(cmd_id == CMD_COMPANY_CTRL || old_company == _current_company);
+ 		if (CmdFailed(res)) {
+ 			res.SetGlobalErrorMessage();
+@@ -603,6 +617,8 @@
+ 	/* Actually try and execute the command. If no cost-type is given
+ 	 * use the construction one */
+ 	res2 = proc(tile, flags | DC_EXEC, p1, p2, text);
++	/* Already multiplied in DoCommand, so just flag that affected by day length. */
++	res2.AffectCost();
+ 
+ 	assert(cmd_id == CMD_COMPANY_CTRL || old_company == _current_company);
+ 
+Index: src/command_type.h
+===================================================================
+--- src/command_type.h	(revision 17304)
++++ src/command_type.h	(working copy)
+@@ -25,32 +25,42 @@
+ 	Money cost;       ///< The cost of this action
+ 	StringID message; ///< Warning message for when success is unset
+ 	bool success;     ///< Whether the comment went fine up to this moment
++	bool affected;    ///< Whether cost was affected by day length factor
+ 
+ public:
+ 	/**
+ 	 * Creates a command cost return with no cost and no error
+ 	 */
+-	CommandCost() : expense_type(INVALID_EXPENSES), cost(0), message(INVALID_STRING_ID), success(true) {}
++	CommandCost() : expense_type(INVALID_EXPENSES), cost(0), message(INVALID_STRING_ID), success(true), affected(false) {}
+ 
+ 	/**
+ 	 * Creates a command return value the is failed with the given message
+ 	 */
+-	CommandCost(StringID msg) : expense_type(INVALID_EXPENSES), cost(0), message(msg), success(false) {}
++	CommandCost(StringID msg) : expense_type(INVALID_EXPENSES), cost(0), message(msg), success(false), affected(false) {}
+ 
+ 	/**
+ 	 * Creates a command cost with given expense type and start cost of 0
+ 	 * @param ex_t the expense type
+ 	 */
+-	CommandCost(ExpensesType ex_t) : expense_type(ex_t), cost(0), message(INVALID_STRING_ID), success(true) {}
++	CommandCost(ExpensesType ex_t) : expense_type(ex_t), cost(0), message(INVALID_STRING_ID), success(true), affected(false) {}
+ 
+ 	/**
+ 	 * Creates a command return value with the given start cost and expense type
+ 	 * @param ex_t the expense type
+ 	 * @param cst the initial cost of this command
+ 	 */
+-	CommandCost(ExpensesType ex_t, Money cst) : expense_type(ex_t), cost(cst), message(INVALID_STRING_ID), success(true) {}
++	CommandCost(ExpensesType ex_t, Money cst) : expense_type(ex_t), cost(cst), message(INVALID_STRING_ID), success(true), affected(false) {}
+ 
+ 	/**
++	 * Creates a command return value with the given start cost, expense type
++	 * and if already affected by day length
++	 * @param ex_t the expense type
++	 * @param cst the initial cost of this command
++	 * @param aff if affected by day length
++	 */
++	CommandCost(ExpensesType ex_t, Money cst, bool aff) : expense_type(ex_t), cost(cst), message(INVALID_STRING_ID), success(true), affected(aff) {}
++
++	/**
+ 	 * Adds the cost of the given command return value to this cost.
+ 	 * Also takes a possible error message when it is set.
+ 	 * @param ret the command to add the cost of.
+@@ -81,6 +91,33 @@
+ 	}
+ 
+ 	/**
++	 * Multiplies the cost of command by given factor,
++	 * if not modified before.
++	 * Also set, that it was modified.
++	 * @param factor factor to multiply the costs with, if 0 just flag that modified
++	 * @return this class
++	 */
++	CommandCost AffectCost(uint8 factor = 0)
++	{
++		if (this->affected) return *this;
++		if (factor != 0) this->cost *= factor;
++		this->affected = true;
++		return *this;
++	}
++
++	/**
++	* Divides the cost of command by given factor.
++	* @param factor factor to divide the cost with
++	* @return this class
++	*/
++	CommandCost DivideCost(uint8 factor)
++	{
++		if (factor == 0) return *this;
++		this->cost /= factor;
++		return *this;
++	}
++
++	/**
+ 	 * The costs as made up to this moment
+ 	 * @return the costs
+ 	 */
+Index: src/company_cmd.cpp
+===================================================================
+--- src/company_cmd.cpp	(revision 17304)
++++ src/company_cmd.cpp	(working copy)
+@@ -161,9 +161,6 @@
+ 	if (cost.GetCost() == 0) return;
+ 	assert(cost.GetExpensesType() != INVALID_EXPENSES);
+ 
+-	c->money -= cost.GetCost();
+-	c->yearly_expenses[0][cost.GetExpensesType()] += cost.GetCost();
+-
+ 	if (HasBit(1 << EXPENSES_TRAIN_INC    |
+ 	           1 << EXPENSES_ROADVEH_INC  |
+ 	           1 << EXPENSES_AIRCRAFT_INC |
+@@ -172,12 +169,37 @@
+ 	} else if (HasBit(1 << EXPENSES_TRAIN_RUN    |
+ 	                  1 << EXPENSES_ROADVEH_RUN  |
+ 	                  1 << EXPENSES_AIRCRAFT_RUN |
+-	                  1 << EXPENSES_SHIP_RUN     |
+-	                  1 << EXPENSES_PROPERTY     |
+-	                  1 << EXPENSES_LOAN_INT, cost.GetExpensesType())) {
++	                  1 << EXPENSES_SHIP_RUN, cost.GetExpensesType())) {
++		if (!(_settings_game.economy.day_length_balance_type == DBT_ALL_COSTS ||
++			  _settings_game.economy.day_length_balance_type == DBT_RUN_COST)) {
++			cost.DivideCost(_settings_game.economy.day_length_balance_factor);
++		}
+ 		c->cur_economy.expenses -= cost.GetCost();
++	} else if (HasBit(1 << EXPENSES_LOAN_INT, cost.GetExpensesType())) {
++		if (_settings_game.economy.day_length_balance_type == DBT_ALL_COSTS ||
++		   (_settings_game.economy.day_length_balance_type == DBT_RUN_COST &&
++			_settings_game.economy.include_loan_int_to_run)) {
++			cost.AffectCost(_settings_game.economy.day_length_balance_factor);
++		}
++		c->cur_economy.expenses -= cost.GetCost();
++	} else if (HasBit(1 << EXPENSES_PROPERTY, cost.GetExpensesType())) {
++		if (_settings_game.economy.day_length_balance_type == DBT_ALL_COSTS ||
++		   (_settings_game.economy.day_length_balance_type == DBT_RUN_COST &&
++			_settings_game.economy.include_prop_main_to_run)) {
++			cost.AffectCost(_settings_game.economy.day_length_balance_factor);
++		}
++		c->cur_economy.expenses -= cost.GetCost();
++	} else if (HasBit(1 << EXPENSES_CONSTRUCTION, cost.GetExpensesType())) {
++		/* Multiply construction costs according to day length balance type. */
++		if (_settings_game.economy.day_length_balance_type == DBT_ALL_COSTS) {
++			cost.AffectCost(_settings_game.economy.day_length_balance_factor);
++		}
+ 	}
+ 
++	/* Subtract money. */
++	c->money -= cost.GetCost();
++	c->yearly_expenses[0][cost.GetExpensesType()] += cost.GetCost();
++
+ 	InvalidateCompanyWindows(c);
+ }
+ 
+Index: src/date.cpp
+===================================================================
+--- src/date.cpp	(revision 17304)
++++ src/date.cpp	(working copy)
+@@ -262,13 +262,89 @@
+ #endif /* ENABLE_NETWORK */
+ 
+ 	DisasterDailyLoop();
+-	IndustryDailyLoop();
+ 
++	/* Update an industry at same speed with any day length setting or really just on new day. */
++	if ((_date_fract % DAY_TICKS == 0 && !_settings_game.economy.slow_down_industry_changes) ||
++		 _date_fract == 0) {
++		IndustryDailyLoop();
++	}
++
+ 	InvalidateWindowWidget(WC_STATUS_BAR, 0, 0);
+-	EnginesDailyLoop();
++	if (_date_fract % DAY_TICKS == 0) EnginesDailyLoop();
+ }
+ 
+ /**
++ * Returns a number of days in current month.
++ * @return number of days of current month
++ */
++static Day DaysInCurrentMonth()
++{
++	/* Months have 28 to 31 days. */
++	Day days = 27;
++	Day elapsed_days = 0;
++	YearMonthDay ymd;
++
++	ConvertDateToYMD(_date, &ymd);
++
++	/* Get number of days already elapsed. */
++	while (ymd.day != 1) {
++		elapsed_days++;
++		ConvertDateToYMD(_date - elapsed_days, &ymd);
++	}
++
++	/* Get how many days will lead to the new month. */
++	for (days; ymd.month == _cur_month; days++) {
++		ConvertDateToYMD(_date - elapsed_days + days, &ymd);
++	}
++
++	days--;
++	return days;
++}
++
++/**
++ * Get a day and tick, where new month on day length 1 would start.
++ * @param cur_day current day
++ * @param dt      the day and tick to write to
++ */
++static void NewMonthAt(Day cur_day, DayTick *dt)
++{
++	DateFract ticks_per_month = (DaysInCurrentMonth() + 1) * DAY_TICKS;
++	Day day_new_month = ticks_per_month / DAY_TICKS_DAY_LENGTH;
++	DateFract tick_new_month = ticks_per_month - day_new_month * DAY_TICKS_DAY_LENGTH;
++
++	/* Temporary save. */
++	dt->day = day_new_month;
++	dt->tick = tick_new_month;
++
++	while (day_new_month < cur_day) {
++		day_new_month += dt->day;
++		tick_new_month += dt->tick;
++
++		/* Ensure, that we will not wait till we have more ticks in day than possible. */
++		if (tick_new_month >= DAY_TICKS_DAY_LENGTH) {
++			day_new_month++;
++			tick_new_month -= DAY_TICKS_DAY_LENGTH;
++		}
++	}
++
++	/* We might have new "old" month at same day, but we also might missed him already. */
++	if ((day_new_month == cur_day) && ( tick_new_month < _date_fract )) {
++		day_new_month += dt->day;
++		tick_new_month += dt->tick;
++
++		if (tick_new_month >= DAY_TICKS_DAY_LENGTH) {
++			day_new_month++;
++			tick_new_month -= DAY_TICKS_DAY_LENGTH;
++		}
++	}
++
++	dt->day = day_new_month;
++	dt->tick = tick_new_month;
++
++	return;
++}
++
++/**
+  * Increases the tick counter, increases date  and possibly calls
+  * procedures that have to be called daily, monthly or yearly.
+  */
+@@ -280,19 +356,44 @@
+ 	if (_game_mode == GM_MENU) return;
+ 
+ 	_date_fract++;
+-	if (_date_fract < DAY_TICKS) return;
+-	_date_fract = 0;
++	if (_date_fract >= DAY_TICKS_DAY_LENGTH) 
++	{
++		_date_fract = 0;
+ 
+-	/* increase day counter and call various daily loops */
+-	_date++;
+-	OnNewDay();
++		/* increase day counter and call various daily loops */
++		_date++;
+ 
+-	YearMonthDay ymd;
++		OnNewDay();
++	}
+ 
+ 	/* check if we entered a new month? */
++	bool new_month = true;
++	YearMonthDay ymd;
+ 	ConvertDateToYMD(_date, &ymd);
+-	if (ymd.month == _cur_month) return;
+ 
++	if (_date_fract != 0)
++	{
++		new_month = false;
++	} else {
++		if (ymd.month == _cur_month) new_month = false;
++	}
++
++	if (!new_month) {
++		if (_date_fract % DAY_TICKS != 0) return;
++
++		DayTick dt;
++		NewMonthAt(ymd.day, &dt);
++
++		/* No new month, but we could have a new month on day length factor = 1. */
++		if ((ymd.day == dt.day) && 
++			(_date_fract == dt.tick) &&
++			!_settings_game.economy.slow_down_industry_changes)	{
++			IndustryMonthlyLoop();
++		}
++
++		return;
++	}
++
+ 	/* yes, call various monthly loops */
+ 	_cur_month = ymd.month;
+ 	OnNewMonth();
+Index: src/date_type.h
+===================================================================
+--- src/date_type.h	(revision 17304)
++++ src/date_type.h	(working copy)
+@@ -12,6 +12,15 @@
+ #ifndef DATE_TYPE_H
+ #define DATE_TYPE_H
+ 
++typedef int32  Date;
++typedef uint16 DateFract;
++
++typedef int32  Year;
++typedef uint8  Month;
++typedef uint8  Day;
++
++#include "settings_type.h"
++
+ /**
+  * 1 day is 74 ticks; _date_fract used to be uint16 and incremented by 885. On
+  *                    an overflow the new day begun and 65535 / 885 = 74.
+@@ -24,6 +33,8 @@
+ 	DAYS_IN_LEAP_YEAR = 366, ///< sometimes, you need one day more...
+ };
+ 
++#define DAY_TICKS_DAY_LENGTH (DAY_TICKS * _settings_game.economy.day_length_factor) ///< ticks per day with day length
++
+ /*
+  * ORIGINAL_BASE_YEAR, ORIGINAL_MAX_YEAR and DAYS_TILL_ORIGINAL_BASE_YEAR are
+  * primarily used for loading newgrf and savegame data and returning some
+@@ -50,13 +61,6 @@
+  * be encoded in a single 32 bits date, about 2^31 / 366 years. */
+ #define MAX_YEAR 5000000
+ 
+-typedef int32  Date;
+-typedef uint16 DateFract;
+-
+-typedef int32  Year;
+-typedef uint8  Month;
+-typedef uint8  Day;
+-
+ /**
+  * Data structure to convert between Date and triplet (year, month, and day).
+  * @see ConvertDateToYMD(), ConvertYMDToDate()
+@@ -67,6 +71,12 @@
+ 	Day   day;    ///< Day (1..31)
+ };
+ 
++struct DayTick
++{
++	Day day;        ///< Day (1 ... 31)
++	DateFract tick; ///< Tick (74, 74*2 ... 74 * day_length_factor - 74)
++};
++
+ static const Year INVALID_YEAR = -1;
+ static const Date INVALID_DATE = -1;
+ 
+Index: src/economy.cpp
+===================================================================
+--- src/economy.cpp	(revision 17304)
++++ src/economy.cpp	(working copy)
+@@ -91,7 +91,7 @@
+ typedef SmallVector<Industry *, 16> SmallIndustryList;
+ 
+ /* Score info */
+-const ScoreInfo _score_info[] = {
++ScoreInfo _score_info[] = {
+ 	{ SCORE_VEHICLES,        120, 100 },
+ 	{ SCORE_STATIONS,         80, 100 },
+ 	{ SCORE_MIN_PROFIT,    10000, 100 },
+@@ -560,6 +560,27 @@
+ 	}
+ }
+ 
++/* Change some needed values to reflect day length. */
++bool InitializeGraphPerformance(int32 p1)
++{
++	_score_info[SCORE_MIN_PROFIT].needed = SCORE_MIN_PROFIT_NEEDED;
++	_score_info[SCORE_MIN_INCOME].needed = SCORE_MIN_INCOME_NEEDED;
++	_score_info[SCORE_MAX_INCOME].needed = SCORE_MAX_INCOME_NEEDED;
++	_score_info[SCORE_MONEY].needed = SCORE_MONEY_NEEDED;
++
++	if (_settings_game.economy.day_length_balance_type != DBT_PAYMENTS) {
++		_score_info[SCORE_MIN_PROFIT].needed *= _settings_game.economy.day_length_factor;
++		_score_info[SCORE_MIN_INCOME].needed *= _settings_game.economy.day_length_factor;
++		_score_info[SCORE_MAX_INCOME].needed *= _settings_game.economy.day_length_factor;
++		_score_info[SCORE_MONEY].needed *= _settings_game.economy.day_length_factor;
++	}
++
++	_score_info[SCORE_DELIVERED].needed = SCORE_DELIVERED_NEEDED * _settings_game.economy.day_length_factor;
++	InvalidateWindow(WC_PERFORMANCE_DETAIL, 0);
++
++	return true;
++}
++
+ static void CompaniesGenStatistics()
+ {
+ 	Station *st;
+@@ -659,6 +680,7 @@
+ static void CompaniesPayInterest()
+ {
+ 	const Company *c;
++	CommandCost cost;
+ 
+ 	FOR_ALL_COMPANIES(c) {
+ 		_current_company = c->index;
+@@ -675,9 +697,18 @@
+ 		Money up_to_previous_month = yearly_fee * _cur_month / 12;
+ 		Money up_to_this_month = yearly_fee * (_cur_month + 1) / 12;
+ 
+-		SubtractMoneyFromCompany(CommandCost(EXPENSES_LOAN_INT, up_to_this_month - up_to_previous_month));
++		cost = CommandCost(EXPENSES_LOAN_INT, up_to_this_month - up_to_previous_month);
++		SubtractMoneyFromCompany(cost);
+ 
+-		SubtractMoneyFromCompany(CommandCost(EXPENSES_OTHER, _price.station_value >> 2));
++		cost = CommandCost(EXPENSES_OTHER, _price.station_value >> 2);
++		/* Multiply property according to day length balance type. */
++		if (_settings_game.economy.day_length_balance_type == DBT_ALL_COSTS ||
++		   (_settings_game.economy.day_length_balance_type == DBT_RUN_COST &&
++		    _settings_game.economy.include_prop_main_to_run)) {
++			cost.AffectCost( _settings_game.economy.day_length_balance_factor );
++		}
++
++		SubtractMoneyFromCompany(cost);
+ 	}
+ }
+ 
+@@ -1026,6 +1057,12 @@
+ 	CompanyID old_company = _current_company;
+ 	_current_company = this->front->owner;
+ 
++	/* Divide income according to day length balance type. */
++	if (_settings_game.economy.day_length_balance_type == DBT_PAYMENTS) {
++		this->route_profit /= _settings_game.economy.day_length_balance_factor;
++		this->visual_profit /= _settings_game.economy.day_length_balance_factor;
++	}
++
+ 	SubtractMoneyFromCompany(CommandCost(this->front->GetExpenseType(true), -this->route_profit));
+ 	this->front->profit_this_year += this->visual_profit << 8;
+ 
+Index: src/economy_func.h
+===================================================================
+--- src/economy_func.h	(revision 17304)
++++ src/economy_func.h	(working copy)
+@@ -26,7 +26,7 @@
+ void SetPriceBaseMultiplier(uint price, byte factor);
+ void ResetEconomy();
+ 
+-extern const ScoreInfo _score_info[];
++extern ScoreInfo _score_info[];
+ extern int _score_part[MAX_COMPANIES][SCORE_END];
+ extern Economy _economy;
+ /* Prices and also the fractional part. */
+@@ -36,6 +36,7 @@
+ extern uint16 _cargo_payment_rates_frac[NUM_CARGO];
+ 
+ int UpdateCompanyRatingAndValue(Company *c, bool update);
++bool InitializeGraphPerformance(int32 p1 = 0);
+ void StartupIndustryDailyChanges(bool init_counter);
+ 
+ Money GetTransportedGoodsIncome(uint num_pieces, uint dist, byte transit_days, CargoID cargo_type);
+Index: src/economy_type.h
+===================================================================
+--- src/economy_type.h	(revision 17304)
++++ src/economy_type.h	(working copy)
+@@ -146,6 +146,22 @@
+ 	PriceCategory category; ///< Price is affected by certain difficulty settings.
+ };
+ 
++/* Default needed values for score */
++#define SCORE_MIN_PROFIT_NEEDED    10000
++#define SCORE_MIN_INCOME_NEEDED    50000
++#define SCORE_MAX_INCOME_NEEDED    100000
++#define SCORE_DELIVERED_NEEDED     40000
++#define SCORE_MONEY_NEEDED         10000000
++
++enum DayLengthBalanceType {
++	DBT_NONE = 0,   ///< no balancing for day length
++	DBT_RUN_COST,   ///< balancing running cost
++	DBT_ALL_COSTS,  ///< balancing all costs
++	DBT_PAYMENTS,   ///< balancing payments
++
++	DBT_NUM,
++};
++
+ /** The "steps" in loan size, in British Pounds! */
+ static const int LOAN_INTERVAL = 10000;
+ 
+Index: src/engine.cpp
+===================================================================
+--- src/engine.cpp	(revision 17304)
++++ src/engine.cpp	(working copy)
+@@ -188,43 +188,71 @@
+ 
+ Money Engine::GetRunningCost() const
+ {
++	Money cost;
++
+ 	switch (this->type) {
+ 		case VEH_ROAD:
+-			return this->u.road.running_cost * GetPriceByIndex(this->u.road.running_cost_class) >> 8;
++			cost = this->u.road.running_cost * GetPriceByIndex(this->u.road.running_cost_class) >> 8;
++			break;
+ 
+ 		case VEH_TRAIN:
+-			return GetEngineProperty(this->index, 0x0D, this->u.rail.running_cost) * GetPriceByIndex(this->u.rail.running_cost_class) >> 8;
++			cost = GetEngineProperty(this->index, 0x0D, this->u.rail.running_cost) * GetPriceByIndex(this->u.rail.running_cost_class) >> 8;
++			break;
+ 
+ 		case VEH_SHIP:
+-			return GetEngineProperty(this->index, 0x0F, this->u.ship.running_cost) * _price.ship_running >> 8;
++			cost = GetEngineProperty(this->index, 0x0F, this->u.ship.running_cost) * _price.ship_running >> 8;
++			break;
+ 
+ 		case VEH_AIRCRAFT:
+-			return GetEngineProperty(this->index, 0x0E, this->u.air.running_cost) * _price.aircraft_running >> 8;
++			cost = GetEngineProperty(this->index, 0x0E, this->u.air.running_cost) * _price.aircraft_running >> 8;
++			break;
+ 
+ 		default: NOT_REACHED();
+ 	}
++
++	/* Multiply showed running cost according to day length balance type. */
++	if (_settings_game.economy.day_length_balance_type == DBT_ALL_COSTS ||
++		_settings_game.economy.day_length_balance_type == DBT_RUN_COST) {
++		cost *= _settings_game.economy.day_length_balance_factor;
++	}
++
++	return cost;
+ }
+ 
+ Money Engine::GetCost() const
+ {
++	Money cost;
++
+ 	switch (this->type) {
+ 		case VEH_ROAD:
+-			return GetEngineProperty(this->index, 0x11, this->u.road.cost_factor) * (_price.roadveh_base >> 3) >> 5;
++			cost = GetEngineProperty(this->index, 0x11, this->u.road.cost_factor) * (_price.roadveh_base >> 3) >> 5;
++			break;
+ 
+ 		case VEH_TRAIN:
+ 			if (this->u.rail.railveh_type == RAILVEH_WAGON) {
+-				return (GetEngineProperty(this->index, 0x17, this->u.rail.cost_factor) * _price.build_railwagon) >> 8;
++				cost = (GetEngineProperty(this->index, 0x17, this->u.rail.cost_factor) * _price.build_railwagon) >> 8;
+ 			} else {
+-				return GetEngineProperty(this->index, 0x17, this->u.rail.cost_factor) * (_price.build_railvehicle >> 3) >> 5;
++				cost = GetEngineProperty(this->index, 0x17, this->u.rail.cost_factor) * (_price.build_railvehicle >> 3) >> 5;
+ 			}
++			break;
++
+ 		case VEH_SHIP:
+-			return GetEngineProperty(this->index, 0x0A, this->u.ship.cost_factor) * (_price.ship_base >> 3) >> 5;
++			cost = GetEngineProperty(this->index, 0x0A, this->u.ship.cost_factor) * (_price.ship_base >> 3) >> 5;
++			break;
+ 
+ 		case VEH_AIRCRAFT:
+-			return GetEngineProperty(this->index, 0x0B, this->u.air.cost_factor) * (_price.aircraft_base >> 3) >> 5;
++			cost = GetEngineProperty(this->index, 0x0B, this->u.air.cost_factor) * (_price.aircraft_base >> 3) >> 5;
++			break;
+ 
+ 		default: NOT_REACHED();
+ 	}
++
++	/* Multiply showed cost according to day length balance type. */
++	if (_settings_game.economy.day_length_balance_type == DBT_ALL_COSTS) {
++		cost *= _settings_game.economy.day_length_balance_factor;
++	}
++
++	return cost;
+ }
+ 
+ /**
+Index: src/industry_cmd.cpp
+===================================================================
+--- src/industry_cmd.cpp	(revision 17304)
++++ src/industry_cmd.cpp	(working copy)
+@@ -1741,7 +1741,13 @@
+ 		AI::BroadcastNewEvent(new AIEventIndustryOpen(ind->index));
+ 	}
+ 
+-	return CommandCost(EXPENSES_OTHER, indspec->GetConstructionCost());
++	CommandCost cost(EXPENSES_OTHER, indspec->GetConstructionCost());
++
++	if (_settings_game.economy.day_length_balance_type == DBT_ALL_COSTS) {
++		cost.AffectCost(_settings_game.economy.day_length_balance_factor);
++	}
++
++	return cost;
+ }
+ 
+ 
+Index: src/industry_gui.cpp
+===================================================================
+--- src/industry_gui.cpp	(revision 17304)
++++ src/industry_gui.cpp	(working copy)
+@@ -551,7 +551,14 @@
+ 			}
+ 
+ 			SetDParam(0, i->produced_cargo[j]);
+-			SetDParam(1, i->last_month_production[j]);
++
++			/* Show values corresponding to show_orig_productions settings. */
++			if (_settings_game.economy.show_orig_productions) {
++				SetDParam(1, 8 * i->production_rate[j]);
++			} else {
++				SetDParam(1, 8 * i->production_rate[j] * _settings_game.economy.day_length_factor);
++			}
++
+ 			SetDParam(2, GetCargoSuffix(j + 3, CST_VIEW, i, i->type, ind));
+ 
+ 			SetDParam(3, ToPercent8(i->last_month_pct_transported[j]));
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 17304)
++++ src/lang/english.txt	(working copy)
+@@ -1231,6 +1231,20 @@
+ STR_CONFIG_SETTING_ALLOW_TOWN_ROADS                             :{LTBLUE}Towns are allowed to build roads: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_NOISE_LEVEL                                  :{LTBLUE}Allow town controlled noise level for airports: {ORANGE}{STRING}
+ 
++STR_CONFIG_SETTING_DAY_LENGTH_FACTOR                            :{LTBLUE}Day length factor: {ORANGE}{STRING}
++STR_CONFIG_SETTING_DAY_LENGTH_BALANCE                           :{LTBLUE}Balancing of day length: {ORANGE}{STRING}
++STR_CONFIG_SETTING_DAY_LENGTH_BALANCE_NONE                      :None {GREEN}(Very easy)
++STR_CONFIG_SETTING_DAY_LENGTH_BALANCE_RUN_COST                  :Running costs {GREEN}(Easy)
++STR_CONFIG_SETTING_DAY_LENGTH_BALANCE_ALL_COSTS                 :All costs
++STR_CONFIG_SETTING_DAY_LENGTH_BALANCE_DECREASE_PAYMENTS         :Payments
++STR_CONFIG_SETTING_DAY_LENGTH_BAL_FACTOR                        :{LTBLUE}Balance factor: {ORANGE}{STRING}
++STR_CONFIG_SETTING_INCL_PROP_MAIN_TO_RUN                        :{LTBLUE}Include property maintemance into running costs: {ORANGE}{STRING}
++STR_CONFIG_SETTING_INCL_LOAN_INT_TO_RUN                         :{LTBLUE}Include loan interests into running costs: {ORANGE}{STRING}
++STR_CONFIG_SETTING_SLOW_DOWN_VEH_REL_DROP                       :{LTBLUE}Slow down vehicle reliability drop down: {ORANGE}{STRING}
++STR_CONFIG_SETTING_SLOW_DOWN_TOWN_GROWTH                        :{LTBLUE}Slow down town growth with day length factor: {ORANGE}{STRING}
++STR_CONFIG_SETTING_SLOW_DOWN_IND_CHANGES                        :{LTBLUE}Slow down industry changes with day length factor: {ORANGE}{STRING}
++STR_CONFIG_SETTING_SHOW_ORIG_PRODUCTION                         :{LTBLUE}Show original production value of industry: {ORANGE}{STRING}
++
+ STR_CONFIG_SETTING_TOOLBAR_POS                                  :{LTBLUE}Position of main toolbar: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_TOOLBAR_POS_LEFT                             :Left
+ STR_CONFIG_SETTING_TOOLBAR_POS_CENTER                           :Centre
+@@ -1267,6 +1281,7 @@
+ STR_CONFIG_SETTING_VEHICLES_TRAINS                              :{ORANGE}Trains
+ STR_CONFIG_SETTING_ECONOMY_TOWNS                                :{ORANGE}Towns
+ STR_CONFIG_SETTING_ECONOMY_INDUSTRIES                           :{ORANGE}Industries
++STR_CONFIG_SETTING_ECONOMY_DAY_LENGTH                           :{ORANGE}Day length
+ 
+ STR_CONFIG_SETTING_PATHFINDER_FOR_TRAINS                        :{LTBLUE}Pathfinder for trains: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_PATHFINDER_FOR_TRAINS_NTP                    :NTP {RED}(Not recommended)
+Index: src/misc.cpp
+===================================================================
+--- src/misc.cpp	(revision 17304)
++++ src/misc.cpp	(working copy)
+@@ -99,6 +99,7 @@
+ 	InitializeRoadGui();
+ 	InitializeAirportGui();
+ 	InitializeDockGui();
++	InitializeGraphPerformance();
+ 	InitializeTowns();
+ 	InitializeSubsidies();
+ 	InitializeTrees();
+Index: src/network/network_chat_gui.cpp
+===================================================================
+--- src/network/network_chat_gui.cpp	(revision 17304)
++++ src/network/network_chat_gui.cpp	(working copy)
+@@ -26,6 +26,7 @@
+ #include "../window_func.h"
+ #include "network_internal.h"
+ #include "network_client.h"
++#include "../settings_type.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -104,8 +105,12 @@
+ 		/* The default colour for a message is company colour. Replace this with
+ 		 * white for any additional lines */
+ 		cmsg->colour = (bufp == buf && (colour & IS_PALETTE_COLOUR)) ? colour : TC_WHITE;
+-		cmsg->end_date = _date + duration;
++		cmsg->end_date = _date;
+ 
++		duration = duration / _settings_game.economy.day_length_factor;
++		if (duration <= 1) cmsg->end_date++;
++		else cmsg->end_date += duration;
++
+ 		bufp += strlen(bufp) + 1; // jump to 'next line' in the formatted string
+ 	}
+ 
+Index: src/roadveh_cmd.cpp
+===================================================================
+--- src/roadveh_cmd.cpp	(revision 17304)
++++ src/roadveh_cmd.cpp	(working copy)
+@@ -194,7 +194,7 @@
+ 	/* Engines without valid cargo should not be available */
+ 	if (e->GetDefaultCargoType() == CT_INVALID) return CMD_ERROR;
+ 
+-	CommandCost cost(EXPENSES_NEW_VEHICLES, e->GetCost());
++	CommandCost cost(EXPENSES_NEW_VEHICLES, e->GetCost(), true);
+ 	if (flags & DC_QUERY_COST) return cost;
+ 
+ 	/* The ai_new queries the vehicle cost before building the route,
+@@ -352,7 +352,7 @@
+ 		return_cmd_error(STR_ERROR_ROAD_VEHICLE_MUST_BE_STOPPED_INSIDE_DEPOT);
+ 	}
+ 
+-	CommandCost ret(EXPENSES_NEW_VEHICLES, -v->value);
++	CommandCost ret(EXPENSES_NEW_VEHICLES, -v->value, true);
+ 
+ 	if (flags & DC_EXEC) {
+ 		delete v;
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 17304)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -48,7 +48,7 @@
+ 
+ #include "saveload_internal.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 125;
++extern const uint16 SAVEGAME_VERSION = 126;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 17304)
++++ src/settings.cpp	(working copy)
+@@ -60,6 +60,7 @@
+ #include "station_func.h"
+ #include "map_type.h"
+ #include "settings_func.h"
++#include "economy_func.h"
+ #include "ini_type.h"
+ #include "ai/ai.hpp"
+ #include "ai/ai_config.hpp"
+@@ -662,6 +663,53 @@
+ 	return true;
+ }
+ 
++/**
++ * Updates everything affected by day length.
++ */
++static bool UpdateAllCosts(int32 p1)
++{
++	if (_game_mode != GM_MENU) {
++		InvalidateIndustryWindow(p1);
++
++		InvalidateWindowClasses(WC_BUILD_VEHICLE);
++		InvalidateWindowClasses(WC_REPLACE_VEHICLE);
++
++		InvalidateBuildIndustryWindow(p1);
++		InvalidateDetailsWindow(p1);
++	}
++
++	InitializeGraphPerformance();
++	CheckDayLengthBalance(p1);
++
++	return true;
++}
++
++/**
++ * Check, if we dont have bigger balance factor than day length factor.
++ */
++static bool CheckDayLengthBalance(int32 p1)
++{
++	EconomySettings *es;
++
++	if (_game_mode == GM_MENU) {
++		es = &_settings_newgame.economy;
++	} else {
++		es = &_settings_game.economy;
++	}
++
++	if (es->day_length_factor < es->day_length_balance_factor) {
++		es->day_length_balance_factor = es->day_length_factor;
++	}
++
++	return true;
++}
++
++static bool InvalidateIndustryWindow(int32 p1)
++{
++	InvalidateWindowData(WC_INDUSTRY_DIRECTORY, 0, 1);
++	return true;
++}
++
+ static bool InvalidateDetailsWindow(int32 p1)
+ {
+ 	InvalidateWindowClasses(WC_VEHICLE_DETAILS);
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 17304)
++++ src/settings_gui.cpp	(working copy)
+@@ -1304,9 +1304,24 @@
+ /** Industries sub-page */
+ static SettingsPage _settings_economy_industries_page = {_settings_economy_industries, lengthof(_settings_economy_industries)};
+ 
++static SettingEntry _settings_economy_day_length[] = {
++	SettingEntry("economy.day_length_factor"),
++	SettingEntry("economy.day_length_balance_type"),
++	SettingEntry("economy.day_length_balance_factor"),
++	SettingEntry("economy.include_prop_main_to_run"),
++	SettingEntry("economy.include_loan_int_to_run"),
++	SettingEntry("economy.slow_down_veh_rel_drop_down"),
++	SettingEntry("economy.slow_down_town_growth"),
++	SettingEntry("economy.slow_down_industry_changes"),
++	SettingEntry("economy.show_orig_productions"),
++};
++/** Day length sub-page */
++static SettingsPage _settings_economy_day_length_page = {_settings_economy_day_length, lengthof(_settings_economy_day_length)};
++
+ static SettingEntry _settings_economy[] = {
+ 	SettingEntry(&_settings_economy_towns_page, STR_CONFIG_SETTING_ECONOMY_TOWNS),
+ 	SettingEntry(&_settings_economy_industries_page, STR_CONFIG_SETTING_ECONOMY_INDUSTRIES),
++	SettingEntry(&_settings_economy_day_length_page, STR_CONFIG_SETTING_ECONOMY_DAY_LENGTH),
+ 	SettingEntry("economy.inflation"),
+ 	SettingEntry("economy.smooth_economy"),
+ };
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 17304)
++++ src/settings_type.h	(working copy)
+@@ -328,6 +328,15 @@
+ 	bool   allow_town_roads;                 ///< towns are allowed to build roads (always allowed when generating world / in SE)
+ 	bool   station_noise_level;              ///< build new airports when the town noise level is still within accepted limits
+ 	uint16 town_noise_population[3];         ///< population to base decision on noise evaluation (@see town_council_tolerance)
++	uint8  day_length_factor;                ///< factor which the day length is multiplied (74 default ticks * setting)
++	uint8  day_length_balance_type;          ///< way of balancing day length
++	uint8  day_length_balance_factor;        ///< factor which parts of economy is modified
++	bool   include_prop_main_to_run;         ///< property maintenance will be multiplied with balance type running costs, not just all costs
++	bool   include_loan_int_to_run;          ///< loan interests will be multiplied with balance type running costs, not just all costs
++	bool   slow_down_veh_rel_drop_down;      ///< vehicles reliability will drop down per game year same apart day length
++	bool   slow_down_town_growth;            ///< towns will grow the same per each game year apart day length
++	bool   slow_down_industry_changes;       ///< industry production changes happen each game year same apart day length
++	bool   show_orig_productions;            ///< industry will show original production
+ };
+ 
+ /** Settings related to stations. */
+Index: src/ship_cmd.cpp
+===================================================================
+--- src/ship_cmd.cpp	(revision 17304)
++++ src/ship_cmd.cpp	(working copy)
+@@ -743,7 +743,7 @@
+ 	if (!IsEngineBuildable(p1, VEH_SHIP, _current_company)) return_cmd_error(STR_ERROR_SHIP_NOT_AVAILABLE);
+ 
+ 	const Engine *e = Engine::Get(p1);
+-	CommandCost value(EXPENSES_NEW_VEHICLES, e->GetCost());
++	CommandCost value(EXPENSES_NEW_VEHICLES, e->GetCost(), true);
+ 
+ 	/* Engines without valid cargo should not be available */
+ 	if (e->GetDefaultCargoType() == CT_INVALID) return CMD_ERROR;
+@@ -846,7 +846,7 @@
+ 		return_cmd_error(STR_ERROR_SHIP_MUST_BE_STOPPED_IN_DEPOT);
+ 	}
+ 
+-	CommandCost ret(EXPENSES_NEW_VEHICLES, -v->value);
++	CommandCost ret(EXPENSES_NEW_VEHICLES, -v->value, true);
+ 
+ 	if (flags & DC_EXEC) {
+ 		delete v;
+Index: src/table/settings.h
+===================================================================
+--- src/table/settings.h	(revision 17304)
++++ src/table/settings.h	(working copy)
+@@ -13,6 +13,9 @@
+ static bool v_PositionMainToolbar(int32 p1);
+ static bool PopulationInLabelActive(int32 p1);
+ static bool RedrawScreen(int32 p1);
++static bool UpdateAllCosts(int32 p1);
++static bool CheckDayLengthBalance(int32 p1);
++static bool InvalidateIndustryWindow(int32 p1);
+ static bool InvalidateDetailsWindow(int32 p1);
+ static bool InvalidateStationBuildWindow(int32 p1);
+ static bool InvalidateBuildIndustryWindow(int32 p1);
+@@ -366,6 +369,16 @@
+ 	 SDT_CONDVAR(GameSettings, economy.town_layout,                  SLE_UINT8, 59, SL_MAX_VERSION, 0,MS,TL_ORIGINAL,TL_BEGIN,NUM_TLS-1,1, STR_CONFIG_SETTING_TOWN_LAYOUT,     NULL),
+ 	SDT_CONDBOOL(GameSettings, economy.allow_town_roads,                       113, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_SETTING_ALLOW_TOWN_ROADS,       NULL),
+ 
++	 SDT_CONDVAR(GameSettings, economy.day_length_factor,            SLE_UINT8,126, SL_MAX_VERSION, 0, 0,     1,     1,      50, 1, STR_CONFIG_SETTING_DAY_LENGTH_FACTOR,      UpdateAllCosts),
++	 SDT_CONDVAR(GameSettings, economy.day_length_balance_type,      SLE_UINT8,126, SL_MAX_VERSION, 0,MS,DBT_RUN_COST,DBT_NONE,DBT_NUM-1,1, STR_CONFIG_SETTING_DAY_LENGTH_BALANCE, UpdateAllCosts),
++	 SDT_CONDVAR(GameSettings, economy.day_length_balance_factor,    SLE_UINT8,126, SL_MAX_VERSION, 0, 0,     1,     1,      50, 1, STR_CONFIG_SETTING_DAY_LENGTH_BAL_FACTOR,  UpdateAllCosts),
++	SDT_CONDBOOL(GameSettings, economy.include_prop_main_to_run,               126, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_SETTING_INCL_PROP_MAIN_TO_RUN,  NULL),
++	SDT_CONDBOOL(GameSettings, economy.include_loan_int_to_run,                126, SL_MAX_VERSION, 0, 0, false,                    STR_CONFIG_SETTING_INCL_LOAN_INT_TO_RUN,   NULL),
++	SDT_CONDBOOL(GameSettings, economy.slow_down_veh_rel_drop_down,            126, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_SETTING_SLOW_DOWN_VEH_REL_DROP, NULL),
++	SDT_CONDBOOL(GameSettings, economy.slow_down_town_growth,                  126, SL_MAX_VERSION, 0, 0, false,                    STR_CONFIG_SETTING_SLOW_DOWN_TOWN_GROWTH,  NULL),
++	SDT_CONDBOOL(GameSettings, economy.slow_down_industry_changes,             126, SL_MAX_VERSION, 0, 0, false,                    STR_CONFIG_SETTING_SLOW_DOWN_IND_CHANGES,  NULL),
++	SDT_CONDBOOL(GameSettings, economy.show_orig_productions,                  126, SL_MAX_VERSION, N, 0,  true,                    STR_CONFIG_SETTING_SHOW_ORIG_PRODUCTION,   InvalidateIndustryWindow),
++
+ 	     SDT_VAR(GameSettings, vehicle.train_acceleration_model,     SLE_UINT8,                     0,MS,     0,     0,       1, 1, STR_CONFIG_SETTING_TRAIN_ACCELERATION_MODEL, TrainAccelerationModelChanged),
+ 	    SDT_BOOL(GameSettings, pf.forbid_90_deg,                                                    0, 0, false,                    STR_CONFIG_SETTING_FORBID_90_DEG,          NULL),
+ 	    SDT_BOOL(GameSettings, vehicle.mammoth_trains,                                              0,NN,  true,                    STR_CONFIG_SETTING_MAMMOTHTRAINS,          NULL),
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revision 17304)
++++ src/town_cmd.cpp	(working copy)
+@@ -671,6 +671,11 @@
+ 		if (i < 0) {
+ 			if (GrowTown(t)) {
+ 				i = t->growth_rate;
++
++				/* If we want same speed of town growth per game year */
++				if (_settings_game.economy.slow_down_town_growth) {
++					i *= _settings_game.economy.day_length_factor;
++				}
+ 			} else {
+ 				i = 0;
+ 			}
+@@ -2564,6 +2569,10 @@
+ 
+ 	CommandCost cost(EXPENSES_OTHER, (_price.build_industry >> 8) * _town_action_costs[p2]);
+ 
++	if (_settings_game.economy.day_length_balance_type == DBT_ALL_COSTS) {
++		cost.AffectCost( _settings_game.economy.day_length_balance_factor );
++	}
++
+ 	if (flags & DC_EXEC) {
+ 		_town_action_proc[p2](t);
+ 		InvalidateWindow(WC_TOWN_AUTHORITY, p1);
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 17304)
++++ src/train_cmd.cpp	(working copy)
+@@ -685,7 +685,7 @@
+ {
+ 	const Engine *e = Engine::Get(engine);
+ 	const RailVehicleInfo *rvi = &e->u.rail;
+-	CommandCost value(EXPENSES_NEW_VEHICLES, e->GetCost());
++	CommandCost value(EXPENSES_NEW_VEHICLES, e->GetCost(), true);
+ 
+ 	/* Engines without valid cargo should not be available */
+ 	if (e->GetDefaultCargoType() == CT_INVALID) return CMD_ERROR;
+@@ -839,7 +839,7 @@
+ 	if (!IsEngineBuildable(p1, VEH_TRAIN, _current_company)) return_cmd_error(STR_ERROR_RAIL_VEHICLE_NOT_AVAILABLE);
+ 
+ 	const Engine *e = Engine::Get(p1);
+-	CommandCost value(EXPENSES_NEW_VEHICLES, e->GetCost());
++	CommandCost value(EXPENSES_NEW_VEHICLES, e->GetCost(), true);
+ 
+ 	/* Engines with CT_INVALID should not be available */
+ 	if (e->GetDefaultCargoType() == CT_INVALID) return CMD_ERROR;
+@@ -1601,6 +1601,7 @@
+ 			}
+ 		} break;
+ 	}
++	cost.AffectCost();
+ 	return cost;
+ }
+ 
+Index: src/tree_cmd.cpp
+===================================================================
+--- src/tree_cmd.cpp	(revision 17304)
++++ src/tree_cmd.cpp	(working copy)
+@@ -430,6 +430,9 @@
+ 	if (cost.GetCost() == 0) {
+ 		return_cmd_error(msg);
+ 	} else {
++		if (_settings_game.economy.day_length_balance_type == DBT_ALL_COSTS) {
++			cost.AffectCost(_settings_game.economy.day_length_balance_factor);
++		}
+ 		return cost;
+ 	}
+ }
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 17304)
++++ src/vehicle.cpp	(working copy)
+@@ -100,9 +100,16 @@
+ 		return EngineHasReplacementForCompany(Company::Get(this->owner), this->engine_type, this->group_id);
+ 	}
+ 
++	Date interval = this->service_interval;
++
++	if (!_settings_game.economy.slow_down_veh_rel_drop_down) {
++		interval /= _settings_game.economy.day_length_factor;
++		if (interval == 0) interval = 1;
++	}
++
+ 	return Company::Get(this->owner)->settings.vehicle.servint_ispercent ?
+-		(this->reliability < Engine::Get(this->engine_type)->reliability * (100 - this->service_interval) / 100) :
+-		(this->date_of_last_service + this->service_interval < _date);
++		(this->reliability < Engine::Get(this->engine_type)->reliability * (100 - interval) / 100) :
++		(this->date_of_last_service + interval < _date);
+ }
+ 
+ bool Vehicle::NeedsAutomaticServicing() const
+@@ -843,8 +850,12 @@
+ 	int rel, rel_old;
+ 
+ 	/* decrease reliability */
+-	v->reliability = rel = max((rel_old = v->reliability) - v->reliability_spd_dec, 0);
+-	if ((rel_old >> 8) != (rel >> 8)) InvalidateWindow(WC_VEHICLE_DETAILS, v->index);
++	if (!_settings_game.economy.slow_down_veh_rel_drop_down || 
++	   (_date_fract < DAY_TICKS &&
++	    _settings_game.economy.slow_down_veh_rel_drop_down)) {
++		v->reliability = rel = max((rel_old = v->reliability) - v->reliability_spd_dec, 0);
++		if ((rel_old >> 8) != (rel >> 8)) InvalidateWindow(WC_VEHICLE_DETAILS, v->index);
++	}
+ 
+ 	if (v->breakdown_ctr != 0 || (v->vehstatus & VS_STOPPED) ||
+ 			_settings_game.difficulty.vehicle_breakdowns < 1 ||
+@@ -876,6 +887,9 @@
+ 
+ void AgeVehicle(Vehicle *v)
+ {
++	if (_date_fract >= DAY_TICKS &&
++		_settings_game.economy.slow_down_veh_rel_drop_down) return;
++
+ 	if (v->age < 65535) v->age++;
+ 
+ 	int age = v->age - v->max_age;
+Index: src/vehicle_gui.cpp
+===================================================================
+--- src/vehicle_gui.cpp	(revision 17304)
++++ src/vehicle_gui.cpp	(working copy)
+@@ -1393,7 +1393,13 @@
+ 		SetDParam(1, v->age / DAYS_IN_LEAP_YEAR);
+ 		SetDParam(0, (v->age + DAYS_IN_YEAR < v->max_age) ? STR_VEHICLE_INFO_AGE : STR_VEHICLE_INFO_AGE_RED);
+ 		SetDParam(2, v->max_age / DAYS_IN_LEAP_YEAR);
+-		SetDParam(3, v->GetDisplayRunningCost());
++		/* Multiply running costs with day length */
++		if (_settings_game.economy.day_length_balance_type == DBT_ALL_COSTS ||
++			_settings_game.economy.day_length_balance_type == DBT_RUN_COST) {
++			SetDParam(3, v->GetDisplayRunningCost() * _settings_game.economy.day_length_balance_factor);
++		} else {
++			SetDParam(3, v->GetDisplayRunningCost());
++		}
+ 		DrawString(2, this->width - 2, 15, STR_VEHICLE_INFO_AGE_RUNNING_COST_YR);
+ 
+ 		/* Draw max speed */

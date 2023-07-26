@@ -1,0 +1,394 @@
+# HG changeset patch
+# User planetmaker <ottd@planetmaker.de>
+# Date 1273426517 -7200
+# Node ID bcf8c69edafccd8a43a9ca466e68c65c457c5bde
+# Parent  6cff46997f6658293a4f010f51b575288435effd
+- Change: Move the road side and town name selection from the options to the new game menu
+
+diff -r 6cff46997f66 -r bcf8c69edafc src/genworld_gui.cpp
+--- a/src/genworld_gui.cpp	Sat May 08 17:45:19 2010 +0000
++++ b/src/genworld_gui.cpp	Sun May 09 19:35:17 2010 +0200
+@@ -17,6 +17,7 @@
+ #include "genworld.h"
+ #include "network/network.h"
+ #include "newgrf_config.h"
++#include "newgrf_townname.h"
+ #include "strings_func.h"
+ #include "window_func.h"
+ #include "date_func.h"
+@@ -32,6 +33,7 @@
+ #include "settings_func.h"
+ #include "core/geometry_func.hpp"
+ #include "core/random_func.hpp"
++#include <map>
+ 
+ #include "table/strings.h"
+ #include "table/sprites.h"
+@@ -59,6 +61,33 @@
+ 	SetWindowClassesDirty(WC_GENERATE_LANDSCAPE);
+ }
+ 
++static const StringID _driveside_dropdown[] = {
++	STR_GAME_OPTIONS_ROAD_VEHICLES_DROPDOWN_LEFT,
++	STR_GAME_OPTIONS_ROAD_VEHICLES_DROPDOWN_RIGHT,
++	INVALID_STRING_ID
++};
++
++int _nb_orig_names = SPECSTR_TOWNNAME_LAST - SPECSTR_TOWNNAME_START + 1;
++static StringID *_grf_names = NULL;
++static int _nb_grf_names = 0;
++
++void InitGRFTownGeneratorNames()
++{
++	free(_grf_names);
++	_grf_names = GetGRFTownNameList();
++	_nb_grf_names = 0;
++	for (StringID *s = _grf_names; *s != INVALID_STRING_ID; s++) _nb_grf_names++;
++}
++
++
++static inline StringID TownName(int town_name)
++{
++	if (town_name < _nb_orig_names) return STR_GAME_OPTIONS_TOWN_NAME_ORIGINAL_ENGLISH + town_name;
++	town_name -= _nb_orig_names;
++	if (town_name < _nb_grf_names) return _grf_names[town_name];
++	return STR_UNDEFINED;
++}
++
+ /** Widgets of GenerateLandscapeWindow */
+ enum GenerateLandscapeWindowWidgets {
+ 	GLAND_TEMPERATE,          ///< Button with icon "Temperate"
+@@ -71,6 +100,8 @@
+ 
+ 	GLAND_TOWN_PULLDOWN,      ///< Dropdown 'No. of towns'
+ 	GLAND_INDUSTRY_PULLDOWN,  ///< Dropdown 'No. of industries'
++	GLAND_ROADSIDE_PULLDOWN,  ///< Dropdown 'Driving side for road vehicles'
++	GLAND_TOWNNAME_PULLDOWN,  ///< Dropdown 'Town name settings'
+ 
+ 	GLAND_RANDOM_EDITBOX,     ///< 'Random seed' editbox
+ 	GLAND_RANDOM_BUTTON,      ///< 'Randomise' button
+@@ -133,6 +164,7 @@
+ 					NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_MAPSIZE, STR_NULL), SetFill(1, 1),
+ 					NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_LAND_GENERATOR, STR_NULL), SetFill(1, 1),
+ 					NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_NUMBER_OF_TOWNS, STR_NULL), SetFill(1, 1),
++					NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_GAME_OPTIONS_TOWN_NAMES_FRAME, STR_NULL), SetFill(1, 1),
+ 					NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_TERRAIN_TYPE, STR_NULL), SetFill(1, 1),
+ 					NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_RANDOM_SEED, STR_NULL), SetFill(1, 1),
+ 					NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_QUANTITY_OF_SEA_LAKES, STR_NULL), SetFill(1, 1),
+@@ -150,6 +182,7 @@
+ 					EndContainer(),
+ 					NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_LANDSCAPE_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
+ 					NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_TOWN_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
++					NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_TOWNNAME_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
+ 					NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_TERRAIN_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
+ 					NWidget(WWT_EDITBOX, COLOUR_WHITE, GLAND_RANDOM_EDITBOX), SetDataTip(STR_MAPGEN_RANDOM_SEED_OSKTITLE, STR_MAPGEN_RANDOM_SEED_HELP), SetFill(1, 1),
+ 					NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_WATER_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
+@@ -164,6 +197,7 @@
+ 						NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_DATE, STR_NULL), SetFill(1, 1),
+ 						NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_SNOW_LINE_HEIGHT, STR_NULL), SetFill(1, 1),
+ 						NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_NUMBER_OF_INDUSTRIES, STR_NULL), SetFill(1, 1),
++						NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_GAME_OPTIONS_ROAD_VEHICLES_FRAME, STR_NULL), SetFill(1, 1),
+ 						NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_SMOOTHNESS, STR_NULL), SetFill(1, 1),
+ 					EndContainer(),
+ 					NWidget(NWID_VERTICAL, NC_EQUALSIZE), SetPIP(0, 4, 0),
+@@ -180,6 +214,7 @@
+ 							NWidget(WWT_IMGBTN, COLOUR_ORANGE, GLAND_SNOW_LEVEL_UP), SetDataTip(SPR_ARROW_UP, STR_MAPGEN_SNOW_LINE_UP), SetFill(0, 1),
+ 						EndContainer(),
+ 						NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_INDUSTRY_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
++						NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_ROADSIDE_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
+ 						NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_SMOOTHNESS_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
+ 					EndContainer(),
+ 				EndContainer(),
+@@ -246,7 +281,9 @@
+ 				NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_HEIGHTMAP_NAME, STR_NULL), SetFill(1, 1),
+ 				NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_MAPSIZE, STR_NULL), SetFill(1, 1),
+ 				NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_NUMBER_OF_TOWNS, STR_NULL), SetFill(1, 1),
++				NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_GAME_OPTIONS_TOWN_NAMES_FRAME, STR_NULL), SetFill(1, 1),
+ 				NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_NUMBER_OF_INDUSTRIES, STR_NULL), SetFill(1, 1),
++				NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_GAME_OPTIONS_ROAD_VEHICLES_FRAME, STR_NULL), SetFill(1, 1),
+ 				NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_RANDOM_SEED, STR_NULL), SetFill(1, 1),
+ 				NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_TREE_PLACER, STR_NULL), SetFill(1, 1),
+ 				NWidget(WWT_TEXT, COLOUR_ORANGE), SetDataTip(STR_MAPGEN_HEIGHTMAP_ROTATION, STR_NULL), SetFill(1, 1),
+@@ -261,7 +298,9 @@
+ 					NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_MAPSIZE_Y_PULLDOWN), SetDataTip(STR_JUST_INT, STR_NULL), SetFill(1, 0),
+ 				EndContainer(),
+ 				NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_TOWN_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
++				NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_TOWNNAME_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
+ 				NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_INDUSTRY_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
++				NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_ROADSIDE_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
+ 				NWidget(WWT_EDITBOX, COLOUR_WHITE, GLAND_RANDOM_EDITBOX), SetDataTip(STR_MAPGEN_RANDOM_SEED_OSKTITLE, STR_MAPGEN_RANDOM_SEED_HELP), SetFill(1, 1),
+ 				NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_TREE_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
+ 				NWidget(WWT_DROPDOWN, COLOUR_ORANGE, GLAND_HEIGHTMAP_ROTATION_PULLDOWN), SetDataTip(STR_JUST_STRING, STR_NULL), SetFill(1, 0),
+@@ -332,6 +371,31 @@
+ 	return list;
+ }
+ 
++/**
++ * Update/redraw the townnames dropdown
++ * @param w   the window the dropdown belongs to
++ * @param sel the currently selected townname generator
++ */
++static void ShowTownnameDropdownGenWorld(Window *w, int sel)
++{
++	typedef std::map<StringID, int, StringIDCompare> TownList;
++	TownList townnames;
++	
++	/* Add and sort original townnames generators */
++	for (int i = 0; i < _nb_orig_names; i++) townnames[STR_GAME_OPTIONS_TOWN_NAME_ORIGINAL_ENGLISH + i] = i;
++	
++	/* Add and sort newgrf townnames generators */
++	for (int i = 0; i < _nb_grf_names; i++) townnames[_grf_names[i]] = _nb_orig_names + i;
++	
++	DropDownList *list = new DropDownList();
++	for (TownList::iterator it = townnames.begin(); it != townnames.end(); it++) {
++		list->push_back(new DropDownListStringItem((*it).first, (*it).second, !(_game_mode == GM_MENU || Town::GetNumItems() == 0 || (*it).second == sel)));
++	}
++	
++	ShowDropDownList(w, list, sel, GLAND_TOWNNAME_PULLDOWN);
++}
++
++
+ static const StringID _elevations[]  = {STR_TERRAIN_TYPE_VERY_FLAT, STR_TERRAIN_TYPE_FLAT, STR_TERRAIN_TYPE_HILLY, STR_TERRAIN_TYPE_MOUNTAINOUS, INVALID_STRING_ID};
+ static const StringID _sea_lakes[]   = {STR_SEA_LEVEL_VERY_LOW, STR_SEA_LEVEL_LOW, STR_SEA_LEVEL_MEDIUM, STR_SEA_LEVEL_HIGH, INVALID_STRING_ID};
+ static const StringID _smoothness[]  = {STR_CONFIG_SETTING_ROUGHNESS_OF_TERRAIN_VERY_SMOOTH, STR_CONFIG_SETTING_ROUGHNESS_OF_TERRAIN_SMOOTH, STR_CONFIG_SETTING_ROUGHNESS_OF_TERRAIN_ROUGH, STR_CONFIG_SETTING_ROUGHNESS_OF_TERRAIN_VERY_ROUGH, INVALID_STRING_ID};
+@@ -374,6 +438,8 @@
+ 			case GLAND_MAPSIZE_Y_PULLDOWN:  SetDParam(0, 1 << _settings_newgame.game_creation.map_y); break;
+ 			case GLAND_SNOW_LEVEL_TEXT:     SetDParam(0, _settings_newgame.game_creation.snow_line_height); break;
+ 			case GLAND_TOWN_PULLDOWN:       SetDParam(0, _game_mode == GM_EDITOR ? STR_DISASTERS_OFF : _num_towns[_settings_newgame.difficulty.number_towns]); break;
++			case GLAND_ROADSIDE_PULLDOWN:   SetDParam(0, STR_GAME_OPTIONS_ROAD_VEHICLES_DROPDOWN_LEFT + _settings_newgame.vehicle.road_side); break;
++			case GLAND_TOWNNAME_PULLDOWN:   SetDParam(0, TownName(_settings_newgame.game_creation.town_name)); break;
+ 			case GLAND_INDUSTRY_PULLDOWN:   SetDParam(0, _game_mode == GM_EDITOR ? STR_DISASTERS_OFF : _num_inds[_settings_newgame.difficulty.number_industries]); break;
+ 			case GLAND_LANDSCAPE_PULLDOWN:  SetDParam(0, _landscape[_settings_newgame.game_creation.land_generator]); break;
+ 			case GLAND_TREE_PULLDOWN:       SetDParam(0, _tree_placer[_settings_newgame.game_creation.tree_placer]); break;
+@@ -542,6 +608,23 @@
+ 				ShowDropDownMenu(this, _num_towns, _settings_newgame.difficulty.number_towns, GLAND_TOWN_PULLDOWN, 0, 0);
+ 				break;
+ 
++			case GLAND_ROADSIDE_PULLDOWN: { // Setup road-side dropdown
++				int i = 0;
++				extern bool RoadVehiclesAreBuilt();
++				
++				/* You can only change the drive side if you are in the menu or ingame with
++				 * no vehicles present. In a networking game only the server can change it */
++				if ((_game_mode != GM_MENU && RoadVehiclesAreBuilt()) || (_networking && !_network_server)) {
++					i = (-1) ^ (1 << _settings_newgame.vehicle.road_side); // disable the other value
++				}
++				
++				ShowDropDownMenu(this, _driveside_dropdown, _settings_newgame.vehicle.road_side, GLAND_ROADSIDE_PULLDOWN, i, 0);
++			} break;
++				
++			case GLAND_TOWNNAME_PULLDOWN: // Setup townname dropdown
++				ShowTownnameDropdownGenWorld(this, _settings_newgame.game_creation.town_name);
++				break;
++				
+ 			case GLAND_INDUSTRY_PULLDOWN: // Number of industries
+ 				ShowDropDownMenu(this, _num_inds, _settings_newgame.difficulty.number_industries, GLAND_INDUSTRY_PULLDOWN, 0, 0);
+ 				break;
+@@ -707,6 +790,20 @@
+ 				IConsoleSetSetting("difficulty.number_towns", index);
+ 				break;
+ 
++				case GLAND_ROADSIDE_PULLDOWN: // Road side
++				if (_settings_newgame.vehicle.road_side != index) { // only change if setting changed
++					_settings_newgame.vehicle.road_side = index;
++					MarkWholeScreenDirty();
++				}
++				break;
++
++			case GLAND_TOWNNAME_PULLDOWN: // Town names
++				if (_game_mode == GM_MENU || Town::GetNumItems() == 0) {
++					_settings_newgame.game_creation.town_name = index;
++					SetWindowDirty(WC_GAME_OPTIONS, 0);
++				}
++				break;
++
+ 			case GLAND_INDUSTRY_PULLDOWN:
+ 				IConsoleSetSetting("difficulty.number_industries", index);
+ 				break;
+diff -r 6cff46997f66 -r bcf8c69edafc src/newgrf_townname.h
+--- a/src/newgrf_townname.h	Sat May 08 17:45:19 2010 +0000
++++ b/src/newgrf_townname.h	Sun May 09 19:35:17 2010 +0200
+@@ -42,6 +42,7 @@
+ 	GRFTownName *next;
+ };
+ 
++StringID *BuildDynamicDropdown(StringID base, int num);
+ GRFTownName *AddGRFTownName(uint32 grfid);
+ GRFTownName *GetGRFTownName(uint32 grfid);
+ void DelGRFTownName(uint32 grfid);
+diff -r 6cff46997f66 -r bcf8c69edafc src/settings_gui.cpp
+--- a/src/settings_gui.cpp	Sat May 08 17:45:19 2010 +0000
++++ b/src/settings_gui.cpp	Sun May 09 19:35:17 2010 +0200
+@@ -18,7 +18,6 @@
+ #include "network/network.h"
+ #include "town.h"
+ #include "settings_internal.h"
+-#include "newgrf_townname.h"
+ #include "strings_func.h"
+ #include "window_func.h"
+ #include "string_func.h"
+@@ -44,12 +43,6 @@
+ 	INVALID_STRING_ID
+ };
+ 
+-static const StringID _driveside_dropdown[] = {
+-	STR_GAME_OPTIONS_ROAD_VEHICLES_DROPDOWN_LEFT,
+-	STR_GAME_OPTIONS_ROAD_VEHICLES_DROPDOWN_RIGHT,
+-	INVALID_STRING_ID
+-};
+-
+ static const StringID _autosave_dropdown[] = {
+ 	STR_GAME_OPTIONS_AUTOSAVE_DROPDOWN_OFF,
+ 	STR_GAME_OPTIONS_AUTOSAVE_DROPDOWN_EVERY_1_MONTH,
+@@ -59,7 +52,7 @@
+ 	INVALID_STRING_ID,
+ };
+ 
+-static StringID *BuildDynamicDropdown(StringID base, int num)
++StringID *BuildDynamicDropdown(StringID base, int num)
+ {
+ 	static StringID buf[32 + 1];
+ 	StringID *p = buf;
+@@ -68,26 +61,6 @@
+ 	return buf;
+ }
+ 
+-int _nb_orig_names = SPECSTR_TOWNNAME_LAST - SPECSTR_TOWNNAME_START + 1;
+-static StringID *_grf_names = NULL;
+-static int _nb_grf_names = 0;
+-
+-void InitGRFTownGeneratorNames()
+-{
+-	free(_grf_names);
+-	_grf_names = GetGRFTownNameList();
+-	_nb_grf_names = 0;
+-	for (StringID *s = _grf_names; *s != INVALID_STRING_ID; s++) _nb_grf_names++;
+-}
+-
+-static inline StringID TownName(int town_name)
+-{
+-	if (town_name < _nb_orig_names) return STR_GAME_OPTIONS_TOWN_NAME_ORIGINAL_ENGLISH + town_name;
+-	town_name -= _nb_orig_names;
+-	if (town_name < _nb_grf_names) return _grf_names[town_name];
+-	return STR_UNDEFINED;
+-}
+-
+ static int GetCurRes()
+ {
+ 	int i;
+@@ -106,8 +79,6 @@
+ 	GOW_BACKGROUND,             ///< Background of the window
+ 	GOW_CURRENCY_DROPDOWN,      ///< Currency dropdown
+ 	GOW_DISTANCE_DROPDOWN,      ///< Measuring unit dropdown
+-	GOW_ROADSIDE_DROPDOWN,      ///< Dropdown to select the road side (to set the right side ;))
+-	GOW_TOWNNAME_DROPDOWN,      ///< Town name dropdown
+ 	GOW_AUTOSAVE_DROPDOWN,      ///< Dropdown to say how often to autosave
+ 	GOW_LANG_DROPDOWN,          ///< Language dropdown
+ 	GOW_RESOLUTION_DROPDOWN,    ///< Dropdown for the resolution
+@@ -123,30 +94,6 @@
+ 	GOW_BASE_MUSIC_DESCRIPTION, ///< Description of selected base music set
+ };
+ 
+-/**
+- * Update/redraw the townnames dropdown
+- * @param w   the window the dropdown belongs to
+- * @param sel the currently selected townname generator
+- */
+-static void ShowTownnameDropdown(Window *w, int sel)
+-{
+-	typedef std::map<StringID, int, StringIDCompare> TownList;
+-	TownList townnames;
+-
+-	/* Add and sort original townnames generators */
+-	for (int i = 0; i < _nb_orig_names; i++) townnames[STR_GAME_OPTIONS_TOWN_NAME_ORIGINAL_ENGLISH + i] = i;
+-
+-	/* Add and sort newgrf townnames generators */
+-	for (int i = 0; i < _nb_grf_names; i++) townnames[_grf_names[i]] = _nb_orig_names + i;
+-
+-	DropDownList *list = new DropDownList();
+-	for (TownList::iterator it = townnames.begin(); it != townnames.end(); it++) {
+-		list->push_back(new DropDownListStringItem((*it).first, (*it).second, !(_game_mode == GM_MENU || Town::GetNumItems() == 0 || (*it).second == sel)));
+-	}
+-
+-	ShowDropDownList(w, list, sel, GOW_TOWNNAME_DROPDOWN);
+-}
+-
+ static void ShowCustCurrency();
+ 
+ template <class T>
+@@ -187,8 +134,6 @@
+ 		switch (widget) {
+ 			case GOW_CURRENCY_DROPDOWN:   SetDParam(0, _currency_specs[this->opt->locale.currency].name); break;
+ 			case GOW_DISTANCE_DROPDOWN:   SetDParam(0, STR_GAME_OPTIONS_MEASURING_UNITS_IMPERIAL + this->opt->locale.units); break;
+-			case GOW_ROADSIDE_DROPDOWN:   SetDParam(0, STR_GAME_OPTIONS_ROAD_VEHICLES_DROPDOWN_LEFT + this->opt->vehicle.road_side); break;
+-			case GOW_TOWNNAME_DROPDOWN:   SetDParam(0, TownName(this->opt->game_creation.town_name)); break;
+ 			case GOW_AUTOSAVE_DROPDOWN:   SetDParam(0, _autosave_dropdown[_settings_client.gui.autosave]); break;
+ 			case GOW_LANG_DROPDOWN:       SetDParam(0, SPECSTR_LANGUAGE_START + _dynlang.curr); break;
+ 			case GOW_RESOLUTION_DROPDOWN: SetDParam(0, GetCurRes() == _num_resolutions ? STR_RES_OTHER : SPECSTR_RESOLUTION_START + GetCurRes()); break;
+@@ -288,23 +233,6 @@
+ 				ShowDropDownMenu(this, _units_dropdown, this->opt->locale.units, GOW_DISTANCE_DROPDOWN, 0, 0);
+ 				break;
+ 
+-			case GOW_ROADSIDE_DROPDOWN: { // Setup road-side dropdown
+-				int i = 0;
+-				extern bool RoadVehiclesAreBuilt();
+-
+-				/* You can only change the drive side if you are in the menu or ingame with
+-				 * no vehicles present. In a networking game only the server can change it */
+-				if ((_game_mode != GM_MENU && RoadVehiclesAreBuilt()) || (_networking && !_network_server)) {
+-					i = (-1) ^ (1 << this->opt->vehicle.road_side); // disable the other value
+-				}
+-
+-				ShowDropDownMenu(this, _driveside_dropdown, this->opt->vehicle.road_side, GOW_ROADSIDE_DROPDOWN, i, 0);
+-			} break;
+-
+-			case GOW_TOWNNAME_DROPDOWN: // Setup townname dropdown
+-				ShowTownnameDropdown(this, this->opt->game_creation.town_name);
+-				break;
+-
+ 			case GOW_AUTOSAVE_DROPDOWN: // Setup autosave dropdown
+ 				ShowDropDownMenu(this, _autosave_dropdown, _settings_client.gui.autosave, GOW_AUTOSAVE_DROPDOWN, 0, 0);
+ 				break;
+@@ -389,22 +317,6 @@
+ 				MarkWholeScreenDirty();
+ 				break;
+ 
+-			case GOW_ROADSIDE_DROPDOWN: // Road side
+-				if (this->opt->vehicle.road_side != index) { // only change if setting changed
+-					uint i;
+-					if (GetSettingFromName("vehicle.road_side", &i) == NULL) NOT_REACHED();
+-					SetSettingValue(i, index);
+-					MarkWholeScreenDirty();
+-				}
+-				break;
+-
+-			case GOW_TOWNNAME_DROPDOWN: // Town names
+-				if (_game_mode == GM_MENU || Town::GetNumItems() == 0) {
+-					this->opt->game_creation.town_name = index;
+-					SetWindowDirty(WC_GAME_OPTIONS, 0);
+-				}
+-				break;
+-
+ 			case GOW_AUTOSAVE_DROPDOWN: // Autosave options
+ 				_settings_client.gui.autosave = index;
+ 				this->SetDirty();
+@@ -465,9 +377,6 @@
+ 				NWidget(WWT_FRAME, COLOUR_GREY), SetDataTip(STR_GAME_OPTIONS_CURRENCY_UNITS_FRAME, STR_NULL),
+ 					NWidget(WWT_DROPDOWN, COLOUR_GREY, GOW_CURRENCY_DROPDOWN), SetMinimalSize(150, 12), SetDataTip(STR_BLACK_STRING, STR_GAME_OPTIONS_CURRENCY_UNITS_DROPDOWN_TOOLTIP), SetFill(1, 0),
+ 				EndContainer(),
+-				NWidget(WWT_FRAME, COLOUR_GREY), SetDataTip(STR_GAME_OPTIONS_ROAD_VEHICLES_FRAME, STR_NULL),
+-					NWidget(WWT_DROPDOWN, COLOUR_GREY, GOW_ROADSIDE_DROPDOWN), SetMinimalSize(150, 12), SetDataTip(STR_BLACK_STRING, STR_GAME_OPTIONS_ROAD_VEHICLES_DROPDOWN_TOOLTIP), SetFill(1, 0),
+-				EndContainer(),
+ 				NWidget(WWT_FRAME, COLOUR_GREY), SetDataTip(STR_GAME_OPTIONS_AUTOSAVE_FRAME, STR_NULL),
+ 					NWidget(WWT_DROPDOWN, COLOUR_GREY, GOW_AUTOSAVE_DROPDOWN), SetMinimalSize(150, 12), SetDataTip(STR_BLACK_STRING, STR_GAME_OPTIONS_AUTOSAVE_DROPDOWN_TOOLTIP), SetFill(1, 0),
+ 				EndContainer(),
+@@ -484,9 +393,6 @@
+ 				NWidget(WWT_FRAME, COLOUR_GREY), SetDataTip(STR_GAME_OPTIONS_MEASURING_UNITS_FRAME, STR_NULL),
+ 					NWidget(WWT_DROPDOWN, COLOUR_GREY, GOW_DISTANCE_DROPDOWN), SetMinimalSize(150, 12), SetDataTip(STR_BLACK_STRING, STR_GAME_OPTIONS_MEASURING_UNITS_DROPDOWN_TOOLTIP), SetFill(1, 0),
+ 				EndContainer(),
+-				NWidget(WWT_FRAME, COLOUR_GREY), SetDataTip(STR_GAME_OPTIONS_TOWN_NAMES_FRAME, STR_NULL),
+-					NWidget(WWT_DROPDOWN, COLOUR_GREY, GOW_TOWNNAME_DROPDOWN), SetMinimalSize(150, 12), SetDataTip(STR_BLACK_STRING, STR_GAME_OPTIONS_TOWN_NAMES_DROPDOWN_TOOLTIP), SetFill(1, 0),
+-				EndContainer(),
+ 				NWidget(WWT_FRAME, COLOUR_GREY), SetDataTip(STR_GAME_OPTIONS_LANGUAGE, STR_NULL),
+ 					NWidget(WWT_DROPDOWN, COLOUR_GREY, GOW_LANG_DROPDOWN), SetMinimalSize(150, 12), SetDataTip(STR_BLACK_STRING, STR_GAME_OPTIONS_LANGUAGE_TOOLTIP), SetFill(1, 0),
+ 				EndContainer(),

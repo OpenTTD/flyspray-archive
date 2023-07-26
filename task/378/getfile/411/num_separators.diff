@@ -1,0 +1,122 @@
+Index: strgen/strgen.c
+===================================================================
+--- strgen/strgen.c	(revision 7002)
++++ strgen/strgen.c	(working copy)
+@@ -37,13 +37,15 @@
+ 
+ typedef struct LanguagePackHeader {
+ 	uint32 ident;
+-	uint32 version;     // 32-bits of auto generated version info which is basically a hash of strings.h
+-	char name[32];      // the international name of this language
+-	char own_name[32];  // the localized name of this language
+-	char isocode[16];   // the ISO code for the language (not country code)
+-	uint16 offsets[32]; // the offsets
+-	byte plural_form;   // plural form index
+-	byte pad[3];        // pad header to be a multiple of 4
++	uint32 version;          // 32-bits of auto generated version info which is basically a hash of strings.h
++	char name[32];           // the international name of this language
++	char own_name[32];       // the localized name of this language
++	char isocode[16];        // the ISO code for the language (not country code)
++	uint16 offsets[32];      // the offsets
++	byte plural_form;        // plural form index
++	char number_separs[2];   // separators for numbers
++	char currency_separs[2]; // separators for money amounts (\0\0 = currency-specified)
++	byte pad[3];             // pad header to be a multiple of 4
+ } LanguagePackHeader;
+ 
+ typedef struct CmdStruct {
+@@ -99,6 +101,8 @@
+ #define MAX_NUM_GENDER 8
+ static char _genders[MAX_NUM_GENDER][8];
+ static int _numgenders;
++static char _lang_number_separs[2] = { ',', '.' };
++static char _lang_currency_separs[2] = { '\0', '\0' };
+ 
+ // contains the name of all cases.
+ #define MAX_NUM_CASES 50
+@@ -635,6 +639,14 @@
+ 			ttd_strlcpy(_cases[_numcases], s, sizeof(_cases[_numcases]));
+ 			_numcases++;
+ 		}
++	} else if (!memcmp(str, "numsepars ", 10)) {
++		const char* buf = str + 10;
++		if (strlen(buf) == sizeof(_lang_number_separs))
++			memcpy(_lang_number_separs, buf, sizeof(_lang_number_separs));
++	} else if (!memcmp(str, "currsepars ", 11)) {
++		const char* buf = str + 11;
++		if (strlen(buf) == sizeof(_lang_currency_separs))
++			memcpy(_lang_currency_separs, buf, sizeof(_lang_currency_separs));
+ 	} else {
+ 		fatal("unknown pragma '%s'", str);
+ 	}
+@@ -1114,6 +1126,8 @@
+ 	strcpy(hdr.name, _lang_name);
+ 	strcpy(hdr.own_name, _lang_ownname);
+ 	strcpy(hdr.isocode, _lang_isocode);
++	memcpy(hdr.number_separs, _lang_number_separs, sizeof(_lang_number_separs));
++	memcpy(hdr.currency_separs, _lang_currency_separs, sizeof(_lang_currency_separs));
+ 
+ 	fwrite(&hdr, sizeof(hdr), 1, f);
+ 
+Index: strings.c
+===================================================================
+--- strings.c	(revision 7002)
++++ strings.c	(working copy)
+@@ -40,13 +40,15 @@
+ 
+ typedef struct LanguagePack {
+ 	uint32 ident;
+-	uint32 version;     // 32-bits of auto generated version info which is basically a hash of strings.h
+-	char name[32];      // the international name of this language
+-	char own_name[32];  // the localized name of this language
+-	char isocode[16];   // the ISO code for the language (not country code)
+-	uint16 offsets[32]; // the offsets
+-	byte plural_form;   // how to compute plural forms
+-	byte pad[3];        // pad header to be a multiple of 4
++	uint32 version;          // 32-bits of auto generated version info which is basically a hash of strings.h
++	char name[32];           // the international name of this language
++	char own_name[32];       // the localized name of this language
++	char isocode[16];        // the ISO code for the language (not country code)
++	uint16 offsets[32];      // the offsets
++	byte plural_form;        // how to compute plural forms
++	char number_separs[2];   // separators for numbers
++	char currency_separs[2]; // separators for money amounts (\0\0 = currency-specified)
++	byte pad[3];             // pad header to be a multiple of 4
+ 	char data[VARARRAY_SIZE];
+ } LanguagePack;
+ 
+@@ -296,7 +298,7 @@
+ 		}
+ 		if (tot |= quot || i == 9) {
+ 			*buff++ = '0' + quot;
+-			if (i == 0 || i == 3 || i == 6) *buff++ = ',';
++			if (i == 0 || i == 3 || i == 6) *buff++ = _langpack->number_separs[0];
+ 		}
+ 	}
+ 
+@@ -382,6 +384,7 @@
+ {
+ 	const char* multiplier = "";
+ 	char buf[40];
++	char sep;
+ 	char* p;
+ 	int j;
+ 
+@@ -410,13 +413,16 @@
+ 		}
+ 	}
+ 
++	// decide what separator to use
++	sep = (_langpack->currency_separs[0] != '\0' ? _langpack->currency_separs[0] : spec->separator);
++
+ 	// convert to ascii number and add commas
+ 	p = endof(buf);
+ 	*--p = '\0';
+ 	j = 4;
+ 	do {
+ 		if (--j == 0) {
+-			*--p = spec->separator;
++			*--p = sep;
+ 			j = 3;
+ 		}
+ 		*--p = '0' + number % 10;

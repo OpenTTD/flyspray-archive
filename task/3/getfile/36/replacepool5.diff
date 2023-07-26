@@ -1,0 +1,806 @@
+Index: engine.c
+===================================================================
+--- engine.c	(revision 3342)
++++ engine.c	(working copy)
+@@ -1046,6 +1046,195 @@
+ }
+ 
+ 
++/*
++ * returns true if an engine is valid, of the specified type, and buildable by
++ * the current player, false otherwise
++ *
++ * engine = index of the engine to check
++ * type   = the type the engine should be of (VEH_xxx)
++ */
++bool IsEngineBuildable(uint engine, byte type)
++{
++	const Engine *e;
++
++	// check if it's an engine that is in the engine array
++	if (!IsEngineIndex(engine)) return false;
++
++	e = GetEngine(engine);
++
++	// check if it's an engine of specified type
++	if (e->type != type) return false;
++
++	// check if it's available
++	if (!HASBIT(e->player_avail, _current_player)) return false;
++
++	return true;
++}
++
++/************************************************************************
++ * Engine Replacement stuff
++ ************************************************************************/
++
++static void EngineRenewPoolNewBlock(uint start_item); /* Forward declare for initializer of _engine_renew_pool */
++enum {
++	ENGINE_RENEW_POOL_BLOCK_SIZE_BITS = 3,
++	ENGINE_RENEW_POOL_MAX_BLOCKS      = 8000,
++};
++
++MemoryPool _engine_renew_pool = { "EngineRe", ENGINE_RENEW_POOL_MAX_BLOCKS, ENGINE_RENEW_POOL_BLOCK_SIZE_BITS, sizeof(EngineRenew), &EngineRenewPoolNewBlock, 0, 0, NULL };
++
++static inline uint16 GetEngineRenewPoolSize(void)
++{
++	return _engine_renew_pool.total_items;
++}
++
++#define FOR_ALL_ENGINE_RENEWS_FROM(er, start) for (er = GetEngineRenew(start); er != NULL; er = (er->index + 1 < GetEngineRenewPoolSize()) ? GetEngineRenew(er->index + 1) : NULL)
++#define FOR_ALL_ENGINE_RENEWS(er) FOR_ALL_ENGINE_RENEWS_FROM(er, 0)
++
++static void EngineRenewPoolNewBlock(uint start_item)
++{
++	EngineRenew *er;
++
++	FOR_ALL_ENGINE_RENEWS_FROM(er, start_item) {
++		er->index = start_item++;
++		er->from = INVALID_ENGINE;
++	}
++}
++
++
++static EngineRenew *AllocateEngineRenew(void)
++{
++	EngineRenew *er;
++
++	FOR_ALL_ENGINE_RENEWS(er) {
++		if (er->from == INVALID_ENGINE) {
++			er->to = INVALID_ENGINE;
++			er->next = NULL;
++			return er;
++		}
++	}
++
++	/* Check if we can add a block to the pool */
++	if (AddBlockToPool(&_engine_renew_pool)) return AllocateEngineRenew();
++
++	return NULL;
++}
++
++/**
++ * Retrieves the EngineRenew that specifies the replacement of the given
++ * engine type from the given renewlist */
++static EngineRenew *GetEngineReplacement(EngineRenewList erl, EngineID engine)
++{
++	EngineRenew* er = (EngineRenew*)erl; /* Fetch first element */
++	while (er) {
++		if (er->from == engine) return er;
++		er = er->next;
++	}
++	return NULL;
++}
++
++void RemoveAllEngineReplacement(EngineRenewList* erl)
++{
++	EngineRenew* er = (EngineRenew*)(*erl); /* Fetch first element */
++	while (er) {
++		er->from = INVALID_ENGINE; /* "Deallocate" all elements */
++		er = er->next;
++	}
++	*erl = NULL; /* Empty list */
++}
++
++EngineID EngineReplacement(EngineRenewList erl, EngineID engine)
++{
++	const EngineRenew *er = GetEngineReplacement(erl, engine);
++	return er == NULL ? INVALID_ENGINE : er->to;
++}
++
++int32 AddEngineReplacement(EngineRenewList* erl, EngineID old_engine, EngineID new_engine, uint32 flags)
++{
++	EngineRenew *er;
++
++	// Check if the old vehicle is already in the list
++	er = GetEngineReplacement(*erl, old_engine);
++	if (er != NULL) {
++		if (flags & DC_EXEC) er->to = new_engine;
++		return 0;
++	}
++
++	er = AllocateEngineRenew();
++	if (er == NULL) return CMD_ERROR;
++
++	if (flags & DC_EXEC) {
++		er->from = old_engine;
++		er->to = new_engine;
++		er->next = (EngineRenew*)(*erl); /* Resolve the first element in the list */
++		
++		*erl = (EngineRenewList)er; /* Insert before the first element */
++	}
++
++	return 0;
++}
++
++int32 RemoveEngineReplacement(EngineRenewList* erl, EngineID engine, uint32 flags)
++{
++	EngineRenew* er = (EngineRenew*)(*erl); /* Start at the first element */
++	EngineRenew* prev = NULL;
++
++	while (er)
++	{
++		if (er->from == engine) {
++			if (flags & DC_EXEC) {
++				if (prev == NULL) { /* First element */
++					(*erl) = (EngineRenewList)er->next; /* The second becomes the new first element */
++				} else {
++					prev->next = er->next; /* Cut this element out */
++				}
++				er->from = INVALID_ENGINE; /* Deallocate */
++			}
++			return 0;
++		}
++		prev = er;
++		er = er->next; /* Look at next element */
++	}
++
++	return CMD_ERROR; /* Not found? */
++}
++
++static const SaveLoad _engine_renew_desc[] = {
++	SLE_VAR(EngineRenew, from, SLE_UINT16),
++	SLE_VAR(EngineRenew, to,   SLE_UINT16),
++
++	SLE_REF(EngineRenew, next, REF_ENGINE_RENEWS),
++
++	SLE_END()
++};
++
++static void Save_ERNW(void)
++{
++	EngineRenew *er;
++
++	FOR_ALL_ENGINE_RENEWS(er) {
++		if (er->from != INVALID_ENGINE) {
++			SlSetArrayIndex(er->index);
++			SlObject(er, _engine_renew_desc);
++		}
++	}
++}
++
++static void Load_ERNW(void)
++{
++	int index;
++
++	while ((index = SlIterateArray()) != -1) {
++		EngineRenew *er;
++
++		if (!AddBlockIfNeeded(&_engine_renew_pool, index))
++			error("EngineRenews: failed loading savegame: too many EngineRenews");
++
++		er = GetEngineRenew(index);
++		SlObject(er, _engine_renew_desc);
++	}
++}
++
+ static const SaveLoad _engine_desc[] = {
+ 	SLE_VAR(Engine,intro_date,						SLE_UINT16),
+ 	SLE_VAR(Engine,age,										SLE_UINT16),
+@@ -1095,32 +1284,14 @@
+ }
+ 
+ const ChunkHandler _engine_chunk_handlers[] = {
+-	{ 'ENGN', Save_ENGN, Load_ENGN, CH_ARRAY},
+-	{ 'ENGS', LoadSave_ENGS, LoadSave_ENGS, CH_RIFF | CH_LAST},
++	{ 'ENGN', Save_ENGN,     Load_ENGN,     CH_ARRAY          },
++	{ 'ENGS', LoadSave_ENGS, LoadSave_ENGS, CH_RIFF           },
++	{ 'ERNW', Save_ERNW,     Load_ERNW,     CH_ARRAY | CH_LAST},
+ };
+ 
+-
+-/*
+- * returns true if an engine is valid, of the specified type, and buildable by
+- * the current player, false otherwise
+- *
+- * engine = index of the engine to check
+- * type   = the type the engine should be of (VEH_xxx)
+- */
+-bool IsEngineBuildable(uint engine, byte type)
++void InitializeEngines(void)
+ {
+-	const Engine *e;
+-
+-	// check if it's an engine that is in the engine array
+-	if (!IsEngineIndex(engine)) return false;
+-
+-	e = GetEngine(engine);
+-
+-	// check if it's an engine of specified type
+-	if (e->type != type) return false;
+-
+-	// check if it's available
+-	if (!HASBIT(e->player_avail, _current_player)) return false;
+-
+-	return true;
++	/* Clean the engine renew pool and create 1 block in it */
++	CleanPool(&_engine_renew_pool);
++	AddBlockToPool(&_engine_renew_pool);
+ }
+Index: engine.h
+===================================================================
+--- engine.h	(revision 3342)
++++ engine.h	(working copy)
+@@ -7,6 +7,7 @@
+   */
+ 
+ #include "sprite.h"
++#include "pool.h"
+ 
+ typedef struct RailVehicleInfo {
+ 	byte image_index;
+@@ -101,6 +102,10 @@
+ 	NUM_VEHICLE_TYPES = 6
+ };
+ 
++enum {
++	INVALID_ENGINE = 0xFFFF,
++};
++
+ void AddTypeToEngines(void);
+ void StartupEngines(void);
+ 
+@@ -284,4 +289,80 @@
+ void UnloadCustomEngineSprites(void);
+ void UnloadCustomEngineNames(void);
+ 
++/************************************************************************
++ * Engine Replacement stuff
++ ************************************************************************/
++
++/**
++ * Struct to store engine replacements. DO NOT USE outside of engine.c. Is
++ * placed here so the only exception to this rule, the saveload code, can use
++ * it.
++ */
++struct EngineRenew {
++	uint16 index;
++	EngineID from;
++	EngineID to;
++	struct EngineRenew *next;
++};
++
++typedef struct EngineRenew EngineRenew;
++
++/**
++ * Memory pool for engine renew elements. DO NOT USE outside of engine.c. Is
++ * placed here so the only exception to this rule, the saveload code, can use
++ * it.
++ */
++extern MemoryPool _engine_renew_pool;
++
++/**
++ * DO NOT USE outside of engine.c. Is
++ * placed here so the only exception to this rule, the saveload code, can use
++ * it.
++ */
++static inline EngineRenew *GetEngineRenew(uint16 index)
++{
++	return (EngineRenew*)GetItemFromPool(&_engine_renew_pool, index);
++}
++
++
++/**
++ * A list to group EngineRenew directives together (such as per-player).
++ */
++typedef EngineRenew* EngineRenewList; 
++
++/**
++ * Remove all engine replacement settings for the player.
++ * @param  er The renewlist for a given player.
++ * @return The new renewlist for the player.
++ */
++void RemoveAllEngineReplacement(EngineRenewList* erl);
++
++/**
++ * Retrieve the engine replacement in a given renewlist for an original engine type.
++ * @param  erl The renewlist to search in.
++ * @param  engine Engine type to be replaced.
++ * @return The engine type to replace with, or INVALID_ENGINE if no
++ * replacement is in the list.
++ */
++EngineID EngineReplacement(EngineRenewList erl, EngineID engine);
++
++/**
++ * Add an engine replacement to the given renewlist.
++ * @param erl The renewlist to add to.
++ * @param old_engine The original engine type.
++ * @param new_engine The replacement engine type.
++ * @param flags The calling command flags.
++ * @return 0 on success, CMD_ERROR on failure.
++ */
++int32 AddEngineReplacement(EngineRenewList* erl, EngineID old_engine, EngineID new_engine, uint32 flags);
++
++/**
++ * Remove an engine replacement from a given renewlist.
++ * @param erl The renewlist from which to remove the replacement
++ * @param engine The original engine type.
++ * @param flags The calling command flags.
++ * @return 0 on success, CMD_ERROR on failure.
++ */
++int32 RemoveEngineReplacement(EngineRenewList* erl, EngineID engine, uint32 flags);
++
+ #endif /* ENGINE_H */
+Index: aircraft_cmd.c
+===================================================================
+--- aircraft_cmd.c	(revision 3342)
++++ aircraft_cmd.c	(working copy)
+@@ -1469,7 +1469,7 @@
+ 
+ 	// check if the aircraft needs to be replaced or renewed and send it to a hangar if needed
+ 	if (v->owner == _local_player && (
+-				EngineHasReplacement(p, v->engine_type) ||
++				EngineHasReplacementForPlayer(p, v->engine_type) ||
+ 				(p->engine_renew && v->age - v->max_age > p->engine_renew_months * 30)
+ 			)) {
+ 		_current_player = _local_player;
+@@ -1533,7 +1533,7 @@
+ 	// check if the aircraft needs to be replaced or renewed and send it to a hangar if needed
+ 	if (v->current_order.type != OT_GOTO_DEPOT && v->owner == _local_player) {
+ 		// only the vehicle owner needs to calculate the rest (locally)
+-		if (EngineHasReplacement(p, v->engine_type) ||
++		if (EngineHasReplacementForPlayer(p, v->engine_type) ||
+ 			(p->engine_renew && v->age - v->max_age > (p->engine_renew_months * 30))) {
+ 			// send the aircraft to the hangar at next airport (bit 17 set)
+ 			_current_player = _local_player;
+Index: vehicle_gui.c
+===================================================================
+--- vehicle_gui.c	(revision 3342)
++++ vehicle_gui.c	(working copy)
+@@ -421,7 +421,7 @@
+ 		const RailVehicleInfo *rvi = RailVehInfo(i);
+ 		const EngineInfo *info = &_engine_info[i];
+ 
+-		if (!EngineHasReplacement(p, i) && _player_num_engines[i] == 0 && show_outdated) continue;
++		if (!EngineHasReplacementForPlayer(p, i) && _player_num_engines[i] == 0 && show_outdated) continue;
+ 
+ 		if (rvi->power == 0 && !show_cars)   // disables display of cars (works since they do not have power)
+ 			continue;
+@@ -480,7 +480,7 @@
+ 				const EngineInfo *info = &_engine_info[engine_id];
+ 
+ 				if (ENGINE_AVAILABLE && RailVehInfo(engine_id)->power && e->railtype == railtype) {
+-					if (_player_num_engines[engine_id] > 0 || EngineHasReplacement(p, engine_id)) {
++					if (_player_num_engines[engine_id] > 0 || EngineHasReplacementForPlayer(p, engine_id)) {
+ 						if (sel[0] == 0) selected_id[0] = engine_id;
+ 						count++;
+ 						sel[0]--;
+@@ -501,7 +501,7 @@
+ 			engine_id = ROAD_ENGINES_INDEX;
+ 
+ 			do {
+-				if (_player_num_engines[engine_id] > 0 || EngineHasReplacement(p, engine_id)) {
++				if (_player_num_engines[engine_id] > 0 || EngineHasReplacementForPlayer(p, engine_id)) {
+ 					if (sel[0] == 0) selected_id[0] = engine_id;
+ 					count++;
+ 					sel[0]--;
+@@ -532,7 +532,7 @@
+ 			engine_id = SHIP_ENGINES_INDEX;
+ 
+ 			do {
+-				if (_player_num_engines[engine_id] > 0 || EngineHasReplacement(p, engine_id)) {
++				if (_player_num_engines[engine_id] > 0 || EngineHasReplacementForPlayer(p, engine_id)) {
+ 					if (sel[0] == 0) selected_id[0] = engine_id;
+ 					count++;
+ 					sel[0]--;
+@@ -565,7 +565,7 @@
+ 			engine_id = AIRCRAFT_ENGINES_INDEX;
+ 
+ 			do {
+-				if (_player_num_engines[engine_id] > 0 || EngineHasReplacement(p, engine_id)) {
++				if (_player_num_engines[engine_id] > 0 || EngineHasReplacementForPlayer(p, engine_id)) {
+ 					count++;
+ 					if (sel[0] == 0) selected_id[0] = engine_id;
+ 					sel[0]--;
+@@ -642,7 +642,7 @@
+ 				cargo = RoadVehInfo(selected_id[0])->cargo_type;
+ 
+ 				do {
+-					if (_player_num_engines[engine_id] > 0 || EngineHasReplacement(p, engine_id)) {
++					if (_player_num_engines[engine_id] > 0 || EngineHasReplacementForPlayer(p, engine_id)) {
+ 						if (IS_INT_INSIDE(--pos, -w->vscroll.cap, 0)) {
+ 							DrawString(x+59, y+2, GetCustomEngineName(engine_id), sel[0]==0 ? 0xC : 0x10);
+ 							DrawRoadVehEngine(x+29, y+6, engine_id, _player_num_engines[engine_id] > 0 ? SPRITE_PALETTE(PLAYER_SPRITE_COLOR(_local_player)) : PALETTE_CRASH);
+@@ -677,7 +677,7 @@
+ 				refittable = ShipVehInfo(selected_id[0])->refittable;
+ 
+ 				do {
+-					if (_player_num_engines[engine_id] > 0 || EngineHasReplacement(p, engine_id)) {
++					if (_player_num_engines[engine_id] > 0 || EngineHasReplacementForPlayer(p, engine_id)) {
+ 						if (IS_INT_INSIDE(--pos, -w->vscroll.cap, 0)) {
+ 							DrawString(x+75, y+7, GetCustomEngineName(engine_id), sel[0]==0 ? 0xC : 0x10);
+ 							DrawShipEngine(x+35, y+10, engine_id, _player_num_engines[engine_id] > 0 ? SPRITE_PALETTE(PLAYER_SPRITE_COLOR(_local_player)) : PALETTE_CRASH);
+@@ -710,7 +710,7 @@
+ 				byte subtype = AircraftVehInfo(selected_id[0])->subtype;
+ 
+ 				do {
+-					if (_player_num_engines[engine_id] > 0 || EngineHasReplacement(p, engine_id)) {
++					if (_player_num_engines[engine_id] > 0 || EngineHasReplacementForPlayer(p, engine_id)) {
+ 						if (sel[0] == 0) selected_id[0] = engine_id;
+ 						if (IS_INT_INSIDE(--pos, -w->vscroll.cap, 0)) {
+ 							DrawString(x+62, y+7, GetCustomEngineName(engine_id), sel[0]==0 ? 0xC : 0x10);
+@@ -824,8 +824,8 @@
+ 				if (selected_id[0] == INVALID_ENGINE ||
+ 						selected_id[1] == INVALID_ENGINE ||
+ 						selected_id[0] == selected_id[1] ||
+-						EngineReplacement(p, selected_id[1]) != INVALID_ENGINE ||
+-						EngineReplacement(p, selected_id[0]) == selected_id[1]) {
++						EngineReplacementForPlayer(p, selected_id[1]) != INVALID_ENGINE ||
++						EngineReplacementForPlayer(p, selected_id[0]) == selected_id[1]) {
+ 					SETBIT(w->disabled_state, 4);
+ 				} else {
+ 					CLRBIT(w->disabled_state, 4);
+@@ -835,7 +835,7 @@
+ 				//    The left list (existing vehicle) is empty
+ 				// or The selected vehicle has no replacement set up
+ 				if (selected_id[0] == INVALID_ENGINE ||
+-						!EngineHasReplacement(p, selected_id[0])) {
++						!EngineHasReplacementForPlayer(p, selected_id[0])) {
+ 					SETBIT(w->disabled_state, 6);
+ 				} else {
+ 					CLRBIT(w->disabled_state, 6);
+@@ -853,10 +853,10 @@
+ 
+ 				// sets up the string for the vehicle that is being replaced to
+ 				if (selected_id[0] != INVALID_ENGINE) {
+-					if (!EngineHasReplacement(p, selected_id[0])) {
++					if (!EngineHasReplacementForPlayer(p, selected_id[0])) {
+ 						SetDParam(0, STR_NOT_REPLACING);
+ 					} else {
+-						SetDParam(0, GetCustomEngineName(EngineReplacement(p, selected_id[0])));
++						SetDParam(0, GetCustomEngineName(EngineReplacementForPlayer(p, selected_id[0])));
+ 					}
+ 				} else {
+ 					SetDParam(0, STR_NOT_REPLACING_VEHICLE_SELECTED);
+Index: players.c
+===================================================================
+--- players.c	(revision 3342)
++++ players.c	(working copy)
+@@ -23,6 +23,7 @@
+ #include "sound.h"
+ #include "network.h"
+ #include "variables.h"
++#include "engine.h"
+ #include "ai/ai.h"
+ 
+ static const SpriteID cheeks_table[4] = {
+@@ -487,7 +488,7 @@
+ 	p->face = Random();
+ 
+ 	/* Engine renewal settings */
+-	InitialiseEngineReplacement(p);
++	p->engine_renew_list = NULL;
+ 	p->renew_keep_length = false;
+ 	p->engine_renew = false;
+ 	p->engine_renew_months = -6;
+@@ -729,9 +730,9 @@
+ 				if (!HASBIT(GetEngine(new_engine_type)->player_avail, _current_player))
+ 					return CMD_ERROR;
+ 
+-				return AddEngineReplacement(p, old_engine_type, new_engine_type, flags);
++				return AddEngineReplacementForPlayer(p, old_engine_type, new_engine_type, flags);
+ 			} else {
+-				return RemoveEngineReplacement(p, old_engine_type, flags);
++				return RemoveEngineReplacementForPlayer(p, old_engine_type, flags);
+ 			}
+ 		}
+ 
+@@ -894,6 +895,8 @@
+ 			p->money64 = p->player_money = 100000000; // XXX - wtf?
+ 			p->is_active = false;
+ 		}
++		RemoveAllEngineReplacementForPlayer(p);
++
+ 	} break;
+ 
+ 	case 3: { /* Merge a company (#1) into another company (#2), elimination company #1 */
+@@ -1098,63 +1101,6 @@
+ 	 _patches.ending_date = 2051;
+ }
+ 
+-void InitialiseEngineReplacement(Player *p)
+-{
+-	EngineID engine;
+-
+-	for (engine = 0; engine < TOTAL_NUM_ENGINES; engine++)
+-		p->engine_replacement[engine] = INVALID_ENGINE;
+-}
+-
+-/**
+- * Retrieve the engine replacement for the given player and original engine type.
+- * @param p Player.
+- * @param engine Engine type.
+- * @return Assigned replacement engine.
+- */
+-EngineID EngineReplacement(const Player *p, EngineID engine)
+-{
+-	return p->engine_replacement[engine];
+-}
+-
+-/**
+- * Check if an engine has a replacement set up.
+- * @param p Player.
+- * @param engine Engine type.
+- * @return True if there is a replacement for the original engine type.
+- */
+-bool EngineHasReplacement(const Player *p, EngineID engine)
+-{
+-	return EngineReplacement(p, engine) != INVALID_ENGINE;
+-}
+-
+-/**
+- * Add an engine replacement for the player.
+- * @param p Player.
+- * @param old_engine The original engine type.
+- * @param new_engine The replacement engine type.
+- * @param flags The calling command flags.
+- * @return 0 on success, CMD_ERROR on failure.
+- */
+-int32 AddEngineReplacement(Player *p, EngineID old_engine, EngineID new_engine, uint32 flags)
+-{
+-	if (flags & DC_EXEC) p->engine_replacement[old_engine] = new_engine;
+-	return 0;
+-}
+-
+-/**
+- * Remove an engine replacement for the player.
+- * @param p Player.
+- * @param engine The original engine type.
+- * @param flags The calling command flags.
+- * @return 0 on success, CMD_ERROR on failure.
+- */
+-int32 RemoveEngineReplacement(Player *p, EngineID engine, uint32 flags)
+-{
+-	if (flags & DC_EXEC) p->engine_replacement[engine] = INVALID_ENGINE;
+-	return 0;
+-}
+-
+ // Save/load of players
+ static const SaveLoad _player_desc[] = {
+ 	SLE_VAR(Player,name_2,					SLE_UINT32),
+@@ -1200,7 +1146,8 @@
+ 	SLE_CONDVAR(Player,is_active,	SLE_UINT8, 4, 255),
+ 
+ 	// Engine renewal settings
+-	SLE_CONDARR(Player,engine_replacement,  SLE_UINT16, 256, 16, 255),
++	SLE_CONDARR(NullStruct,null,SLE_FILE_U16 | SLE_VAR_NULL, 256, 16, 18),
++	SLE_CONDREF(Player,engine_renew_list ,REF_ENGINE_RENEWS, 19, 255),
+ 	SLE_CONDVAR(Player,engine_renew,         SLE_UINT8,      16, 255),
+ 	SLE_CONDVAR(Player,engine_renew_months,  SLE_INT16,      16, 255),
+ 	SLE_CONDVAR(Player,engine_renew_money,  SLE_UINT32,      16, 255),
+@@ -1340,3 +1287,4 @@
+ const ChunkHandler _player_chunk_handlers[] = {
+ 	{ 'PLYR', Save_PLYR, Load_PLYR, CH_ARRAY | CH_LAST},
+ };
++
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 3342)
++++ openttd.c	(working copy)
+@@ -1248,7 +1248,7 @@
+ 	 *  of course, we do need to initialize them for older savegames. */
+ 	if (CheckSavegameVersion(16)) {
+ 		FOR_ALL_PLAYERS(p) {
+-			InitialiseEngineReplacement(p);
++			p->engine_renew_list = NULL;
+ 			p->engine_renew = false;
+ 			p->engine_renew_months = -6;
+ 			p->engine_renew_money = 100000;
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 3342)
++++ saveload.c	(working copy)
+@@ -29,7 +29,7 @@
+ #include <setjmp.h>
+ 
+ enum {
+-	SAVEGAME_VERSION = 18,
++	SAVEGAME_VERSION = 19,
+ 
+ };
+ 
+@@ -1051,6 +1051,7 @@
+ // these define the chunks
+ extern const ChunkHandler _misc_chunk_handlers[];
+ extern const ChunkHandler _player_chunk_handlers[];
++extern const ChunkHandler _engine_chunk_handlers[];
+ extern const ChunkHandler _veh_chunk_handlers[];
+ extern const ChunkHandler _waypoint_chunk_handlers[];
+ extern const ChunkHandler _depot_chunk_handlers[];
+@@ -1059,7 +1060,6 @@
+ extern const ChunkHandler _sign_chunk_handlers[];
+ extern const ChunkHandler _station_chunk_handlers[];
+ extern const ChunkHandler _industry_chunk_handlers[];
+-extern const ChunkHandler _engine_chunk_handlers[];
+ extern const ChunkHandler _economy_chunk_handlers[];
+ extern const ChunkHandler _animated_tile_chunk_handlers[];
+ 
+@@ -1107,6 +1107,7 @@
+ 		case REF_TOWN:      return ((const     Town*)obj)->index + 1;
+ 		case REF_ORDER:     return ((const    Order*)obj)->index + 1;
+ 		case REF_ROADSTOPS: return ((const RoadStop*)obj)->index + 1;
++		case REF_ENGINE_RENEWS: return ((const EngineRenew*)obj)->index + 1;
+ 		default: NOT_REACHED();
+ 	}
+ 
+@@ -1162,6 +1163,11 @@
+ 				error("RoadStops: failed loading savegame: too many RoadStops");
+ 			return GetRoadStop(index);
+ 		}
++		case REF_ENGINE_RENEWS: {
++			if (!AddBlockIfNeeded(&_engine_renew_pool, index))
++				error("EngineRenews: failed loading savegame: too many EngineRenews");
++			return GetEngineRenew(index);
++		}
+ 
+ 		case REF_VEHICLE_OLD: {
+ 			/* Old vehicles were saved differently:
+Index: player.h
+===================================================================
+--- player.h	(revision 3342)
++++ player.h	(working copy)
+@@ -3,6 +3,7 @@
+ #ifndef PLAYER_H
+ #define PLAYER_H
+ 
++#include "pool.h"
+ #include "aystar.h"
+ #include "rail.h"
+ #include "engine.h"
+@@ -188,7 +189,7 @@
+ 	int64 yearly_expenses[3][13];
+ 	PlayerEconomyEntry cur_economy;
+ 	PlayerEconomyEntry old_economy[24];
+-	EngineID engine_replacement[TOTAL_NUM_ENGINES];
++	EngineRenewList engine_renew_list; // Defined later
+ 	bool engine_renew;
+ 	bool renew_keep_length;
+ 	int16 engine_renew_months;
+@@ -263,10 +264,48 @@
+ int8 SaveHighScoreValue(const Player *p);
+ int8 SaveHighScoreValueNetwork(void);
+ 
+-void InitialiseEngineReplacement(Player *p);
+-EngineID EngineReplacement(const Player *p, EngineID engine);
+-bool EngineHasReplacement(const Player *p, EngineID engine);
+-int32 AddEngineReplacement(Player *p, EngineID old_engine, EngineID new_engine, uint32 flags);
+-int32 RemoveEngineReplacement(Player *p, EngineID engine, uint32 flags);
++/* Engine Replacement Functions */
+ 
++/**
++ * Remove all engine replacement settings for the given player.
++ * @param p Player.
++ */
++static inline void RemoveAllEngineReplacementForPlayer(Player *p) { RemoveAllEngineReplacement(&p->engine_renew_list); }
++
++/**
++ * Retrieve the engine replacement for the given player and original engine type.
++ * @param p Player.
++ * @param engine Engine type.
++ * @return The engine type to replace with, or INVALID_ENGINE if no
++ * replacement is in the list.
++ */
++static inline EngineID EngineReplacementForPlayer(const Player *p, EngineID engine) { return EngineReplacement(p->engine_renew_list, engine); }
++
++/**
++ * Check if a player has a replacement set up for the given engine.
++ * @param p Player.
++ * @param  engine Engine type to be replaced.
++ * @return true if a replacement was set up, false otherwise.
++ */
++static inline bool EngineHasReplacementForPlayer(const Player *p, EngineID engine) { return EngineReplacementForPlayer(p, engine) != INVALID_ENGINE; }
++
++/**
++ * Add an engine replacement for the player.
++ * @param p Player.
++ * @param old_engine The original engine type.
++ * @param new_engine The replacement engine type.
++ * @param flags The calling command flags.
++ * @return 0 on success, CMD_ERROR on failure.
++ */
++static inline int32 AddEngineReplacementForPlayer(Player *p, EngineID old_engine, EngineID new_engine, uint32 flags) { return AddEngineReplacement(&p->engine_renew_list, old_engine, new_engine, flags); }
++
++/**
++ * Remove an engine replacement for the player.
++ * @param p Player.
++ * @param engine The original engine type.
++ * @param flags The calling command flags.
++ * @return 0 on success, CMD_ERROR on failure.
++ */
++static inline int32 RemoveEngineReplacementForPlayer(Player *p, EngineID engine, uint32 flags) {return RemoveEngineReplacement(&p->engine_renew_list, engine, flags); }
++
+ #endif /* PLAYER_H */
+Index: saveload.h
+===================================================================
+--- saveload.h	(revision 3342)
++++ saveload.h	(working copy)
+@@ -47,7 +47,8 @@
+ 	REF_STATION     = 2,
+ 	REF_TOWN        = 3,
+ 	REF_VEHICLE_OLD = 4,
+-	REF_ROADSTOPS   = 5
++	REF_ROADSTOPS   = 5,
++	REF_ENGINE_RENEWS = 6,
+ } SLRefType;
+ 
+ 
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 3342)
++++ vehicle.c	(working copy)
+@@ -1612,7 +1612,7 @@
+ 	Vehicle *new_v = NULL;
+ 	char vehicle_name[32];
+ 
+-	new_engine_type = EngineReplacement(p, old_v->engine_type);
++	new_engine_type = EngineReplacementForPlayer(p, old_v->engine_type);
+ 	if (new_engine_type == INVALID_ENGINE) new_engine_type = old_v->engine_type;
+ 
+ 	cost = DoCommand(old_v->x_pos, old_v->y_pos, new_engine_type, 1, flags, CMD_BUILD_VEH(old_v->type));
+@@ -1730,7 +1730,7 @@
+ 			if (!p->engine_renew ||
+ 					w->age - w->max_age < (p->engine_renew_months * 30) || // replace if engine is too old
+ 					w->max_age == 0) { // rail cars got a max age of 0
+-				if (!EngineHasReplacement(p, w->engine_type)) // updates to a new model
++				if (!EngineHasReplacementForPlayer(p, w->engine_type)) // updates to a new model
+ 					continue;
+ 			}
+ 
+Index: vehicle.h
+===================================================================
+--- vehicle.h	(revision 3342)
++++ vehicle.h	(working copy)
+@@ -440,10 +440,10 @@
+ VARDEF byte _cmd_build_rail_veh_score;
+ 
+ #define INVALID_VEHICLE 0xFFFF
+-#define INVALID_ENGINE 0xFFFF
+ 
+ /* A lot of code calls for the invalidation of the status bar, which is widget 5.
+- * Best is to have a virtual value for it when it needs to change again */
++ * Best is to have a virtual value for it when it needs to change again 
++ * XXX: Wtf? Why here? */
+ #define STATUS_BAR 5
+ 
+ #endif /* VEHICLE_H */
+Index: misc.c
+===================================================================
+--- misc.c	(revision 3342)
++++ misc.c	(working copy)
+@@ -89,6 +89,7 @@
+ void InitializeVehicles(void);
+ void InitializeWaypoints(void);
+ void InitializeDepot(void);
++void InitializeEngines(void);
+ void InitializeOrders(void);
+ void InitializeClearLand(void);
+ void InitializeRail(void);
+@@ -142,6 +143,7 @@
+ 		SetDate(starting);
+ 	}
+ 
++	InitializeEngines();
+ 	InitializeVehicles();
+ 	InitializeWaypoints();
+ 	InitializeDepot();
