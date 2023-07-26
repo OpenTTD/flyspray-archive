@@ -1,0 +1,196 @@
+From 76ea265f1efb19bd5c930e0b90819d2089a5bbfb Mon Sep 17 00:00:00 2001
+From: J. Tang <tang@jtang.org>
+Date: Thu, 2 Dec 2010 00:34:37 -0500
+Subject: [PATCH 6/6] Save current DisasterTimer values to save file, bumping the version to 154.  When loading an older save file that did not have individual DisasterTimer values, use the single _disaster_delay value to initialize all DisasterTimers.
+
+
+Signed-off-by: J. Tang <tang@jtang.org>
+---
+ src/disaster_cmd.cpp          |    2 -
+ src/saveload/misc_sl.cpp      |   82 +++++++++++++++++++++++++++++++++++++++-
+ src/saveload/oldloader_sl.cpp |    7 +++
+ src/saveload/saveload.cpp     |    3 +-
+ 4 files changed, 88 insertions(+), 6 deletions(-)
+
+diff --git a/src/disaster_cmd.cpp b/src/disaster_cmd.cpp
+index 0789e93..38a36f3 100644
+--- a/src/disaster_cmd.cpp
++++ b/src/disaster_cmd.cpp
+@@ -49,8 +49,6 @@
+ 
+ #include "table/strings.h"
+ 
+-/** Delay counter for considering the next disaster. */
+-uint16 _disaster_delay;
+ /**
+  * Collection of all registered disaster timers.
+  */
+diff --git a/src/saveload/misc_sl.cpp b/src/saveload/misc_sl.cpp
+index 4415d67..d9437f1 100644
+--- a/src/saveload/misc_sl.cpp
++++ b/src/saveload/misc_sl.cpp
+@@ -20,11 +20,12 @@
+ #include "../gfx_func.h"
+ #include "../core/random_func.hpp"
+ #include "../fios.h"
++#include "../disaster.h"
++#include "../debug.h"
+ 
+ #include "saveload.h"
+ 
+ extern TileIndex _cur_tileloop_tile;
+-extern uint16 _disaster_delay;
+ extern byte _trees_tick_ctr;
+ 
+ /* Keep track of current game position */
+@@ -32,6 +33,13 @@ int _saved_scrollpos_x;
+ int _saved_scrollpos_y;
+ ZoomLevelByte _saved_scrollpos_zoom;
+ 
++/**
++ * If loading an older game, use the single _disaster_delay to
++ * initialize all DisasterTimers.  Otherwise store each timer's delay
++ * separately. */
++uint16 _disaster_delay = 0;
++
++
+ void SaveViewportBeforeSaveGame()
+ {
+ 	const Window *w = FindWindowById(WC_MAIN_WINDOW, 0);
+@@ -114,9 +122,23 @@ static const SaveLoadGlobVarList _date_check_desc[] = {
+ 
+ /* Save load date related variables as well as persistent tick counters
+  * XXX: currently some unrelated stuff is just put here */
+-static void SaveLoad_DATE()
++static void SaveLoad_Save_DATE()
++{
++	_disaster_delay = 0;
++	SlGlobList(_date_desc);
++}
++
++static void SaveLoad_Load_DATE()
+ {
+ 	SlGlobList(_date_desc);
++	/* if _disaster_delay is not 0 after loading, then this is an
++	 * older save file */
++	if (_disaster_delay != 0) {
++		/* initialize all DisasterTimers to the same value */
++		for (uint i = 0; i < _disaster_timers.Length(); ++i) {
++			_disaster_timers[i]->Set(_disaster_delay);
++		}
++	}
+ }
+ 
+ static void Check_DATE()
+@@ -127,6 +149,59 @@ static void Check_DATE()
+ 	}
+ }
+ 
++/** Container for a DisasterTimer for SaveLoad system */
++struct DTimerObject {
++	const char *id;
++	uint16 timer;
++};
++
++static const SaveLoad _disaster_timer_desc[] = {
++	SLE_CONDSTR(DTimerObject, id, SLE_STR, 0, 154, SL_MAX_VERSION),
++	SLE_CONDVAR(DTimerObject, timer, SLE_UINT16, 154, SL_MAX_VERSION),
++	SLE_END()
++};
++
++/**
++ * Gather all registered disaster timer values and save them.
++ */
++static void SaveLoad_Save_DTIM()
++{
++	DTimerObject dtimer;
++	for (uint i = 0; i < _disaster_timers.Length(); ++i) {
++		/* Construct a temporary struct to hold timer info.  A
++		 * temporary struct allows for easily adding new
++		 * timers without changing the save game version.
++		 */
++		dtimer.id = _disaster_timers[i]->GetID();
++		dtimer.timer = _disaster_timers[i]->Get();
++		SlSetArrayIndex(i);
++		SlObject(&dtimer, _disaster_timer_desc);
++	}
++}
++
++/**
++ * Load all disaster timers.  For each one loaded, if it is one
++ * registered then set that timer's value.
++ */
++static void SaveLoad_Load_DTIM()
++{
++	DTimerObject dtimer;
++	while (SlIterateArray() != -1) {
++		dtimer.id = NULL;
++		SlObject(&dtimer, _disaster_timer_desc);
++		bool found_timer = false;
++		for (uint i = 0; i < _disaster_timers.Length(); ++i) {
++			if (strcmp(dtimer.id, _disaster_timers[i]->GetID()) == 0) {
++				_disaster_timers[i]->Set(dtimer.timer);
++				found_timer = true;
++				break;
++			}
++		}
++		if (!found_timer) {
++			DEBUG(sl, 1, "Disaster '%s' is not recognized and thus ignored.", dtimer.id);
++		}
++	}
++}
+ 
+ static const SaveLoadGlobVarList _view_desc[] = {
+ 	SLEG_CONDVAR(_saved_scrollpos_x,    SLE_FILE_I16 | SLE_VAR_I32, 0, 5),
+@@ -143,6 +218,7 @@ static void SaveLoad_VIEW()
+ }
+ 
+ extern const ChunkHandler _misc_chunk_handlers[] = {
+-	{ 'DATE', SaveLoad_DATE, SaveLoad_DATE, NULL, Check_DATE, CH_RIFF},
++	{ 'DATE', SaveLoad_Save_DATE, SaveLoad_Load_DATE, NULL, Check_DATE, CH_RIFF},
++	{ 'DTIM', SaveLoad_Save_DTIM, SaveLoad_Load_DTIM, NULL, NULL, CH_ARRAY},
+ 	{ 'VIEW', SaveLoad_VIEW, SaveLoad_VIEW, NULL, NULL,       CH_RIFF | CH_LAST},
+ };
+diff --git a/src/saveload/oldloader_sl.cpp b/src/saveload/oldloader_sl.cpp
+index b360a2d..5fcc674 100644
+--- a/src/saveload/oldloader_sl.cpp
++++ b/src/saveload/oldloader_sl.cpp
+@@ -27,6 +27,7 @@
+ #include "../effectvehicle_base.h"
+ #include "../engine_func.h"
+ #include "../company_base.h"
++#include "../disaster.h"
+ #include "saveload_internal.h"
+ #include "oldloader.h"
+ 
+@@ -1763,6 +1764,12 @@ bool LoadTTDMain(LoadgameState *ls)
+ 
+ 	free(_old_vehicle_names);
+ 
++	/* Convert old disaster delay value to new format, by
++	   initializing all DisasterTimers to that value */
++	for (uint i = 0; i < _disaster_timers.Length(); ++i) {
++		_disaster_timers[i]->Set(_disaster_delay);
++	}
++
+ 	return true;
+ }
+ 
+diff --git a/src/saveload/saveload.cpp b/src/saveload/saveload.cpp
+index 90e50b4..a6936a0 100644
+--- a/src/saveload/saveload.cpp
++++ b/src/saveload/saveload.cpp
+@@ -216,8 +216,9 @@
+  *  151   20918
+  *  152   21171
+  *  153   21263
++ *  154   XXXX FIX ME
+  */
+-extern const uint16 SAVEGAME_VERSION = 153; ///< Current savegame version of OpenTTD.
++extern const uint16 SAVEGAME_VERSION = 154; ///< Current savegame version of OpenTTD.
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+-- 
+1.7.3.2
+

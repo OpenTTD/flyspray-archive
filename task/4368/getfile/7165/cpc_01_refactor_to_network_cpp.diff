@@ -1,0 +1,208 @@
+diff -r b63f7e212ed7 -r e390a8a344e0 src/network/network.cpp
+--- a/src/network/network.cpp	Tue Jan 18 23:58:54 2011 +0100
++++ b/src/network/network.cpp	Wed Jan 19 00:00:04 2011 +0100
+@@ -150,6 +150,75 @@
+ 	return count;
+ }
+ 
++extern uint32 _password_game_seed;
++extern char _password_server_id[NETWORK_SERVER_ID_LENGTH];
++
++/**
++ * Sets/resets company password
++ * @param password new password, "" or "*" resets password
++ * @return new password
++ */
++const char *NetworkChangeCompanyPassword(const char *password)
++{
++	if (strcmp(password, "*") == 0) password = "";
++
++	if (!_network_server) {
++		NetworkClientSetPassword(password);
++	} else {
++		HashCurrentCompanyPassword(password);
++	}
++
++	return password;
++}
++
++/**
++ * Generates a hashed password for the company name.
++ * @param password the password to 'encrypt'.
++ * @return the hashed password.
++ */
++const char *GenerateCompanyPasswordHash(const char *password)
++{
++	if (StrEmpty(password)) return password;
++
++	char salted_password[NETWORK_SERVER_ID_LENGTH];
++
++	memset(salted_password, 0, sizeof(salted_password));
++	snprintf(salted_password, sizeof(salted_password), "%s", password);
++	/* Add the game seed and the server's ID as the salt. */
++	for (uint i = 0; i < NETWORK_SERVER_ID_LENGTH - 1; i++) {
++		salted_password[i] ^= _password_server_id[i] ^ (_password_game_seed >> (i % 32));
++	}
++
++	Md5 checksum;
++	uint8 digest[16];
++	static char hashed_password[NETWORK_SERVER_ID_LENGTH];
++
++	/* Generate the MD5 hash */
++	checksum.Append(salted_password, sizeof(salted_password) - 1);
++	checksum.Finish(digest);
++
++	for (int di = 0; di < 16; di++) sprintf(hashed_password + di * 2, "%02x", digest[di]);
++	hashed_password[lengthof(hashed_password) - 1] = '\0';
++
++	return hashed_password;
++}
++
++/**
++ * Hash the current company password; used when the server 'company' sets his/her password.
++ */
++void HashCurrentCompanyPassword(const char *password)
++{
++	_password_game_seed = _settings_game.game_creation.generation_seed;
++	strecpy(_password_server_id, _settings_client.network.network_id, lastof(_password_server_id));
++
++	const char *new_pw = GenerateCompanyPasswordHash(password);
++	strecpy(_network_company_states[_local_company].password, new_pw, lastof(_network_company_states[_local_company].password));
++
++	if (_network_server) {
++		NetworkServerUpdateCompanyPassworded(_local_company, !StrEmpty(_network_company_states[_local_company].password));
++	}
++}
++
+ /**
+  * Check if the company we want to join requires a password.
+  * @param company_id id of the company we want to check the 'passworded' flag for.
+diff -r b63f7e212ed7 -r e390a8a344e0 src/network/network.h
+--- a/src/network/network.h	Tue Jan 18 23:58:54 2011 +0100
++++ b/src/network/network.h	Wed Jan 19 00:00:04 2011 +0100
+@@ -19,6 +19,9 @@
+ void NetworkShutDown();
+ void NetworkDrawChatMessage();
+ 
++const char *GenerateCompanyPasswordHash(const char *password);
++void HashCurrentCompanyPassword(const char *password);
++
+ extern bool _networking;         ///< are we in networking mode?
+ extern bool _network_server;     ///< network-server is active
+ extern bool _network_available;  ///< is network mode available?
+diff -r b63f7e212ed7 -r e390a8a344e0 src/network/network_client.cpp
+--- a/src/network/network_client.cpp	Tue Jan 18 23:58:54 2011 +0100
++++ b/src/network/network_client.cpp	Wed Jan 19 00:00:04 2011 +0100
+@@ -278,9 +278,9 @@
+ static uint32 last_ack_frame;
+ 
+ /** One bit of 'entropy' used to generate a salt for the company passwords. */
+-static uint32 _password_game_seed;
++uint32 _password_game_seed;
+ /** The other bit of 'entropy' used to generate a salt for the company passwords. */
+-static char _password_server_id[NETWORK_SERVER_ID_LENGTH];
++char _password_server_id[NETWORK_SERVER_ID_LENGTH];
+ 
+ /** Maximum number of companies of the currently joined server. */
+ static uint8 _network_server_max_companies;
+@@ -298,55 +298,6 @@
+ /** Make sure the server ID length is the same as a md5 hash. */
+ assert_compile(NETWORK_SERVER_ID_LENGTH == 16 * 2 + 1);
+ 
+-/**
+- * Generates a hashed password for the company name.
+- * @param password the password to 'encrypt'.
+- * @return the hashed password.
+- */
+-static const char *GenerateCompanyPasswordHash(const char *password)
+-{
+-	if (StrEmpty(password)) return password;
+-
+-	char salted_password[NETWORK_SERVER_ID_LENGTH];
+-
+-	memset(salted_password, 0, sizeof(salted_password));
+-	snprintf(salted_password, sizeof(salted_password), "%s", password);
+-	/* Add the game seed and the server's ID as the salt. */
+-	for (uint i = 0; i < NETWORK_SERVER_ID_LENGTH - 1; i++) {
+-		salted_password[i] ^= _password_server_id[i] ^ (_password_game_seed >> (i % 32));
+-	}
+-
+-	Md5 checksum;
+-	uint8 digest[16];
+-	static char hashed_password[NETWORK_SERVER_ID_LENGTH];
+-
+-	/* Generate the MD5 hash */
+-	checksum.Append(salted_password, sizeof(salted_password) - 1);
+-	checksum.Finish(digest);
+-
+-	for (int di = 0; di < 16; di++) sprintf(hashed_password + di * 2, "%02x", digest[di]);
+-	hashed_password[lengthof(hashed_password) - 1] = '\0';
+-
+-	return hashed_password;
+-}
+-
+-/**
+- * Hash the current company password; used when the server 'company' sets his/her password.
+- */
+-static void HashCurrentCompanyPassword(const char *password)
+-{
+-	_password_game_seed = _settings_game.game_creation.generation_seed;
+-	strecpy(_password_server_id, _settings_client.network.network_id, lastof(_password_server_id));
+-
+-	const char *new_pw = GenerateCompanyPasswordHash(password);
+-	strecpy(_network_company_states[_local_company].password, new_pw, lastof(_network_company_states[_local_company].password));
+-
+-	if (_network_server) {
+-		NetworkServerUpdateCompanyPassworded(_local_company, !StrEmpty(_network_company_states[_local_company].password));
+-	}
+-}
+-
+-
+ /***********
+  * Sending functions
+  *   DEF_CLIENT_SEND_COMMAND has no parameters
+@@ -1227,7 +1178,7 @@
+ 	MyClient::SendChat(action, type, dest, msg, data);
+ }
+ 
+-static void NetworkClientSetPassword(const char *password)
++void NetworkClientSetPassword(const char *password)
+ {
+ 	MyClient::SendSetPassword(password);
+ }
+@@ -1251,24 +1202,6 @@
+ }
+ 
+ /**
+- * Sets/resets company password
+- * @param password new password, "" or "*" resets password
+- * @return new password
+- */
+-const char *NetworkChangeCompanyPassword(const char *password)
+-{
+-	if (strcmp(password, "*") == 0) password = "";
+-
+-	if (!_network_server) {
+-		NetworkClientSetPassword(password);
+-	} else {
+-		HashCurrentCompanyPassword(password);
+-	}
+-
+-	return password;
+-}
+-
+-/**
+  * Check if max_companies has been reached on the server (local check only).
+  * @return true if the max value has been reached or exceeded, false otherwise.
+  */
+diff -r b63f7e212ed7 -r e390a8a344e0 src/network/network_client.h
+--- a/src/network/network_client.h	Tue Jan 18 23:58:54 2011 +0100
++++ b/src/network/network_client.h	Wed Jan 19 00:00:04 2011 +0100
+@@ -108,6 +108,7 @@
+ typedef ClientNetworkGameSocketHandler MyClient;
+ 
+ void NetworkClient_Connected();
++void NetworkClientSetPassword(const char *password);
+ 
+ extern CompanyID _network_join_as;
+ 

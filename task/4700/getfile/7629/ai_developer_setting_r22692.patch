@@ -1,0 +1,196 @@
+diff -r 363fe2f3a4a8 src/ai/ai_gui.cpp
+--- a/src/ai/ai_gui.cpp	Fri Jul 29 20:49:03 2011 +0200
++++ b/src/ai/ai_gui.cpp	Fri Jul 29 23:07:43 2011 +0200
+@@ -32,6 +32,8 @@
+ 
+ #include "table/strings.h"
+ 
++#include <vector>
++
+ /** Enum referring to the widgets of the AI list window */
+ enum AIListWindowWidgets {
+ 	AIL_WIDGET_LIST,             ///< The matrix with all available AIs
+@@ -270,6 +272,8 @@
+ 	int clicked_row;       ///< The clicked row of settings.
+ 	int line_height;       ///< Height of a row in the matrix widget.
+ 	Scrollbar *vscroll;    ///< Cache of the vertical scrollbar.
++	typedef std::vector<const AIConfigItem *> VisibleSettingsList;
++	VisibleSettingsList visible_settings; ///< List of visible AI settings
+ 
+ 	/**
+ 	 * Constructor for the window.
+@@ -282,6 +286,7 @@
+ 		timeout(0)
+ 	{
+ 		this->ai_config = AIConfig::GetConfig(slot);
++		this->RebuildVisibleSettings();
+ 
+ 		this->CreateNestedTree(desc);
+ 		this->vscroll = this->GetScrollbar(AIS_WIDGET_SCROLLBAR);
+@@ -289,7 +294,24 @@
+ 
+ 		this->SetWidgetDisabledState(AIS_WIDGET_RESET, _game_mode != GM_MENU && Company::IsValidID(this->slot));
+ 
+-		this->vscroll->SetCount((int)this->ai_config->GetConfigList()->size());
++		this->vscroll->SetCount(this->visible_settings.size());
++	}
++
++	/**
++	 * Rebuilds the list of visible settings. AI settings with the flag 
++	 * AICONFIG_AI_DEVELOPER set will only be visible if the game setting
++	 * gui.ai_developer_tools is enabled.
++	 */
++	void RebuildVisibleSettings()
++	{
++		visible_settings.clear();
++
++		AIConfigItemList::const_iterator it = this->ai_config->GetConfigList()->begin();
++		for (; it != this->ai_config->GetConfigList()->end(); it++) {
++			bool no_hide = (it->flags & AICONFIG_AI_DEVELOPER) == 0;
++			if (no_hide || _settings_client.gui.ai_developer_tools) // visible?
++				visible_settings.push_back( &(*it) );
++		}
+ 	}
+ 
+ 	virtual void UpdateWidgetSize(int widget, Dimension *size, const Dimension &padding, Dimension *fill, Dimension *resize)
+@@ -308,7 +330,7 @@
+ 		if (widget != AIS_WIDGET_BACKGROUND) return;
+ 
+ 		AIConfig *config = this->ai_config;
+-		AIConfigItemList::const_iterator it = config->GetConfigList()->begin();
++		VisibleSettingsList::const_iterator it = this->visible_settings.begin();		
+ 		int i = 0;
+ 		for (; !this->vscroll->IsVisible(i); i++) it++;
+ 
+@@ -319,30 +341,31 @@
+ 
+ 
+ 		int y = r.top;
+-		for (; this->vscroll->IsVisible(i) && it != config->GetConfigList()->end(); i++, it++) {
+-			int current_value = config->GetSetting((*it).name);
+-			bool editable = _game_mode == GM_MENU || !Company::IsValidID(this->slot) || (it->flags & AICONFIG_INGAME) != 0;
++		for (; this->vscroll->IsVisible(i) && it != visible_settings.end(); i++, it++) {
++			const AIConfigItem &config_item = **it;
++			int current_value = config->GetSetting((config_item).name);
++			bool editable = _game_mode == GM_MENU || !Company::IsValidID(this->slot) || (config_item.flags & AICONFIG_INGAME) != 0;
+ 
+ 			StringID str;
+ 			TextColour colour;
+ 			uint idx = 0;
+-			if (StrEmpty((*it).description)) {
++			if (StrEmpty(config_item.description)) {
+ 				str = STR_JUST_STRING;
+ 				colour = TC_ORANGE;
+ 			} else {
+ 				str = STR_AI_SETTINGS_SETTING;
+ 				colour = TC_LIGHT_BLUE;
+-				SetDParamStr(idx++, (*it).description);
++				SetDParamStr(idx++, config_item.description);
+ 			}
+ 
+-			if (((*it).flags & AICONFIG_BOOLEAN) != 0) {
++			if ((config_item.flags & AICONFIG_BOOLEAN) != 0) {
+ 				DrawFrameRect(buttons_left, y  + 2, buttons_left + 19, y + 10, (current_value != 0) ? COLOUR_GREEN : COLOUR_RED, (current_value != 0) ? FR_LOWERED : FR_NONE);
+ 				SetDParam(idx++, current_value == 0 ? STR_CONFIG_SETTING_OFF : STR_CONFIG_SETTING_ON);
+ 			} else {
+-				DrawArrowButtons(buttons_left, y + 2, COLOUR_YELLOW, (this->clicked_button == i) ? 1 + (this->clicked_increase != rtl) : 0, editable && current_value > (*it).min_value, editable && current_value < (*it).max_value);
+-				if (it->labels != NULL && it->labels->Contains(current_value)) {
++				DrawArrowButtons(buttons_left, y + 2, COLOUR_YELLOW, (this->clicked_button == i) ? 1 + (this->clicked_increase != rtl) : 0, editable && current_value > config_item.min_value, editable && current_value < config_item.max_value);
++				if (config_item.labels != NULL && config_item.labels->Contains(current_value)) {
+ 					SetDParam(idx++, STR_JUST_RAW_STRING);
+-					SetDParamStr(idx++, it->labels->Find(current_value)->second);
++					SetDParamStr(idx++, config_item.labels->Find(current_value)->second);
+ 				} else {
+ 					SetDParam(idx++, STR_JUST_INT);
+ 					SetDParam(idx++, current_value);
+@@ -375,11 +398,11 @@
+ 			case AIS_WIDGET_BACKGROUND: {
+ 				const NWidgetBase *wid = this->GetWidget<NWidgetBase>(AIS_WIDGET_BACKGROUND);
+ 				int num = (pt.y - wid->pos_y) / this->line_height + this->vscroll->GetPosition();
+-				if (num >= (int)this->ai_config->GetConfigList()->size()) break;
++				if (num >= (int)this->visible_settings.size()) break;
+ 
+-				AIConfigItemList::const_iterator it = this->ai_config->GetConfigList()->begin();
++				VisibleSettingsList::const_iterator it = this->visible_settings.begin();
+ 				for (int i = 0; i < num; i++) it++;
+-				AIConfigItem config_item = *it;
++				const AIConfigItem config_item = **it;
+ 				if (_game_mode == GM_NORMAL && Company::IsValidID(this->slot) && (config_item.flags & AICONFIG_INGAME) == 0) return;
+ 
+ 				bool bool_item = (config_item.flags & AICONFIG_BOOLEAN) != 0;
+@@ -470,6 +493,7 @@
+ 	virtual void OnInvalidateData(int data = 0, bool gui_scope = true)
+ 	{
+ 		if (_game_mode == GM_NORMAL && Company::IsValidID(this->slot)) delete this;
++		else this->RebuildVisibleSettings(); // update which settings that are visible
+ 	}
+ };
+ 
+diff -r 363fe2f3a4a8 src/ai/ai_info.hpp
+--- a/src/ai/ai_info.hpp	Fri Jul 29 20:49:03 2011 +0200
++++ b/src/ai/ai_info.hpp	Fri Jul 29 23:07:43 2011 +0200
+@@ -24,6 +24,7 @@
+ 	AICONFIG_RANDOM  = 0x1, ///< When randomizing the AI, pick any value between min_value and max_value when on custom difficulty setting.
+ 	AICONFIG_BOOLEAN = 0x2, ///< This value is a boolean (either 0 (false) or 1 (true) ).
+ 	AICONFIG_INGAME  = 0x4, ///< This setting can be changed while the AI is running.
++	AICONFIG_AI_DEVELOPER = 0x8, ///< This setting will only be visible when the ai development tools are active.
+ };
+ 
+ typedef SmallMap<int, char *> LabelMapping; ///< Map-type used to map the setting numbers to labels.
+diff -r 363fe2f3a4a8 src/ai/ai_scanner.cpp
+--- a/src/ai/ai_scanner.cpp	Fri Jul 29 20:49:03 2011 +0200
++++ b/src/ai/ai_scanner.cpp	Fri Jul 29 23:07:43 2011 +0200
+@@ -42,6 +42,7 @@
+ 	SQAIInfo.DefSQConst(engine, AICONFIG_RANDOM, "AICONFIG_RANDOM");
+ 	SQAIInfo.DefSQConst(engine, AICONFIG_BOOLEAN, "AICONFIG_BOOLEAN");
+ 	SQAIInfo.DefSQConst(engine, AICONFIG_INGAME, "AICONFIG_INGAME");
++	SQAIInfo.DefSQConst(engine, AICONFIG_AI_DEVELOPER, "AICONFIG_AI_DEVELOPER");
+ 	SQAIInfo.PostRegister(engine);
+ 	this->engine->AddMethod("RegisterAI", &AIInfo::Constructor, 2, "tx");
+ 	this->engine->AddMethod("RegisterDummyAI", &AIInfo::DummyConstructor, 2, "tx");
+diff -r 363fe2f3a4a8 src/ai/api/ai_info_docs.hpp
+--- a/src/ai/api/ai_info_docs.hpp	Fri Jul 29 20:49:03 2011 +0200
++++ b/src/ai/api/ai_info_docs.hpp	Fri Jul 29 23:07:43 2011 +0200
+@@ -187,6 +187,7 @@
+ 		AICONFIG_RANDOM,  ///< When randomizing the AI, pick any value between min_value and max_value.
+ 		AICONFIG_BOOLEAN, ///< This value is a boolean (either 0 (false) or 1 (true) ).
+ 		AICONFIG_INGAME,  ///< This setting can be changed while the AI is running.
++		AICONFIG_AI_DEVELOPER, ///< This setting will only be visible when the ai development tools are active.
+ 	};
+ 
+ 	/**
+diff -r 363fe2f3a4a8 src/settings.cpp
+--- a/src/settings.cpp	Fri Jul 29 20:49:03 2011 +0200
++++ b/src/settings.cpp	Fri Jul 29 23:07:43 2011 +0200
+@@ -920,6 +920,12 @@
+ 	return true;
+ }
+ 
++static bool InvalidateAISettingsWindow(int32 p1)
++{
++	InvalidateWindowClassesData(WC_AI_SETTINGS); 
++	return true;
++}
++
+ /**
+  * Update the town authority window after a town authority setting change.
+  * @param p1 Unused.
+diff -r 363fe2f3a4a8 src/table/settings.ini
+--- a/src/table/settings.ini	Fri Jul 29 20:49:03 2011 +0200
++++ b/src/table/settings.ini	Fri Jul 29 23:07:43 2011 +0200
+@@ -37,6 +37,7 @@
+ static bool InvalidateCompanyLiveryWindow(int32 p1);
+ static bool InvalidateNewGRFChangeWindows(int32 p1);
+ static bool InvalidateIndustryViewWindow(int32 p1);
++static bool InvalidateAISettingsWindow(int32 p1);
+ static bool RedrawTownAuthority(int32 p1);
+ extern bool UpdateNewGRFConfigPalette(int32 p1);
+ 
+@@ -2384,6 +2385,7 @@
+ var      = gui.ai_developer_tools
+ flags    = SLF_NOT_IN_SAVE | SLF_NO_NETWORK_SYNC
+ def      = false
++proc     = InvalidateAISettingsWindow
+ 
+ [SDTC_BOOL]
+ var      = gui.scenario_developer

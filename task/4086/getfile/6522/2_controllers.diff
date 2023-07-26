@@ -1,0 +1,129 @@
+diff -r 45fb424e1382 src/aircraft_cmd.cpp
+--- a/src/aircraft_cmd.cpp	Fri Aug 27 16:09:39 2010 +0200
++++ b/src/aircraft_cmd.cpp	Fri Aug 27 16:54:45 2010 +0200
+@@ -1775,14 +1775,7 @@
+ 
+ 	if (v->vehstatus & VS_STOPPED) return true;
+ 
+-	/* aircraft is broken down? */
+-	if (v->breakdown_ctr != 0) {
+-		if (v->breakdown_ctr <= 2) {
+-			v->HandleBreakdown();
+-		} else {
+-			if (!v->current_order.IsType(OT_LOADING)) v->breakdown_ctr--;
+-		}
+-	}
++	v->HandleBreakdown();
+ 
+ 	HandleAircraftSmoke(v);
+ 	ProcessOrders(v);
+diff -r 45fb424e1382 src/roadveh_cmd.cpp
+--- a/src/roadveh_cmd.cpp	Fri Aug 27 16:09:39 2010 +0200
++++ b/src/roadveh_cmd.cpp	Fri Aug 27 16:54:45 2010 +0200
+@@ -1485,14 +1485,7 @@
+ 	}
+ 
+ 	/* road vehicle has broken down? */
+-	if (v->breakdown_ctr != 0) {
+-		if (v->breakdown_ctr <= 2) {
+-			v->HandleBreakdown();
+-			return true;
+-		}
+-		if (!v->current_order.IsType(OT_LOADING)) v->breakdown_ctr--;
+-	}
+-
++	if (v->HandleBreakdown()) return true;
+ 	if (v->vehstatus & VS_STOPPED) return true;
+ 
+ 	ProcessOrders(v);
+diff -r 45fb424e1382 src/ship_cmd.cpp
+--- a/src/ship_cmd.cpp	Fri Aug 27 16:09:39 2010 +0200
++++ b/src/ship_cmd.cpp	Fri Aug 27 16:54:45 2010 +0200
+@@ -424,13 +424,7 @@
+ 	v->tick_counter++;
+ 	v->current_order_time++;
+ 
+-	if (v->breakdown_ctr != 0) {
+-		if (v->breakdown_ctr <= 2) {
+-			v->HandleBreakdown();
+-			return;
+-		}
+-		if (!v->current_order.IsType(OT_LOADING)) v->breakdown_ctr--;
+-	}
++	if (v->HandleBreakdown()) return;
+ 
+ 	if (v->vehstatus & VS_STOPPED) return;
+ 
+diff -r 45fb424e1382 src/train_cmd.cpp
+--- a/src/train_cmd.cpp	Fri Aug 27 16:09:39 2010 +0200
++++ b/src/train_cmd.cpp	Fri Aug 27 16:54:45 2010 +0200
+@@ -3716,13 +3716,7 @@
+ 	}
+ 
+ 	/* train is broken down? */
+-	if (v->breakdown_ctr != 0) {
+-		if (v->breakdown_ctr <= 2) {
+-			v->HandleBreakdown();
+-			return true;
+-		}
+-		if (!v->current_order.IsType(OT_LOADING)) v->breakdown_ctr--;
+-	}
++	if (v->HandleBreakdown()) return true;
+ 
+ 	if (HasBit(v->flags, VRF_REVERSING) && v->cur_speed == 0) {
+ 		ReverseTrainDirection(v);
+diff -r 45fb424e1382 src/vehicle.cpp
+--- a/src/vehicle.cpp	Fri Aug 27 16:09:39 2010 +0200
++++ b/src/vehicle.cpp	Fri Aug 27 16:54:45 2010 +0200
+@@ -986,13 +986,18 @@
+ 	}
+ }
+ 
+-void Vehicle::HandleBreakdown()
++bool Vehicle::HandleBreakdown()
+ {
+ 	/* Possible states for Vehicle::breakdown_ctr
+ 	 * 0  - vehicle is running normally
+ 	 * 1  - vehicle is currently broken down
+ 	 * 2  - vehicle is going to break down now
+ 	 * >2 - vehicle is counting down to the actual breakdown event */
++	if (this->breakdown_ctr == 0) return false;
++	if (this->breakdown_ctr > 2) {
++		if (!this->current_order.IsType(OT_LOADING)) this->breakdown_ctr--;
++		return false;
++	}
+ 	if (this->breakdown_ctr != 1) {
+ 		this->breakdown_ctr = 1;
+ 
+@@ -1024,7 +1029,7 @@
+ 	}
+ 
+ 	/* Aircraft breakdowns end only when arriving at the airport */
+-	if (this->type == VEH_AIRCRAFT) return;
++	if (this->type == VEH_AIRCRAFT) return false;
+ 
+ 	/* For trains this function is called twice per tick, so decrease v->breakdown_delay at half the rate */
+ 	if ((this->tick_counter & (this->type == VEH_TRAIN ? 3 : 1)) == 0) {
+@@ -1034,6 +1039,7 @@
+ 			SetWindowDirty(WC_VEHICLE_VIEW, this->index);
+ 		}
+ 	}
++	return true;
+ }
+ 
+ void AgeVehicle(Vehicle *v)
+diff -r 45fb424e1382 src/vehicle_base.h
+--- a/src/vehicle_base.h	Fri Aug 27 16:09:39 2010 +0200
++++ b/src/vehicle_base.h	Fri Aug 27 16:54:45 2010 +0200
+@@ -527,8 +527,10 @@
+ 	/**
+ 	 * Handle all of the aspects of a vehicle breakdown
+ 	 * This includes adding smoke and sounds, and ending the breakdown when appropriate.
++	 * @return true iff the vehicle is stopped because of a breakdown
++	 * @note This function always returns false for aircraft, since these never stop for breakdowns
+ 	 */
+-	void HandleBreakdown();
++	bool HandleBreakdown();
+ 
+ 	bool NeedsAutorenewing(const Company *c) const;
+ 

@@ -1,0 +1,419 @@
+From e17e67f3a6caca3670aa8df6769659925dd7087a Mon Sep 17 00:00:00 2001
+From: Vikthor <noviktor@seznam.cz>
+Date: Tue, 1 Feb 2011 14:39:52 +0100
+Subject: [PATCH] Feature: Add option to replace vehicle only when it gets old.
+
+---
+ src/autoreplace.cpp             |   26 ++++++++++-
+ src/autoreplace_base.h          |    1 +
+ src/autoreplace_cmd.cpp         |    4 +-
+ src/autoreplace_func.h          |   20 +++++++-
+ src/autoreplace_gui.cpp         |   92 ++++++++++++++++++++++++++++++---------
+ src/lang/english.txt            |    2 +
+ src/saveload/autoreplace_sl.cpp |    5 ++-
+ src/saveload/saveload.cpp       |    2 +-
+ src/vehicle.cpp                 |    8 +++-
+ 9 files changed, 130 insertions(+), 30 deletions(-)
+
+diff --git a/src/autoreplace.cpp b/src/autoreplace.cpp
+index 18a5c4e..02ee6f0 100644
+--- a/src/autoreplace.cpp
++++ b/src/autoreplace.cpp
+@@ -70,6 +70,24 @@ EngineID EngineReplacement(EngineRenewList erl, EngineID engine, GroupID group)
+ }
+ 
+ /**
++ * Check if the engine replacement in a given renewlist
++ * should be carried out only when the engine gets old.
++ * @param c Company.
++ * @param engine Engine type to be replaced.
++ * @param group The group related to this replacement.
++ * @return true if a replacement should be postoponed until engine gets old, false otherwise.
++ */ 
++bool EngineHasReplacementWhenOld(EngineRenewList erl, EngineID engine, GroupID group)
++{
++	const EngineRenew *er = GetEngineReplacement(erl, engine, group);
++	if (er == NULL && (group == DEFAULT_GROUP || (Group::IsValidID(group) && !Group::Get(group)->replace_protection))) {
++		/* We didn't find anything useful in the vehicle's own group so we will try ALL_GROUP */
++		er = GetEngineReplacement(erl, engine, ALL_GROUP);
++	}	
++	return er == NULL ? false : er->replace_when_old;
++}
++
++/**
+  * Add an engine replacement to the given renewlist.
+  * @param erl The renewlist to add to.
+  * @param old_engine The original engine type.
+@@ -78,12 +96,15 @@ EngineID EngineReplacement(EngineRenewList erl, EngineID engine, GroupID group)
+  * @param flags The calling command flags.
+  * @return 0 on success, CMD_ERROR on failure.
+  */
+-CommandCost AddEngineReplacement(EngineRenewList *erl, EngineID old_engine, EngineID new_engine, GroupID group, DoCommandFlag flags)
++CommandCost AddEngineReplacement(EngineRenewList *erl, EngineID old_engine, EngineID new_engine, GroupID group, bool replace_when_old, DoCommandFlag flags)
+ {
+ 	/* Check if the old vehicle is already in the list */
+ 	EngineRenew *er = GetEngineReplacement(*erl, old_engine, group);
+ 	if (er != NULL) {
+-		if (flags & DC_EXEC) er->to = new_engine;
++		if (flags & DC_EXEC) {
++			er->to = new_engine;
++			er->replace_when_old = replace_when_old;
++		}
+ 		return CommandCost();
+ 	}
+ 
+@@ -92,6 +113,7 @@ CommandCost AddEngineReplacement(EngineRenewList *erl, EngineID old_engine, Engi
+ 	if (flags & DC_EXEC) {
+ 		er = new EngineRenew(old_engine, new_engine);
+ 		er->group_id = group;
++		er->replace_when_old = replace_when_old;
+ 
+ 		/* Insert before the first element */
+ 		er->next = (EngineRenew *)(*erl);
+diff --git a/src/autoreplace_base.h b/src/autoreplace_base.h
+index 77a3153..6ffd38b 100644
+--- a/src/autoreplace_base.h
++++ b/src/autoreplace_base.h
+@@ -37,6 +37,7 @@ struct EngineRenew : EngineRenewPool::PoolItem<&_enginerenew_pool> {
+ 	EngineID to;
+ 	EngineRenew *next;
+ 	GroupID group_id;
++	bool replace_when_old;
+ 
+ 	EngineRenew(EngineID from = INVALID_ENGINE, EngineID to = INVALID_ENGINE) : from(from), to(to) {}
+ 	~EngineRenew() {}
+diff --git a/src/autoreplace_cmd.cpp b/src/autoreplace_cmd.cpp
+index b2360e5..ac91d71 100644
+--- a/src/autoreplace_cmd.cpp
++++ b/src/autoreplace_cmd.cpp
+@@ -711,6 +711,7 @@ CommandCost CmdAutoreplaceVehicle(TileIndex tile, DoCommandFlag flags, uint32 p1
+  * @param tile unused
+  * @param flags operation to perform
+  * @param p1 packed data
++ *   - bit 0 = whether to replace when engine gets old
+  *   - bits 16-31 = engine group
+  * @param p2 packed data
+  *   - bits  0-15 = old engine type
+@@ -726,6 +727,7 @@ CommandCost CmdSetAutoReplace(TileIndex tile, DoCommandFlag flags, uint32 p1, ui
+ 	EngineID old_engine_type = GB(p2, 0, 16);
+ 	EngineID new_engine_type = GB(p2, 16, 16);
+ 	GroupID id_g = GB(p1, 16, 16);
++	bool replace_when_old = HasBit(p1, 0);
+ 	CommandCost cost;
+ 
+ 	if (!Group::IsValidID(id_g) && !IsAllGroupID(id_g) && !IsDefaultGroupID(id_g)) return CMD_ERROR;
+@@ -735,7 +737,7 @@ CommandCost CmdSetAutoReplace(TileIndex tile, DoCommandFlag flags, uint32 p1, ui
+ 		if (!Engine::IsValidID(new_engine_type)) return CMD_ERROR;
+ 		if (!CheckAutoreplaceValidity(old_engine_type, new_engine_type, _current_company)) return CMD_ERROR;
+ 
+-		cost = AddEngineReplacementForCompany(c, old_engine_type, new_engine_type, id_g, flags);
++		cost = AddEngineReplacementForCompany(c, old_engine_type, new_engine_type, id_g, replace_when_old, flags);
+ 	} else {
+ 		cost = RemoveEngineReplacementForCompany(c, old_engine_type, id_g, flags);
+ 	}
+diff --git a/src/autoreplace_func.h b/src/autoreplace_func.h
+index fdb8898..75b1acd 100644
+--- a/src/autoreplace_func.h
++++ b/src/autoreplace_func.h
+@@ -19,8 +19,9 @@
+ 
+ void RemoveAllEngineReplacement(EngineRenewList *erl);
+ EngineID EngineReplacement(EngineRenewList erl, EngineID engine, GroupID group);
+-CommandCost AddEngineReplacement(EngineRenewList *erl, EngineID old_engine, EngineID new_engine, GroupID group, DoCommandFlag flags);
++CommandCost AddEngineReplacement(EngineRenewList *erl, EngineID old_engine, EngineID new_engine, GroupID group, bool replace_when_old, DoCommandFlag flags);
+ CommandCost RemoveEngineReplacement(EngineRenewList *erl, EngineID engine, GroupID group, DoCommandFlag flags);
++bool EngineHasReplacementWhenOld(EngineRenewList erl, EngineID engine, GroupID group);
+ 
+ /**
+  * Remove all engine replacement settings for the given company.
+@@ -57,6 +58,19 @@ static inline bool EngineHasReplacementForCompany(const Company *c, EngineID eng
+ }
+ 
+ /**
++ * Check if a company's replacement of the given engine
++ * should be carried out only when the engine gets old.
++ * @param c Company.
++ * @param engine Engine type to be replaced.
++ * @param group The group related to this replacement.
++ * @return true if a replacement should be postoponed until engine gets old, false otherwise.
++ */ 
++static inline bool EngineHasReplacementWhenOldForCompany(const Company *c, EngineID engine, GroupID group)
++{
++	return EngineHasReplacementWhenOld(c->engine_renew_list, engine, group);
++}
++
++/**
+  * Add an engine replacement for the company.
+  * @param c Company.
+  * @param old_engine The original engine type.
+@@ -65,9 +79,9 @@ static inline bool EngineHasReplacementForCompany(const Company *c, EngineID eng
+  * @param flags The calling command flags.
+  * @return 0 on success, CMD_ERROR on failure.
+  */
+-static inline CommandCost AddEngineReplacementForCompany(Company *c, EngineID old_engine, EngineID new_engine, GroupID group, DoCommandFlag flags)
++static inline CommandCost AddEngineReplacementForCompany(Company *c, EngineID old_engine, EngineID new_engine, GroupID group, bool replace_when_old, DoCommandFlag flags)
+ {
+-	return AddEngineReplacement(&c->engine_renew_list, old_engine, new_engine, group, flags);
++	return AddEngineReplacement(&c->engine_renew_list, old_engine, new_engine, group, replace_when_old, flags);
+ }
+ 
+ /**
+diff --git a/src/autoreplace_gui.cpp b/src/autoreplace_gui.cpp
+index af75dec..2912708 100644
+--- a/src/autoreplace_gui.cpp
++++ b/src/autoreplace_gui.cpp
+@@ -25,6 +25,7 @@
+ #include "settings_func.h"
+ #include "core/geometry_func.hpp"
+ #include "rail_gui.h"
++#include "widgets/dropdown_func.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -56,6 +57,12 @@ enum ReplaceVehicleWindowWidgets {
+ 	RVW_WIDGET_TRAIN_WAGONREMOVE_TOGGLE,
+ };
+ 
++static const StringID _start_replace_dropdown[] = {
++	STR_REPLACE_VEHICLES_NOW,
++	STR_REPLACE_VEHICLES_WHEN_OLD,
++	INVALID_STRING_ID
++};
++
+ static int CDECL EngineNumberSorter(const EngineID *a, const EngineID *b)
+ {
+ 	int r = ListPositionOfEngine(*a) - ListPositionOfEngine(*b);
+@@ -198,6 +205,18 @@ class ReplaceVehicleWindow : public Window {
+ 		this->reset_sel_engine = false;
+ 	}
+ 
++	/** 
++	 * Handle click on the start replace button 
++	 * @param replace_when_old When to start replace. True - when engine gets old, false - now.
++	 */ 
++	void ReplaceClick_StartReplace(bool replace_when_old)
++	{
++		EngineID veh_from = this->sel_engine[0];
++		EngineID veh_to = this->sel_engine[1];
++		DoCommandP(0, replace_when_old | (this->sel_group << 16), veh_from + (veh_to << 16), CMD_SET_AUTOREPLACE);
++		this->SetDirty();
++	}
++		
+ public:
+ 	ReplaceVehicleWindow(const WindowDesc *desc, VehicleType vehicletype, GroupID id_g) : Window()
+ 	{
+@@ -298,6 +317,20 @@ public:
+ 				*size = maxdim(*size, d);
+ 				break;
+ 			}
++
++			case RVW_WIDGET_START_REPLACE: {
++				StringID str = this->GetWidget<NWidgetCore>(widget)->widget_data;
++				SetDParam(0, STR_REPLACE_VEHICLES_START);
++				Dimension d = GetStringBoundingBox(str);
++				for (int i = 0; _start_replace_dropdown[i] != INVALID_STRING_ID; i++) {
++					SetDParam(0, _start_replace_dropdown[i]);
++					d = maxdim(d, GetStringBoundingBox(str));
++				}
++				d.width += padding.width;
++				d.height += padding.height;
++				*size = maxdim(*size, d);
++				break;
++			}
+ 		}
+ 	}
+ 
+@@ -317,6 +350,17 @@ public:
+ 			case RVW_WIDGET_TRAIN_ENGINEWAGON_TOGGLE:
+ 				SetDParam(0, this->replace_engines ? STR_REPLACE_ENGINES : STR_REPLACE_WAGONS);
+ 				break;
++
++			case RVW_WIDGET_START_REPLACE: {
++				const Company *c = Company::Get(_local_company);			
++				if (EngineHasReplacementForCompany(c, this->sel_engine[0], this->sel_group)) {
++					SetDParam(0, EngineHasReplacementWhenOldForCompany(c, this->sel_engine[0], this->sel_group) ?
++							STR_REPLACE_VEHICLES_WHEN_OLD : STR_REPLACE_VEHICLES_NOW);
++				} else {
++					SetDParam(0, STR_REPLACE_VEHICLES_START);
++				}
++				break;
++			}
+ 		}
+ 	}
+ 
+@@ -362,13 +406,11 @@ public:
+ 
+ 		/* Disable the "Start Replacing" button if:
+ 		 *    Either engines list is empty
+-		 * or The selected replacement engine has a replacement (to prevent loops)
+-		 * or The right engines list (new replacement) has the existing replacement vehicle selected */
++		 * or The selected replacement engine has a replacement (to prevent loops)*/
+ 		this->SetWidgetDisabledState(RVW_WIDGET_START_REPLACE,
+ 										this->sel_engine[0] == INVALID_ENGINE ||
+ 										this->sel_engine[1] == INVALID_ENGINE ||
+-										EngineReplacementForCompany(c, this->sel_engine[1], this->sel_group) != INVALID_ENGINE ||
+-										EngineReplacementForCompany(c, this->sel_engine[0], this->sel_group) == this->sel_engine[1]);
++										EngineReplacementForCompany(c, this->sel_engine[1], this->sel_group) != INVALID_ENGINE);
+ 
+ 		/* Disable the "Stop Replacing" button if:
+ 		 *   The left engines list (existing vehicle) is empty
+@@ -377,6 +419,9 @@ public:
+ 										this->sel_engine[0] == INVALID_ENGINE ||
+ 										!EngineHasReplacementForCompany(c, this->sel_engine[0], this->sel_group));
+ 
++		/* Lower "Start Replacing" button if replacement is setup for the left engine */
++		this->SetWidgetLoweredState(RVW_WIDGET_START_REPLACE, EngineHasReplacementForCompany(c, this->sel_engine[0], this->sel_group));
++
+ 		/* now the actual drawing of the window itself takes place */
+ 		SetDParam(0, STR_REPLACE_VEHICLE_TRAIN + this->window_number);
+ 
+@@ -429,10 +474,11 @@ public:
+ 				break;
+ 
+ 			case RVW_WIDGET_START_REPLACE: { // Start replacing
+-				EngineID veh_from = this->sel_engine[0];
+-				EngineID veh_to = this->sel_engine[1];
+-				DoCommandP(0, this->sel_group << 16, veh_from + (veh_to << 16), CMD_SET_AUTOREPLACE);
+-				this->SetDirty();
++				if (this->GetWidget<NWidgetLeaf>(widget)->ButtonHit(pt) && !IsWidgetLowered(RVW_WIDGET_START_REPLACE)) {
++					ReplaceClick_StartReplace(false);
++				} else {
++					ShowDropDownMenu(this, _start_replace_dropdown, 0, RVW_WIDGET_START_REPLACE, 0, 0);
++				}
+ 				break;
+ 			}
+ 
+@@ -469,17 +515,21 @@ public:
+ 
+ 	virtual void OnDropdownSelect(int widget, int index)
+ 	{
+-		RailType temp = (RailType)index;
+-		if (temp == sel_railtype) return; // we didn't select a new one. No need to change anything
+-		sel_railtype = temp;
+-		/* Reset scrollbar positions */
+-		this->vscroll[0]->SetPosition(0);
+-		this->vscroll[1]->SetPosition(0);
+-		/* Rebuild the lists */
+-		this->engines[0].ForceRebuild();
+-		this->engines[1].ForceRebuild();
+-		this->reset_sel_engine = true;
+-		this->SetDirty();
++		if (widget == RVW_WIDGET_TRAIN_RAILTYPE_DROPDOWN) { 
++			RailType temp = (RailType)index;
++			if (temp == sel_railtype) return; // we didn't select a new one. No need to change anything
++			sel_railtype = temp;
++			/* Reset scrollbar positions */
++			this->vscroll[0]->SetPosition(0);
++			this->vscroll[1]->SetPosition(0);
++			/* Rebuild the lists */
++			this->engines[0].ForceRebuild();
++			this->engines[1].ForceRebuild();
++			this->reset_sel_engine = true;
++			this->SetDirty();
++		} else {
++			ReplaceClick_StartReplace(index == 0 ? false : true);
++		}
+ 	}
+ 
+ 	virtual void OnResize()
+@@ -519,7 +569,7 @@ static const NWidgetPart _nested_replace_rail_vehicle_widgets[] = {
+ 		NWidget(WWT_PANEL, COLOUR_GREY, RVW_WIDGET_RIGHT_DETAILS), SetMinimalSize(228, 102), SetResize(1, 0), EndContainer(),
+ 	EndContainer(),
+ 	NWidget(NWID_HORIZONTAL),
+-		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, RVW_WIDGET_START_REPLACE), SetMinimalSize(139, 12), SetDataTip(STR_REPLACE_VEHICLES_START, STR_REPLACE_HELP_START_BUTTON),
++		NWidget(NWID_BUTTON_DROPDOWN, COLOUR_GREY, RVW_WIDGET_START_REPLACE), SetMinimalSize(139, 12), SetDataTip(STR_BLACK_STRING, STR_REPLACE_HELP_START_BUTTON),
+ 		NWidget(WWT_PANEL, COLOUR_GREY, RVW_WIDGET_INFO_TAB), SetMinimalSize(167, 12), SetDataTip(0x0, STR_REPLACE_HELP_REPLACE_INFO_TAB), SetResize(1, 0),
+ 		EndContainer(),
+ 		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, RVW_WIDGET_STOP_REPLACE), SetMinimalSize(150, 12), SetDataTip(STR_REPLACE_VEHICLES_STOP, STR_REPLACE_HELP_STOP_BUTTON),
+@@ -559,7 +609,7 @@ static const NWidgetPart _nested_replace_vehicle_widgets[] = {
+ 		NWidget(WWT_PANEL, COLOUR_GREY, RVW_WIDGET_RIGHT_DETAILS), SetMinimalSize(228, 92), SetResize(1, 0), EndContainer(),
+ 	EndContainer(),
+ 	NWidget(NWID_HORIZONTAL),
+-		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, RVW_WIDGET_START_REPLACE), SetMinimalSize(139, 12), SetDataTip(STR_REPLACE_VEHICLES_START, STR_REPLACE_HELP_START_BUTTON),
++		NWidget(NWID_BUTTON_DROPDOWN, COLOUR_GREY, RVW_WIDGET_START_REPLACE), SetMinimalSize(139, 12), SetDataTip(STR_BLACK_STRING, STR_REPLACE_HELP_START_BUTTON),
+ 		NWidget(WWT_PANEL, COLOUR_GREY, RVW_WIDGET_INFO_TAB), SetMinimalSize(167, 12), SetDataTip(0x0, STR_REPLACE_HELP_REPLACE_INFO_TAB), SetResize(1, 0), EndContainer(),
+ 		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, RVW_WIDGET_STOP_REPLACE), SetMinimalSize(138, 12), SetDataTip(STR_REPLACE_VEHICLES_STOP, STR_REPLACE_HELP_STOP_BUTTON),
+ 		NWidget(WWT_RESIZEBOX, COLOUR_GREY),
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+index e2671b9..abdb693 100644
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -2966,6 +2966,8 @@ STR_REPLACE_HELP_LEFT_ARRAY                                     :{BLACK}Select t
+ STR_REPLACE_HELP_RIGHT_ARRAY                                    :{BLACK}Select the new engine type you would like to use in place of the left selected engine type
+ 
+ STR_REPLACE_VEHICLES_START                                      :{BLACK}Start Replacing Vehicles
++STR_REPLACE_VEHICLES_NOW                                        :Replace all vehicles now
++STR_REPLACE_VEHICLES_WHEN_OLD                                   :Replace only old vehicles
+ STR_REPLACE_HELP_START_BUTTON                                   :{BLACK}Press to begin replacement of the left selected engine type with the right selected engine type
+ STR_REPLACE_NOT_REPLACING                                       :{BLACK}Not replacing
+ STR_REPLACE_NOT_REPLACING_VEHICLE_SELECTED                      :{BLACK}No vehicle selected
+diff --git a/src/saveload/autoreplace_sl.cpp b/src/saveload/autoreplace_sl.cpp
+index 96fff77..a4a35dd 100644
+--- a/src/saveload/autoreplace_sl.cpp
++++ b/src/saveload/autoreplace_sl.cpp
+@@ -20,6 +20,7 @@ static const SaveLoad _engine_renew_desc[] = {
+ 
+ 	    SLE_REF(EngineRenew, next,     REF_ENGINE_RENEWS),
+ 	SLE_CONDVAR(EngineRenew, group_id, SLE_UINT16, 60, SL_MAX_VERSION),
++	SLE_CONDVAR(EngineRenew, replace_when_old, SLE_BOOL, 159, SL_MAX_VERSION),
+ 	SLE_END()
+ };
+ 
+@@ -46,7 +47,9 @@ static void Load_ERNW()
+ 			er->group_id = ALL_GROUP;
+ 		} else if (IsSavegameVersionBefore(71)) {
+ 			if (er->group_id == DEFAULT_GROUP) er->group_id = ALL_GROUP;
+-		}
++			} else if (IsSavegameVersionBefore(159)) {
++				er->replace_when_old = false;
++			}
+ 	}
+ }
+ 
+diff --git a/src/saveload/saveload.cpp b/src/saveload/saveload.cpp
+index 552b008..97a538d 100644
+--- a/src/saveload/saveload.cpp
++++ b/src/saveload/saveload.cpp
+@@ -224,7 +224,7 @@
+  *  157   21862
+  *  158   21933
+  */
+-extern const uint16 SAVEGAME_VERSION = 158; ///< Current savegame version of OpenTTD.
++extern const uint16 SAVEGAME_VERSION = 159; ///< Current savegame version of OpenTTD.
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+diff --git a/src/vehicle.cpp b/src/vehicle.cpp
+index ada4948..469843f 100644
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -130,6 +130,9 @@ bool Vehicle::NeedsServicing() const
+ 	if (needed_money > c->money) return false;
+ 
+ 	for (const Vehicle *v = this; v != NULL; v = (v->type == VEH_TRAIN) ? Train::From(v)->GetNextUnit() : NULL) {
++		/* Shall we autoreplace the vehicle now? */
++		if (EngineHasReplacementWhenOldForCompany(c, v->engine_type, v->group_id) && !v->NeedsAutorenewing(c)) continue;
++		
+ 		EngineID new_engine = EngineReplacementForCompany(c, v->engine_type, v->group_id);
+ 
+ 		/* Check engine availability */
+@@ -851,12 +854,15 @@ void CallVehicleTicks()
+ 		 * they are already leaving the depot again before being replaced. */
+ 		if (it->second) v->vehstatus &= ~VS_STOPPED;
+ 
++		/* Shall we autoreplace the vehicle now? */
++		const Company *c = Company::Get(_current_company);
++		if (EngineHasReplacementWhenOldForCompany(c, v->engine_type, v->group_id) && !v->NeedsAutorenewing(c)) continue;
++
+ 		/* Store the position of the effect as the vehicle pointer will become invalid later */
+ 		int x = v->x_pos;
+ 		int y = v->y_pos;
+ 		int z = v->z_pos;
+ 
+-		const Company *c = Company::Get(_current_company);
+ 		SubtractMoneyFromCompany(CommandCost(EXPENSES_NEW_VEHICLES, (Money)c->settings.engine_renew_money));
+ 		CommandCost res = DoCommand(0, v->index, 0, DC_EXEC, CMD_AUTOREPLACE_VEHICLE);
+ 		SubtractMoneyFromCompany(CommandCost(EXPENSES_NEW_VEHICLES, -(Money)c->settings.engine_renew_money));
+-- 
+1.7.4
+

@@ -1,0 +1,185 @@
+
+ /** Window class for handling the bridge-build GUI. */
+-class BuildBridgeWindow : public Window {
++class BuildBridgeWindow : public WindowPopup {
+ private:
+
+>>> Interesting approach. I was surprised at first, but it seems to be a good one.
+
+
+ public:
+-	BuildBridgeWindow(const WindowDesc *desc, TileIndex start, TileIndex end, uint32 br_type, GUIBridgeList *bl) : Window(),
++	BuildBridgeWindow(const WindowDesc *desc, TileIndex start, TileIndex end, uint32 br_type, GUIBridgeList *bl) : WindowPopup(WPUT_WIDGET_RELATIVE),
+ 		start_tile(start),
+ 		end_tile(end),
+ 		type(br_type),
+ 		bridges(bl)
+ 	{
++		this->wpu_widget = BBSW_BRIDGE_LIST;
++		this->WpuSetModifierX(-5);
++		this->WpuSetModifierY(-5);
+ 		this->CreateNestedTree(desc);
+
+>>> Any particular reason why you don't put these constants in the constructor? That saves 3 lines of code in both windows.
+
+>>> The "-5" values seem standard, so you could use them as default values.
+
+
+
+
+
+ void ScrollbarClickHandler(Window *w, NWidgetCore *nw, int x, int y);
+ 
++
++/**
++ * WindowPopup's positionment types
++ */
++enum WindowPopupType {
++	WPUT_ORIGIN = 1,        ///< align with the top-left corner of the window
++	WPUT_WIDGET_RELATIVE,   ///< align from a nested widget
++	WPUT_CENTERED,		///< center the widget under the cursor. Ignore modifiers.
++};
+
+>>> "positionment" is not an english word, perhaps you meant "positioning" ?
+
+>>> enums start at 0 (which you do not need to specify.
+
+>>> After a value, only spaces are allowed (WPUT_CENTERED, is followed by 2 TABs).
+
+>>> Comments start with an upper case letter, and end with a "." normally.
+
+
++/**
++ * Specialized Window bound to open around the cursor's position.
++ * Its sole purpose is to provide the OnInitialPosition() method
++ * and an simple interface to control its behaviour.
++ */
+
+>>> Doxygen uses # to denote a reference to code. You'd thus write "#OnInitialPosition" (the "()" are normally omitted, as the yare implied by the word "method" already).
+
++struct WindowPopup: public Window {
++public:
++	                 WindowPopup( WindowPopupType t = WPUT_ORIGIN);
++	virtual Point    OnInitialPosition(const WindowDesc *desc, int16 sm_width, int16 sm_height, int window_number);
++protected:
++	uint             wpu_widget;	
++	int WpuGetModifierX() const;
++	int WpuGetModifierY() const;
++	void WpuSetModifierX(int x);
++	void WpuSetModifierY(int y);
++private:
++	uint32           type;
++	int              modifier_x;
++	int              modifier_y;
++};
+
+>>> Code style does not allow this aligning of entries. Just start right after the TAB, 1 space between the words, and no space directly inside parentheses ie "WindowPopup(WindowPopupType ...". 1 or 2 extra spaces for alignment is possible, but not much more.
+
+>>> Watch the whitespace at the end of the line too, the "wpu_widget;" line as a TAB at the end. (It is useful to turn on display of spaces and TABs in your editor.)
+
+>>> struct defaults to public, thus "public:" is not needed.
+
+>>> We don't use setters and getters, instead we make variables simply public.
+>>> setters and getters are mostly useful when you want code to interface with you that does not have access to the source code. That allows you to change the code without breaking the code that depends on you. In openttd there is no such external code.
+>>> The exception is when setting something does more than assigning the value to a variable, or when a value needs to be computed rather than simply pulled from a variable.
+
+>>> Another reason for dropping the setters and getters is that we don't add dead code. With moving the additional data values into the constructors, both the getters and the setters are not used any more, ie they are dead code.
+
+>>> I don't really like the word "modifier", but I have not found a better word for it, so far.
+
+
+
+@@ -21,6 +21,7 @@
+ #include "zoom_func.h"
+ #include "vehicle_base.h"
+ #include "window_func.h"
++#include "window_gui.h"
+ #include "tilehighlight_func.h"
+
+>>> Did you try to compile without adding the '#include "window_gui.h"' line?
+>>> The PickerBaseWindow class does the same as you are doing (it extends Window), with its destructor defined in window.cpp. However, that seems to compile without adding the include.
+
+>>> An alternative could be to put your code inline in the class definition.
+>>> I am not sure which is best.
+
+
++
++/**
++ * Sets safe-initial values.
++ * @param t	The type of positionment desired.
++ */
++WindowPopup::WindowPopup(WindowPopupType t): Window()
++{
++	this->type = t;
++	this->modifier_x = 0;
++	this->modifier_y = 0;
++	this->wpu_widget = 0;
++}
+
+>>> No TAB in the @param line.
+
+>>> By convention, the names of the formal parameters ("t" here) should be the same as the variable you assign to.
+>>> This does not cause confusion, since "this->" is used as prefix to refer to the object variables.
+
+>>> A space at both sides of the ":" as in "...) : Window()"
+
+>>> By adding the other values as parameters too, you can drop the getters and setters below, as explained.
+
+
++/**
++ * Compute WindowPopup origin Point.
++ *
++ * @param desc		The window's WindowDesc object
++ * @param sm_width	window's smallest_x
++ * @param sm_height	window's smallest_y
++ * @param window_number unused
++ * @return The origin coordinate of the window.
++ */
+
+>>> Like the OnInitialPosition abvove, when you refer to code names, prefix with a #, eg #smallest_x.
+
+>>> @param lines should not contain TAB between the variable and the explanation.
+
+>>> Like the enum fields, comments start with an upper case and end with a "."
+
+
++/*virtual*/ Point WindowPopup::OnInitialPosition(const WindowDesc *desc, int16 sm_width, int16 sm_height, int window_number)
++{
++        Point rv; 
++        int x = 0, y = 0;
++
++        if (this->type == WPUT_WIDGET_RELATIVE) {
++                if (this->wpu_widget) {
++                      	NWidgetBase *wid = this->GetWidget<NWidgetBase>(this->wpu_widget);
++                        x = _cursor.pos.x - wid->pos_x + modifier_x;
++                        y = _cursor.pos.y - wid->pos_y + modifier_y;
++                } else {
++			this->type = WPUT_ORIGIN;
++		}
++        }
++
++        if (this->type == WPUT_ORIGIN) {
++                x = _cursor.pos.x + this->modifier_x;
++                y = _cursor.pos.y + this->modifier_y;
++        } else if (this->type == WPUT_CENTERED) {
++                x = _cursor.pos.x - (desc->default_width / 2);
++                y = _cursor.pos.y - (desc->default_height / 2);
++        }
++
++        rv.x = Clamp(x, 0, _screen.width - desc->default_width);
++        rv.y = Clamp(y, GetMainViewTop(), GetMainViewBottom() - desc->default_height);
++        return rv;
++}
+
+>>> Be more careful with spacing. Above, most code lines uses spaces rather than TABs for code indentation. The "Point rv;" also has trailing whitespace.
+
+>>> Why don't you use a switch statement here? Seems easier.
+
+>>> As for variables, we declare as close as possible to first use. Thus in the current code, "Point rv;" should be near the end. However, instead of x and y, you could also use rv.x and rv.y, and drop x and y.
+>>> If you initialize a variable, use a separate declaration for each variable at a separate line (thus "int x = 0; \n int y = 0'"). Initialization of variables that always get a value is not done.
+
+>>> We always do an explicit compare, except for boolean value, thus "if (this->wpu_widget != 0) {"
+
+>>> instance variables are ALWAYS referenced with "this->" (first use of modifier_x/y doesn't use it)
+
+>>> no unneeded parentheses where the meaning is clear, "/ 2" has higher priority and does not need parentheses.

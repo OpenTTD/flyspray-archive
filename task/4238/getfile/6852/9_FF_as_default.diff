@@ -1,0 +1,76 @@
+Codechange/Fix: Use 0xFF instead of 0 as default value for visual effect. This makes setting train prop 22 to 0 actually work.
+
+diff -r 642c3acc7514 src/engine.cpp
+--- a/src/engine.cpp	Wed Nov 17 21:11:54 2010 +0100
++++ b/src/engine.cpp	Wed Nov 17 21:35:13 2010 +0100
+@@ -85,6 +85,8 @@
+ 		this->info.base_life = 0xFF;
+ 		/* Set road vehicle tractive effort to the default value */
+ 		if (type == VEH_ROAD) this->u.road.tractive_effort = 0x4C;
++		/* Set visual effect to the default value */
++		if (type == VEH_TRAIN) this->u.rail.visual_effect = VE_DEFAULT;
+ 		return;
+ 	}
+ 
+diff -r 642c3acc7514 src/newgrf.cpp
+--- a/src/newgrf.cpp	Wed Nov 17 21:11:54 2010 +0100
++++ b/src/newgrf.cpp	Wed Nov 17 21:35:13 2010 +0100
+@@ -48,6 +48,7 @@
+ #include "gui.h"
+ #include "vehicle_func.h"
+ #include "language.h"
++#include "vehicle_base.h"
+ 
+ #include "table/strings.h"
+ #include "table/build_industry.h"
+@@ -710,8 +711,13 @@
+ 				break;
+ 
+ 			case 0x22: // Visual effect
+-				/** @see note in engine.h about rvi->visual_effect */
+ 				rvi->visual_effect = buf->ReadByte();
++				/* Avoid accidentally setting visual_effect to the default value
++				 * Since bit 6 (disable effects) is set anyways, we can safely erase some bits. */
++				if (rvi->visual_effect == VE_DEFAULT) {
++					assert(HasBit(rvi->visual_effect, VE_DISABLE_EFFECT));
++					SB(rvi->visual_effect, VE_TYPE_START, VE_TYPE_COUNT, 0);
++				}
+ 				break;
+ 
+ 			case 0x23: // Powered wagons weight bonus
+diff -r 642c3acc7514 src/table/engines.h
+--- a/src/table/engines.h	Wed Nov 17 21:11:54 2010 +0100
++++ b/src/table/engines.h	Wed Nov 17 21:35:13 2010 +0100
+@@ -364,7 +364,7 @@
+  * Tractive effort coefficient by default is the same as TTDPatch, 0.30*256=76
+  * Air drag value depends on the top speed of the vehicle.
+  */
+-#define RVI(a, b, c, d, e, f, g, h, i, j, k) { a, b, c, {j}, d, e, f, g, h, k, i, 0, 0, 0, 0, 0, 76, 0, 0 }
++#define RVI(a, b, c, d, e, f, g, h, i, j, k) { a, b, c, {j}, d, e, f, g, h, k, i, 0, 0, 0, VE_DEFAULT, 0, 76, 0, 0 }
+ #define M RAILVEH_MULTIHEAD
+ #define W RAILVEH_WAGON
+ #define G RAILVEH_SINGLEHEAD
+diff -r 642c3acc7514 src/vehicle.cpp
+--- a/src/vehicle.cpp	Wed Nov 17 21:11:54 2010 +0100
++++ b/src/vehicle.cpp	Wed Nov 17 21:35:13 2010 +0100
+@@ -1864,7 +1864,7 @@
+ 
+ 	const Engine *e = Engine::Get(this->engine_type);
+ 	if (this->type == VEH_TRAIN) {
+-		if (e->u.rail.visual_effect != 0) {
++		if (e->u.rail.visual_effect != VE_DEFAULT) {
+ 			this->vcache.cached_vis_effect = e->u.rail.visual_effect;
+ 		} else {
+ 			Train *t = Train::From(this);
+diff -r 642c3acc7514 src/vehicle_base.h
+--- a/src/vehicle_base.h	Wed Nov 17 21:11:54 2010 +0100
++++ b/src/vehicle_base.h	Wed Nov 17 21:35:13 2010 +0100
+@@ -79,6 +79,8 @@
+ 
+ 	VE_DISABLE_EFFECT      = 6, ///< Flag to disable visual effect
+ 	VE_DISABLE_WAGON_POWER = 7, ///< Flag to disable wagon power
++
++	VE_DEFAULT = 0xFF,          ///< Default value to indicate that visual effect should be based on engine class
+ };
+ 
+ /** Cached often queried values common to all vehicles. */

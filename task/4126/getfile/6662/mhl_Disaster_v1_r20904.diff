@@ -1,0 +1,252 @@
+Index: src/disaster_cmd.cpp
+===================================================================
+--- src/disaster_cmd.cpp	(Revision 20904)
++++ src/disaster_cmd.cpp	(Arbeitskopie)
+@@ -43,6 +43,7 @@
+ #include "company_base.h"
+ #include "core/random_func.hpp"
+ #include "core/backup_type.hpp"
++#include "aircraft.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -120,6 +121,50 @@
+ 	_disaster_images_4, _disaster_images_5,                     ///< small and big submarine sprites
+ };
+ 
++static inline uint GetTileHeightBelowFlyingDisasterVehicle(int x_pos, int y_pos)
++{
++	TileIndex tile = TileVirtXY(x_pos, y_pos);
++	uint tile_height;
++
++	/* Check for being inside the map. If not call TileHeightOutsideMap() instead of TileHeight(). */
++	if (x_pos >= 0 && x_pos <= (int)MapSizeX() * (int)TILE_SIZE - 1
++			&& y_pos >= 0 && y_pos <= (int)MapSizeY() * (int)TILE_SIZE - 1) {
++		tile_height = TileHeight(tile) * TILE_HEIGHT;
++	} else {
++		tile_height = TileHeightOutsideMap(x_pos, y_pos) * TILE_HEIGHT;
++	}
++
++	return tile_height;
++}
++
++static inline int GetFlyingDisasterVehicleMinHeight(int x_pos, int y_pos)
++{
++	return GetTileHeightBelowFlyingDisasterVehicle(x_pos, y_pos) + AIRCRAFT_MIN_FLYING_ALTITUDE;
++}
++
++static inline int GetFlyingDisasterVehicleMaxHeight(int x_pos, int y_pos)
++{
++	return GetTileHeightBelowFlyingDisasterVehicle(x_pos, y_pos) + AIRCRAFT_MAX_FLYING_ALTITUDE;
++}
++
++static inline void AdjustFlyingDisasterVehicleHeight(DisasterVehicle *v)
++{
++	int min_altitude = GetFlyingDisasterVehicleMinHeight(v->x_pos, v->y_pos);
++	int max_altitude = GetFlyingDisasterVehicleMaxHeight(v->x_pos, v->y_pos);
++	int middle_altitude = min_altitude + ((uint)(max_altitude - min_altitude)) / 2;
++	if (v->z_pos < min_altitude || (v->is_in_min_height_correction && v->z_pos < middle_altitude)) {
++		v->is_in_min_height_correction = true;
++		v->z_pos += 2;
++	} else if (v->z_pos > max_altitude || (v->is_in_max_height_correction && v->z_pos > middle_altitude)) {
++		v->is_in_max_height_correction = true;
++		v->z_pos -= 2;
++	} else if (v->is_in_min_height_correction && v->z_pos >= middle_altitude) {
++		v->is_in_min_height_correction = false;
++	} else if (v->is_in_max_height_correction && v->z_pos <= middle_altitude) {
++		v->is_in_max_height_correction = false;
++	}
++}
++
+ static void DisasterVehicleUpdateImage(DisasterVehicle *v)
+ {
+ 	SpriteID img = v->image_override;
+@@ -131,7 +176,7 @@
+  * Initialize a disaster vehicle. These vehicles are of type VEH_DISASTER, are unclickable
+  * and owned by nobody
+  */
+-static void InitializeDisasterVehicle(DisasterVehicle *v, int x, int y, byte z, Direction direction, byte subtype)
++static void InitializeDisasterVehicle(DisasterVehicle *v, int x, int y, int z, Direction direction, byte subtype)
+ {
+ 	v->x_pos = x;
+ 	v->y_pos = y;
+@@ -144,13 +189,15 @@
+ 	v->vehstatus = VS_UNCLICKABLE;
+ 	v->image_override = 0;
+ 	v->current_order.Free();
++	v->is_in_min_height_correction = false;
++	v->is_in_max_height_correction = false;
+ 
+ 	DisasterVehicleUpdateImage(v);
+ 	VehicleMove(v, false);
+ 	MarkSingleVehicleDirty(v);
+ }
+ 
+-static void SetDisasterVehiclePos(DisasterVehicle *v, int x, int y, byte z)
++static void SetDisasterVehiclePos(DisasterVehicle *v, int x, int y, int z)
+ {
+ 	v->x_pos = x;
+ 	v->y_pos = y;
+@@ -199,7 +246,7 @@
+ 		if (HasBit(v->tick_counter, 0)) return true;
+ 
+ 		GetNewVehiclePosResult gp = GetNewVehiclePos(v);
+-
++		AdjustFlyingDisasterVehicleHeight(v);
+ 		SetDisasterVehiclePos(v, gp.x, gp.y, v->z_pos);
+ 
+ 		if (v->current_order.GetDestination() == 1) {
+@@ -247,7 +294,7 @@
+ 
+ 	int x = v->x_pos;
+ 	int y = v->y_pos;
+-	byte z = GetSlopeZ(x, y);
++	int z = GetSlopeZ(x, y);
+ 	if (z < v->z_pos) z = v->z_pos - 1;
+ 	SetDisasterVehiclePos(v, x, y, z);
+ 
+@@ -296,6 +343,7 @@
+ 		if (Delta(x, v->x_pos) + Delta(y, v->y_pos) >= (int)TILE_SIZE) {
+ 			v->direction = GetDirectionTowards(v, x, y);
+ 			GetNewVehiclePosResult gp = GetNewVehiclePos(v);
++			AdjustFlyingDisasterVehicleHeight(v);
+ 			SetDisasterVehiclePos(v, gp.x, gp.y, v->z_pos);
+ 			return true;
+ 		}
+@@ -331,7 +379,7 @@
+ 		v->direction = GetDirectionTowards(v, u->x_pos, u->y_pos);
+ 		GetNewVehiclePosResult gp = GetNewVehiclePos(v);
+ 
+-		byte z = v->z_pos;
++		int z = v->z_pos;
+ 		if (dist <= TILE_SIZE && z > u->z_pos) z--;
+ 		SetDisasterVehiclePos(v, gp.x, gp.y, z);
+ 
+@@ -389,6 +437,7 @@
+ 	v->image_override = (v->current_order.GetDestination() == 1 && HasBit(v->tick_counter, 2)) ? image_override : 0;
+ 
+ 	GetNewVehiclePosResult gp = GetNewVehiclePos(v);
++	AdjustFlyingDisasterVehicleHeight(v);
+ 	SetDisasterVehiclePos(v, gp.x, gp.y, v->z_pos);
+ 
+ 	if ((leave_at_top && gp.x < (-10 * (int)TILE_SIZE)) || (!leave_at_top && gp.x > (int)(MapSizeX() * TILE_SIZE + 9 * TILE_SIZE) - 1)) {
+@@ -486,6 +535,7 @@
+ 			v->direction = GetDirectionTowards(v, x, y);
+ 
+ 			GetNewVehiclePosResult gp = GetNewVehiclePos(v);
++			AdjustFlyingDisasterVehicleHeight(v);
+ 			SetDisasterVehiclePos(v, gp.x, gp.y, v->z_pos);
+ 			return true;
+ 		}
+@@ -496,7 +546,7 @@
+ 			return false;
+ 		}
+ 
+-		byte z = GetSlopeZ(v->x_pos, v->y_pos);
++		int z = GetSlopeZ(v->x_pos, v->y_pos);
+ 		if (z < v->z_pos) {
+ 			SetDisasterVehiclePos(v, v->x_pos, v->y_pos, v->z_pos - 1);
+ 			return true;
+@@ -541,6 +591,7 @@
+ 		if (Delta(x, v->x_pos) + Delta(y, v->y_pos) >= (int)TILE_SIZE) {
+ 			v->direction = GetDirectionTowards(v, x, y);
+ 			GetNewVehiclePosResult gp = GetNewVehiclePos(v);
++			AdjustFlyingDisasterVehicleHeight(v);
+ 			SetDisasterVehiclePos(v, gp.x, gp.y, v->z_pos);
+ 			return true;
+ 		}
+@@ -576,6 +627,7 @@
+ 	v->tick_counter++;
+ 
+ 	GetNewVehiclePosResult gp = GetNewVehiclePos(v);
++	AdjustFlyingDisasterVehicleHeight(v);
+ 	SetDisasterVehiclePos(v, gp.x, gp.y, v->z_pos);
+ 
+ 	if (gp.x > (int)(MapSizeX() * TILE_SIZE + 9 * TILE_SIZE) - 1) {
+@@ -691,7 +743,8 @@
+ 	}
+ 
+ 	DisasterVehicle *v = new DisasterVehicle();
+-	InitializeDisasterVehicle(v, x, 0, 135, DIR_SE, ST_ZEPPELINER);
++	int z = GetFlyingDisasterVehicleMinHeight(x, 0);
++	InitializeDisasterVehicle(v, x, 0, z, DIR_SE, ST_ZEPPELINER);
+ 
+ 	/* Allocate shadow */
+ 	DisasterVehicle *u = new DisasterVehicle();
+@@ -712,7 +765,8 @@
+ 	DisasterVehicle *v = new DisasterVehicle();
+ 	int x = TileX(Random()) * TILE_SIZE + TILE_SIZE / 2;
+ 
+-	InitializeDisasterVehicle(v, x, 0, 135, DIR_SE, ST_SMALL_UFO);
++	int z = GetFlyingDisasterVehicleMinHeight(x, 0);
++	InitializeDisasterVehicle(v, x, 0, z, DIR_SE, ST_SMALL_UFO);
+ 	v->dest_tile = TileXY(MapSizeX() / 2, MapSizeY() / 2);
+ 	v->age = 0;
+ 
+@@ -746,7 +800,8 @@
+ 	int x = (MapSizeX() + 9) * TILE_SIZE - 1;
+ 	int y = TileY(found->location.tile) * TILE_SIZE + 37;
+ 
+-	InitializeDisasterVehicle(v, x, y, 135, DIR_NE, ST_AIRPLANE);
++	int z = GetFlyingDisasterVehicleMinHeight(x, y);
++	InitializeDisasterVehicle(v, x, y, z, DIR_NE, ST_AIRPLANE);
+ 
+ 	DisasterVehicle *u = new DisasterVehicle();
+ 	v->SetNext(u);
+@@ -776,7 +831,8 @@
+ 	int x = -16 * (int)TILE_SIZE;
+ 	int y = TileY(found->location.tile) * TILE_SIZE + 37;
+ 
+-	InitializeDisasterVehicle(v, x, y, 135, DIR_SW, ST_HELICOPTER);
++	int z = GetFlyingDisasterVehicleMinHeight(x, y);
++	InitializeDisasterVehicle(v, x, y, z, DIR_SW, ST_HELICOPTER);
+ 
+ 	DisasterVehicle *u = new DisasterVehicle();
+ 	v->SetNext(u);
+@@ -785,7 +841,7 @@
+ 
+ 	DisasterVehicle *w = new DisasterVehicle();
+ 	u->SetNext(w);
+-	InitializeDisasterVehicle(w, x, y, 140, DIR_SW, ST_HELICOPTER_ROTORS);
++	InitializeDisasterVehicle(w, x, y, z + 5, DIR_SW, ST_HELICOPTER_ROTORS);
+ }
+ 
+ 
+@@ -799,7 +855,8 @@
+ 	int x = TileX(Random()) * TILE_SIZE + TILE_SIZE / 2;
+ 	int y = MapMaxX() * TILE_SIZE - 1;
+ 
+-	InitializeDisasterVehicle(v, x, y, 135, DIR_NW, ST_BIG_UFO);
++	int z = GetFlyingDisasterVehicleMinHeight(x, y);
++	InitializeDisasterVehicle(v, x, y, z, DIR_NW, ST_BIG_UFO);
+ 	v->dest_tile = TileXY(MapSizeX() / 2, MapSizeY() / 2);
+ 	v->age = 0;
+ 
+Index: src/saveload/vehicle_sl.cpp
+===================================================================
+--- src/saveload/vehicle_sl.cpp	(Revision 20904)
++++ src/saveload/vehicle_sl.cpp	(Arbeitskopie)
+@@ -664,6 +664,8 @@
+ 
+ 		     SLE_VAR(DisasterVehicle, image_override,            SLE_UINT16),
+ 		     SLE_VAR(DisasterVehicle, big_ufo_destroyer_target,  SLE_UINT16),
++		 SLE_CONDVAR(DisasterVehicle, is_in_max_height_correction, SLE_UINT8,     MORE_HEIGHTLEVEL_SAVEGAME_VERSION, SL_MAX_VERSION),
++		 SLE_CONDVAR(DisasterVehicle, is_in_min_height_correction, SLE_UINT8,     MORE_HEIGHTLEVEL_SAVEGAME_VERSION, SL_MAX_VERSION),
+ 
+ 		SLE_CONDNULL(16,                                                           2, 143), // old reserved space
+ 
+Index: src/vehicle_base.h
+===================================================================
+--- src/vehicle_base.h	(Revision 20904)
++++ src/vehicle_base.h	(Arbeitskopie)
+@@ -733,6 +733,10 @@
+ 	uint16 image_override;
+ 	VehicleID big_ufo_destroyer_target;
+ 
++	// see aircraft_is_in_min/max_height_correction in aircraft.h
++    bool is_in_max_height_correction;
++    bool is_in_min_height_correction;
++
+ 	/** We don't want GCC to zero our struct! It already is zeroed and has an index! */
+ 	DisasterVehicle() : SpecializedVehicle<DisasterVehicle, VEH_DISASTER>() {}
+ 	/** We want to 'destruct' the right class. */

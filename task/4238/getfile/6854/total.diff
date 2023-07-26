@@ -1,0 +1,719 @@
+diff -r bd1ebafbdd43 -r 2df004262f01 src/engine.cpp
+--- a/src/engine.cpp	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/engine.cpp	Wed Nov 17 22:42:23 2010 +0100
+@@ -85,6 +85,12 @@
+ 		this->info.base_life = 0xFF;
+ 		/* Set road vehicle tractive effort to the default value */
+ 		if (type == VEH_ROAD) this->u.road.tractive_effort = 0x4C;
++		/* Set visual effect to the default value */
++		switch (type) {
++			case VEH_TRAIN: this->u.rail.visual_effect = VE_DEFAULT; break;
++			case VEH_ROAD:  this->u.road.visual_effect = VE_DEFAULT; break;
++			case VEH_SHIP:  this->u.ship.visual_effect = VE_DEFAULT; break;
++		}
+ 		return;
+ 	}
+ 
+diff -r bd1ebafbdd43 -r 2df004262f01 src/engine_type.h
+--- a/src/engine_type.h	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/engine_type.h	Wed Nov 17 22:42:23 2010 +0100
+@@ -67,6 +67,7 @@
+ 	byte running_cost;
+ 	SoundID sfx;
+ 	bool old_refittable;   ///< Is ship refittable; only used during initialisation. Later use EngineInfo::refit_mask.
++	byte visual_effect;    ///< Bitstuffed NewGRF visual effect data
+ };
+ 
+ /* AircraftVehicleInfo subtypes, bitmask type.
+@@ -102,6 +103,7 @@
+ 	uint8 power;             ///< Power in 10hp units
+ 	uint8 tractive_effort;   ///< Coefficient of tractive effort
+ 	uint8 air_drag;          ///< Coefficient of air drag
++	byte visual_effect;      ///< Bitstuffed NewGRF visual effect data
+ };
+ 
+ /**
+diff -r bd1ebafbdd43 -r 2df004262f01 src/lang/english.txt
+--- a/src/lang/english.txt	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/lang/english.txt	Wed Nov 17 22:42:23 2010 +0100
+@@ -1090,7 +1090,7 @@
+ STR_CONFIG_SETTING_CATCHMENT                                    :{LTBLUE}Allow more realistically sized catchment areas: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_EXTRADYNAMITE                                :{LTBLUE}Allow removal of more town-owned roads, bridges, etc: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_MAMMOTHTRAINS                                :{LTBLUE}Enable building very long trains: {ORANGE}{STRING1}
+-STR_CONFIG_SETTING_SMOKE_AMOUNT                                 :{LTBLUE}Amount of locomotive smoke/sparks: {ORANGE}{STRING1}
++STR_CONFIG_SETTING_SMOKE_AMOUNT                                 :{LTBLUE}Amount of vehicle smoke/sparks: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_SMOKE_AMOUNT_NONE                            :None
+ STR_CONFIG_SETTING_SMOKE_AMOUNT_ORIGINAL                        :Original
+ STR_CONFIG_SETTING_SMOKE_AMOUNT_REALISTIC                       :Realistic
+diff -r bd1ebafbdd43 -r 2df004262f01 src/newgrf.cpp
+--- a/src/newgrf.cpp	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/newgrf.cpp	Wed Nov 17 22:42:23 2010 +0100
+@@ -48,6 +48,7 @@
+ #include "gui.h"
+ #include "vehicle_func.h"
+ #include "language.h"
++#include "vehicle_base.h"
+ 
+ #include "table/strings.h"
+ #include "table/build_industry.h"
+@@ -710,8 +711,13 @@
+ 				break;
+ 
+ 			case 0x22: // Visual effect
+-				/** @see note in engine.h about rvi->visual_effect */
+ 				rvi->visual_effect = buf->ReadByte();
++				/* Avoid accidentally setting visual_effect to the default value
++				 * Since bit 6 (disable effects) is set anyways, we can safely erase some bits. */
++				if (rvi->visual_effect == VE_DEFAULT) {
++					assert(HasBit(rvi->visual_effect, VE_DISABLE_EFFECT));
++					SB(rvi->visual_effect, VE_TYPE_START, VE_TYPE_COUNT, 0);
++				}
+ 				break;
+ 
+ 			case 0x23: // Powered wagons weight bonus
+@@ -885,6 +891,16 @@
+ 				AlterVehicleListOrder(e->index, buf->ReadExtendedByte());
+ 				break;
+ 
++			case 0x21: // Visual effect
++				rvi->visual_effect = buf->ReadByte();
++				/* Avoid accidentally setting visual_effect to the default value
++				 * Since bit 6 (disable effects) is set anyways, we can safely erase some bits. */
++				if (rvi->visual_effect == VE_DEFAULT) {
++					assert(HasBit(rvi->visual_effect, VE_DISABLE_EFFECT));
++					SB(rvi->visual_effect, VE_TYPE_START, VE_TYPE_COUNT, 0);
++				}
++				break;
++
+ 			default:
+ 				ret = CommonVehicleChangeInfo(ei, prop, buf);
+ 				break;
+@@ -1001,6 +1017,16 @@
+ 				AlterVehicleListOrder(e->index, buf->ReadExtendedByte());
+ 				break;
+ 
++			case 0x1C: // Visual effect
++				svi->visual_effect = buf->ReadByte();
++				/* Avoid accidentally setting visual_effect to the default value
++				 * Since bit 6 (disable effects) is set anyways, we can safely erase some bits. */
++				if (svi->visual_effect == VE_DEFAULT) {
++					assert(HasBit(svi->visual_effect, VE_DISABLE_EFFECT));
++					SB(svi->visual_effect, VE_TYPE_START, VE_TYPE_COUNT, 0);
++				}
++				break;
++
+ 			default:
+ 				ret = CommonVehicleChangeInfo(ei, prop, buf);
+ 				break;
+diff -r bd1ebafbdd43 -r 2df004262f01 src/newgrf_callbacks.h
+--- a/src/newgrf_callbacks.h	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/newgrf_callbacks.h	Wed Nov 17 22:42:23 2010 +0100
+@@ -28,8 +28,8 @@
+ 
+ 	/* There are no callbacks 0x02 - 0x0F. */
+ 
+-	/** Powered wagons and visual effects. */
+-	CBID_TRAIN_WAGON_POWER               = 0x10, // 8 bit callback
++	/** Visual effects and wagon power. */
++	CBID_VEHICLE_VISUAL_EFFECT           = 0x10, // 8 bit callback
+ 
+ 	/** Vehicle length, returns the amount of 1/8's the vehicle is shorter for trains and RVs. */
+ 	CBID_VEHICLE_LENGTH                  = 0x11,
+@@ -279,7 +279,7 @@
+  * Some callbacks are always used and don't have a mask.
+  */
+ enum VehicleCallbackMask {
+-	CBM_TRAIN_WAGON_POWER      = 0, ///< Powered wagons (trains only)
++	CBM_VEHICLE_VISUAL_EFFECT  = 0, ///< Visual effects and wagon power (trains, road vehicles and ships)
+ 	CBM_VEHICLE_LENGTH         = 1, ///< Vehicle length (trains and road vehicles)
+ 	CBM_VEHICLE_LOAD_AMOUNT    = 2, ///< Load amount
+ 	CBM_VEHICLE_REFIT_CAPACITY = 3, ///< Cargo capacity after refit
+diff -r bd1ebafbdd43 -r 2df004262f01 src/newgrf_sound.h
+--- a/src/newgrf_sound.h	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/newgrf_sound.h	Wed Nov 17 22:42:23 2010 +0100
+@@ -17,15 +17,15 @@
+ #include "vehicle_type.h"
+ 
+ enum VehicleSoundEvent {
+-	VSE_START        = 1,
+-	VSE_TUNNEL       = 2,
+-	VSE_BREAKDOWN    = 3,
+-	VSE_RUNNING      = 4,
+-	VSE_TOUCHDOWN    = 5,
+-	VSE_TRAIN_EFFECT = 6,
+-	VSE_RUNNING_16   = 7,
+-	VSE_STOPPED_16   = 8,
+-	VSE_LOAD_UNLOAD  = 9,
++	VSE_START         = 1,
++	VSE_TUNNEL        = 2,
++	VSE_BREAKDOWN     = 3,
++	VSE_RUNNING       = 4,
++	VSE_TOUCHDOWN     = 5,
++	VSE_VISUAL_EFFECT = 6,
++	VSE_RUNNING_16    = 7,
++	VSE_STOPPED_16    = 8,
++	VSE_LOAD_UNLOAD   = 9,
+ };
+ 
+ 
+diff -r bd1ebafbdd43 -r 2df004262f01 src/roadveh_cmd.cpp
+--- a/src/roadveh_cmd.cpp	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/roadveh_cmd.cpp	Wed Nov 17 22:42:23 2010 +0100
+@@ -188,6 +188,9 @@
+ 		u->rcache.cached_veh_length = GetRoadVehLength(u);
+ 		v->rcache.cached_total_length += u->rcache.cached_veh_length;
+ 
++		/* Update visual effect */
++		v->UpdateVisualEffect();
++
+ 		/* Invalidate the vehicle colour map */
+ 		u->colourmap = PAL_NONE;
+ 	}
+@@ -1477,6 +1480,8 @@
+ 
+ 	if (v->IsInDepot() && RoadVehLeaveDepot(v, true)) return true;
+ 
++	v->ShowVisualEffect();
++
+ 	/* Check how far the vehicle needs to proceed */
+ 	int j = RoadVehAccelerate(v);
+ 
+diff -r bd1ebafbdd43 -r 2df004262f01 src/settings_gui.cpp
+--- a/src/settings_gui.cpp	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/settings_gui.cpp	Wed Nov 17 22:42:23 2010 +0100
+@@ -1448,7 +1448,6 @@
+ 	SettingEntry("vehicle.train_acceleration_model"),
+ 	SettingEntry("vehicle.train_slope_steepness"),
+ 	SettingEntry("vehicle.mammoth_trains"),
+-	SettingEntry("vehicle.smoke_amount"),
+ 	SettingEntry("gui.lost_train_warn"),
+ 	SettingEntry("vehicle.wagon_speed_limits"),
+ 	SettingEntry("vehicle.disable_elrails"),
+@@ -1478,6 +1477,7 @@
+ 	SettingEntry("vehicle.dynamic_engines"),
+ 	SettingEntry("vehicle.roadveh_acceleration_model"),
+ 	SettingEntry("vehicle.roadveh_slope_steepness"),
++	SettingEntry("vehicle.smoke_amount"),
+ };
+ /** Vehicles sub-page */
+ static SettingsPage _settings_vehicles_page = {_settings_vehicles, lengthof(_settings_vehicles)};
+diff -r bd1ebafbdd43 -r 2df004262f01 src/ship_cmd.cpp
+--- a/src/ship_cmd.cpp	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/ship_cmd.cpp	Wed Nov 17 22:42:23 2010 +0100
+@@ -156,6 +156,8 @@
+ void Ship::UpdateCache()
+ {
+ 	this->vcache.cached_max_speed = GetVehicleProperty(this, PROP_SHIP_SPEED, ShipVehInfo(this->engine_type)->max_speed);
++
++	this->UpdateVisualEffect();
+ }
+ 
+ Money Ship::GetRunningCost() const
+@@ -446,6 +448,8 @@
+ 
+ 	CheckShipLeaveDepot(v);
+ 
++	v->ShowVisualEffect();
++
+ 	if (!ShipAccelerate(v)) return;
+ 
+ 	GetNewVehiclePosResult gp = GetNewVehiclePos(v);
+diff -r bd1ebafbdd43 -r 2df004262f01 src/table/engines.h
+--- a/src/table/engines.h	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/table/engines.h	Wed Nov 17 22:42:23 2010 +0100
+@@ -364,7 +364,7 @@
+  * Tractive effort coefficient by default is the same as TTDPatch, 0.30*256=76
+  * Air drag value depends on the top speed of the vehicle.
+  */
+-#define RVI(a, b, c, d, e, f, g, h, i, j, k) { a, b, c, {j}, d, e, f, g, h, k, i, 0, 0, 0, 0, 0, 76, 0, 0 }
++#define RVI(a, b, c, d, e, f, g, h, i, j, k) { a, b, c, {j}, d, e, f, g, h, k, i, 0, 0, 0, VE_DEFAULT, 0, 76, 0, 0 }
+ #define M RAILVEH_MULTIHEAD
+ #define W RAILVEH_WAGON
+ #define G RAILVEH_SINGLEHEAD
+@@ -541,7 +541,7 @@
+  * @param f sound effect
+  * @param g refittable
+  */
+-#define SVI(a, b, c, d, e, f, g) { a, b, c, d, e, f, g }
++#define SVI(a, b, c, d, e, f, g) { a, b, c, d, e, f, g, VE_DEFAULT }
+ static const ShipVehicleInfo _orig_ship_vehicle_info[] = {
+ 	/*   image_index    capacity                   refittable
+ 	 *   |    cost_factor    running_cost          |
+@@ -645,7 +645,7 @@
+  * Tractive effort coefficient by default is the same as TTDPatch, 0.30*256=76
+  * Air drag value depends on the top speed of the vehicle.
+  */
+-#define ROV(a, b, c, d, e, f, g, h) { a, b, c, PR_RUNNING_ROADVEH, d, e, f, g, h, 76, 0 }
++#define ROV(a, b, c, d, e, f, g, h) { a, b, c, PR_RUNNING_ROADVEH, d, e, f, g, h, 76, 0, VE_DEFAULT }
+ static const RoadVehicleInfo _orig_road_vehicle_info[] = {
+ 	/*    image_index       sfx                                 max_speed    power
+ 	 *    |    cost_factor  |                                   |   capacity |
+diff -r bd1ebafbdd43 -r 2df004262f01 src/table/newgrf_debug_data.h
+--- a/src/table/newgrf_debug_data.h	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/table/newgrf_debug_data.h	Wed Nov 17 22:42:23 2010 +0100
+@@ -26,7 +26,7 @@
+ 
+ #define NICV(cb_id, bit) NIC(cb_id, Engine, info.callback_mask, bit)
+ static const NICallback _nic_vehicles[] = {
+-	NICV(CBID_TRAIN_WAGON_POWER,             CBM_TRAIN_WAGON_POWER),
++	NICV(CBID_VEHICLE_VISUAL_EFFECT,         CBM_VEHICLE_VISUAL_EFFECT),
+ 	NICV(CBID_VEHICLE_LENGTH,                CBM_VEHICLE_LENGTH),
+ 	NICV(CBID_VEHICLE_LOAD_AMOUNT,           CBM_VEHICLE_LOAD_AMOUNT),
+ 	NICV(CBID_VEHICLE_REFIT_CAPACITY,        CBM_VEHICLE_REFIT_CAPACITY),
+diff -r bd1ebafbdd43 -r 2df004262f01 src/train.h
+--- a/src/train.h	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/train.h	Wed Nov 17 22:42:23 2010 +0100
+@@ -78,14 +78,6 @@
+ 	/* cached max. speed / acceleration data */
+ 	int cached_max_curve_speed; ///< max consist speed limited by curves
+ 
+-	/**
+-	 * Position/type of visual effect.
+-	 * bit 0 - 3 = position of effect relative to vehicle. (0 = front, 8 = centre, 15 = rear)
+-	 * bit 4 - 5 = type of effect. (0 = default for engine class, 1 = steam, 2 = diesel, 3 = electric)
+-	 * bit     6 = disable visual effect.
+-	 * bit     7 = disable powered wagons.
+-	 */
+-	byte cached_vis_effect;
+ 	byte user_def_data;
+ 
+ 	EngineID first_engine;  ///< cached EngineID of the front vehicle. INVALID_ENGINE for the front vehicle itself.
+@@ -373,8 +365,6 @@
+ 
+ protected: // These functions should not be called outside acceleration code.
+ 
+-	void UpdateVisualEffect(bool allow_power_change);
+-
+ 	/**
+ 	 * Allows to know the power value that this vehicle will use.
+ 	 * @return Power value from the engine in HP, or zero if the vehicle is not powered.
+diff -r bd1ebafbdd43 -r 2df004262f01 src/train_cmd.cpp
+--- a/src/train_cmd.cpp	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/train_cmd.cpp	Wed Nov 17 22:42:23 2010 +0100
+@@ -139,43 +139,6 @@
+ }
+ 
+ /**
+- * Update the cached visual effect.
+- * @param allow_power_change true if the wagon-is-powered-state may change.
+- */
+-void Train::UpdateVisualEffect(bool allow_power_change)
+-{
+-	byte powered_before = this->tcache.cached_vis_effect & 0x80;
+-
+-	const Engine *e = Engine::Get(this->engine_type);
+-	if (e->u.rail.visual_effect != 0) {
+-		this->tcache.cached_vis_effect = e->u.rail.visual_effect;
+-	} else {
+-		if (this->IsWagon() || this->IsArticulatedPart()) {
+-			/* Wagons and articulated parts have no effect by default */
+-			this->tcache.cached_vis_effect = 0x40;
+-		} else if (e->u.rail.engclass == 0) {
+-			/* Steam is offset by -4 units */
+-			this->tcache.cached_vis_effect = 4;
+-		} else {
+-			/* Diesel fumes and sparks come from the centre */
+-			this->tcache.cached_vis_effect = 8;
+-		}
+-	}
+-
+-	/* Check powered wagon / visual effect callback */
+-	if (HasBit(e->info.callback_mask, CBM_TRAIN_WAGON_POWER)) {
+-		uint16 callback = GetVehicleCallback(CBID_TRAIN_WAGON_POWER, 0, 0, this->engine_type, this);
+-
+-		if (callback != CALLBACK_FAILED) this->tcache.cached_vis_effect = GB(callback, 0, 8);
+-	}
+-
+-	if (!allow_power_change && powered_before != (this->tcache.cached_vis_effect & 0x80)) {
+-		this->tcache.cached_vis_effect ^= 0x80;
+-		ShowNewGrfVehicleError(this->engine_type, STR_NEWGRF_BROKEN, STR_NEWGRF_BROKEN_POWERED_WAGON, GBUG_VEH_POWERED_WAGON, false);
+-	}
+-}
+-
+-/**
+  * Recalculates the cached stuff of a train. Should be called each time a vehicle is added
+  * to/removed from the chain, and when the game is loaded.
+  * Note: this needs to be called too for 'wagon chains' (in the depot, without an engine)
+@@ -235,7 +198,7 @@
+ 		u->UpdateVisualEffect(true);
+ 
+ 		if (rvi_v->pow_wag_power != 0 && rvi_u->railveh_type == RAILVEH_WAGON &&
+-				UsesWagonOverride(u) && !HasBit(u->tcache.cached_vis_effect, 7)) {
++				UsesWagonOverride(u) && !HasBit(u->vcache.cached_vis_effect, VE_DISABLE_WAGON_POWER)) {
+ 			/* wagon is powered */
+ 			SetBit(u->flags, VRF_POWEREDWAGON); // cache 'powered' status
+ 		} else {
+@@ -1923,118 +1886,6 @@
+ 	return true;
+ }
+ 
+-static const int8 _vehicle_smoke_pos[8] = {
+-	1, 1, 1, 0, -1, -1, -1, 0
+-};
+-
+-static void HandleLocomotiveSmokeCloud(const Train *v)
+-{
+-	bool sound = false;
+-
+-	/* Do not show any locomotive smoke/sparks when smoke_amount is set to none (0) or train is:
+-	 * slowing down or stopped (by the player) or
+-	 * it is ordered to reverse direction (by player) so it is slowing down to do it or
+-	 * its current speed is less than 2 km-ish/h or
+-	 * it is entering station with an order to stop there and its speed is equal to maximum station entering speed. */
+-	if (_settings_game.vehicle.smoke_amount == 0 ||
+-			v->vehstatus & (VS_TRAIN_SLOWING | VS_STOPPED) ||
+-			HasBit(v->flags, VRF_REVERSING) ||
+-			v->cur_speed < 2 ||
+-			(IsRailStationTile(v->tile) && v->IsFrontEngine() && v->current_order.ShouldStopAtStation(v, GetStationIndex(v->tile)) &&
+-			v->cur_speed >= v->Train::GetCurrentMaxSpeed())) {
+-		return;
+-	}
+-
+-	const Train *u = v;
+-
+-	do {
+-		const RailVehicleInfo *rvi = RailVehInfo(v->engine_type);
+-		int effect_offset = GB(v->tcache.cached_vis_effect, 0, 4) - 8;
+-		byte effect_type = GB(v->tcache.cached_vis_effect, 4, 2);
+-		bool disable_effect = HasBit(v->tcache.cached_vis_effect, 6);
+-
+-		/* no smoke? */
+-		if ((rvi->railveh_type == RAILVEH_WAGON && effect_type == 0) ||
+-				disable_effect ||
+-				v->vehstatus & VS_HIDDEN) {
+-			continue;
+-		}
+-
+-		/* No smoke in depots or tunnels */
+-		if (IsRailDepotTile(v->tile) || IsTunnelTile(v->tile)) continue;
+-
+-		/* No sparks for electric vehicles on non-electrified tracks. */
+-		if (!HasPowerOnRail(v->railtype, GetTileRailType(v->tile))) continue;
+-
+-		if (effect_type == 0) {
+-			/* Use default effect type for engine class. */
+-			effect_type = rvi->engclass;
+-		} else {
+-			effect_type--;
+-		}
+-
+-		int x = _vehicle_smoke_pos[v->direction] * effect_offset;
+-		int y = _vehicle_smoke_pos[(v->direction + 2) % 8] * effect_offset;
+-
+-		if (HasBit(v->flags, VRF_REVERSE_DIRECTION)) {
+-			x = -x;
+-			y = -y;
+-		}
+-
+-		switch (effect_type) {
+-			case 0:
+-				/* Steam smoke - amount is gradually falling until train reaches its maximum speed, after that it's normal.
+-				 * Details: while train's current speed is gradually increasing, steam plumes' density decreases by one third each
+-				 * third of its maximum speed spectrum. Steam emission finally normalises at very close to train's maximum speed.
+-				 * REGULATION:
+-				 * - instead of 1, 4 / 2^smoke_amount (max. 2) is used to provide sufficient regulation to steam puffs' amount. */
+-				if (GB(v->tick_counter, 0, ((4 >> _settings_game.vehicle.smoke_amount) + ((u->cur_speed * 3) / u->vcache.cached_max_speed))) == 0) {
+-					CreateEffectVehicleRel(v, x, y, 10, EV_STEAM_SMOKE);
+-					sound = true;
+-				}
+-				break;
+-
+-			case 1:
+-				/* Diesel smoke - thicker when train is starting, gradually subsiding till locomotive reaches its maximum speed
+-				 * when it stops.
+-				 * Details: Train's (max.) speed spectrum is divided into 32 parts. When max. speed is reached, chance for smoke
+-				 * emission erodes by 32 (1/4). Power and train's weight come in handy too to either increase smoke emission in
+-				 * 6 steps (1000HP each) if the power is low or decrease smoke emission in 6 steps (512 tonnes each) if the train
+-				 * isn't overweight. Power and weight contributions are expressed in a way that neither extreme power, nor
+-				 * extreme weight can ruin the balance (e.g. FreightWagonMultiplier) in the formula. When the train reaches
+-				 * maximum speed no diesel_smoke is emitted as train has enough traction to keep locomotive running optimally.
+-				 * REGULATION:
+-				 * - up to which speed a diesel train is emitting smoke (with reduced/small setting only until 1/2 of max_speed),
+-				 * - in Chance16 - the last value is 512 / 2^smoke_amount (max. smoke when 128 = smoke_amount of 2). */
+-				if (u->cur_speed < (u->vcache.cached_max_speed >> (2 >> _settings_game.vehicle.smoke_amount)) &&
+-						Chance16((64 - ((u->cur_speed << 5) / u->vcache.cached_max_speed) + (32 >> (u->acc_cache.cached_power >> 10)) - (32 >> (u->acc_cache.cached_weight >> 9))), (512 >> _settings_game.vehicle.smoke_amount))) {
+-					CreateEffectVehicleRel(v, 0, 0, 10, EV_DIESEL_SMOKE);
+-					sound = true;
+-				}
+-				break;
+-
+-			case 2:
+-				/* Electric train's spark - more often occurs when train is departing (more load)
+-				 * Details: Electric locomotives are usually at least twice as powerful as their diesel counterparts, so spark
+-				 * emissions are kept simple. Only when starting, creating huge force are sparks more likely to happen, but when
+-				 * reaching its max. speed, quarter by quarter of it, chance decreases untill the usuall 2,22% at train's top speed.
+-				 * REGULATION:
+-				 * - in Chance16 the last value is 360 / 2^smoke_amount (max. sparks when 90 = smoke_amount of 2). */
+-				if (GB(v->tick_counter, 0, 2) == 0 &&
+-						Chance16((6 - ((u->cur_speed << 2) / u->vcache.cached_max_speed)), (360 >> _settings_game.vehicle.smoke_amount))) {
+-					CreateEffectVehicleRel(v, 0, 0, 10, EV_ELECTRIC_SPARK);
+-					sound = true;
+-				}
+-				break;
+-
+-			default:
+-				break;
+-		}
+-	} while ((v = v->Next()) != NULL);
+-
+-	if (sound) PlayVehicleSound(u, VSE_TRAIN_EFFECT);
+-}
+-
+ void Train::PlayLeaveStationSound() const
+ {
+ 	static const SoundFx sfx[] = {
+@@ -3740,7 +3591,7 @@
+ 
+ 	if (CheckTrainStayInDepot(v)) return true;
+ 
+-	if (!mode) HandleLocomotiveSmokeCloud(v);
++	if (!mode) v->ShowVisualEffect();
+ 
+ 	/* We had no order but have an order now, do look ahead. */
+ 	if (!valid_order && !v->current_order.IsType(OT_NOTHING)) {
+diff -r bd1ebafbdd43 -r 2df004262f01 src/vehicle.cpp
+--- a/src/vehicle.cpp	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/vehicle.cpp	Wed Nov 17 22:42:23 2010 +0100
+@@ -50,6 +50,8 @@
+ #include "effectvehicle_func.h"
+ #include "effectvehicle_base.h"
+ #include "vehiclelist.h"
++#include "tunnel_map.h"
++#include "depot_map.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -1855,6 +1857,180 @@
+ 
+ }
+ 
++void Vehicle::UpdateVisualEffect(bool allow_power_change)
++{
++	bool powered_before = HasBit(this->vcache.cached_vis_effect, VE_DISABLE_WAGON_POWER);
++	this->vcache.cached_vis_effect = 0;
++
++	const Engine *e = Engine::Get(this->engine_type);
++	byte default_effect = VE_DEFAULT;
++	switch (this->type) {
++		case VEH_TRAIN:    default_effect = e->u.rail.visual_effect; break;
++		case VEH_ROAD:     default_effect = e->u.road.visual_effect; break;
++		case VEH_SHIP:     default_effect = e->u.ship.visual_effect; break;
++		default: break;
++	}
++	if (default_effect == VE_DEFAULT) {
++		if (this->type == VEH_TRAIN && Train::From(this)->IsEngine()) {
++			if (e->u.rail.engclass == 0) {
++				/* Steam is offset by -4 units */
++				SB(this->vcache.cached_vis_effect, VE_OFFSET_START, VE_OFFSET_COUNT, VE_OFFSET_CENTRE - 4);
++			} else {
++				/* Diesel fumes and sparks come from the centre */
++				SB(this->vcache.cached_vis_effect, VE_OFFSET_START, VE_OFFSET_COUNT, VE_OFFSET_CENTRE);
++			}
++		} else {
++			/* Non-train engines do not have a visual effect by default. */
++			SetBit(this->vcache.cached_vis_effect, VE_DISABLE_EFFECT);
++		}
++	} else {
++		this->vcache.cached_vis_effect = default_effect;
++	}
++
++	/* Check powered wagon / visual effect callback */
++	if (HasBit(e->info.callback_mask, CBM_VEHICLE_VISUAL_EFFECT)) {
++		uint16 callback = GetVehicleCallback(CBID_VEHICLE_VISUAL_EFFECT, 0, 0, this->engine_type, this);
++
++		if (callback != CALLBACK_FAILED) this->vcache.cached_vis_effect = GB(callback, 0, 8);
++	}
++
++	if (!allow_power_change && powered_before != HasBit(this->vcache.cached_vis_effect, VE_DISABLE_WAGON_POWER)) {
++		ToggleBit(this->vcache.cached_vis_effect, VE_DISABLE_WAGON_POWER);
++		ShowNewGrfVehicleError(this->engine_type, STR_NEWGRF_BROKEN, STR_NEWGRF_BROKEN_POWERED_WAGON, GBUG_VEH_POWERED_WAGON, false);
++	}
++}
++
++static const int8 _vehicle_smoke_pos[8] = {
++	1, 1, 1, 0, -1, -1, -1, 0
++};
++
++void Vehicle::ShowVisualEffect() const
++{
++	assert(this->IsPrimaryVehicle());
++	bool sound = false;
++
++	/* Do not show any smoke when
++	 * vehicle smoke is disabled by the player
++	 * the vehicle is slowing down or stopped (by the player)
++	 * the vehicle is moving very slowly
++	 */
++	if (_settings_game.vehicle.smoke_amount == 0 ||
++			this->vehstatus & (VS_TRAIN_SLOWING | VS_STOPPED) ||
++			this->cur_speed < 2) {
++		return;
++	}
++	if (this->type == VEH_TRAIN) {
++		const Train *t = Train::From(this);
++		/* For trains, do not show any smoke when
++		 * the train is reversing
++		 * is entering a station with an order to stop there and its speed is equal to maximum station entering speed
++		 */
++		if (HasBit(t->flags, VRF_REVERSING) ||
++				(IsRailStationTile(t->tile) && t->IsFrontEngine() && t->current_order.ShouldStopAtStation(t, GetStationIndex(t->tile)) &&
++				t->cur_speed >= t->Train::GetCurrentMaxSpeed())) {
++			return;
++		}
++	}
++
++	const Vehicle *v = this;
++
++	do {
++		int effect_offset = GB(v->vcache.cached_vis_effect, VE_OFFSET_START, VE_OFFSET_COUNT) - VE_OFFSET_CENTRE;
++		byte effect_type = GB(v->vcache.cached_vis_effect, VE_TYPE_START, VE_TYPE_COUNT);
++		bool disable_effect = HasBit(v->vcache.cached_vis_effect, VE_DISABLE_EFFECT);
++
++		/* Show no smoke when
++		 * Smoke has been disabled for this vehicle
++		 * The vehicle is not visible
++		 * The vehicle is on a depot tile
++		 * The vehicle is on a tunnel tile
++		 * The vehicle is a train engine that is currently unpowered */
++		if (disable_effect ||
++				v->vehstatus & VS_HIDDEN ||
++				IsDepotTile(v->tile) ||
++				IsTunnelTile(v->tile) ||
++				(v->type == VEH_TRAIN &&
++				!HasPowerOnRail(Train::From(v)->railtype, GetTileRailType(v->tile)))) {
++			continue;
++		}
++
++		if (effect_type == VE_TYPE_DEFAULT) {
++			if (v->type == VEH_TRAIN && Train::From(v)->IsEngine()) {
++				/* Use default effect type for engine class. */
++				effect_type = RailVehInfo(v->engine_type)->engclass + 1;
++			} else {
++				/* No default effect exists, so continue */
++				continue;
++			}
++		}
++
++		int x = _vehicle_smoke_pos[v->direction] * effect_offset;
++		int y = _vehicle_smoke_pos[(v->direction + 2) % 8] * effect_offset;
++
++		if (v->type == VEH_TRAIN && HasBit(Train::From(v)->flags, VRF_REVERSE_DIRECTION)) {
++			x = -x;
++			y = -y;
++		}
++
++		switch (effect_type) {
++			case VE_TYPE_STEAM:
++				/* Steam smoke - amount is gradually falling until vehicle reaches its maximum speed, after that it's normal.
++				 * Details: while vehicle's current speed is gradually increasing, steam plumes' density decreases by one third each
++				 * third of its maximum speed spectrum. Steam emission finally normalises at very close to vehicle's maximum speed.
++				 * REGULATION:
++				 * - instead of 1, 4 / 2^smoke_amount (max. 2) is used to provide sufficient regulation to steam puffs' amount. */
++				if (GB(v->tick_counter, 0, ((4 >> _settings_game.vehicle.smoke_amount) + ((this->cur_speed * 3) / this->vcache.cached_max_speed))) == 0) {
++					CreateEffectVehicleRel(v, x, y, 10, EV_STEAM_SMOKE);
++					sound = true;
++				}
++				break;
++
++			case VE_TYPE_DIESEL: {
++				/* Diesel smoke - thicker when vehicle is starting, gradually subsiding till it reaches its maximum speed
++				 * when smoke emission stops.
++				 * Details: Vehicle's (max.) speed spectrum is divided into 32 parts. When max. speed is reached, chance for smoke
++				 * emission erodes by 32 (1/4). For trains, power and weight come in handy too to either increase smoke emission in
++				 * 6 steps (1000HP each) if the power is low or decrease smoke emission in 6 steps (512 tonnes each) if the train
++				 * isn't overweight. Power and weight contributions are expressed in a way that neither extreme power, nor
++				 * extreme weight can ruin the balance (e.g. FreightWagonMultiplier) in the formula. When the vehicle reaches
++				 * maximum speed no diesel_smoke is emitted.
++				 * REGULATION:
++				 * - up to which speed a diesel vehicle is emitting smoke (with reduced/small setting only until 1/2 of max_speed),
++ 				 * - in Chance16 - the last value is 512 / 2^smoke_amount (max. smoke when 128 = smoke_amount of 2). */
++				int power_weight_effect = 0;
++				if (v->type == VEH_TRAIN) {
++					power_weight_effect = (32 >> (Train::From(this)->acc_cache.cached_power >> 10)) - (32 >> (Train::From(this)->acc_cache.cached_weight >> 9));
++				}
++				if (this->cur_speed < (this->vcache.cached_max_speed >> (2 >> _settings_game.vehicle.smoke_amount)) &&
++						Chance16((64 - ((this->cur_speed << 5) / this->vcache.cached_max_speed) + power_weight_effect), (512 >> _settings_game.vehicle.smoke_amount))) {
++					CreateEffectVehicleRel(v, x, y, 10, EV_DIESEL_SMOKE);
++					sound = true;
++				}
++				break;
++			}
++
++			case VE_TYPE_ELECTRIC:
++				/* Electric train's spark - more often occurs when train is departing (more load)
++				 * Details: Electric locomotives are usually at least twice as powerful as their diesel counterparts, so spark
++				 * emissions are kept simple. Only when starting, creating huge force are sparks more likely to happen, but when
++				 * reaching its max. speed, quarter by quarter of it, chance decreases untill the usuall 2,22% at train's top speed.
++				 * REGULATION:
++				 * - in Chance16 the last value is 360 / 2^smoke_amount (max. sparks when 90 = smoke_amount of 2). */
++				if (GB(v->tick_counter, 0, 2) == 0 &&
++						Chance16((6 - ((this->cur_speed << 2) / this->vcache.cached_max_speed)), (360 >> _settings_game.vehicle.smoke_amount))) {
++					CreateEffectVehicleRel(v, x, y, 10, EV_ELECTRIC_SPARK);
++					sound = true;
++				}
++				break;
++
++			default:
++				break;
++		}
++	} while ((v = v->Next()) != NULL);
++
++	if (sound) PlayVehicleSound(this, VSE_VISUAL_EFFECT);
++}
++
+ void Vehicle::SetNext(Vehicle *next)
+ {
+ 	assert(this != next);
+diff -r bd1ebafbdd43 -r 2df004262f01 src/vehicle_base.h
+--- a/src/vehicle_base.h	Wed Nov 17 19:43:15 2010 +0000
++++ b/src/vehicle_base.h	Wed Nov 17 22:42:23 2010 +0100
+@@ -64,9 +64,30 @@
+ 	uint8  cache_valid;               ///< Bitset that indicates which cache values are valid.
+ };
+ 
++/** Meaning of the various bits of the visual effect. */
++enum VisualEffect {
++	VE_OFFSET_START        = 0, ///< First bit that contains the offset (0 = front, 8 = centre, 15 = rear)
++	VE_OFFSET_COUNT        = 4, ///< Number of bits used for the offset
++	VE_OFFSET_CENTRE       = 8, ///< Value of offset corresponding to a position above the centre of the vehicle
++
++	VE_TYPE_START          = 4, ///< First bit used for the type of effect
++	VE_TYPE_COUNT          = 2, ///< Number of bits used for the effect type
++	VE_TYPE_DEFAULT        = 0, ///< Use default from engine class
++	VE_TYPE_STEAM          = 1, ///< Steam plumes
++	VE_TYPE_DIESEL         = 2, ///< Diesel fumes
++	VE_TYPE_ELECTRIC       = 3, ///< Electric sparks
++
++	VE_DISABLE_EFFECT      = 6, ///< Flag to disable visual effect
++	VE_DISABLE_WAGON_POWER = 7, ///< Flag to disable wagon power
++
++	VE_DEFAULT = 0xFF,          ///< Default value to indicate that visual effect should be based on engine class
++};
++
+ /** Cached often queried values common to all vehicles. */
+ struct VehicleCache {
+ 	uint16 cached_max_speed; ///< Maximum speed of the consist (minimum of the max speed of all vehicles in the consist).
++
++	byte cached_vis_effect;  ///< Visual effect to show (see #VisualEffect)
+ };
+ 
+ /** A vehicle pool for a little over 1 million vehicles. */
+@@ -594,6 +615,18 @@
+ 	CommandCost SendToDepot(DoCommandFlag flags, DepotCommand command);
+ 
+ 	/**
++	 * Update the cached visual effect.
++	 * @param allow_power_change true if the wagon-is-powered-state may change.
++	 */
++	void UpdateVisualEffect(bool allow_power_change = true);
++
++	/*
++	 * Draw visual effects (smoke and/or sparks) for a vehicle chain.
++	 * @pre this->IsPrimaryVehicle()
++	 */
++	void ShowVisualEffect() const;
++
++	/**
+ 	 * Increments cur_order_index, keeps care of the wrap-around and invalidates the GUI.
+ 	 * Note: current_order is not invalidated.
+ 	 */

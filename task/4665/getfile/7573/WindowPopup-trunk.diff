@@ -1,0 +1,214 @@
+Index: src/bridge_gui.cpp
+===================================================================
+--- src/bridge_gui.cpp	(revision 22621)
++++ src/bridge_gui.cpp	(working copy)
+@@ -80,7 +80,7 @@
+ };
+ 
+ /** Window class for handling the bridge-build GUI. */
+-class BuildBridgeWindow : public Window {
++class BuildBridgeWindow : public WindowPopup {
+ private:
+ 	/* Runtime saved values */
+ 	static uint16 last_size;     ///< Last size of the bridge GUI window.
+@@ -141,12 +141,15 @@
+ 	}
+ 
+ public:
+-	BuildBridgeWindow(const WindowDesc *desc, TileIndex start, TileIndex end, uint32 br_type, GUIBridgeList *bl) : Window(),
++	BuildBridgeWindow(const WindowDesc *desc, TileIndex start, TileIndex end, uint32 br_type, GUIBridgeList *bl) : WindowPopup(WPUT_WIDGET_RELATIVE),
+ 		start_tile(start),
+ 		end_tile(end),
+ 		type(br_type),
+ 		bridges(bl)
+ 	{
++		this->wpu_widget = BBSW_BRIDGE_LIST;
++		this->WpuSetModifierX(-5);
++		this->WpuSetModifierY(-5);
+ 		this->CreateNestedTree(desc);
+ 		this->vscroll = this->GetScrollbar(BBSW_SCROLLBAR);
+ 		/* Change the data, or the caption of the gui. Set it to road or rail, accordingly. */
+@@ -220,16 +223,6 @@
+ 		}
+ 	}
+ 
+-	virtual Point OnInitialPosition(const WindowDesc *desc, int16 sm_width, int16 sm_height, int window_number)
+-	{
+-		/* Position the window so hopefully the first bridge from the list is under the mouse pointer. */
+-		NWidgetBase *list = this->GetWidget<NWidgetBase>(BBSW_BRIDGE_LIST);
+-		Point corner; // point of the top left corner of the window.
+-		corner.y = Clamp(_cursor.pos.y - list->pos_y - 5, GetMainViewTop(), GetMainViewBottom() - sm_height);
+-		corner.x = Clamp(_cursor.pos.x - list->pos_x - 5, 0, _screen.width - sm_width);
+-		return corner;
+-	}
+-
+ 	virtual void DrawWidget(const Rect &r, int widget) const
+ 	{
+ 		switch (widget) {
+Index: src/window_gui.h
+===================================================================
+--- src/window_gui.h	(revision 22621)
++++ src/window_gui.h	(working copy)
+@@ -844,4 +844,36 @@
+ 
+ void ScrollbarClickHandler(Window *w, NWidgetCore *nw, int x, int y);
+ 
++
++/**
++ * WindowPopup's positionment types
++ */
++enum WindowPopupType {
++	WPUT_ORIGIN = 1,        ///< align with the top-left corner of the window
++	WPUT_WIDGET_RELATIVE,   ///< align from a nested widget
++	WPUT_CENTERED,		///< center the widget under the cursor. Ignore modifiers.
++};
++
++
++/**
++ * Specialized Window bound to open around the cursor's position.
++ * Its sole purpose is to provide the OnInitialPosition() method
++ * and an simple interface to control its behaviour.
++ */
++struct WindowPopup: public Window {
++public:
++	                 WindowPopup( WindowPopupType t = WPUT_ORIGIN);
++	virtual Point    OnInitialPosition(const WindowDesc *desc, int16 sm_width, int16 sm_height, int window_number);
++protected:
++	uint             wpu_widget;	
++	int WpuGetModifierX() const;
++	int WpuGetModifierY() const;
++	void WpuSetModifierX(int x);
++	void WpuSetModifierY(int y);
++private:
++	uint32           type;
++	int              modifier_x;
++	int              modifier_y;
++};
++
+ #endif /* WINDOW_GUI_H */
+Index: src/station_gui.cpp
+===================================================================
+--- src/station_gui.cpp	(revision 22621)
++++ src/station_gui.cpp	(working copy)
+@@ -1360,16 +1360,19 @@
+  * @tparam T The type of station to join with
+  */
+ template <class T>
+-struct SelectStationWindow : Window {
++struct SelectStationWindow : WindowPopup {
+ 	CommandContainer select_station_cmd; ///< Command to build new station
+ 	TileArea area; ///< Location of new station
+ 	Scrollbar *vscroll;
+ 
+ 	SelectStationWindow(const WindowDesc *desc, CommandContainer cmd, TileArea ta) :
+-		Window(),
++		WindowPopup(WPUT_WIDGET_RELATIVE),
+ 		select_station_cmd(cmd),
+ 		area(ta)
+ 	{
++		this->wpu_widget = JSW_PANEL;
++		this->WpuSetModifierX(-5);
++		this->WpuSetModifierY(-5);
+ 		this->CreateNestedTree(desc);
+ 		this->vscroll = this->GetScrollbar(JSW_SCROLLBAR);
+ 		this->GetWidget<NWidgetCore>(JSW_WIDGET_CAPTION)->widget_data = T::EXPECTED_FACIL == FACIL_WAYPOINT ? STR_JOIN_WAYPOINT_CAPTION : STR_JOIN_STATION_CAPTION;
+Index: src/window.cpp
+===================================================================
+--- src/window.cpp	(revision 22621)
++++ src/window.cpp	(working copy)
+@@ -21,6 +21,7 @@
+ #include "zoom_func.h"
+ #include "vehicle_base.h"
+ #include "window_func.h"
++#include "window_gui.h"
+ #include "tilehighlight_func.h"
+ #include "network/network.h"
+ #include "querystring_gui.h"
+@@ -2820,3 +2821,87 @@
+ 	this->window_class = WC_INVALID; // stop the ancestor from freeing the already (to be) child
+ 	ResetObjectToPlace();
+ }
++
++/**
++ * Sets safe-initial values.
++ * @param t	The type of positionment desired.
++ */
++WindowPopup::WindowPopup(WindowPopupType t): Window()
++{
++	this->type = t;
++	this->modifier_x = 0;
++	this->modifier_y = 0;
++	this->wpu_widget = 0;
++}
++
++/**
++ * Returns the width's modifier.
++ */
++int WindowPopup::WpuGetModifierX() const
++{
++	return this->modifier_x;
++}
++
++/**
++ * Returns the height's modifier.
++ */
++int WindowPopup::WpuGetModifierY() const
++{
++	return this->modifier_y;
++}
++
++/**
++ * Setup the width's modifier. N.B. Modifiers are always added.
++ */
++void WindowPopup::WpuSetModifierX(int x)
++{
++	this->modifier_x = x;
++}
++
++/**
++ * Setup the height's modifier. N.B. Modifiers are always added.
++ */
++void WindowPopup::WpuSetModifierY(int y)
++{
++	this->modifier_y = y;
++}
++
++/**
++ * Compute WindowPopup origin Point. Positionment flags may not be respected based on the cursor position on the surface.
++ * The function does it best to keep the window inside the surface, unless the window's occupies more a bigger area than
++ * the surface it should be drawn on.
++ *
++ * @param desc		The window's WindowDesc object
++ * @param sm_width	window's smallest_x
++ * @param sm_height	window's smallest_y
++ * @param window_number unused
++ */
++/*virtual*/ Point WindowPopup::OnInitialPosition(const WindowDesc *desc, int16 sm_width, int16 sm_height, int window_number)
++{
++        Point rv; 
++        int x = 0, y = 0;
++
++        if (this->type == WPUT_WIDGET_RELATIVE) {
++                if (this->wpu_widget) {
++                      	NWidgetBase *wid = this->GetWidget<NWidgetBase>(this->wpu_widget);
++                        x = _cursor.pos.x - wid->pos_x + modifier_x;
++                        y = _cursor.pos.y - wid->pos_y + modifier_y;
++                }
++                else this->type = WPUT_ORIGIN;
++        }
++
++        if (this->type == WPUT_ORIGIN) {
++                x = _cursor.pos.x + this->modifier_x;
++                y = _cursor.pos.y + this->modifier_y;
++        }
++        else if (this->type == WPUT_CENTERED)
++        {
++                x = _cursor.pos.x - (desc->default_width / 2);
++                y = _cursor.pos.y - (desc->default_height / 2);
++        }
++
++        rv.x = Clamp(x, 0, _screen.width - desc->default_width);
++        rv.y = Clamp(y, GetMainViewTop(), GetMainViewBottom() - desc->default_height);
++	return rv;
++}
++

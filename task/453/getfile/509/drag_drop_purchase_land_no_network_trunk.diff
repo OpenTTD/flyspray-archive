@@ -1,0 +1,145 @@
+Index: clear_cmd.c
+===================================================================
+--- clear_cmd.c	(revision 7502)
++++ clear_cmd.c	(working copy)
+@@ -398,29 +398,77 @@
+  * the name is a bit confusing ;p
+  * @param tile the tile the player is purchasing
+  * @param p1 unused
+- * @param p2 unused
++ * @param p2 end tile
+  */
+ int32 CmdPurchaseLandArea(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+-	int32 cost;
++ 	int32 cost,othercost = 0;
++	TileIndex p = p2 == 0 ? tile : p2; //we passed only the start tile? is a single tile, so start and end are the same tile... copy from tile
++	int size_x, size_y;
++	int ex, ey, sx, sy;
++	int tile_count = 0, purchased_count = 0, unclear_count = 0; //tile counters
+ 
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+ 	if (!EnsureNoVehicle(tile)) return CMD_ERROR;
+ 
+-	if (IsOwnedLandTile(tile) && IsTileOwner(tile, _current_player)) {
+-		return_cmd_error(STR_5807_YOU_ALREADY_OWN_IT);
+-	}
++// START DRAG CODE
++	// make sure sx,sy are smaller than ex,ey
++	ex = TileX(tile);
++	ey = TileY(tile);
++	sx = TileX(p);
++	sy = TileY(p);
++	if (ex < sx) intswap(ex, sx);
++	if (ey < sy) intswap(ey, sy);
++	tile = TileXY(sx, sy);
+ 
+-	cost = DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
+-	if (CmdFailed(cost)) return CMD_ERROR;
++	size_x = ex-sx+1;
++	size_y = ey-sy+1;
+ 
+-	if (flags & DC_EXEC) {
+-		MakeOwnedLand(tile, _current_player);
+-		MarkTileDirtyByTile(tile);
++	cost = _price.purchase_land*10;
++
++	BEGIN_TILE_LOOP(tile2, size_x, size_y, tile) {
++		tile_count+=1;
++		//test if is possible to buy the tile
++		if (!EnsureNoVehicle(tile2)) continue; //return CMD_ERROR;
++
++		if (IsOwnedLandTile(tile2) && IsTileOwner(tile2, _current_player)) {
++			if(p1 == 0) {
++				/*continue;*/return 0;
++			} else {
++				//return_cmd_error(STR_5807_YOU_ALREADY_OWN_IT);
++				purchased_count+=1;
++				continue;
++			}
++		} else {
++			othercost = DoCommand(tile2, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++			if (CmdFailed(othercost)) {
++			    unclear_count+=1;
++				continue; //return CMD_ERROR;
++			} else {
++				cost += othercost;
++			}
++		}
++		
++		if (flags & DC_EXEC) {
++			MakeOwnedLand(tile2, _current_player);
++			MarkTileDirtyByTile(tile2);
++		}
++
++		//calculate the cost for every single tile
++		cost += _price.purchase_land*10;
++
++	} END_TILE_LOOP(tile2, size_x, size_y, tile)
++	//error handling
++	if (tile_count == (unclear_count+purchased_count)) {
++		if (tile_count == purchased_count) {
++ 			return_cmd_error(STR_5807_YOU_ALREADY_OWN_IT);
++		} else {
++ 			return CMD_ERROR;
++		}
+ 	}
+-
+-	return cost + _price.purchase_land * 10;
++// END DRAG CODE
++	return cost; //buy 3 pay 2, why?	
+ }
+ 
+ 
+Index: gui.h
+===================================================================
+--- gui.h	(revision 7502)
++++ gui.h	(working copy)
+@@ -74,6 +74,7 @@
+ 	GUI_PlaceProc_WaterArea       = 3 << 4,
+ 	GUI_PlaceProc_ConvertRailArea = 4 << 4,
+ 	GUI_PlaceProc_RockyArea       = 5 << 4,
++	GUI_PlaceProc_BuyLand         = 6 << 4,
+ };
+ 
+ /* misc_gui.c */
+Index: rail_gui.c
+===================================================================
+--- rail_gui.c	(revision 7502)
++++ rail_gui.c	(working copy)
+@@ -23,6 +23,7 @@
+ #include "newgrf_callbacks.h"
+ #include "newgrf_station.h"
+ #include "train.h"
++#include "network.h"
+ 
+ static RailType _cur_railtype;
+ static bool _remove_button_clicked;
+@@ -212,7 +213,11 @@
+ 
+ void PlaceProc_BuyLand(TileIndex tile)
+ {
+-	DoCommandP(tile, 0, 0, CcPlaySound1E, CMD_PURCHASE_LAND_AREA | CMD_AUTO | CMD_NO_WATER | CMD_MSG(STR_5806_CAN_T_PURCHASE_THIS_LAND));
++	if (_networking) {
++		DoCommandP(tile, 1, tile, CcPlaySound1E, CMD_PURCHASE_LAND_AREA | CMD_AUTO | CMD_NO_WATER | CMD_MSG(STR_5806_CAN_T_PURCHASE_THIS_LAND));
++	} else {
++		VpStartPlaceSizing(tile, VPM_X_AND_Y | GUI_PlaceProc_BuyLand);
++	}
+ }
+ 
+ static void PlaceRail_ConvertRail(TileIndex tile)
+Index: terraform_gui.c
+===================================================================
+--- terraform_gui.c	(revision 7502)
++++ terraform_gui.c	(working copy)
+@@ -112,6 +112,9 @@
+ 	case GUI_PlaceProc_WaterArea >> 4:
+ 		DoCommandP(end_tile, start_tile, _ctrl_pressed, CcBuildCanal, CMD_BUILD_CANAL | CMD_AUTO | CMD_MSG(STR_CANT_BUILD_CANALS));
+ 		break;
++	case GUI_PlaceProc_BuyLand >> 4:
++		DoCommandP(start_tile, 1, end_tile, CcPlaySound10, CMD_PURCHASE_LAND_AREA | CMD_AUTO | CMD_NO_WATER | CMD_MSG(STR_5806_CAN_T_PURCHASE_THIS_LAND));
++		break;
+ 	default: return false;
+ 	}
+ 

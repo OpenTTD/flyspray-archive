@@ -1,0 +1,227 @@
+Index: src/ai/api/ai_company.cpp
+===================================================================
+--- src/ai/api/ai_company.cpp	(revision 22930)
++++ src/ai/api/ai_company.cpp	(working copy)
+@@ -192,9 +192,7 @@
+ 
+ 	if (loan == GetLoanAmount()) return true;
+ 
+-	return AIObject::DoCommand(0,
+-			abs(loan - GetLoanAmount()), 2,
+-			(loan > GetLoanAmount()) ? CMD_INCREASE_LOAN : CMD_DECREASE_LOAN);
++	return AIObject::DoCommand(0, 0, loan, CMD_SET_LOAN);
+ }
+ 
+ /* static */ bool AICompany::SetMinimumLoanAmount(int32 loan)
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revision 22930)
++++ src/command.cpp	(working copy)
+@@ -99,8 +99,7 @@
+ CommandProc CmdSetCompanyManagerFace;
+ CommandProc CmdSetCompanyColour;
+ 
+-CommandProc CmdIncreaseLoan;
+-CommandProc CmdDecreaseLoan;
++CommandProc CmdSetLoan;
+ 
+ CommandProc CmdWantEnginePreview;
+ 
+@@ -236,8 +235,7 @@
+ 	DEF_CMD(CmdSetCompanyManagerFace,                          0, CMDT_OTHER_MANAGEMENT      ), // CMD_SET_COMPANY_MANAGER_FACE
+ 	DEF_CMD(CmdSetCompanyColour,                               0, CMDT_OTHER_MANAGEMENT      ), // CMD_SET_COMPANY_COLOUR
+ 
+-	DEF_CMD(CmdIncreaseLoan,                                   0, CMDT_MONEY_MANAGEMENT      ), // CMD_INCREASE_LOAN
+-	DEF_CMD(CmdDecreaseLoan,                                   0, CMDT_MONEY_MANAGEMENT      ), // CMD_DECREASE_LOAN
++	DEF_CMD(CmdSetLoan,                                        0, CMDT_MONEY_MANAGEMENT      ), // CMD_SET_LOAN
+ 
+ 	DEF_CMD(CmdWantEnginePreview,                              0, CMDT_VEHICLE_MANAGEMENT    ), // CMD_WANT_ENGINE_PREVIEW
+ 
+Index: src/command_type.h
+===================================================================
+--- src/command_type.h	(revision 22930)
++++ src/command_type.h	(working copy)
+@@ -222,8 +222,7 @@
+ 	CMD_SET_COMPANY_MANAGER_FACE,     ///< set the manager's face of the company
+ 	CMD_SET_COMPANY_COLOUR,           ///< set the colour of the company
+ 
+-	CMD_INCREASE_LOAN,                ///< increase the loan from the bank
+-	CMD_DECREASE_LOAN,                ///< decrease the loan from the bank
++	CMD_SET_LOAN,                     ///< set the loan from the bank
+ 
+ 	CMD_WANT_ENGINE_PREVIEW,          ///< confirm the preview of an engine
+ 
+Index: src/company_gui.cpp
+===================================================================
+--- src/company_gui.cpp	(revision 22930)
++++ src/company_gui.cpp	(working copy)
+@@ -428,8 +428,9 @@
+ 			}
+ 
+ 			const Company *c = Company::Get(company);
+-			this->SetWidgetDisabledState(CFW_INCREASE_LOAN, c->current_loan == _economy.max_loan); // Borrow button only shows when there is any more money to loan.
+-			this->SetWidgetDisabledState(CFW_REPAY_LOAN, company != _local_company || c->current_loan == 0); // Repay button only shows when there is any more money to repay.
++			bool can_increase_loan = c->current_loan < _economy.max_loan, can_repay_loan = c->current_loan > 0 && c->money >= LOAN_INTERVAL;
++			this->SetWidgetDisabledState(CFW_INCREASE_LOAN, !can_increase_loan); // Borrow button only shows when there is any more money to loan.
++			this->SetWidgetDisabledState(CFW_REPAY_LOAN, !can_repay_loan); // Repay button only shows when there is any more money to repay, and can be repaid.
+ 		}
+ 
+ 		this->DrawWidgets();
+@@ -437,6 +438,8 @@
+ 
+ 	virtual void OnClick(Point pt, int widget, int click_count)
+ 	{
++		Company *c = Company::Get((CompanyID)this->window_number);
++
+ 		switch (widget) {
+ 			case CFW_TOGGLE_SIZE: // toggle size
+ 				this->small = !this->small;
+@@ -450,13 +453,17 @@
+ 				}
+ 				break;
+ 
+-			case CFW_INCREASE_LOAN: // increase loan
+-				DoCommandP(0, 0, _ctrl_pressed, CMD_INCREASE_LOAN | CMD_MSG(STR_ERROR_CAN_T_BORROW_ANY_MORE_MONEY));
++			case CFW_INCREASE_LOAN: { // increase loan
++				Money loan = _ctrl_pressed ? _economy.max_loan : c->current_loan + LOAN_INTERVAL;
++				DoCommandP(0, loan >> 32, loan, CMD_SET_LOAN | CMD_MSG(STR_ERROR_CAN_T_BORROW_ANY_MORE_MONEY));
+ 				break;
++			}
+ 
+-			case CFW_REPAY_LOAN: // repay loan
+-				DoCommandP(0, 0, _ctrl_pressed, CMD_DECREASE_LOAN | CMD_MSG(STR_ERROR_CAN_T_REPAY_LOAN));
++			case CFW_REPAY_LOAN: { // repay loan
++				Money loan = _ctrl_pressed ? max(c->current_loan - (c->money / LOAN_INTERVAL * LOAN_INTERVAL), 0) : c->current_loan - LOAN_INTERVAL;
++				DoCommandP(0, loan >> 32, loan, CMD_SET_LOAN | CMD_MSG(STR_ERROR_CAN_T_REPAY_LOAN));
+ 				break;
++			}
+ 		}
+ 	}
+ 
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 22930)
++++ src/lang/english.txt	(working copy)
+@@ -3509,7 +3509,6 @@
+ 
+ STR_ERROR_MAXIMUM_PERMITTED_LOAN                                :{WHITE}... maximum permitted loan size is {CURRENCY}
+ STR_ERROR_CAN_T_BORROW_ANY_MORE_MONEY                           :{WHITE}Can't borrow any more money...
+-STR_ERROR_LOAN_ALREADY_REPAYED                                  :{WHITE}... no loan to repay
+ STR_ERROR_CURRENCY_REQUIRED                                     :{WHITE}... {CURRENCY} required
+ STR_ERROR_CAN_T_REPAY_LOAN                                      :{WHITE}Can't repay loan...
+ STR_ERROR_INSUFFICIENT_FUNDS                                    :{WHITE}Can't give away money that is loaned from the bank...
+Index: src/misc_cmd.cpp
+===================================================================
+--- src/misc_cmd.cpp	(revision 22930)
++++ src/misc_cmd.cpp	(working copy)
+@@ -25,95 +25,41 @@
+ #include "table/strings.h"
+ 
+ /**
+- * Increase the loan of your company.
++ * Set the loan of your company.
+  * @param tile unused
+  * @param flags operation to perform
+- * @param p1 amount to increase the loan with, multitude of LOAN_INTERVAL. Only used when p2 == 2.
+- * @param p2 when 0: loans LOAN_INTERVAL
+- *           when 1: loans the maximum loan permitting money (press CTRL),
+- *           when 2: loans the amount specified in p1
++ * @param p1 amount to set the loan to, upper 32 bits
++ * @param p2 amount to set the loan to, lower 32 bits
+  * @param text unused
+  * @return the cost of this operation or an error
+  */
+-CommandCost CmdIncreaseLoan(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
++CommandCost CmdSetLoan(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
+ {
+ 	Company *c = Company::Get(_current_company);
+ 
+-	if (c->current_loan >= _economy.max_loan) {
+-		SetDParam(0, _economy.max_loan);
+-		return_cmd_error(STR_ERROR_MAXIMUM_PERMITTED_LOAN);
+-	}
++	Money loan = ((uint64)p1 << 32) | p2;
+ 
+-	Money loan;
+-	switch (p2) {
+-		default: return CMD_ERROR; // Invalid method
+-		case 0: // Take some extra loan
+-			loan = LOAN_INTERVAL;
+-			break;
+-		case 1: // Take a loan as big as possible
+-			loan = _economy.max_loan - c->current_loan;
+-			break;
+-		case 2: // Take the given amount of loan
+-			if ((int32)p1 < LOAN_INTERVAL || c->current_loan + (int32)p1 > _economy.max_loan || p1 % LOAN_INTERVAL != 0) return CMD_ERROR;
+-			loan = p1;
+-			break;
+-	}
+-
+ 	/* Overflow protection */
+-	if (c->money + c->current_loan + loan < c->money) return CMD_ERROR;
++	if (c->money - c->current_loan + loan - (c->money - c->current_loan) < loan) return CMD_ERROR;
+ 
+-	if (flags & DC_EXEC) {
+-		c->money        += loan;
+-		c->current_loan += loan;
+-		InvalidateCompanyWindows(c);
+-	}
++	if (loan < 0 || loan % LOAN_INTERVAL != 0) return CMD_ERROR;
+ 
+-	return CommandCost(EXPENSES_OTHER);
+-}
+-
+-/**
+- * Decrease the loan of your company.
+- * @param tile unused
+- * @param flags operation to perform
+- * @param p1 amount to decrease the loan with, multitude of LOAN_INTERVAL. Only used when p2 == 2.
+- * @param p2 when 0: pays back LOAN_INTERVAL
+- *           when 1: pays back the maximum loan permitting money (press CTRL),
+- *           when 2: pays back the amount specified in p1
+- * @param text unused
+- * @return the cost of this operation or an error
+- */
+-CommandCost CmdDecreaseLoan(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
+-{
+-	Company *c = Company::Get(_current_company);
+-
+-	if (c->current_loan == 0) return_cmd_error(STR_ERROR_LOAN_ALREADY_REPAYED);
+-
+-	Money loan;
+-	switch (p2) {
+-		default: return CMD_ERROR; // Invalid method
+-		case 0: // Pay back one step
+-			loan = min(c->current_loan, (Money)LOAN_INTERVAL);
+-			break;
+-		case 1: // Pay back as much as possible
+-			loan = max(min(c->current_loan, c->money), (Money)LOAN_INTERVAL);
+-			loan -= loan % LOAN_INTERVAL;
+-			break;
+-		case 2: // Repay the given amount of loan
+-			if (p1 % LOAN_INTERVAL != 0 || (int32)p1 < LOAN_INTERVAL || p1 > c->current_loan) return CMD_ERROR; // Invalid amount to loan
+-			loan = p1;
+-			break;
++	if (loan > _economy.max_loan) {
++		SetDParam(0, _economy.max_loan);
++		return_cmd_error(STR_ERROR_MAXIMUM_PERMITTED_LOAN);
+ 	}
+ 
+-	if (c->money < loan) {
+-		SetDParam(0, loan);
++	if (loan < c->current_loan && c->money < c->current_loan - loan) {
++		SetDParam(0, c->current_loan - loan);
+ 		return_cmd_error(STR_ERROR_CURRENCY_REQUIRED);
+ 	}
+ 
+ 	if (flags & DC_EXEC) {
+-		c->money        -= loan;
+-		c->current_loan -= loan;
++		c->money += loan - c->current_loan;
++		c->current_loan = loan;
+ 		InvalidateCompanyWindows(c);
+ 	}
++
+ 	return CommandCost();
+ }
+ 

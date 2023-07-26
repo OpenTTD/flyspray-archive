@@ -1,0 +1,156 @@
+Index: src/video/cocoa/cocoa_v.h
+===================================================================
+--- src/video/cocoa/cocoa_v.h	(revision 22851)
++++ src/video/cocoa/cocoa_v.h	(working copy)
+@@ -88,6 +88,8 @@
+ 	virtual bool ChangeResolution(int w, int h) = 0;
+ 
+ 	virtual bool IsFullscreen() = 0;
++	virtual bool CanToggleFullscreen() { return false; }
++	virtual bool ToggleFullscreen() { return false; }
+ 	virtual int GetWidth() = 0;
+ 	virtual int GetHeight() = 0;
+ 	virtual void *GetPixelBuffer() = 0;
+Index: src/video/cocoa/cocoa_v.mm
+===================================================================
+--- src/video/cocoa/cocoa_v.mm	(revision 22851)
++++ src/video/cocoa/cocoa_v.mm	(working copy)
+@@ -142,6 +142,11 @@
+ 	NSMenuItem *menuItem = [ [ NSMenuItem alloc ] initWithTitle:@"Window" action:nil keyEquivalent:@"" ];
+ 	[ menuItem setSubmenu:windowMenu ];
+ 	[ [ NSApp mainMenu ] addItem:menuItem ];
++	
++	if(MacOSVersionIsAtLeast(10, 7, 0)) {
++		/* The OS will change the name of this menu item automatically */
++		[ windowMenu addItemWithTitle:@"Fullscreen" action:@selector(toggleFullScreen:) keyEquivalent:@"^f" ];
++	}
+ 
+ 	/* Tell the application object that this is now the window menu */
+ 	[ NSApp setWindowsMenu:windowMenu ];
+@@ -273,15 +278,27 @@
+  * @param width Width of display area.
+  * @param height Height of display area.
+  * @param bpp Colour depth of display area.
+- * @param fullscreen Wether a fullscreen mode is requested.
++ * @param fullscreen Whether a fullscreen mode is requested.
+  * @param fallback Whether we look for a fallback driver.
+- * @return Pointer to subdriver.
+  * @return Pointer to window subdriver.
+  */
+ static CocoaSubdriver *QZ_CreateSubdriver(int width, int height, int bpp, bool fullscreen, bool fallback)
+ {
+-	CocoaSubdriver *ret = fullscreen ? QZ_CreateFullscreenSubdriver(width, height, bpp) : QZ_CreateWindowSubdriver(width, height, bpp);
+-	if (ret != NULL) return ret;
++	CocoaSubdriver *ret = NULL;
++	if(MacOSVersionIsAtLeast(10,7,0)) {
++			ret = QZ_CreateWindowSubdriver(width, height, bpp);
++		if (ret != NULL) {
++			if(fullscreen) {
++				ret->ToggleFullscreen();
++			}
++			return ret;
++		}
++	}
++	else
++	{
++		ret = fullscreen ? QZ_CreateFullscreenSubdriver(width, height, bpp) : QZ_CreateWindowSubdriver(width, height, bpp);
++		if (ret != NULL) return ret;
++	}
+ 
+ 	if (!fallback) return NULL;
+ 
+@@ -401,6 +418,10 @@
+ bool VideoDriver_Cocoa::ToggleFullscreen(bool full_screen)
+ {
+ 	assert(_cocoa_subdriver != NULL);
++	
++	/* For 10.7 and later, we toggle using the quartz subdriver. */
++	if(_cocoa_subdriver->CanToggleFullscreen())
++		return _cocoa_subdriver->ToggleFullscreen();
+ 
+ 	bool oldfs = _cocoa_subdriver->IsFullscreen();
+ 	if (full_screen != oldfs) {
+Index: src/video/cocoa/wnd_quartz.mm
+===================================================================
+--- src/video/cocoa/wnd_quartz.mm	(revision 22851)
++++ src/video/cocoa/wnd_quartz.mm	(working copy)
+@@ -78,6 +78,8 @@
+ 	virtual bool ChangeResolution(int w, int h);
+ 
+ 	virtual bool IsFullscreen() { return false; }
++	virtual bool CanToggleFullscreen();
++	virtual bool ToggleFullscreen();
+ 
+ 	virtual int GetWidth() { return window_width; }
+ 	virtual int GetHeight() { return window_height; }
+@@ -220,6 +222,24 @@
+ 	);
+ }
+ 
++bool WindowQuartzSubdriver::CanToggleFullscreen()
++{
++	if(MacOSVersionIsAtLeast(10,7,0))
++		return true;
++	else
++		return false;
++}
++
++bool WindowQuartzSubdriver::ToggleFullscreen()
++{
++	if(!CanToggleFullscreen())
++		return false;
++	
++	[this->window toggleFullScreen:this->window];
++	
++	return true;
++}
++
+ bool WindowQuartzSubdriver::SetVideoMode(int width, int height)
+ {
+ 	this->setup = true;
+@@ -251,6 +271,24 @@
+ 			this->setup = false;
+ 			return false;
+ 		}
++		
++		/* Add built in full-screen support when available (OS X 10.7 and higher) */
++		if ([this->window respondsToSelector:@selector(toggleFullScreen:)]) {
++			/* Constants needed to build on pre-10.7 systems. Source: NSWindow documentation. */
++			const int NSWindowCollectionBehaviorFullScreenPrimary = 1 << 7;
++			const int NSWindowFullScreenButton = 7;
++			
++			NSWindowCollectionBehavior behavior = [this->window collectionBehavior];
++			behavior |= NSWindowCollectionBehaviorFullScreenPrimary;
++			[window setCollectionBehavior:behavior];
++			
++			NSButton* fullscreenButton =
++			[this->window standardWindowButton:NSWindowFullScreenButton];
++			[fullscreenButton setAction:@selector(toggleFullScreen:)];
++			[fullscreenButton setTarget:this->window];
++			
++			[this->window setCollectionBehavior: NSWindowCollectionBehaviorFullScreenPrimary];
++		}
+ 
+ 		[ this->window setDriver:this ];
+ 
+Index: src/video/cocoa/fullscreen.mm
+===================================================================
+--- src/video/cocoa/fullscreen.mm	(revision 22851)
++++ src/video/cocoa/fullscreen.mm	(working copy)
+@@ -308,10 +308,12 @@
+ 			DEBUG(driver, 0, "Failed switching display resolution");
+ 			goto ERR_NO_SWITCH;
+ 		}
+-
+-		this->window_buffer = CGDisplayBaseAddress(this->display_id);
+-		this->window_pitch  = CGDisplayBytesPerRow(this->display_id);
+-
++		
++		/* Since CGDisplayBaseAddress and CGDisplayBytesPerRow are no longer available on 10.7,
++		 * disable until a replacement can be found. */
++		this->window_buffer = NULL; /* CGDisplayBaseAddress(this->display_id); */
++		this->window_pitch  = NULL; /*CGDisplayBytesPerRow(this->display_id); */
++		
+ 		this->device_width  = CGDisplayPixelsWide(this->display_id);
+ 		this->device_height = CGDisplayPixelsHigh(this->display_id);
+ 

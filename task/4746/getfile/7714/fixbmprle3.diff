@@ -1,0 +1,232 @@
+Index: src/bmp.cpp
+===================================================================
+--- src/bmp.cpp	(revision 22836)
++++ src/bmp.cpp	(working copy)
+@@ -130,63 +130,84 @@
+  */
+ static inline bool BmpRead4Rle(BmpBuffer *buffer, BmpInfo *info, BmpData *data)
+ {
+-	uint i;
+-	uint x = 0;
+-	uint y = info->height - 1;
+-	byte n, c, b;
+-	byte *pixel = &data->bitmap[y * info->width];
+-	while (y != 0 || x < info->width) {
++	uint x = 0, y = 0;
++	byte *pixel = &data->bitmap[(info->height - 1 - y) * info->width + x];
++
++	for (;;) {
+ 		if (EndOfBuffer(buffer)) return false; // the file is shorter than expected
+-		n = ReadByte(buffer);
+-		c = ReadByte(buffer);
++
++		const byte n = ReadByte(buffer);
++		const byte c = ReadByte(buffer);
++
+ 		if (n == 0) {
+ 			switch (c) {
+-			case 0: // end of line
+-				x = 0;
+-				pixel = &data->bitmap[--y * info->width];
+-				break;
+-			case 1: // end of bitmap
+-				x = info->width;
+-				y = 0;
+-				pixel = NULL;
+-				break;
+-			case 2: // delta
+-				x += ReadByte(buffer);
+-				i = ReadByte(buffer);
+-				if (x >= info->width || (y == 0 && i > 0)) return false;
+-				y -= i;
+-				pixel = &data->bitmap[y * info->width + x];
+-				break;
+-			default: // uncompressed
+-				i = 0;
+-				while (i++ < c) {
+-					if (EndOfBuffer(buffer) || x >= info->width) return false;
+-					b = ReadByte(buffer);
+-					*pixel++ = GB(b, 4, 4);
+-					x++;
+-					if (x < info->width && i++ < c) {
+-						*pixel++ = GB(b, 0, 4);
+-						x++;
++				case 0: // end of line
++					if (y >= info->height) return false;
++
++					x = 0;
++					++y;
++					pixel = &data->bitmap[(info->height - 1 - y) * info->width + x];
++					break;
++
++				case 1: // end of bitmap
++					return true;
++
++				case 2: { // delta
++					const byte dx = ReadByte(buffer);
++					const byte dy = ReadByte(buffer);
++
++					if (x + dx > info->width || y + dy > info->height || x + dx < x || y + dy < y) return false;
++
++					x += dx;
++					y += dy;
++					pixel = &data->bitmap[(info->height - 1 - y) * info->width + x];
++					break;
++				}
++
++				default: { // uncompressed
++					if (y >= info->height) return false;
++
++					uint i = 0;
++					while (i < c) {
++						if (EndOfBuffer(buffer) || x >= info->width) return false;
++						const byte b = ReadByte(buffer);
++
++						*pixel++ = GB(b, 4, 4);
++						++x;
++						++i;
++
++						if (i < c) {
++							if (x >= info->width) return false;
++
++							*pixel++ = GB(b, 0, 4);
++							++x;
++							++i;
++						}
+ 					}
++
++					SkipBytes(buffer, ((c + 1) / 2) % 2); // padding for 16 bit align
++					break;
+ 				}
+-				/* Padding for 16 bit align */
+-				SkipBytes(buffer, ((c + 1) / 2) % 2);
+-				break;
+ 			}
+ 		} else {
+-			i = 0;
+-			while (i++ < n) {
+-				if (EndOfBuffer(buffer) || x >= info->width) return false;
+-				*pixel++ = GB(c, 4, 4);
+-				x++;
+-				if (x < info->width && i++ < n) {
+-					*pixel++ = GB(c, 0, 4);
+-					x++;
++			if (y >= info->height || EndOfBuffer(buffer)) return false;
++
++			const byte b = ReadByte(buffer);
++
++			uint i = 0;
++			while (x < info->width && i < c) {
++				*pixel++ = GB(b, 4, 4);
++				++x;
++				++i;
++
++				if (x < info->width && i < c) {
++					*pixel++ = GB(b, 0, 4);
++					++x;
++					++i;
+ 				}
+ 			}
+ 		}
+ 	}
+-	return true;
+ }
+ 
+ /**
+@@ -213,49 +234,60 @@
+  */
+ static inline bool BmpRead8Rle(BmpBuffer *buffer, BmpInfo *info, BmpData *data)
+ {
+-	uint i;
+-	uint x = 0;
+-	uint y = info->height - 1;
+-	byte n, c;
+-	byte *pixel = &data->bitmap[y * info->width];
+-	while (y != 0 || x < info->width) {
++	uint x = 0, y = 0;
++	byte *pixel = &data->bitmap[(info->height - 1 - y) * info->width + x];
++
++	for (;;) {
+ 		if (EndOfBuffer(buffer)) return false; // the file is shorter than expected
+-		n = ReadByte(buffer);
+-		c = ReadByte(buffer);
++
++		const byte n = ReadByte(buffer);
++		const byte c = ReadByte(buffer);
++
+ 		if (n == 0) {
+ 			switch (c) {
+-			case 0: // end of line
+-				x = 0;
+-				pixel = &data->bitmap[--y * info->width];
+-				break;
+-			case 1: // end of bitmap
+-				x = info->width;
+-				y = 0;
+-				pixel = NULL;
+-				break;
+-			case 2: // delta
+-				x += ReadByte(buffer);
+-				i = ReadByte(buffer);
+-				if (x >= info->width || (y == 0 && i > 0)) return false;
+-				y -= i;
+-				pixel = &data->bitmap[y * info->width + x];
+-				break;
+-			default: // uncompressed
+-				if ((x += c) > info->width) return false;
+-				for (i = 0; i < c; i++) *pixel++ = ReadByte(buffer);
+-				/* Padding for 16 bit align */
+-				SkipBytes(buffer, c % 2);
+-				break;
++				case 0: // end of line
++					if (y >= info->height) return false;
++
++					x = 0;
++					++y;
++					pixel = &data->bitmap[(info->height - 1 - y) * info->width + x];
++					break;
++
++				case 1: // end of bitmap
++					return true;
++
++				case 2: { // delta
++					const byte dx = ReadByte(buffer);
++					const byte dy = ReadByte(buffer);
++
++					if (x + dx > info->width || y + dy > info->height || x + dx < x || y + dy < y) return false;
++
++					x += dx;
++					y += dy;
++					pixel = &data->bitmap[(info->height - 1 - y) * info->width + x];
++					break;
++				}
++
++				default: // uncompressed
++					if (x + c > info->width || x + c < x || y >= info->height) return false;
++
++					for (byte i = 0; i < c; ++i) *pixel++ = ReadByte(buffer);
++					SkipBytes(buffer, c % 2); // padding for 16 bit align
++
++					x += c;
++					break;
+ 			}
+ 		} else {
+-			for (i = 0; i < n; i++) {
+-				if (x >= info->width) return false;
+-				*pixel++ = c;
+-				x++;
+-			}
++			if (y >= info->height) return false;
++
++			const byte en = min(n, info->width - x);
++
++			memset(pixel, c, en);
++			pixel += en;
++
++			x += en;
+ 		}
+ 	}
+-	return true;
+ }
+ 
+ /**

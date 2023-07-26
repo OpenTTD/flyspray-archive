@@ -1,0 +1,98 @@
+Index: src/landscape.cpp
+===================================================================
+--- src/landscape.cpp	(revision 22719)
++++ src/landscape.cpp	(working copy)
+@@ -712,32 +712,38 @@
+ 
+ 
+ TileIndex _cur_tileloop_tile;
+-#define TILELOOP_BITS 4
+-#define TILELOOP_SIZE (1 << TILELOOP_BITS)
+-#define TILELOOP_ASSERTMASK ((TILELOOP_SIZE - 1) + ((TILELOOP_SIZE - 1) << MapLogX()))
+-#define TILELOOP_CHKMASK (((1 << (MapLogX() - TILELOOP_BITS))-1) << TILELOOP_BITS)
+ 
++/**
++ * Gradually iterate over all tiles on the map, calling their TileLoopProcs.
++ * The pseudorandom sequence of tiles is generated using a Galois linear feedback shift register (LFSR).
++ * This allows a deterministic pseudorandom ordering, but still with minimal state and fast iteration.
++ */
+ void RunTileLoop()
+ {
++	/* Maximal length LFSR feedback terms, from 12-bit (for 64x64 maps) to 22-bit (for 2048x2048 maps).
++	 * Extracted from http://www.ece.cmu.edu/~koopman/lfsr/ */
++	static const uint32 feedbacks[] = {
++		0xD8F, 0x1296, 0x2496, 0x4357, 0x8679, 0x1030E, 0x206CD, 0x403FE, 0x807B8, 0x1004B2, 0x2006A8
++	};
++
++	/* The LFSR cannot have a zeroed state - this incidentally means tile 0 is never hit, however this is
++	 * not a problem as it is only of type MP_VOID */
++	assert(_cur_tileloop_tile != 0);
++
++	const uint32 feedback = feedbacks[MapLogX() + MapLogY() - 12];
++	uint count = 1 << (MapLogX() + MapLogY() - 8);
++
++	/* Store the tile index iterator locally as an optimization - this way the compiler can keep it in a register
++	 * and not need to write it out to memory each iteration */
+ 	TileIndex tile = _cur_tileloop_tile;
+ 
+-	assert((tile & ~TILELOOP_ASSERTMASK) == 0);
+-	uint count = (MapSizeX() / TILELOOP_SIZE) * (MapSizeY() / TILELOOP_SIZE);
+-	do {
++	while (count--) {
+ 		_tile_type_procs[GetTileType(tile)]->tile_loop_proc(tile);
+ 
+-		if (TileX(tile) < MapSizeX() - TILELOOP_SIZE) {
+-			tile += TILELOOP_SIZE; // no overflow
+-		} else {
+-			tile = TILE_MASK(tile - TILELOOP_SIZE * (MapSizeX() / TILELOOP_SIZE - 1) + TileDiffXY(0, TILELOOP_SIZE)); // x would overflow, also increase y
+-		}
+-	} while (--count != 0);
+-	assert((tile & ~TILELOOP_ASSERTMASK) == 0);
++		/* Get the next tile in sequence using a Galois LFSR */
++		tile = (tile >> 1) ^ (-(int32)(tile & 1) & feedback);
++	}
+ 
+-	tile += 9;
+-	if (tile & TILELOOP_CHKMASK) {
+-		tile = (tile + MapSizeX()) & TILELOOP_ASSERTMASK;
+-	}
+ 	_cur_tileloop_tile = tile;
+ }
+ 
+Index: src/misc.cpp
+===================================================================
+--- src/misc.cpp	(revision 22719)
++++ src/misc.cpp	(working copy)
+@@ -60,7 +60,7 @@
+ 	_pause_mode = PM_UNPAUSED;
+ 	_fast_forward = 0;
+ 	_tick_counter = 0;
+-	_cur_tileloop_tile = 0;
++	_cur_tileloop_tile = 1;
+ 	_thd.redsq = INVALID_TILE;
+ 	if (reset_settings) MakeNewgameSettingsLive();
+ 
+Index: src/saveload/afterload.cpp
+===================================================================
+--- src/saveload/afterload.cpp	(revision 22719)
++++ src/saveload/afterload.cpp	(working copy)
+@@ -62,6 +62,8 @@
+ extern StringID _switch_mode_errorstr;
+ extern Company *DoStartupNewCompany(bool is_ai, CompanyID company = INVALID_COMPANY);
+ 
++extern TileIndex _cur_tileloop_tile;
++
+ /**
+  * Makes a tile canal or water depending on the surroundings.
+  *
+@@ -485,6 +487,10 @@
+ 
+ 	TileIndex map_size = MapSize();
+ 
++	if (!_cur_tileloop_tile)
++		/* The LFSR used in RunTileLoop iteration cannot have a zeroed state, make it nonzeroed. */
++		_cur_tileloop_tile = 1;
++
+ 	if (IsSavegameVersionBefore(98)) GamelogOldver();
+ 
+ 	GamelogTestRevision();

@@ -1,0 +1,147 @@
+From 714db7e66022b2d5b065b6e1bfe565ba85b90dde Mon Sep 17 00:00:00 2001
+From: J. Tang <tang@jtang.org>
+Date: Thu, 2 Dec 2010 00:33:01 -0500
+Subject: [PATCH 5/6] Manipulate disasters through the console, but only if the cheat option has been selected.
+
+
+Signed-off-by: J. Tang <tang@jtang.org>
+---
+ src/cheat_gui.cpp    |    1 +
+ src/cheat_type.h     |    1 +
+ src/console_cmds.cpp |    8 ++++++++
+ src/disaster_cmd.cpp |   50 ++++++++++++++++++++++++++++++++++++++++++++++++--
+ 4 files changed, 58 insertions(+), 2 deletions(-)
+
+diff --git a/src/cheat_gui.cpp b/src/cheat_gui.cpp
+index 11aea4f..6f066c2 100644
+--- a/src/cheat_gui.cpp
++++ b/src/cheat_gui.cpp
+@@ -128,6 +128,7 @@ static const CheatEntry _cheats_ui[] = {
+ 	{SLE_BOOL,  STR_CHEAT_BUILD_IN_PAUSE,  &_cheats.build_in_pause.value,           &_cheats.build_in_pause.been_used,   NULL                     },
+ 	{SLE_BOOL,  STR_CHEAT_NO_JETCRASH,     &_cheats.no_jetcrash.value,              &_cheats.no_jetcrash.been_used,      NULL                     },
+ 	{SLE_BOOL,  STR_CHEAT_SETUP_PROD,      &_cheats.setup_prod.value,               &_cheats.setup_prod.been_used,       &ClickSetProdCheat       },
++	{SLE_BOOL,  STR_CHEAT_DISASTERS,       &_cheats.disasters.value,                &_cheats.disasters.been_used,        NULL                     },
+ 	{SLE_UINT8, STR_CHEAT_SWITCH_CLIMATE,  &_settings_game.game_creation.landscape, &_cheats.switch_climate.been_used,   &ClickChangeClimateCheat },
+ 	{SLE_INT32, STR_CHEAT_CHANGE_DATE,     &_cur_year,                              &_cheats.change_date.been_used,      &ClickChangeDateCheat    },
+ };
+diff --git a/src/cheat_type.h b/src/cheat_type.h
+index 4116345..5bff459 100644
+--- a/src/cheat_type.h
++++ b/src/cheat_type.h
+@@ -35,6 +35,7 @@ struct Cheats {
+ 	Cheat switch_climate;   ///< change the climate of the map
+ 	Cheat change_date;      ///< changes date ingame
+ 	Cheat setup_prod;       ///< setup raw-material production in game
++	Cheat disasters;        ///< view disaster timers, reset them, or invoke disasters
+ 	Cheat dummy;            ///< empty cheat (enable running el-engines on normal rail)
+ };
+ 
+diff --git a/src/console_cmds.cpp b/src/console_cmds.cpp
+index 8f4cf50..4125349 100644
+--- a/src/console_cmds.cpp
++++ b/src/console_cmds.cpp
+@@ -36,6 +36,7 @@
+ #include "ai/ai_config.hpp"
+ #include "newgrf.h"
+ #include "console_func.h"
++#include "disaster.h"
+ 
+ #ifdef ENABLE_NETWORK
+ 	#include "table/strings.h"
+@@ -1717,6 +1718,12 @@ DEF_CONSOLE_CMD(ConNewGRFReload)
+ 	return true;
+ }
+ 
++/* disasters */
++DEF_CONSOLE_CMD(ConDisaster)
++{
++	return DisasterTimer::Command(argc, argv);
++}
++
+ #ifdef _DEBUG
+ /******************
+  *  debug commands
+@@ -1771,6 +1778,7 @@ void IConsoleStdLibRegister()
+ 	IConsoleCmdRegister("list_settings",ConListSettings);
+ 	IConsoleCmdRegister("gamelog",      ConGamelogPrint);
+ 	IConsoleCmdRegister("rescan_newgrf", ConRescanNewGRF);
++	IConsoleCmdRegister("disaster",     ConDisaster);
+ 
+ 	IConsoleAliasRegister("dir",          "ls");
+ 	IConsoleAliasRegister("del",          "rm %+");
+diff --git a/src/disaster_cmd.cpp b/src/disaster_cmd.cpp
+index 31bac3e..0789e93 100644
+--- a/src/disaster_cmd.cpp
++++ b/src/disaster_cmd.cpp
+@@ -44,6 +44,8 @@
+ #include "company_base.h"
+ #include "core/random_func.hpp"
+ #include "core/backup_type.hpp"
++#include "console_func.h"
++#include "cheat_type.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -926,13 +928,57 @@ void DisasterTimer::DailyLoop()
+ 	}
+ }
+ 
++/**
++ * Handle all console commands by the user, but only if that cheat has
++ * been enabled.
++ * @return true if command is legal, false if not.
++ */
++bool DisasterTimer::Command(const int argc, char *argv[])
++{
++	if (!_cheats.disasters.value) {
++		IConsolePrintF(CC_WARNING, "You must enable disasters in cheat window to use this command.");
++		return true;
+ 	}
+ 
+-	if (j == 0) return;
++	if (argc <= 1) {
++		IConsolePrintF(CC_WARNING, "Usage: disaster <cmd> [args...]");
++		IConsolePrintF(CC_WARNING, "  list - print information about all registered disasters");
++		IConsolePrintF(CC_WARNING, "  invoke <disaster> - force invocation of <disaster>");
++		IConsolePrintF(CC_WARNING, "  set <disaster> <value> - set <disaster>'s timer to <value>");
++		return true;
++	}
++	if (strcmp(argv[1], "list") == 0) {
++		for (uint i = 0; i < _disaster_timers.Length(); ++i) {
++			_disaster_timers[i]->ShowInfo();
++		}
++		return true;
++	} else if (strcmp(argv[1], "invoke") == 0 && argc >= 3) {
++		for (uint i = 0; i < _disaster_timers.Length(); ++i) {
++			if (strcmp(argv[2], _disaster_timers[i]->GetID()) == 0) {
++				_disaster_timers[i]->Invoke();
++				IConsolePrintF(CC_DEFAULT, "Invoked %s", _disaster_timers[i]->GetID());
++				return true;
++			}
++		}
++	} else if (strcmp(argv[1], "set") == 0 && argc >= 4) {
++		for (uint i = 0; i < _disaster_timers.Length(); ++i) {
++			if (strcmp(argv[2], _disaster_timers[i]->GetID()) == 0) {
++				uint16 new_timer = _disaster_timers[i]->Set(atoi(argv[3]));
++				IConsolePrintF(CC_DEFAULT, "Set %s to %u", _disaster_timers[i]->GetID(), new_timer);
++				return true;
++			}
++		}
++	}
+ 
+-	_disasters[buf[RandomRange(j)]].init_proc();
++	/* syntax error */
++	return false;
+ }
+ 
++/** Show statistics about this timer to the console. */
++void DisasterTimer::ShowInfo() const
++{
++	IConsolePrintF(CC_DEFAULT, "disaster %s: timer %u, current setting %u", this->disaster_id, this->timer, this->disaster_setting);
++}
+ 
+ /** Reset this timer to a (new) random value. */
+ void DisasterTimer::Reset()
+-- 
+1.7.3.2
+

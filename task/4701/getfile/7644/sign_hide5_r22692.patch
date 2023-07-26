@@ -1,0 +1,155 @@
+diff -r 7af4b7626a34 src/lang/english.txt
+--- a/src/lang/english.txt	Sat Jul 30 00:55:53 2011 +0200
++++ b/src/lang/english.txt	Mon Aug 01 14:51:22 2011 +0200
+@@ -356,6 +356,7 @@
+ STR_SETTINGS_MENU_STATION_NAMES_DISPLAYED                       :Station names displayed
+ STR_SETTINGS_MENU_WAYPOINTS_DISPLAYED                           :Waypoint names displayed
+ STR_SETTINGS_MENU_SIGNS_DISPLAYED                               :Signs displayed
++STR_SETTINGS_MENU_SHOW_COMPETITOR_SIGNS                         :Show competitor signs and names
+ STR_SETTINGS_MENU_FULL_ANIMATION                                :Full animation
+ STR_SETTINGS_MENU_FULL_DETAIL                                   :Full detail
+ STR_SETTINGS_MENU_TRANSPARENT_BUILDINGS                         :Transparent buildings
+diff -r 7af4b7626a34 src/openttd.h
+--- a/src/openttd.h	Sat Jul 30 00:55:53 2011 +0200
++++ b/src/openttd.h	Mon Aug 01 14:51:22 2011 +0200
+@@ -45,6 +45,7 @@
+ 	DO_FULL_ANIMATION      = 3, ///< Perform palette animation.
+ 	DO_FULL_DETAIL         = 5, ///< Also draw details of track and roads.
+ 	DO_SHOW_WAYPOINT_NAMES = 6, ///< Display waypoint names.
++	DO_SHOW_COMPETITOR_SIGNS = 7, ///< Display signs, station names and waypoint names of opponent companies. Buyos and oilrig-stations are always shown, even if this option is turned off.
+ };
+ 
+ extern GameMode _game_mode;
+diff -r 7af4b7626a34 src/signs_gui.cpp
+--- a/src/signs_gui.cpp	Sat Jul 30 00:55:53 2011 +0200
++++ b/src/signs_gui.cpp	Mon Aug 01 14:51:22 2011 +0200
+@@ -26,6 +26,7 @@
+ #include "string_func.h"
+ #include "core/geometry_func.hpp"
+ #include "hotkeys.h"
++#include "transparency.h"
+ 
+ #include "table/strings.h"
+ #include "table/sprites.h"
+@@ -116,11 +117,21 @@
+ 		return (filter_info.case_sensitive ? strstr(buf1, filter_info.string) : strcasestr(buf1, filter_info.string)) != NULL;
+ 	}
+ 
++	/** Filter sign list by owner */
++	static bool CDECL OwnerVisibilityFilter(const Sign * const *a, FilterInfo filter_info)
++	{
++		/* Hide sign if non-own signs are hidden in the viewport */
++		return HasBit(_display_opt, DO_SHOW_COMPETITOR_SIGNS) || (*a)->owner == _local_company;
++	}
++
+ 	/** Filter out signs from the sign list that does not match the name filter */
+ 	void FilterSignList()
+ 	{
+ 		FilterInfo filter_info = {this->filter_string, this->match_case};
+ 		this->signs.Filter(&SignNameFilter, filter_info);
++		if (!HasBit(_display_opt, DO_SHOW_COMPETITOR_SIGNS)) {
++			this->signs.Filter(&OwnerVisibilityFilter, filter_info);
++		}
+ 	}
+ };
+ 
+@@ -199,7 +210,7 @@
+ 			/* There is no new string -> clear this->filter_string */
+ 			this->filter_string[0] = '\0';
+ 
+-			this->signs.SetFilterState(false);
++			this->signs.SetFilterState(!HasBit(_display_opt, DO_SHOW_COMPETITOR_SIGNS)); // keep sign list filtering active if competitor signs should be hidden
+ 			this->DisableWidget(SLW_FILTER_CLEAR_BTN);
+ 		}
+ 
+@@ -374,10 +385,15 @@
+ 	 */
+ 	virtual void OnInvalidateData(int data = 0, bool gui_scope = true)
+ 	{
++		if (data == -1) {
++			/* The DO_SHOW_COMPETITOR_SIGNS display option has changed */
++			this->signs.SetFilterState(!StrEmpty(this->filter_string) || !HasBit(_display_opt, DO_SHOW_COMPETITOR_SIGNS));
++		}
++
+ 		/* When there is a filter string, we always need to rebuild the list even if
+ 		 * the amount of signs in total is unchanged, as the subset of signs that is
+ 		 * accepted by the filter might has changed. */
+-		if (data == 0 || !StrEmpty(this->filter_string)) { // New or deleted sign, or there is a filter string
++		if (data == 0 || data == -1 || !StrEmpty(this->filter_string)) { // New or deleted sign, changed visibility setting or there is a filter string
+ 			/* This needs to be done in command-scope to enforce rebuilding before resorting invalid data */
+ 			this->signs.ForceRebuild();
+ 		} else { // Change of sign contents while there is no filter string
+diff -r 7af4b7626a34 src/table/misc_settings.ini
+--- a/src/table/misc_settings.ini	Sat Jul 30 00:55:53 2011 +0200
++++ b/src/table/misc_settings.ini	Mon Aug 01 14:51:22 2011 +0200
+@@ -37,8 +37,8 @@
+ name     = ""display_opt""
+ type     = SLE_UINT8
+ var      = _display_opt
+-def      = (1 << DO_SHOW_TOWN_NAMES | 1 << DO_SHOW_STATION_NAMES | 1 << DO_SHOW_SIGNS | 1 << DO_FULL_ANIMATION | 1 << DO_FULL_DETAIL | 1 << DO_SHOW_WAYPOINT_NAMES)
+-full     = ""SHOW_TOWN_NAMES|SHOW_STATION_NAMES|SHOW_SIGNS|FULL_ANIMATION||FULL_DETAIL|WAYPOINTS""
++def      = (1 << DO_SHOW_TOWN_NAMES | 1 << DO_SHOW_STATION_NAMES | 1 << DO_SHOW_SIGNS | 1 << DO_FULL_ANIMATION | 1 << DO_FULL_DETAIL | 1 << DO_SHOW_WAYPOINT_NAMES | 1 << DO_SHOW_COMPETITOR_SIGNS)
++full     = ""SHOW_TOWN_NAMES|SHOW_STATION_NAMES|SHOW_SIGNS|FULL_ANIMATION||FULL_DETAIL|WAYPOINTS|SHOW_COMPETITOR_SIGNS""
+ 
+ [SDTG_BOOL]
+ name     = ""news_ticker_sound""
+diff -r 7af4b7626a34 src/toolbar_gui.cpp
+--- a/src/toolbar_gui.cpp	Sat Jul 30 00:55:53 2011 +0200
++++ b/src/toolbar_gui.cpp	Mon Aug 01 14:51:22 2011 +0200
+@@ -42,6 +42,7 @@
+ #include "newgrf_debug.h"
+ #include "hotkeys.h"
+ #include "engine_base.h"
++#include "settings_type.h"
+ 
+ #include "network/network.h"
+ #include "network/network_gui.h"
+@@ -302,6 +303,7 @@
+ 	OME_SHOW_STATIONNAMES,
+ 	OME_SHOW_WAYPOINTNAMES,
+ 	OME_SHOW_SIGNS,
++	OME_SHOW_COMPETITOR_SIGNS,
+ 	OME_FULL_ANIMATION,
+ 	OME_FULL_DETAILS,
+ 	OME_TRANSPARENTBUILDINGS,
+@@ -331,6 +333,7 @@
+ 	list->push_back(new DropDownListCheckedItem(STR_SETTINGS_MENU_STATION_NAMES_DISPLAYED, OME_SHOW_STATIONNAMES, false, HasBit(_display_opt, DO_SHOW_STATION_NAMES)));
+ 	list->push_back(new DropDownListCheckedItem(STR_SETTINGS_MENU_WAYPOINTS_DISPLAYED,     OME_SHOW_WAYPOINTNAMES, false, HasBit(_display_opt, DO_SHOW_WAYPOINT_NAMES)));
+ 	list->push_back(new DropDownListCheckedItem(STR_SETTINGS_MENU_SIGNS_DISPLAYED,         OME_SHOW_SIGNS, false, HasBit(_display_opt, DO_SHOW_SIGNS)));
++	list->push_back(new DropDownListCheckedItem(STR_SETTINGS_MENU_SHOW_COMPETITOR_SIGNS,   OME_SHOW_COMPETITOR_SIGNS, false, HasBit(_display_opt, DO_SHOW_COMPETITOR_SIGNS)));
+ 	list->push_back(new DropDownListCheckedItem(STR_SETTINGS_MENU_FULL_ANIMATION,          OME_FULL_ANIMATION, false, HasBit(_display_opt, DO_FULL_ANIMATION)));
+ 	list->push_back(new DropDownListCheckedItem(STR_SETTINGS_MENU_FULL_DETAIL,             OME_FULL_DETAILS, false, HasBit(_display_opt, DO_FULL_DETAIL)));
+ 	list->push_back(new DropDownListCheckedItem(STR_SETTINGS_MENU_TRANSPARENT_BUILDINGS,   OME_TRANSPARENTBUILDINGS, false, IsTransparencySet(TO_HOUSES)));
+@@ -361,6 +364,7 @@
+ 		case OME_SHOW_STATIONNAMES:    ToggleBit(_display_opt, DO_SHOW_STATION_NAMES);  break;
+ 		case OME_SHOW_WAYPOINTNAMES:   ToggleBit(_display_opt, DO_SHOW_WAYPOINT_NAMES); break;
+ 		case OME_SHOW_SIGNS:           ToggleBit(_display_opt, DO_SHOW_SIGNS);          break;
++		case OME_SHOW_COMPETITOR_SIGNS:ToggleBit(_display_opt, DO_SHOW_COMPETITOR_SIGNS), InvalidateWindowClassesData(WC_SIGN_LIST, -1); break;
+ 		case OME_FULL_ANIMATION:       ToggleBit(_display_opt, DO_FULL_ANIMATION);      break;
+ 		case OME_FULL_DETAILS:         ToggleBit(_display_opt, DO_FULL_DETAIL);         break;
+ 		case OME_TRANSPARENTBUILDINGS: ToggleTransparency(TO_HOUSES);                   break;
+diff -r 7af4b7626a34 src/viewport.cpp
+--- a/src/viewport.cpp	Sat Jul 30 00:55:53 2011 +0200
++++ b/src/viewport.cpp	Mon Aug 01 14:51:22 2011 +0200
+@@ -1186,6 +1186,9 @@
+ 		/* Don't draw if the display options are disabled */
+ 		if (!HasBit(_display_opt, is_station ? DO_SHOW_STATION_NAMES : DO_SHOW_WAYPOINT_NAMES)) continue;
+ 
++		/* Don't draw if station is owned by another company and competitor station names are hidden. Stations owned by none are never ignored. */
++		if (!HasBit(_display_opt, DO_SHOW_COMPETITOR_SIGNS) && _local_company != st->owner && st->owner != OWNER_NONE) continue;
++
+ 		ViewportAddString(dpi, ZOOM_LVL_OUT_4X, &st->sign,
+ 				is_station ? STR_VIEWPORT_STATION : STR_VIEWPORT_WAYPOINT,
+ 				(is_station ? STR_VIEWPORT_STATION : STR_VIEWPORT_WAYPOINT) + 1, STR_NULL,
+@@ -1201,6 +1204,11 @@
+ 
+ 	const Sign *si;
+ 	FOR_ALL_SIGNS(si) {
++		/* Don't draw if sign is owned by another company and competitor signs should be hidden.
++		 * Note: It is intetional that also signs owned by OWNER_NONE are hidden. Bankrupt
++		 * companies can leave OWNER_NONE signs after them. */
++		if (!HasBit(_display_opt, DO_SHOW_COMPETITOR_SIGNS) && _local_company != si->owner) continue;
++
+ 		ViewportAddString(dpi, ZOOM_LVL_OUT_4X, &si->sign,
+ 				STR_WHITE_SIGN,
+ 				IsTransparencySet(TO_SIGNS) ? STR_VIEWPORT_SIGN_SMALL_WHITE : STR_VIEWPORT_SIGN_SMALL_BLACK, STR_NULL,

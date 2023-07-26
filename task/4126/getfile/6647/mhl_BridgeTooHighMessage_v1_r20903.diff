@@ -1,0 +1,96 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(Revision 20903)
++++ src/lang/english.txt	(Arbeitskopie)
+@@ -3467,6 +3467,7 @@
+ STR_ERROR_ALREADY_AT_SEA_LEVEL                                  :{WHITE}... already at sea level
+ STR_ERROR_TOO_HIGH                                              :{WHITE}... too high
+ STR_ERROR_ALREADY_LEVELLED                                      :{WHITE}... already flat
++STR_ERROR_BRIDGE_TOO_HIGH_AFTER_LOWER_LAND                      :{WHITE}Afterwards the bridge above it would be too high.
+ 
+ # Company related errors
+ STR_ERROR_CAN_T_CHANGE_COMPANY_NAME                             :{WHITE}Can't change company name...
+@@ -3649,6 +3650,7 @@
+ STR_ERROR_CAN_T_START_AND_END_ON                                :{WHITE}Can't start and end in the same spot
+ STR_ERROR_BRIDGEHEADS_NOT_SAME_HEIGHT                           :{WHITE}Bridge heads not at the same level
+ STR_ERROR_BRIDGE_TOO_LOW_FOR_TERRAIN                            :{WHITE}Bridge is too low for the terrain
++STR_ERROR_BRIDGE_TOO_HIGH_FOR_TERRAIN                           :{WHITE}Bridge is too high for this terrain.
+ STR_ERROR_START_AND_END_MUST_BE_IN                              :{WHITE}Start and end must be in line
+ STR_ERROR_ENDS_OF_BRIDGE_MUST_BOTH                              :{WHITE}... ends of bridge must both be on land
+ STR_ERROR_BRIDGE_TOO_LONG                                       :{WHITE}... bridge too long
+Index: src/terraform_cmd.cpp
+===================================================================
+--- src/terraform_cmd.cpp	(Revision 20903)
++++ src/terraform_cmd.cpp	(Arbeitskopie)
+@@ -17,6 +17,7 @@
+ #include "functions.h"
+ #include "economy_func.h"
+ #include "genworld.h"
++#include "tunnelbridge.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -304,12 +305,23 @@
+ 			if (z_E > z_min) tileh |= SLOPE_E;
+ 			if (z_N > z_min) tileh |= SLOPE_N;
+ 
+-			/* Check if bridge would take damage */
+-			if (direction == 1 && MayHaveBridgeAbove(tile) && IsBridgeAbove(tile) &&
+-					GetBridgeHeight(GetSouthernBridgeEnd(tile)) <= z_max * TILE_HEIGHT) {
+-				_terraform_err_tile = tile; // highlight the tile under the bridge
+-				return_cmd_error(STR_ERROR_MUST_DEMOLISH_BRIDGE_FIRST);
++			if (MayHaveBridgeAbove(tile) && IsBridgeAbove(tile)) {
++				uint bridge_height = GetBridgeHeight(GetSouthernBridgeEnd(tile));
++
++				/* Check if bridge would take damage */
++				if (direction == 1 && bridge_height <= z_max * TILE_HEIGHT) {
++					_terraform_err_tile = tile; ///< highlight the tile under the bridge
++					return_cmd_error(STR_ERROR_MUST_DEMOLISH_BRIDGE_FIRST);
++				}
++
++				/* Is the bridge above not too high afterwards?
++				 * @see tunnelbridge_cmd.cpp for a detailed discussion. */
++				if (direction == -1 && bridge_height > (z_min + MAX_BRIDGE_HEIGHT) * TILE_HEIGHT) {
++					_terraform_err_tile = tile;
++					return_cmd_error(STR_ERROR_BRIDGE_TOO_HIGH_AFTER_LOWER_LAND);
++				}
+ 			}
++
+ 			/* Check if tunnel would take damage */
+ 			if (direction == -1 && IsTunnelInWay(tile, z_min * TILE_HEIGHT)) {
+ 				_terraform_err_tile = tile; // highlight the tile above the tunnel
+Index: src/tunnelbridge.h
+===================================================================
+--- src/tunnelbridge.h	(Revision 20903)
++++ src/tunnelbridge.h	(Arbeitskopie)
+@@ -15,6 +15,12 @@
+ #include "map_func.h"
+ 
+ /**
++ * Maximum height of  bridge above ground.
++ * Used when building bridges and terraforming below bridges.
++ */
++static const uint MAX_BRIDGE_HEIGHT = 15;
++
++/**
+  * Calculates the length of a tunnel or a bridge (without end tiles)
+  * @return length of bridge/tunnel middle
+  */
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(Revision 20903)
++++ src/tunnelbridge_cmd.cpp	(Arbeitskopie)
+@@ -362,6 +362,13 @@
+ 		for (TileIndex tile = tile_start + delta; tile != tile_end; tile += delta) {
+ 			if (GetTileMaxZ(tile) > z_start) return_cmd_error(STR_ERROR_BRIDGE_TOO_LOW_FOR_TERRAIN);
+ 
++			if (z_start + TILE_HEIGHT > (TileHeight(tile) + MAX_BRIDGE_HEIGHT) * TILE_HEIGHT) {
++				/* z_start seems to be one height level below the bridge level in all cases.
++				 * So add one TILE_HEIGHT. Then compare, if the currently tested tile is to low.
++				 * If yes, we have a problem... */
++				return_cmd_error(STR_ERROR_BRIDGE_TOO_HIGH_FOR_TERRAIN);
++			}
++
+ 			if (MayHaveBridgeAbove(tile) && IsBridgeAbove(tile)) {
+ 				/* Disallow crossing bridges for the time being */
+ 				return_cmd_error(STR_ERROR_MUST_DEMOLISH_BRIDGE_FIRST);

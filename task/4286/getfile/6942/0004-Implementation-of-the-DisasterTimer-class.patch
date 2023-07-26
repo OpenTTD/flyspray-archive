@@ -1,0 +1,162 @@
+From f6cf1bf5dc931586f2d7e080414a6e7ceccc91ed Mon Sep 17 00:00:00 2001
+From: J. Tang <tang@jtang.org>
+Date: Thu, 2 Dec 2010 00:31:30 -0500
+Subject: [PATCH 4/6] Implementation of the DisasterTimer class.
+
+
+Signed-off-by: J. Tang <tang@jtang.org>
+---
+ src/disaster_cmd.cpp |   98 +++++++++++++++++++++++++++++++++-----------------
+ 1 files changed, 65 insertions(+), 33 deletions(-)
+
+diff --git a/src/disaster_cmd.cpp b/src/disaster_cmd.cpp
+index faac56b..31bac3e 100644
+--- a/src/disaster_cmd.cpp
++++ b/src/disaster_cmd.cpp
+@@ -26,6 +26,7 @@
+ 
+ #include "stdafx.h"
+ 
++#include "disaster.h"
+ #include "industry.h"
+ #include "station_base.h"
+ #include "command_func.h"
+@@ -48,6 +49,10 @@
+ 
+ /** Delay counter for considering the next disaster. */
+ uint16 _disaster_delay;
++/**
++ * Collection of all registered disaster timers.
++ */
++SmallVector<DisasterTimer *, 8> _disaster_timers;
+ 
+ enum DisasterSubType {
+ 	ST_ZEPPELINER,
+@@ -668,9 +673,6 @@ bool DisasterVehicle::Tick()
+ 	return _disastervehicle_tick_procs[this->subtype](this);
+ }
+ 
+-typedef void DisasterInitProc();
+-
+-
+ /**
+  * Zeppeliner which crashes on a small airport if one found,
+  * otherwise crashes on a random tile
+@@ -883,30 +885,47 @@ static void Disaster_CoalMine_Init()
+ 	}
+ }
+ 
+-struct Disaster {
+-	DisasterInitProc *init_proc; ///< The init function for this disaster.
+-	Year min_year;               ///< The first year this disaster will occur.
+-	Year max_year;               ///< The last year this disaster will occur.
+-};
++/**
++ * If disasters have not yet been registered yet, initialize their
++ * timers.  Otherwise just reset their timers.
++ */
++void DisasterTimer::Startup()
++{
++	if (_disaster_timers.Length() == 0) {
++		DisasterTimer **coalmine = _disaster_timers.Append(1);
++		*coalmine = new DisasterTimer("coal mine", _settings_game.disaster.coalmine_subsidence, 1970, 2020, Disaster_CoalMine_Init);
++		DisasterTimer **factory = _disaster_timers.Append(1);
++		*factory = new DisasterTimer("factory", _settings_game.disaster.factory_explosion, 1970, 2020, Disaster_Helicopter_Init);
++		DisasterTimer **refinery = _disaster_timers.Append(1);
++		*refinery = new DisasterTimer("refinery", _settings_game.disaster.refinery_explosion, 1960, 2000, Disaster_Airplane_Init);
++		DisasterTimer **zeppeliner = _disaster_timers.Append(1);
++		*zeppeliner = new DisasterTimer("zeppeliner", _settings_game.disaster.zeppeliner_crash, 1890, 1955, Disaster_Zeppeliner_Init);
++		DisasterTimer **small_ufo = _disaster_timers.Append(1);
++		*small_ufo = new DisasterTimer("small ufo", _settings_game.disaster.small_ufo_landing, 1940, 1970, Disaster_Small_Ufo_Init);
++		DisasterTimer **big_ufo = _disaster_timers.Append(1);
++		*big_ufo = new DisasterTimer("big ufo", _settings_game.disaster.big_ufo_landing, 1970, 2020, Disaster_Big_Ufo_Init);
++		DisasterTimer **small_sub = _disaster_timers.Append(1);
++		*small_sub = new DisasterTimer("small sub", _settings_game.disaster.small_submarine_sighting, 1970, 2020, Disaster_Small_Submarine_Init);
++		DisasterTimer **big_sub = _disaster_timers.Append(1);
++		*big_sub = new DisasterTimer("big sub", _settings_game.disaster.big_submarine_sighting, 1970, 2020, Disaster_Big_Submarine_Init);
++	}
+ 
+-static const Disaster _disasters[] = {
+-	{Disaster_Zeppeliner_Init,      1930, 1955}, // zeppeliner
+-	{Disaster_Small_Ufo_Init,       1940, 1970}, // ufo (small)
+-	{Disaster_Airplane_Init,        1960, 1990}, // airplane
+-	{Disaster_Helicopter_Init,      1970, 2000}, // helicopter
+-	{Disaster_Big_Ufo_Init,         2000, 2100}, // ufo (big)
+-	{Disaster_Small_Submarine_Init, 1940, 1965}, // submarine (small)
+-	{Disaster_Big_Submarine_Init,   1975, 2010}, // submarine (big)
+-	{Disaster_CoalMine_Init,        1950, 1985}, // coalmine
+-};
++	for (uint i = 0; i < _disaster_timers.Length(); ++i) {
++		_disaster_timers[i]->Reset();
++	}
++}
+ 
+-static void DoDisaster()
++/**
++ * Decrement all registered disaster timers by 1, which may cause a
++ * disaster to be invoked.
++ */
++void DisasterTimer::DailyLoop()
+ {
+-	byte buf[lengthof(_disasters)];
++	for (uint i = 0; i < _disaster_timers.Length(); ++i) {
++		_disaster_timers[i]->Tick();
++	}
++}
+ 
+-	byte j = 0;
+-	for (size_t i = 0; i != lengthof(_disasters); i++) {
+-		if (_cur_year >= _disasters[i].min_year && _cur_year < _disasters[i].max_year) buf[j++] = (byte)i;
+ 	}
+ 
+ 	if (j == 0) return;
+@@ -915,23 +934,36 @@ static void DoDisaster()
+ }
+ 
+ 
+-static void ResetDisasterDelay()
++/** Reset this timer to a (new) random value. */
++void DisasterTimer::Reset()
+ {
+-	_disaster_delay = GB(Random(), 0, 9) + 730;
++	this->timer = GB(Random(), 0, 9) + this->DISASTER_BASE;
+ }
+ 
+-void DisasterDailyLoop()
++/**
++ * Decrement the timer each time Tick() is called.  When the timer
++ * reaches 0, reset it.  Also, check if a disaster should be invoked.
++ * If the current year is not within this DisasterTimer's year bounds,
++ * then the disaster cannot occur.  Otherwise, randomly decide (1 in 4
++ * if normal, 1 in 8 if reduced, 1 in 2 if frequent).
++ */
++void DisasterTimer::Tick()
+ {
+-	if (--_disaster_delay != 0) return;
++	if (--(this->timer) > 0) return;
++	this->Reset();
+ 
+-	ResetDisasterDelay();
++	/* check if disasters are globally disabled */
++	if (_settings_game.difficulty.disasters == 0) return;
+ 
+-	if (_settings_game.difficulty.disasters != 0) DoDisaster();
+-}
++	/* check year */
++	if (_cur_year < this->min_year || _cur_year > this->max_year) return;
+ 
+-void StartupDisasters()
+-{
+-	ResetDisasterDelay();
++	/* check if this disaster is disabled */
++	if (this->disaster_setting == 0) return;
++
++	/* otherwise randomly invoke disaster */
++	uint16 threshold = 1 << (this->disaster_setting - 1);
++	if (GB(Random(), 0, 3) < threshold) this->init_proc();
+ }
+ 
+ /**
+-- 
+1.7.3.2
+

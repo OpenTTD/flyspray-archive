@@ -1,0 +1,396 @@
+Index: src/aircraft.h
+===================================================================
+--- src/aircraft.h	(Revision 20904)
++++ src/aircraft.h	(Arbeitskopie)
+@@ -15,6 +15,19 @@
+ #include "station_map.h"
+ #include "vehicle_base.h"
+ 
++
++/**
++ * Minimal, Maximal and Holding flying altitude above ground while a plane is in flight
++ * and not starting or landing, i.e. in the state SLOWTURN & NOSPDCLAMP.
++ * Under certain circumstances, the actual flying altitude is
++ * higher, because certain offsets are added.
++ */
++enum AircraftFlyingAltitude {
++	AIRCRAFT_MIN_FLYING_ALTITUDE      = 120, ///< minimal flying altitude above tile
++	AIRCRAFT_MAX_FLYING_ALTITUDE      = 360, ///< maximal flying altitude above tile
++	AIRCRAFT_HOLD_MAX_FLYING_ALTITUDE = 150  ///< holding flying altitude above tile
++};
++
+ struct Aircraft;
+ 
+ /** An aircraft can be one ot those types */
+@@ -55,8 +68,10 @@
+ 
+ void AircraftLeaveHangar(Aircraft *v);
+ void AircraftNextAirportPos_and_Order(Aircraft *v);
++uint GetAircraftMinFlyingAltitude(const Aircraft *v);
++uint GetAircraftMaxFlyingAltitude(const Aircraft *v);
++uint GetAircraftHoldMaxFlyingAltitude(const Aircraft *v);
+ void SetAircraftPosition(Aircraft *v, int x, int y, int z);
+-byte GetAircraftFlyingAltitude(const Aircraft *v);
+ 
+ /** Cached oftenly queried (NewGRF) values */
+ struct AircraftCache {
+@@ -70,6 +85,7 @@
+ 	AircraftCache acache; ///< Cache of often used calculated values
+ 
+ 	uint16 crashed_counter;
++	uint16 cached_max_speed;
+ 	byte pos;
+ 	byte previous_pos;
+ 	StationID targetairport;
+@@ -77,6 +93,18 @@
+ 	DirectionByte last_direction;
+ 	byte number_consecutive_turns;
+ 
++    /* True if an only if the aircraft has touched its upper altitude limit
++	 * and currently corrects its altitude. Used in order to avoid the
++	 * aircraft "stairclimbing". When an aircraft starts correcting
++	 * altitude it should make a rather big correction in one step. */
++    bool aircraft_is_in_max_height_correction;
++
++    /* True if an only if the aircraft has touched its lower altitude limit
++	 * and currently corrects its altitude. Used in order to avoid the
++	 * aircraft "stairclimbing". When an aircraft starts correcting
++	 * altitude it should make a rather big correction in one step. */
++    bool aircraft_is_in_min_height_correction;
++
+ 	/** Ticks between each turn to prevent > 45 degree turns. */
+ 	byte turn_counter;
+ 
+Index: src/saveload/afterload.cpp
+===================================================================
+--- src/saveload/afterload.cpp	(Revision 20904)
++++ src/saveload/afterload.cpp	(Arbeitskopie)
+@@ -2252,7 +2252,7 @@
+ 				UpdateAircraftCache(v);
+ 				AircraftNextAirportPos_and_Order(v);
+ 				/* get aircraft back on running altitude */
+-				if ((v->vehstatus & VS_CRASHED) == 0) SetAircraftPosition(v, v->x_pos, v->y_pos, GetAircraftFlyingAltitude(v));
++				if ((v->vehstatus & VS_CRASHED) == 0) SetAircraftPosition(v, v->x_pos, v->y_pos, GetAircraftMaxFlyingAltitude(v));
+ 			}
+ 		}
+ 	}
+Index: src/saveload/vehicle_sl.cpp
+===================================================================
+--- src/saveload/vehicle_sl.cpp	(Revision 20904)
++++ src/saveload/vehicle_sl.cpp	(Arbeitskopie)
+@@ -194,7 +194,7 @@
+ 			if (a->subtype == AIR_HELICOPTER) a->Next()->Next()->cur_speed = 32;
+ 
+ 			/* set new position x,y,z */
+-			SetAircraftPosition(a, gp.x, gp.y, GetAircraftFlyingAltitude(a));
++			SetAircraftPosition(a, gp.x, gp.y, GetAircraftMaxFlyingAltitude(a));
+ 		}
+ 	}
+ }
+@@ -597,10 +597,11 @@
+ 		 SLE_CONDVAR(Aircraft, last_direction,        SLE_UINT8,                    2, SL_MAX_VERSION),
+ 		 SLE_CONDVAR(Aircraft, number_consecutive_turns, SLE_UINT8,                 2, SL_MAX_VERSION),
+ 
++		 SLE_CONDVAR(Aircraft, aircraft_is_in_max_height_correction, SLE_UINT8,     MORE_HEIGHTLEVEL_SAVEGAME_VERSION, SL_MAX_VERSION),
++		 SLE_CONDVAR(Aircraft, aircraft_is_in_min_height_correction, SLE_UINT8,     MORE_HEIGHTLEVEL_SAVEGAME_VERSION, SL_MAX_VERSION),
++
+ 		 SLE_CONDVAR(Aircraft, turn_counter,          SLE_UINT8,                  136, SL_MAX_VERSION),
+-
+ 		SLE_CONDNULL(13,                                                           2, 143), // old reserved space
+-
+ 		     SLE_END()
+ 	};
+ 
+Index: src/newgrf_engine.cpp
+===================================================================
+--- src/newgrf_engine.cpp	(Revision 20904)
++++ src/newgrf_engine.cpp	(Arbeitskopie)
+@@ -593,7 +593,7 @@
+ 
+ 			{
+ 				const Vehicle *w = v->Next();
+-				uint16 altitude = v->z_pos - w->z_pos; // Aircraft height - shadow height
++				uint32 altitude = v->z_pos - w->z_pos; // Aircraft height - shadow height
+ 				byte airporttype = ATP_TTDP_LARGE;
+ 
+ 				const Station *st = GetTargetAirportIfValid(Aircraft::From(v));
+Index: src/aircraft_cmd.cpp
+===================================================================
+--- src/aircraft_cmd.cpp	(Revision 20904)
++++ src/aircraft_cmd.cpp	(Arbeitskopie)
+@@ -16,6 +16,7 @@
+ #include "aircraft.h"
+ #include "landscape.h"
+ #include "news_func.h"
++#include "tile_map.h"
+ #include "vehicle_gui.h"
+ #include "newgrf_engine.h"
+ #include "newgrf_sound.h"
+@@ -285,6 +286,8 @@
+ 		v->state = HANGAR;
+ 		v->previous_pos = v->pos;
+ 		v->targetairport = GetStationIndex(tile);
++		v->aircraft_is_in_min_height_correction = false;
++		v->aircraft_is_in_max_height_correction = false;
+ 		v->SetNext(u);
+ 
+ 		v->service_interval = Company::Get(_current_company)->settings.vehicle.servint_aircraft;
+@@ -606,18 +609,16 @@
+ }
+ 
+ /**
+- * Gets the cruise altitude of an aircraft.
+- * The cruise altitude is determined by the velocity of the vehicle
+- * and the direction it is moving
+- * @param v The vehicle. Should be an aircraft
+- * @returns Altitude in pixel units
++ * Get the offset in pixels to be added to the AIRCRAFT_MIN_FLYING_ALTITUDE,
++ * AIRCRAFT_MAX_FLYING_ALTITUDE constants, in order to make collisions less probable.
++ * The offset is determined by the velocity of the vehicle and the direction it is moving.
++ *
++ * @param v The aircraft that needs an offset.
++ * @return Offset in pixels to be added to the flying altitude.
+  */
+-byte GetAircraftFlyingAltitude(const Aircraft *v)
++uint GetAircraftFlyingAltitudeOffset(const Aircraft *v)
+ {
+-	/* Make sure Aircraft fly no lower so that they don't conduct
+-	 * CFITs (controlled flight into terrain)
+-	 */
+-	byte base_altitude = 150;
++	uint offset = 0;
+ 
+ 	/* Make sure eastbound and westbound planes do not "crash" into each
+ 	 * other by providing them with vertical seperation
+@@ -627,19 +628,88 @@
+ 		case DIR_NE:
+ 		case DIR_E:
+ 		case DIR_SE:
+-			base_altitude += 10;
++			offset += 10;
+ 			break;
+ 
+ 		default: break;
+ 	}
+ 
+ 	/* Make faster planes fly higher so that they can overtake slower ones */
+-	base_altitude += min(20 * (v->max_speed / 200), 90);
++	offset += min(20 * (v->max_speed / 200), 90);
++	return offset;
++}
+ 
+-	return base_altitude;
++/**
++ * Get the tile height below the aircraft.
++ * This function is needed because aircraft can leave the mapborders.
++ * The game would crash if an aircraft leaves the northeast or southeast border.
++ * Just for completeness we check all four map edges.
++ *
++ * @param v The aircraft
++ * @return the tileheight below the aircaft's shadow. 
++ */
++uint GetTileHeightBelowAircraft(const Aircraft *v) {
++	TileIndex tile = TileVirtXY(v->x_pos, v->y_pos);
++	uint tile_height;
++
++	/* Check for being inside the map. If not call TileHeightOutsideMap() instead of TileHeight(). */
++	if ( v->x_pos >= 0 && v->x_pos <= (int)MapSizeX() * (int)TILE_SIZE - 1
++			&& v->y_pos >= 0 && v->y_pos <= (int)MapSizeY() * (int)TILE_SIZE - 1) {
++		tile_height = TileHeight(tile) * TILE_HEIGHT;
++	} else {
++		tile_height = TileHeightOutsideMap(v->x_pos, v->y_pos) * TILE_HEIGHT;
++	}
++
++	return tile_height;
+ }
+ 
+ /**
++ * Get the height in pixels, from level 0, dependant on terrain below,
++ * at wich an aircraft should start increasing it's altitude,
++ * to prevent aircraft crashing in higher terrain ahead.
++ *
++ * @param v The Aircraft that needs cruise altitude adjusted.
++ * @return Minimal aircraft flying altitude above ground, while in normal flight, in pixels.
++ */
++uint GetAircraftMinFlyingAltitude(const Aircraft *v)
++{
++	uint tile_height = GetTileHeightBelowAircraft(v);
++	uint offset = GetAircraftFlyingAltitudeOffset(v);
++
++	return tile_height + AIRCRAFT_MIN_FLYING_ALTITUDE + offset;
++}
++
++/**
++ * Get the height in pixels, from level 0, dependant on terrain below,
++ * at wich an aircraft should start decreasing it's altitude,
++ * to prevent aircraft taking off to space.
++ *
++ * @param v The aircraft that needs cruise altitude adjusted.
++ * @return Maximal aircraft flying altitude above ground, while in normal flight, in pixels.
++ */
++uint GetAircraftMaxFlyingAltitude(const Aircraft *v)
++{
++	uint tile_height = GetTileHeightBelowAircraft(v);
++	uint offset = GetAircraftFlyingAltitudeOffset(v);
++
++	return tile_height + AIRCRAFT_MAX_FLYING_ALTITUDE + offset;
++}
++
++/**
++ * Checks the flightpath height of the aircraft, in pixels, from level 0, dependant on terrain below,
++ * after adjusting height.
++ *
++ * @param v The aircraft that may or may not need to decrease its altitude.
++ * @return Maximal aircraft holding altitude, while in normal flight, in pixels.
++ */
++uint GetAircraftHoldMaxFlyingAltitude(const Aircraft *v)
++{
++	uint tile_height = GetTileHeightBelowAircraft(v);
++
++	return tile_height + AIRCRAFT_HOLD_MAX_FLYING_ALTITUDE;
++}
++
++/**
+  * Find the entry point to an airport depending on direction which
+  * the airport is being approached from. Each airport can have up to
+  * four entry points for its approach system so that approaching
+@@ -651,7 +721,7 @@
+  * @param v   The vehicle that is approaching the airport
+  * @param apc The Airport Class being approached.
+  * @param rotation The rotation of the airport.
+- * @returns   The index of the entry point
++ * @return   The index of the entry point
+  */
+ static byte AircraftGetEntryPoint(const Aircraft *v, const AirportFTAClass *apc, Direction rotation)
+ {
+@@ -728,7 +798,7 @@
+ 			UpdateAircraftCache(v);
+ 			AircraftNextAirportPos_and_Order(v);
+ 			/* get aircraft back on running altitude */
+-			SetAircraftPosition(v, v->x_pos, v->y_pos, GetAircraftFlyingAltitude(v));
++			SetAircraftPosition(v, v->x_pos, v->y_pos, GetAircraftMaxFlyingAltitude(v));
+ 			return false;
+ 		}
+ 	}
+@@ -757,12 +827,14 @@
+ 			if (count > 0) {
+ 				v->tile = 0;
+ 
++				uint aircraft_max_altitude = GetAircraftMaxFlyingAltitude(v);
++
+ 				/* Reached altitude? */
+-				if (v->z_pos >= 184) {
++				if (v->z_pos >= (int)aircraft_max_altitude) {
+ 					v->cur_speed = 0;
+ 					return true;
+ 				}
+-				SetAircraftPosition(v, v->x_pos, v->y_pos, min(v->z_pos + count, 184));
++				SetAircraftPosition(v, v->x_pos, v->y_pos, min(v->z_pos + count, aircraft_max_altitude));
+ 			}
+ 		}
+ 		return false;
+@@ -825,6 +897,9 @@
+ 		if (!UpdateAircraftSpeed(v, SPEED_LIMIT_TAXI)) return false;
+ 
+ 		v->direction = ChangeDir(v->direction, dirdiff > DIRDIFF_REVERSE ? DIRDIFF_45LEFT : DIRDIFF_45RIGHT);
++
++		DEBUG(misc, 9, "New direction: %i", (int)v->direction);
++
+ 		v->cur_speed >>= 1;
+ 
+ 		SetAircraftPosition(v, v->x_pos, v->y_pos, v->z_pos);
+@@ -912,11 +987,64 @@
+ 		uint z = v->z_pos;
+ 
+ 		if (amd.flag & AMED_TAKEOFF) {
+-			z = min(z + 2, GetAircraftFlyingAltitude(v));
++			uint aircraft_max_altitude = GetAircraftMaxFlyingAltitude(v);
++
++			if (aircraft_max_altitude >= z) {
++				/* The aircraft rises or has reached its flying altitude. */
++				z = min(z + 2, GetAircraftMaxFlyingAltitude(v));
++			} else {
++				/* Aircraft has reached its flying altitude, but then the terrain
++				 * gets lower. So, its flying altitude also decreases.
++				 * We ignore this effect here, as lowering altitude during takeoff
++				 * would be a bit strange. */
++			}
+ 		}
+ 
+-		if ((amd.flag & AMED_HOLD) && (z > 150)) z--;
++		if ((amd.flag & AMED_SLOWTURN) && (amd.flag & AMED_NOSPDCLAMP)) {
++			/* Aircraft is in flight. We want to enforce it being somewhere
++			 * between the minimum and the maximum allowed altitude. */
++			uint aircraft_min_altitude = GetAircraftMinFlyingAltitude(v);
++			uint aircraft_max_altitude = GetAircraftMaxFlyingAltitude(v);
++			uint aircraft_middle_altitude = aircraft_min_altitude + ((uint)(aircraft_max_altitude - aircraft_min_altitude)) / 2;
+ 
++			/* If those assumptions would be violated, aircraft would behave
++			 * fairly strange. */
++			assert(aircraft_min_altitude < aircraft_max_altitude);
++			assert(aircraft_min_altitude < aircraft_middle_altitude);
++			assert(aircraft_middle_altitude < aircraft_max_altitude);
++
++			if (z < aircraft_min_altitude
++					|| (v->aircraft_is_in_min_height_correction && z < aircraft_middle_altitude)) {
++				/* Rise. And don't fly into that mountain right ahead.
++				 * And avoid our aircraft become a stairclimber, so if we start
++				 * correcting altitude, then we stop correction not too early. */
++				v->aircraft_is_in_min_height_correction = true;
++				z += 2;
++
++			} else if (z > aircraft_max_altitude
++					|| (v->aircraft_is_in_max_height_correction && z > aircraft_middle_altitude)) {
++				/* Fly lower. You are an aircraft, not an UFO.
++				 * And again, don't stop correcting altitude too early. */
++				v->aircraft_is_in_max_height_correction = true;
++				z--;
++
++			} else if (v->aircraft_is_in_min_height_correction && z >= aircraft_middle_altitude) {
++				/* Now, we have corrected altitude enough. */
++				v->aircraft_is_in_min_height_correction = false;
++
++			} else if (v->aircraft_is_in_max_height_correction && z <= aircraft_middle_altitude) {
++				/* Now, we have corrected altitude enough. */
++				v->aircraft_is_in_max_height_correction = false;
++			}
++		}
++
++		if (amd.flag & AMED_HOLD) {
++			uint aircraft_max_hold_altitude = GetAircraftHoldMaxFlyingAltitude(v);
++			if (z > aircraft_max_hold_altitude) {
++				z--;
++			}
++		}
++
+ 		if (amd.flag & AMED_LAND) {
+ 			if (st->airport.tile == INVALID_TILE) {
+ 				/* Airport has been removed, abort the landing procedure */
+@@ -924,7 +1052,7 @@
+ 				UpdateAircraftCache(v);
+ 				AircraftNextAirportPos_and_Order(v);
+ 				/* get aircraft back on running altitude */
+-				SetAircraftPosition(v, gp.x, gp.y, GetAircraftFlyingAltitude(v));
++				SetAircraftPosition(v, gp.x, gp.y, GetAircraftMaxFlyingAltitude(v));
+ 				continue;
+ 			}
+ 
+@@ -939,6 +1067,9 @@
+ 			if (delta >= t) {
+ 				z -= CeilDiv(z - curz, t);
+ 			}
++
++			DEBUG(misc, 9, "AMED_LAND: New z is %i", z);
++
+ 			if (z < curz) z = curz;
+ 		}
+ 
+@@ -970,7 +1101,7 @@
+ 	if (v->crashed_counter < 500 && st == NULL && ((v->crashed_counter % 3) == 0) ) {
+ 		uint z = GetSlopeZ(v->x_pos, v->y_pos);
+ 		v->z_pos -= 1;
+-		if (v->z_pos == z) {
++		if (v->z_pos == (int32)z) {
+ 			v->crashed_counter = 500;
+ 			v->z_pos++;
+ 		}

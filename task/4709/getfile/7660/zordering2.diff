@@ -1,0 +1,86 @@
+Index: src/window.cpp
+===================================================================
+--- src/window.cpp	(revision 22727)
++++ src/window.cpp	(working copy)
+@@ -849,20 +849,49 @@
+ }
+ 
+ /**
+- * On clicking on a window, make it the frontmost window of all. However
+- * there are certain windows that always need to be on-top; these include
+- * - Toolbar, Statusbar (always on)
+- * - New window, Chatbar (only if open)
+- * The window is marked dirty for a repaint if the window is actually moved
+- * @param w window that is put into the foreground
++ * Get the z-priority for a given window. This is defined as an arbitrary integer value which is used only in
++ * comparison with other z-priority values; a window with a given z-priority will appear above other windows with
++ * a lower value, and below those with a higher one. (The ordering within z-priorities can be mixed).
++ * @param w The window to get the z-priority for
++ * @return The window's z-priority
++ */
++static inline int GetWindowZPriority(const Window *w)
++{
++	switch (w->window_class) {
++		case WC_ENDSCREEN:
++			return 5;
++
++		case WC_HIGHSCORE:
++			return 4;
++
++		case WC_MAIN_TOOLBAR:
++		case WC_STATUS_BAR:
++			return 3;
++
++		case WC_SAVELOAD:
++			return 2;
++
++		case WC_SEND_NETWORK_MSG:
++		case WC_NEWS_WINDOW:
++			return 1;
++
++		default:
++			return 0;
++	}
++}
++
++/**
++ * On clicking on a window, make it the frontmost window of all other windows with an equal
++ * or lower z-priority. The window is marked dirty for a repaint if the window is actually moved
++ * @param w window that is put into the relative foreground
+  * @return pointer to the window, the same as the input pointer
+  */
+ static void BringWindowToFront(Window *w)
+ {
+ 	Window *v = _z_front_window;
+ 
+-	/* Bring the window just below the vital windows */
+-	for (; v != NULL && v != w && IsVitalWindow(v); v = v->z_back) { }
++	/* Bring the window just below the windows that have a greater z-priority */
++	for (; v != NULL && v != w && GetWindowZPriority(v) > GetWindowZPriority(w); v = v->z_back) { }
+ 
+ 	if (v == NULL || w == v) return; // window is already in the right position
+ 
+@@ -929,20 +958,10 @@
+ 	 * window has a text box, then take focus anyway. */
+ 	if (this->window_class != WC_OSK && (!EditBoxInGlobalFocus() || this->nested_root->GetWidgetOfType(WWT_EDITBOX) != NULL)) SetFocusedWindow(this);
+ 
+-	/* Hacky way of specifying always-on-top windows. These windows are
+-	 * always above other windows because they are moved below them.
+-	 * status-bar is above news-window because it has been created earlier.
+-	 * Also, as the chat-window is excluded from this, it will always be
+-	 * the last window, thus always on top.
+-	 * XXX - Yes, ugly, probably needs something like w->always_on_top flag
+-	 * to implement correctly, but even then you need some kind of distinction
+-	 * between on-top of chat/news and status windows, because these conflict */
++	/* Insert the window into the correct location in the z-ordering. */
+ 	Window *w = _z_front_window;
+-	if (w != NULL && this->window_class != WC_SEND_NETWORK_MSG && this->window_class != WC_HIGHSCORE && this->window_class != WC_ENDSCREEN) {
+-		if (FindWindowById(WC_MAIN_TOOLBAR, 0)     != NULL) w = w->z_back;
+-		if (FindWindowById(WC_STATUS_BAR, 0)       != NULL) w = w->z_back;
+-		if (FindWindowById(WC_NEWS_WINDOW, 0)      != NULL) w = w->z_back;
+-		if (FindWindowByClass(WC_SEND_NETWORK_MSG) != NULL) w = w->z_back;
++	if (w != NULL) {
++		while (w != NULL && GetWindowZPriority(w) > GetWindowZPriority(this)) w = w->z_back;
+ 
+ 		if (w == NULL) {
+ 			_z_back_window->z_front = this;

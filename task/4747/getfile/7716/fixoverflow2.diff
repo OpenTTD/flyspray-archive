@@ -1,0 +1,203 @@
+Index: src/bmp.cpp
+===================================================================
+--- src/bmp.cpp	(revision 22846)
++++ src/bmp.cpp	(working copy)
+@@ -360,6 +360,9 @@
+ {
+ 	assert(info != NULL && data != NULL);
+ 
++	/* Disallow overly large images (to prevent size overflow) */
++	if (info->width > 0x4000 || info->height > 0x4000) return false;
++
+ 	data->bitmap = CallocT<byte>(info->width * info->height * ((info->bpp == 24) ? 3 : 1));
+ 
+ 	/* Load image */
+Index: src/fontcache.cpp
+===================================================================
+--- src/fontcache.cpp	(revision 22846)
++++ src/fontcache.cpp	(working copy)
+@@ -1027,6 +1027,9 @@
+ 	FT_Load_Glyph(face, glyph_index, FT_LOAD_DEFAULT);
+ 	FT_Render_Glyph(face->glyph, aa ? FT_RENDER_MODE_NORMAL : FT_RENDER_MODE_MONO);
+ 
++	/* Disallow overly large glyphs (to prevent size overflow) */
++	if (slot->bitmap.width > 0xFF || slot->bitmap.rows > 0xFF) error("Overly large glyph dimension(s)");
++
+ 	/* Despite requesting a normal glyph, FreeType may have returned a bitmap */
+ 	aa = (slot->bitmap.pixel_mode == FT_PIXEL_MODE_GRAY);
+ 
+Index: src/heightmap.cpp
+===================================================================
+--- src/heightmap.cpp	(revision 22846)
++++ src/heightmap.cpp	(working copy)
+@@ -142,14 +142,22 @@
+ 		return false;
+ 	}
+ 
++	*x = png_get_image_width(png_ptr, info_ptr);
++	*y = png_get_image_height(png_ptr, info_ptr);
++
++	/* Disallow overly large images (to prevent size overflow) */
++	if (*x > 0x4000 || *y > 0x4000) {
++		ShowErrorMessage(STR_ERROR_PNGMAP, STR_ERROR_PNGMAP_IMAGE_TYPE, WL_ERROR);
++		fclose(fp);
++		png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
++		return false;
++	}
++
+ 	if (map != NULL) {
+-		*map = MallocT<byte>(png_get_image_width(png_ptr, info_ptr) * png_get_image_height(png_ptr, info_ptr));
++		*map = MallocT<byte>(*x * *y);
+ 		ReadHeightmapPNGImageData(*map, png_ptr, info_ptr);
+ 	}
+ 
+-	*x = png_get_image_width(png_ptr, info_ptr);
+-	*y = png_get_image_height(png_ptr, info_ptr);
+-
+ 	fclose(fp);
+ 	png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+ 	return true;
+@@ -243,6 +251,17 @@
+ 		return false;
+ 	}
+ 
++	*x = info.width;
++	*y = info.height;
++
++	/* Disallow overly large images (to prevent size overflow) */
++	if (*x > 0x4000 || *y > 0x4000) {
++		ShowErrorMessage(STR_ERROR_BMPMAP, STR_ERROR_BMPMAP_IMAGE_TYPE, WL_ERROR);
++		fclose(f);
++		BmpDestroyData(&data);
++		return false;
++	}
++
+ 	if (map != NULL) {
+ 		if (!BmpReadBitmap(&buffer, &info, &data)) {
+ 			ShowErrorMessage(STR_ERROR_BMPMAP, STR_ERROR_BMPMAP_IMAGE_TYPE, WL_ERROR);
+@@ -251,15 +270,12 @@
+ 			return false;
+ 		}
+ 
+-		*map = MallocT<byte>(info.width * info.height);
++		*map = MallocT<byte>(*x * *y);
+ 		ReadHeightmapBMPImageData(*map, &info, &data);
+ 	}
+ 
+ 	BmpDestroyData(&data);
+ 
+-	*x = info.width;
+-	*y = info.height;
+-
+ 	fclose(f);
+ 	return true;
+ }
+Index: src/misc/fixedsizearray.hpp
+===================================================================
+--- src/misc/fixedsizearray.hpp	(revision 22846)
++++ src/misc/fixedsizearray.hpp	(working copy)
+@@ -53,6 +53,9 @@
+ 	/** Default constructor. Preallocate space for items and header, then initialize header. */
+ 	FixedSizeArray()
+ 	{
++		/* Ensure the size won't overflow. */
++		assert_compile(C < (SIZE_MAX - HeaderSize) / Tsize);
++
+ 		/* allocate block for header + items (don't construct items) */
+ 		data = (T*)((MallocT<byte>(HeaderSize + C * Tsize)) + HeaderSize);
+ 		SizeRef() = 0; // initial number of items
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 22846)
++++ src/openttd.cpp	(working copy)
+@@ -599,8 +599,8 @@
+ 	 * height must still fit within a 32 bits integer, this way all
+ 	 * internal drawing routines work correctly.
+ 	 */
+-	_cur_resolution.width  = ClampU(_cur_resolution.width,  1, UINT16_MAX);
+-	_cur_resolution.height = ClampU(_cur_resolution.height, 1, UINT16_MAX);
++	_cur_resolution.width  = ClampU(_cur_resolution.width,  1, UINT16_MAX / 2);
++	_cur_resolution.height = ClampU(_cur_resolution.height, 1, UINT16_MAX / 2);
+ 
+ 	/* enumerate language files */
+ 	InitializeLanguagePacks();
+Index: src/pathfinder/npf/queue.cpp
+===================================================================
+--- src/pathfinder/npf/queue.cpp	(revision 22846)
++++ src/pathfinder/npf/queue.cpp	(working copy)
+@@ -234,10 +234,15 @@
+ 	/* Allocate space for the Hash, the buckets and the bucket flags */
+ 	uint i;
+ 
++	const size_t per_bucket_size = sizeof(*this->buckets) + sizeof(*this->buckets_in_use);
++
++	/* Ensure the size won't overflow. */
++	assert(num_buckets < SIZE_MAX / per_bucket_size);
++
+ 	this->hash = hash;
+ 	this->size = 0;
+ 	this->num_buckets = num_buckets;
+-	this->buckets = (HashNode*)MallocT<byte>(num_buckets * (sizeof(*this->buckets) + sizeof(*this->buckets_in_use)));
++	this->buckets = (HashNode*)MallocT<byte>(num_buckets * per_bucket_size);
+ 	this->buckets_in_use = (bool*)(this->buckets + num_buckets);
+ 	for (i = 0; i < num_buckets; i++) this->buckets_in_use[i] = false;
+ }
+Index: src/script/squirrel_helper.hpp
+===================================================================
+--- src/script/squirrel_helper.hpp	(revision 22846)
++++ src/script/squirrel_helper.hpp	(working copy)
+@@ -118,6 +118,8 @@
+ 
+ 	template <> inline Array      *GetParam(ForceType<Array *>,      HSQUIRRELVM vm, int index, SQAutoFreePointers *ptr)
+ 	{
++		/* Sanity check the size. */
++		if (sq_getsize(vm, index) > 0xFFFF) sq_throwerror(vm, _SC("an array used as parameter to a function is too large"));
+ 		SQObject obj;
+ 		sq_getstackobj(vm, index, &obj);
+ 		sq_pushobject(vm, obj);
+Index: src/sound/win32_s.cpp
+===================================================================
+--- src/sound/win32_s.cpp	(revision 22846)
++++ src/sound/win32_s.cpp	(working copy)
+@@ -15,6 +15,7 @@
+ #include "../mixer.h"
+ #include "../core/alloc_func.hpp"
+ #include "../core/bitmath_func.hpp"
++#include "../core/math_func.hpp"
+ #include "win32_s.h"
+ #include <windows.h>
+ #include <mmsystem.h>
+@@ -63,7 +64,7 @@
+ 	wfex.nBlockAlign = (wfex.nChannels * wfex.wBitsPerSample) / 8;
+ 	wfex.nAvgBytesPerSec = wfex.nSamplesPerSec * wfex.nBlockAlign;
+ 
+-	_bufsize = GetDriverParamInt(parm, "bufsize", (GB(GetVersion(), 0, 8) > 5) ? 8192 : 4096);
++	_bufsize = Clamp(GetDriverParamInt(parm, "bufsize", (GB(GetVersion(), 0, 8) > 5) ? 8192 : 4096), 0, 65536);
+ 
+ 	try {
+ 		if (NULL == (_event = CreateEvent(NULL, FALSE, FALSE, NULL))) throw "Failed to create event";
+Index: src/spriteloader/png.cpp
+===================================================================
+--- src/spriteloader/png.cpp	(revision 22846)
++++ src/spriteloader/png.cpp	(working copy)
+@@ -94,6 +94,12 @@
+ 
+ 	png_read_info(png_ptr, info_ptr);
+ 
++	/* Disallow overly large images (to prevent size overflow) */
++	if (sprite->width > 0x800 || sprite->height > 0x800) {
++		png_destroy_read_struct(&png_ptr, &info_ptr, &end_info);
++		return false;
++	}
++
+ 	if (!mask) {
+ 		/* Read the text chunks */
+ 		png_textp text_ptr;
+@@ -116,6 +122,7 @@
+ 
+ 	if (mask && (bit_depth != 8 || colour_type != PNG_COLOR_TYPE_PALETTE)) {
+ 		DEBUG(misc, 0, "Ignoring mask for SpriteID %d as it isn't a 8 bit palette image", id);
++		png_destroy_read_struct(&png_ptr, &info_ptr, &end_info);
+ 		return true;
+ 	}
+ 

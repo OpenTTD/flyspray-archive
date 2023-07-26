@@ -1,0 +1,90 @@
+diff -r a33e0abe08ce src/newgrf_callbacks.h
+--- a/src/newgrf_callbacks.h	Wed Jan 12 15:33:47 2011 +0000
++++ b/src/newgrf_callbacks.h	Sat Jan 22 21:42:23 2011 +0000
+@@ -70,8 +70,8 @@
+ 	/** Called whenever the construction state of a house changes. */
+ 	CBID_HOUSE_CONSTRUCTION_STATE_CHANGE = 0x1C, // 15 bit callback
+ 
+-	/** Determine whether a wagon can be attached to an already existing train. */
+-	CBID_TRAIN_ALLOW_WAGON_ATTACH        = 0x1D,
++	/** Determine whether the lead engine of a consist will allow a wagon to be attached. */
++	CBID_ENGINE_ALLOW_WAGON_ATTACH       = 0x1D,
+ 
+ 	/** Called to determine the colour of a town building. */
+ 	CBID_HOUSE_COLOUR                    = 0x1E, // 15 bit callback
+@@ -272,6 +272,10 @@
+ 
+ 	/** Called to determine if one can alter the ground below an object tile */
+ 	CBID_OBJECT_AUTOSLOPE                = 0x15D, // 15 bit callback
++	
++	/** Determine whether a wagon will allow attaching to an existing consist. */
++	CBID_WAGON_ALLOW_ATTACH_TO_CONSIST   = 0x15E,
++	
+ };
+ 
+ /**
+diff -r a33e0abe08ce src/table/newgrf_debug_data.h
+--- a/src/table/newgrf_debug_data.h	Wed Jan 12 15:33:47 2011 +0000
++++ b/src/table/newgrf_debug_data.h	Sat Jan 22 21:42:23 2011 +0000
+@@ -32,7 +32,7 @@
+ 	NICV(CBID_VEHICLE_REFIT_CAPACITY,        CBM_VEHICLE_REFIT_CAPACITY),
+ 	NICV(CBID_VEHICLE_ARTIC_ENGINE,          CBM_VEHICLE_ARTIC_ENGINE),
+ 	NICV(CBID_VEHICLE_CARGO_SUFFIX,          CBM_VEHICLE_CARGO_SUFFIX),
+-	NICV(CBID_TRAIN_ALLOW_WAGON_ATTACH,      CBM_NO_BIT),
++	NICV(CBID_ENGINE_ALLOW_WAGON_ATTACH,     CBM_NO_BIT),
+ 	NICV(CBID_VEHICLE_ADDITIONAL_TEXT,       CBM_NO_BIT),
+ 	NICV(CBID_VEHICLE_COLOUR_MAPPING,        CBM_VEHICLE_COLOUR_REMAP),
+ 	NICV(CBID_VEHICLE_START_STOP_CHECK,      CBM_NO_BIT),
+@@ -40,6 +40,7 @@
+ 	NICV(CBID_VEHICLE_SOUND_EFFECT,          CBM_VEHICLE_SOUND_EFFECT),
+ 	NICV(CBID_VEHICLE_AUTOREPLACE_SELECTION, CBM_NO_BIT),
+ 	NICV(CBID_VEHICLE_MODIFY_PROPERTY,       CBM_NO_BIT),
++	NICV(CBID_WAGON_ALLOW_ATTACH_TO_CONSIST, CBM_NO_BIT),
+ 	NIC_END()
+ };
+ 
+diff -r a33e0abe08ce src/train_cmd.cpp
+--- a/src/train_cmd.cpp	Wed Jan 12 15:33:47 2011 +0000
++++ b/src/train_cmd.cpp	Sat Jan 22 21:42:23 2011 +0000
+@@ -970,8 +970,9 @@
+ 			 * the loop and after each callback does not need to be cleared here. */
+ 			t->InvalidateNewGRFCache();
+ 
+-			uint16 callback = GetVehicleCallbackParent(CBID_TRAIN_ALLOW_WAGON_ATTACH, 0, 0, head->engine_type, t, head);
+-
++			uint16 engine_callback = GetVehicleCallbackParent(CBID_TRAIN_ALLOW_WAGON_ATTACH, 0, 0, head->engine_type, t, head);
++			uint16 wagon_callback = GetVehicleCallbackParent(CBID_WAGON_ALLOW_ATTACH_TO_CONSIST, 0, 0, t->engine_type, t, head);
++			
+ 			/* Restore original first_engine data */
+ 			t->gcache.first_engine = first_engine;
+ 
+@@ -979,15 +980,26 @@
+ 			t->InvalidateNewGRFCache();
+ 			head->InvalidateNewGRFCache();
+ 
+-			if (callback != CALLBACK_FAILED) {
++			if (engine_callback != CALLBACK_FAILED) {
+ 				/* A failing callback means everything is okay */
+ 				StringID error = STR_NULL;
+ 
+-				if (callback == 0xFD) error = STR_ERROR_INCOMPATIBLE_RAIL_TYPES;
+-				if (callback  < 0xFD) error = GetGRFStringID(GetEngineGRFID(head->engine_type), 0xD000 + callback);
++				if (engine_callback == 0xFD) error = STR_ERROR_INCOMPATIBLE_RAIL_TYPES;
++				if (engine_callback  < 0xFD) error = GetGRFStringID(GetEngineGRFID(head->engine_type), 0xD000 + engine_callback);
+ 
+ 				if (error != STR_NULL) return_cmd_error(error);
+ 			}
++			
++			if (wagon_callback != CALLBACK_FAILED) {
++				/* A failing callback means everything is okay */
++				StringID error = STR_NULL;
++				
++				if (wagon_callback == 0xFD) error = STR_ERROR_INCOMPATIBLE_RAIL_TYPES;
++				if (wagon_callback  < 0xFD) error = GetGRFStringID(GetEngineGRFID(t->engine_type), 0xD000 + wagon_callback);
++				
++				if (error != STR_NULL) return_cmd_error(error);
++			}
++			
+ 		}
+ 
+ 		/* And link it to the new part. */

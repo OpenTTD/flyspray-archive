@@ -1,0 +1,155 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 7149)
++++ lang/english.txt	(working copy)
+@@ -1099,6 +1099,7 @@
+ STR_CONFIG_PATCHES_SMOOTH_ECONOMY                               :{LTBLUE}Enable smooth economy (more, smaller changes)
+ STR_CONFIG_PATCHES_ALLOW_SHARES                                 :{LTBLUE}Allow buying shares from other companies
+ STR_CONFIG_PATCHES_DRAG_SIGNALS_DENSITY                         :{LTBLUE}When dragging, place signals every: {ORANGE}{STRING1} tile(s)
++STR_CONFIG_PATCHES_IMPROVED_SIGNALS_DENSITY                     :{LTBLUE}Use improved signal density: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_TOOLBAR_POS                                  :{LTBLUE}Position of main toolbar: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_TOOLBAR_POS_LEFT                             :Left
+ STR_CONFIG_PATCHES_TOOLBAR_POS_CENTER                           :Centre
+Index: rail.c
+===================================================================
+--- rail.c	(revision 7149)
++++ rail.c	(working copy)
+@@ -63,6 +63,16 @@
+ 	TRACK_BIT_HORZ  /* TRACK_RIGHT */
+ };
+ 
++/* Maps a track to another track running along the same axis. */
++const Track _same_axis_track[] = {
++	TRACK_X,     /* TRACK_X     */
++	TRACK_Y,     /* TRACK_Y     */
++	TRACK_LOWER, /* TRACK_UPPER */
++	TRACK_UPPER, /* TRACK_LOWER */
++	TRACK_RIGHT, /* TRACK_LEFT  */
++	TRACK_LEFT   /* TRACK_RIGHT */
++};
++
+ /* Maps a trackdir to the (4-way) direction the tile is exited when following
+  * that trackdir */
+ const DiagDirection _trackdir_to_exitdir[] = {
+Index: rail.h
+===================================================================
+--- rail.h	(revision 7149)
++++ rail.h	(working copy)
+@@ -320,6 +320,15 @@
+ }
+ 
+ /**
++ * Maps a track to another track running along the same axis.
++ */
++static inline Track SameAxisTrack(Track track)
++{
++	extern const Track _same_axis_track[TRACK_END];
++	return _same_axis_track[track];
++}
++
++/**
+  * Maps a trackdir to the (4-way) direction the tile is exited when following
+  * that trackdir.
+  */
+Index: rail_cmd.c
+===================================================================
+--- rail_cmd.c	(revision 7149)
++++ rail_cmd.c	(working copy)
+@@ -744,7 +744,7 @@
+ static int32 CmdSignalTrackHelper(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	int32 ret, total_cost, signal_ctr;
+-	byte signals;
++	byte signals, alt_signals;
+ 	bool error = true;
+ 	TileIndex end_tile;
+ 
+@@ -756,7 +756,7 @@
+ 
+ 	if (p1 >= MapSize()) return CMD_ERROR;
+ 	end_tile = p1;
+-	if (signal_density == 0 || signal_density > 20) return CMD_ERROR;
++	if ((signal_density == 0) || (signal_density > 20)) return CMD_ERROR;
+ 
+ 	if (!IsTileType(tile, MP_RAILWAY)) return CMD_ERROR;
+ 
+@@ -764,7 +764,10 @@
+ 
+ 	/* for vertical/horizontal tracks, double the given signals density
+ 	 * since the original amount will be too dense (shorter tracks) */
+-	if (!IsDiagonalTrack(track)) signal_density *= 2;
++	if (!IsDiagonalTrack(track)) {
++		signal_density *= 2;
++		if (_patches.improved_signals_density) signal_density -= 1;
++	}
+ 
+ 	if (CmdFailed(ValidateAutoDrag(&trackdir, tile, end_tile))) return CMD_ERROR;
+ 
+@@ -773,12 +776,17 @@
+ 	// copy the signal-style of the first rail-piece if existing
+ 	if (HasSignals(tile)) {
+ 		signals = _m[tile].m3 & SignalOnTrack(track);
+-		if (signals == 0) signals = SignalOnTrack(track); /* Can this actually occur? */
++		alt_signals = _m[tile].m3 & SignalOnTrack(SameAxisTrack(track)); /* HACK: MY: do we need to convert m3 as well? */
++		if (signals == 0) {
++			signals = SignalOnTrack(track); /* Can this actually occur? */
++			alt_signals = SignalOnTrack(SameAxisTrack(track));
++		}
+ 
+ 		// copy signal/semaphores style (independent of CTRL)
+ 		semaphores = (GetSignalVariant(tile) == SIG_ELECTRIC ? 0 : 8);
+ 	} else { // no signals exist, drag a two-way signal stretch
+ 		signals = SignalOnTrack(track);
++		alt_signals = SignalOnTrack(SameAxisTrack(track));
+ 	}
+ 
+ 	/* signal_ctr         - amount of tiles already processed
+@@ -793,7 +801,11 @@
+ 	for (;;) {
+ 		// only build/remove signals with the specified density
+ 		if (signal_ctr % signal_density == 0) {
+-			ret = DoCommand(tile, TrackdirToTrack(trackdir) | semaphores, signals, flags, (mode == 1) ? CMD_REMOVE_SIGNALS : CMD_BUILD_SIGNALS);
++			if ((signal_ctr % 2) == 0) {
++				ret = DoCommand(tile, TrackdirToTrack(trackdir) | semaphores, signals, flags, (mode == 1) ? CMD_REMOVE_SIGNALS : CMD_BUILD_SIGNALS);
++			} else {
++				ret = DoCommand(tile, TrackdirToTrack(trackdir) | semaphores, alt_signals, flags, (mode == 1) ? CMD_REMOVE_SIGNALS : CMD_BUILD_SIGNALS);
++			}
+ 
+ 			/* Be user-friendly and try placing signals as much as possible */
+ 			if (!CmdFailed(ret)) {
+Index: settings.c
+===================================================================
+--- settings.c	(revision 7149)
++++ settings.c	(working copy)
+@@ -1275,6 +1275,7 @@
+ 	SDT_BOOL(Patches, signal_side,                   N, 0,  true,        STR_CONFIG_PATCHES_SIGNALSIDE,          RedrawScreen),
+ 	SDT_BOOL(Patches, always_small_airport,          0, 0, false,        STR_CONFIG_PATCHES_SMALL_AIRPORTS,      NULL),
+ 	 SDT_VAR(Patches, drag_signals_density,SLE_UINT8,S, 0,  4, 1, 20, 0, STR_CONFIG_PATCHES_DRAG_SIGNALS_DENSITY,NULL),
++	SDT_BOOL(Patches, improved_signals_density,      S, 0, false,        STR_CONFIG_PATCHES_IMPROVED_SIGNALS_DENSITY,NULL),
+ 
+ 	/***************************************************************************/
+ 	/* Vehicle section of the GUI-configure patches window */
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 7149)
++++ settings_gui.c	(working copy)
+@@ -581,6 +581,7 @@
+ 	"signal_side",
+ 	"always_small_airport",
+ 	"drag_signals_density",
++	"improved_signals_density",
+ 	"oil_refinery_limit",
+ };
+ 
+Index: variables.h
+===================================================================
+--- variables.h	(revision 7149)
++++ variables.h	(working copy)
+@@ -181,6 +181,7 @@
+ 	uint8 map_y;
+ 
+ 	byte drag_signals_density;          // many signals density
++	bool improved_signals_density;      // improve the signal density on non-diagonal tracks.
+ 	bool ainew_active;                  // Is the new AI active?
+ 	bool ai_in_multiplayer;             // Do we allow AIs in multiplayer
+ 

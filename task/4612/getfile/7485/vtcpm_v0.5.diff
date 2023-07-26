@@ -1,0 +1,364 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 22450)
++++ src/lang/english.txt	(working copy)
+@@ -1353,6 +1353,11 @@
+ STR_CONFIG_SETTING_PATHFINDER_FOR_SHIPS                         :{LTBLUE}Pathfinder for ships: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_REVERSE_AT_SIGNALS                           :{LTBLUE}Automatic reversing at signals: {ORANGE}{STRING1}
+ 
++STR_CONFIG_SETTING_PATCHES_AIRCRAFT_CARGO_PAYMENT_MODIFIER      :{LTBLUE}Cargo payment modifier for aircraft: {ORANGE}{STRING1}%
++STR_CONFIG_SETTING_PATCHES_RV_CARGO_PAYMENT_MODIFIER            :{LTBLUE}Cargo payment modifier for road vehicles: {ORANGE}{STRING1}%
++STR_CONFIG_SETTING_PATCHES_SHIP_CARGO_PAYMENT_MODIFIER          :{LTBLUE}Cargo payment modifier for ships: {ORANGE}{STRING1}%
++STR_CONFIG_SETTING_PATCHES_TRAIN_CARGO_PAYMENT_MODIFIER         :{LTBLUE}Cargo payment modifier for trains: {ORANGE}{STRING1}%
++
+ STR_CONFIG_SETTING_QUERY_CAPTION                                :{WHITE}Change setting value
+ 
+ # Intro window
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 22450)
++++ src/settings_gui.cpp	(working copy)
+@@ -1475,6 +1475,10 @@
+ 	SettingEntry("economy.inflation"),
+ 	SettingEntry("economy.smooth_economy"),
+ 	SettingEntry("economy.feeder_payment_share"),
++	SettingEntry("economy.aircraft_cargo_payment_modifier"),
++	SettingEntry("economy.rv_cargo_payment_modifier"),
++	SettingEntry("economy.ship_cargo_payment_modifier"),
++	SettingEntry("economy.train_cargo_payment_modifier"),
+ };
+ /** Economy sub-page */
+ static SettingsPage _settings_economy_page = {_settings_economy, lengthof(_settings_economy)};
+Index: src/table/settings.ini
+===================================================================
+--- src/table/settings.ini	(revision 22450)
++++ src/table/settings.ini	(working copy)
+@@ -1077,6 +1077,66 @@
+ 
+ [SDT_VAR]
+ base     = GameSettings
++var      = economy.aircraft_cargo_payment_modifier
++type     = SLE_UINT8
++from     = 161
++to       = SL_MAX_VERSION
++flags    = 0
++guiflags = 0
++def      = 100
++min      = 10
++max      = 100
++interval = 5
++str      = STR_CONFIG_SETTING_PATCHES_AIRCRAFT_CARGO_PAYMENT_MODIFIER
++proc     = NULL
++
++[SDT_VAR]
++base     = GameSettings
++var      = economy.rv_cargo_payment_modifier
++type     = SLE_UINT8
++from     = 161
++to       = SL_MAX_VERSION
++flags    = 0
++guiflags = 0
++def      = 100
++min      = 10
++max      = 255
++interval = 5
++str      = STR_CONFIG_SETTING_PATCHES_RV_CARGO_PAYMENT_MODIFIER
++proc     = NULL
++
++[SDT_VAR]
++base     = GameSettings
++var      = economy.ship_cargo_payment_modifier
++type     = SLE_UINT8
++from     = 161
++to       = SL_MAX_VERSION
++flags    = 0
++guiflags = 0
++def      = 100
++min      = 10
++max      = 255
++interval = 5
++str      = STR_CONFIG_SETTING_PATCHES_SHIP_CARGO_PAYMENT_MODIFIER
++proc     = NULL
++
++[SDT_VAR]
++base     = GameSettings
++var      = economy.train_cargo_payment_modifier
++type     = SLE_UINT8
++from     = 161
++to       = SL_MAX_VERSION
++flags    = 0
++guiflags = 0
++def      = 100
++min      = 10
++max      = 100
++interval = 5
++str      = STR_CONFIG_SETTING_PATCHES_TRAIN_CARGO_PAYMENT_MODIFIER
++proc     = NULL
++
++[SDT_VAR]
++base     = GameSettings
+ var      = economy.town_growth_rate
+ type     = SLE_UINT8
+ from     = 54
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 22450)
++++ src/settings_type.h	(working copy)
+@@ -404,6 +404,10 @@
+ 	bool   station_noise_level;              ///< build new airports when the town noise level is still within accepted limits
+ 	uint16 town_noise_population[3];         ///< population to base decision on noise evaluation (@see town_council_tolerance)
+ 	bool   allow_town_level_crossings;       ///< towns are allowed to build level crossings
++	uint8 aircraft_cargo_payment_modifier;   ///< Multiply cargo payment by this number when cargo is delivered by plane
++	uint8 rv_cargo_payment_modifier;         ///< Multiply cargo payment by this number when cargo is delivered by a road vehicle
++	uint8 ship_cargo_payment_modifier;       ///< Multiply cargo payment by this number when cargo is delivered by a ship
++	uint8 train_cargo_payment_modifier;      ///< Multiply cargo payment by this number when cargo is delivered by a train
+ };
+ 
+ /** Settings related to stations. */
+Index: src/cargopacket.h
+===================================================================
+--- src/cargopacket.h	(revision 22450)
++++ src/cargopacket.h	(working copy)
+@@ -75,16 +75,48 @@
+ 	}
+ 
+ 	/**
+-	 * Gets the amount of money already paid to earlier vehicles in
+-	 * the feeder chain.
+-	 * @return Feeder share.
++	 * Returns the modified feeder share stored scaled by 100 in order to 
++	 * eliminate rounding errors when calculating vehicle type cargo payment modifiers (VTCPM)
++	 * which are themselves percentages. 
+ 	 */
+ 	FORCEINLINE Money FeederShare() const
+ 	{
+-		return this->feeder_share;
++		return this->feeder_share & 0xFFFFFFFFFFFF; // lower 48bits of feeder_share hold the value. the upper 16 bits hold the (scaled) VTCP modifier
+ 	}
+ 
+ 	/**
++	* Returns the vehicle type cargo payment modifier (VCTPM)
++	*/
++	FORCEINLINE int Modifier() const
++	{
++		int vtcpm = (((this->feeder_share >> 48) & 0xFFFF) > 0) ? (this->feeder_share >> 48) & 0xFFFF : 10000; // compatibility with older savegames
++		return vtcpm; // upper 16 bits of feeder_share hold this value
++	}
++	
++	
++	/**
++	* Adds to the feeder_share (lower 48 bits) by decrypting it and recalculating the combined VTCP modifier (upper 16 bits)
++	* @param number The number to add, of the same format 
++	**/
++	FORCEINLINE void FeederShareAddTo(Money number) {
++		int vtcpm = this->Modifier();
++		Money fs1 = (this->FeederShare() > 0 ) ? ( (this->feeder_share & 0xFFFFFFFFFFFF) / vtcpm ) : 0;
++		vtcpm = (int) (number >> 48) & 0xFFFF;
++		Money fs2 = ( (number & 0xFFFFFFFFFFFF) > 0) ? ((number & 0xFFFFFFFFFFFF) / vtcpm) : 0;
++		vtcpm = (fs1 + fs2 != 0) ? static_cast<int> ( ( (this->feeder_share & 0xFFFFFFFFFFFF) + (number & 0xFFFFFFFFFFFF) ) / (fs1 +fs2) ) : 0; // if both are zero set it to zero
++		this->feeder_share = ( (Money) vtcpm << 48) | ( (this->feeder_share & 0xFFFFFFFFFFFF) + (number & 0xFFFFFFFFFFFF));
++	} 
++	/**
++	 * Subtracts from the feeder_share by subtracting only from the lower 48 bits
++	 * @param number The number to subtract, of the same format
++	 **/
++	FORCEINLINE void FeederShareSubtractFrom(Money number) {
++		int vtcpm = this->Modifier();
++		Money fs = this->FeederShare() - (Money) (number & 0xFFFFFFFFFFFF);
++		this->feeder_share = ((Money) vtcpm << 48) | fs;
++	}
++
++	/**
+ 	 * Gets the number of days this cargo has been in transit.
+ 	 * This number isn't really in days, but in 2.5 days (185 ticks) and
+ 	 * it is capped at 255.
+@@ -262,7 +294,7 @@
+ 	/** The (direct) parent of this class. */
+ 	typedef CargoList<VehicleCargoList> Parent;
+ 
+-	Money feeder_share; ///< Cache for the feeder share.
++	Money feeder_share; ///< Cache for the (modified) feeder share.
+ 
+ 	void AddToCache(const CargoPacket *cp);
+ 	void RemoveFromCache(const CargoPacket *cp);
+@@ -274,12 +306,13 @@
+ 	friend const struct SaveLoad *GetVehicleDescription(VehicleType vt);
+ 
+ 	/**
+-	 * Returns total sum of the feeder share for all packets.
+-	 * @return The before mentioned number.
++	 * Gets the amount of money already paid to earlier vehicles in
++	 * the feeder chain.
++	 * @return Feeder share.
+ 	 */
+ 	FORCEINLINE Money FeederShare() const
+ 	{
+-		return this->feeder_share;
++		return (this->feeder_share) / 10000; //scale down the vehicle feeder share for display in vehicle details
+ 	}
+ 
+ 	void AgeCargo();
+Index: src/economy.cpp
+===================================================================
+--- src/economy.cpp	(revision 22450)
++++ src/economy.cpp	(working copy)
+@@ -1050,10 +1050,47 @@
+ 
+ 	/* Handle end of route payment */
+ 	Money profit = DeliverGoods(count, this->ct, this->current_station, cp->SourceStationXY(), cp->DaysInTransit(), this->owner, cp->SourceSubsidyType(), cp->SourceSubsidyID());
+-	this->route_profit += profit;
+ 
+-	/* The vehicle's profit is whatever route profit there is minus feeder shares. */
+-	this->visual_profit += profit - cp->FeederShare();
++	/* Get the appropriate VTCP modifier for this vehicle type */
++	int vtcpm = 10000; // default value
++	switch (this->front->type) {
++	default:
++		/* do nothing */
++		break;
++	case VEH_ROAD:
++		vtcpm = (int) _settings_game.economy.rv_cargo_payment_modifier;
++		break;
++	case VEH_SHIP:
++		vtcpm = (int) _settings_game.economy.ship_cargo_payment_modifier;
++		break;
++	case VEH_AIRCRAFT:
++		vtcpm = (int) _settings_game.economy.aircraft_cargo_payment_modifier;
++		break;
++	case VEH_TRAIN:
++		vtcpm = (int) _settings_game.economy.train_cargo_payment_modifier;
++		break;
++	}
++
++	vtcpm *= 100; // apply scaling to avoid rounding errors
++	
++	/* Calculate overall vtcmp modifier if there is a feeder share */
++	if ( cp->FeederShare() !=0 ) {
++		/* Get profit of final leg to use as a weight  */
++			Money last_leg_profit = GetTransportedGoodsIncome(
++			count,
++			DistanceManhattan(cp->LoadedAtXY(), Station::Get(this->current_station)->xy),
++			cp->DaysInTransit(),
++			this->ct);
++		vtcpm = static_cast<int> ( ( cp->FeederShare() + (last_leg_profit * vtcpm) ) / ( ( cp->FeederShare() / cp->Modifier() ) + last_leg_profit ) );
++	} 
++
++	/* Finally calculate modified profit */
++	profit *= vtcpm;
++
++ 	/* The vehicle's profit is whatever route profit there is minus feeder shares. */
++	/* - divide by10000 as the vtcpm is a percentage scaled by 100*/
++	this->visual_profit += (profit - cp->FeederShare()) / 10000;
++	this->route_profit += profit / 10000; // accumulate the route payment
+ }
+ 
+ /**
+@@ -1072,8 +1109,32 @@
+ 			this->ct);
+ 
+ 	profit = profit * _settings_game.economy.feeder_payment_share / 100;
++	
++	/* Get the appropriate VTCP modifier for this vehicle type */
++	int vtcpm = 10000; // default value
++	switch (this->front->type) {
++	default:
++		/* do nothing */
++		break;
++	case VEH_ROAD:
++		vtcpm = (int) _settings_game.economy.rv_cargo_payment_modifier;
++		break;
++	case VEH_SHIP:
++		vtcpm = (int) _settings_game.economy.ship_cargo_payment_modifier;
++		break;
++	case VEH_AIRCRAFT:
++		vtcpm = (int) _settings_game.economy.aircraft_cargo_payment_modifier;
++		break;
++	case VEH_TRAIN:
++		vtcpm = (int) _settings_game.economy.train_cargo_payment_modifier;
++		break;
++	}
+ 
+-	this->visual_profit += profit; // accumulate transfer profits for whole vehicle
++	vtcpm *= 100; // apply scaling to avoid rounding errors
++	profit *= vtcpm; // modify the profit
++	
++	this->visual_profit += profit / 10000; // accumulate transfer profits for whole vehicle
++	profit = ( (Money) vtcpm << 48) | profit; // pack the vtcp modifier in the upper 16 bits of the variable
+ 	return profit; // account for the (virtual) profit already made for the cargo packet
+ }
+ 
+Index: src/cargopacket.cpp
+===================================================================
+--- src/cargopacket.cpp	(revision 22450)
++++ src/cargopacket.cpp	(working copy)
+@@ -86,9 +86,10 @@
+ {
+ 	if (!CargoPacket::CanAllocateItem()) return NULL;
+ 
+-	Money fs = this->feeder_share * new_size / static_cast<uint>(this->count);
++	Money fs = (this->FeederShare() * new_size) / static_cast<uint>(this->count); //calculate feeder share of new packet
++	fs = ( (Money) this->Modifier() << 48) | fs; // pack it back with its VTCP modifier
+ 	CargoPacket *cp_new = new CargoPacket(new_size, this->days_in_transit, this->source, this->source_xy, this->loaded_at_xy, fs, this->source_type, this->source_id);
+-	this->feeder_share -= fs;
++	this->FeederShareSubtractFrom(fs); // subtract the feeder share of the new packet from this packet
+ 	this->count -= new_size;
+ 	return cp_new;
+ }
+@@ -100,7 +101,7 @@
+ FORCEINLINE void CargoPacket::Merge(CargoPacket *cp)
+ {
+ 	this->count += cp->count;
+-	this->feeder_share += cp->feeder_share;
++	this->FeederShareAddTo(cp->feeder_share);
+ 	delete cp;
+ }
+ 
+@@ -291,7 +292,7 @@
+ 					break;
+ 
+ 				case MTA_TRANSFER:
+-					cp->feeder_share += payment->PayTransfer(cp, cp->count);
++					cp->FeederShareAddTo(payment->PayTransfer(cp, cp->count));
+ 					break;
+ 
+ 				case MTA_UNLOAD:
+@@ -326,7 +327,7 @@
+ 
+ 			if (mta == MTA_TRANSFER) {
+ 				/* Add the feeder share before inserting in dest. */
+-				cp_new->feeder_share += payment->PayTransfer(cp_new, max_move);
++				cp_new->FeederShareAddTo(payment->PayTransfer(cp_new, max_move));
+ 			} else if (mta == MTA_CARGO_LOAD) {
+ 				cp_new->loaded_at_xy = data;
+ 			}
+@@ -359,7 +360,7 @@
+  */
+ void VehicleCargoList::RemoveFromCache(const CargoPacket *cp)
+ {
+-	this->feeder_share -= cp->feeder_share;
++	this->feeder_share -= cp->FeederShare();
+ 	this->Parent::RemoveFromCache(cp);
+ }
+ 
+@@ -370,7 +371,7 @@
+  */
+ void VehicleCargoList::AddToCache(const CargoPacket *cp)
+ {
+-	this->feeder_share += cp->feeder_share;
++	this->feeder_share += cp->FeederShare();
+ 	this->Parent::AddToCache(cp);
+ }
+ 
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 22450)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -226,7 +226,7 @@
+  *  159   21962
+  *  160   21974
+  */
+-extern const uint16 SAVEGAME_VERSION = 160; ///< Current savegame version of OpenTTD.
++extern const uint16 SAVEGAME_VERSION = 161; ///< Current savegame version of OpenTTD.
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 

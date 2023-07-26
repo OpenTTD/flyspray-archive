@@ -1,0 +1,128 @@
+Index: src/newgrf.cpp
+===================================================================
+--- src/newgrf.cpp	(revision 20896)
++++ src/newgrf.cpp	(working copy)
+@@ -1373,6 +1373,47 @@
+ 	return ret;
+ }
+ 
++/**
++ * Sets bridge flags bit 1
++ * if newgrf changes bridge layout or flags (Action 0 for bridges, Property 0D, 0E)
++ * and bridge is cantilever or tubular
++ * @param bridge_id Bridge index
++ */
++static inline void DetectBridgePillarChange(byte bridge_id)
++{
++	if (bridge_id >= 6 && bridge_id != 9) {
++		SetBit(_bridge[bridge_id].flags, 7);
++	}
++}
++
++/**
++ * Sets bridge flags bit 1
++ * if newgrf changes bridge pillar sprite (Action A)
++ * and bridge is cantilever or tubular
++ * @param sprite_index Sprite index
++ */
++static inline void DetectBridgePillarSprite(int sprite_index)
++{
++	switch(sprite_index) {
++		case SPR_BTCAN_X_PILLAR_BEG:
++		case SPR_BTCAN_X_PILLAR_MID:
++		case SPR_BTCAN_Y_PILLAR_MID:
++		case SPR_BTCAN_Y_PILLAR_BEG: // cantilever bridge
++			SetBit(_bridge[6].flags, 7);
++			SetBit(_bridge[7].flags, 7);
++			SetBit(_bridge[8].flags, 7);
++			break;
++		case SPR_BTTUB_X_PILLAR_BEG:
++		case SPR_BTTUB_X_PILLAR_MID:
++		case SPR_BTTUB_Y_PILLAR_MID:
++		case SPR_BTTUB_Y_PILLAR_BEG: // tubular bridge
++			SetBit(_bridge[10].flags, 7);
++			SetBit(_bridge[11].flags, 7);
++			SetBit(_bridge[12].flags, 7);
++			break;
++	}
++}
++
+ static ChangeInfoResult BridgeChangeInfo(uint brid, int numinfo, int prop, ByteReader *buf)
+ {
+ 	ChangeInfoResult ret = CIR_SUCCESS;
+@@ -1439,11 +1480,13 @@
+ 						MapSpriteMappingRecolour(&bridge->sprite_table[tableid][sprite]);
+ 					}
+ 				}
++				DetectBridgePillarChange(brid + i);
+ 				break;
+ 			}
+ 
+ 			case 0x0E: // Flags; bit 0 - disable far pillars
+ 				bridge->flags = buf->ReadByte();
++				DetectBridgePillarChange(brid + i);
+ 				break;
+ 
+ 			case 0x0F: // Long format year of availability (year since year 0)
+@@ -5262,6 +5305,7 @@
+ 			int load_index = first_sprite + j;
+ 			_nfo_line++;
+ 			LoadNextSprite(load_index, _file_index, _nfo_line); // XXX
++			DetectBridgePillarSprite(load_index);
+ 
+ 			/* Shore sprites now located at different addresses.
+ 			 * So detect when the old ones get replaced. */
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 20896)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -38,6 +38,7 @@
+ #include "pbs.h"
+ #include "company_base.h"
+ #include "newgrf_railtype.h"
++#include "base_media_base.h"
+ 
+ #include "table/sprites.h"
+ #include "table/strings.h"
+@@ -821,6 +822,15 @@
+ 	}
+ }
+ 
++/*
++ * checks if OpenGFX graphics set is used
++ * @return true iff OpenGFX graphics set is used
++ */
++static inline bool IsUsedOpenGFX() {
++	const GraphicsSet *used_set = BaseGraphics::GetUsedSet();
++	return (used_set->shortname == 1481000783); // OpenGFX shortname OGFX
++};
++
+ /**
+  * Draws the pillars under high bridges.
+  *
+@@ -876,6 +886,8 @@
+ 	bool draw_odd_pillar = false;
+ 	bool cantilever_pillars_fix = false;
+ 	bool tubular_pillars_fix = false;
++	/* If this is opengfx or newgrf bridge, don't fix it */
++	bool disable_fix = (IsUsedOpenGFX() || HasBit(flags, 7));
+ 
+ 	switch(type) {
+ 		case 0: case 1: case 2: case 9: // wooden, girder and concrete bridges
+@@ -889,13 +901,13 @@
+ 			}
+ 			break;
+ 		case 6: case 7: case 8: // cantilever bridges
+-			cantilever_pillars_fix = true;
++			cantilever_pillars_fix = !disable_fix;
+ 			break;
+ 		case 10: case 11: case 12: //tubular bridges
+-			tubular_pillars_fix = true;
++			tubular_pillars_fix = !disable_fix;
+ 			break;
+ 
+-		default:;
++		default: NOT_REACHED();
+ 	}
+ 
+ 	if (draw_odd_pillar) {

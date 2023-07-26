@@ -1,0 +1,145 @@
+Index: src/video/cocoa/cocoa_v.mm
+===================================================================
+--- src/video/cocoa/cocoa_v.mm	(revision 24953)
++++ src/video/cocoa/cocoa_v.mm	(working copy)
+@@ -44,6 +44,7 @@
+  * Read http://developer.apple.com/releasenotes/Cocoa/Objective-C++.html for more information.
+  */
+ 
++#define nsapp_launch_ge_not @"napp_launch_ge_not"
+ 
+ @interface OTTDMain : NSObject
+ @end
+@@ -63,25 +64,62 @@
+  */
+ @implementation OTTDMain
+ /**
+- * Called when the internal event loop has just started running.
++ * Stop the game engine. Must be called on main thread.
+  */
+-- (void) applicationDidFinishLaunching: (NSNotification*) note
++- (void)stopEngine
+ {
++	/* We're done, thank you for playing */
++	[ NSApp stop:self ];
++
++	/* Send an empty event to return from the run. Without that, application is waiting for an event to get out of the run. Why ? TODO */
++	NSEvent* event = [ NSEvent otherEventWithType:NSApplicationDefined
++                                                     location:NSMakePoint(0,0)
++                                               modifierFlags:0
++                                                   timestamp:0.0
++                                                windowNumber:0
++                                                     context:nil
++                                                     subtype:0
++                                                       data1:0
++                                                       data2:0 ];
++    [ NSApp postEvent:event atStart:YES ];
++}
++
++/**
++ * Launch the game engine.
++ */
++- (void)launchGameEngine:(NSNotification *)note
++{
++	/* Setup cursor for the current _game_mode */
++	[ _cocoa_subdriver->cocoaview resetCursorRects ];
++
+ 	/* Hand off to main application code */
+ 	QZ_GameLoop();
+ 
+-	/* We're done, thank you for playing */
+-	[ NSApp stop:_ottd_main ];
++	/* End on main thread */
++	[ self performSelectorOnMainThread:@selector(stopEngine) withObject:nil waitUntilDone:FALSE ];
+ }
+ 
+ /**
++ * Called when the internal event loop has just started running (only once).
++ */
++- (void) applicationDidFinishLaunching: (NSNotification*) note
++{
++	/* The current method is called only once. For later call to game engine we register an observer */
++	[ [ NSNotificationCenter defaultCenter ] addObserver:self selector:@selector(launchGameEngine:) name:nsapp_launch_ge_not object:nil ];
++
++	/* Launch game engine */
++	[ [ NSNotificationCenter defaultCenter ] postNotificationName:nsapp_launch_ge_not object:NSApp ];
++}
++
++/**
+  * Display the in game quit confirmation dialog.
+  */
+ - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*) sender
+ {
+-
+ 	HandleExitGameRequest();
+ 
++	[ [ NSNotificationCenter defaultCenter ] removeObserver:nsapp_launch_ge_not ];
++
+ 	return NSTerminateCancel; // NSTerminateLater ?
+ }
+ @end
+@@ -385,6 +423,9 @@
+  */
+ void VideoDriver_Cocoa::MainLoop()
+ {
++	/* First call the observer is not registred so it does nothing. Later calls, it launch game engine */
++	 [ [ NSNotificationCenter defaultCenter ] postNotificationName:nsapp_launch_ge_not object:nil ];
++
+ 	/* Start the main event loop */
+ 	[ NSApp run ];
+ }
+@@ -708,7 +749,7 @@
+ 	[ super resetCursorRects ];
+ 	[ self clearTrackingRect ];
+ 	[ self setTrackingRect ];
+-	[ self addCursorRect:[ self bounds ] cursor:[ NSCursor clearCocoaCursor ] ];
++	[ self addCursorRect:[ self bounds ] cursor:(_game_mode == GM_BOOTSTRAP) ? [ NSCursor arrowCursor ] : [ NSCursor arrowCursor] ];
+ }
+ /**
+  * Prepare for moving the application window
+Index: src/fontcache.cpp
+===================================================================
+--- src/fontcache.cpp	(revision 24953)
++++ src/fontcache.cpp	(working copy)
+@@ -485,11 +485,8 @@
+ 
+ bool SetFallbackFont(FreeTypeSettings *settings, const char *language_isocode, int winlangid, MissingGlyphSearcher *callback)
+ {
+-	const char *str;
+ 	bool result = false;
+ 
+-	callback->FindMissingGlyphs(&str);
+-
+ #if (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5)
+ 	if (MacOSVersionIsAtLeast(10, 5, 0)) {
+ 		/* Determine fallback font using CoreText. This uses the language isocode
+Index: src/bootstrap_gui.cpp
+===================================================================
+--- src/bootstrap_gui.cpp	(revision 24953)
++++ src/bootstrap_gui.cpp	(working copy)
+@@ -218,7 +218,7 @@
+ 	if (BlitterFactoryBase::GetCurrentBlitter()->GetScreenDepth() == 0) goto failure;
+ 
+ 	/* If there is no network or no freetype, then there is nothing we can do. Go straight to failure. */
+-#if defined(ENABLE_NETWORK) && defined(WITH_FREETYPE) && !defined(__APPLE__) && (defined(WITH_FONTCONFIG) || defined(WIN32))
++#if defined(ENABLE_NETWORK) && defined(WITH_FREETYPE) && (defined(WITH_FONTCONFIG) || defined(WIN32))
+ 	if (!_network_available) goto failure;
+ 
+ 	/* First tell the game we're bootstrapping. */
+Index: config.lib
+===================================================================
+--- config.lib	(revision 24953)
++++ config.lib	(working copy)
+@@ -2848,12 +2848,6 @@
+ 		return 0
+ 	fi
+ 
+-	if [ "$os" = "OSX" ]; then
+-		log 1 "checking libfontconfig... OSX, skipping"
+-		fontconfig_config=""
+-		return 0
+-	fi
+-
+ 	if [ "$with_fontconfig" = "1" ] || [ "$with_fontconfig" = "" ] || [ "$with_fontconfig" = "2" ]; then
+ 		fontconfig_config="pkg-config fontconfig"
+ 	else

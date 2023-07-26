@@ -1,0 +1,276 @@
+Index: src/water_map.h
+===================================================================
+--- src/water_map.h	(wersja 22643)
++++ src/water_map.h	(kopia robocza)
+@@ -33,38 +33,23 @@
+ /** Helper information for extract tool. */
+ template <> struct EnumPropsT<WaterClass> : MakeEnumPropsT<WaterClass, byte, WATER_CLASS_SEA, WATER_CLASS_INVALID, WATER_CLASS_INVALID, 2> {};
+ 
+-/** Sections of the water depot. */
++/** The part of a water depot. */
+ enum DepotPart {
+-	DEPOT_NORTH = 0x80,
+-	DEPOT_SOUTH = 0x81,
+-	DEPOT_END   = 0x84,
++	DEPOT_NORTH = 0,
++	DEPOT_SOUTH = 1,
++	DEPOT_END   = 2,
+ };
+ 
+-/** Sections of the water lock. */
++/** The part of a water lock. */
+ enum LockPart {
+-	LOCK_MIDDLE = 0x10,
+-	LOCK_LOWER  = 0x14,
+-	LOCK_UPPER  = 0x18,
+-	LOCK_END    = 0x1C
++	LOCK_MIDDLE = 0,
++	LOCK_LOWER  = 1,
++	LOCK_UPPER  = 2,
++	LOCK_END    = 3,
+ };
+ 
+-/**
+- * Get the water tile type at a tile.
+- * @param t Water tile to query.
+- * @return Water tile type at the tile.
+- */
+-static inline WaterTileType GetWaterTileType(TileIndex t)
+-{
+-	assert(IsTileType(t, MP_WATER));
++static inline WaterTileType GetWaterTileType(TileIndex t);
+ 
+-	if (_m[t].m5 == 0) return WATER_TILE_CLEAR;
+-	if (_m[t].m5 == 1) return WATER_TILE_COAST;
+-	if (IsInsideMM(_m[t].m5, LOCK_MIDDLE, LOCK_END)) return WATER_TILE_LOCK;
+-
+-	assert(IsInsideMM(_m[t].m5, DEPOT_NORTH, DEPOT_END));
+-	return WATER_TILE_DEPOT;
+-}
+-
+ /**
+  * Checks whether the tile has an waterclass associated.
+  * You can then subsequently call GetWaterClass().
+@@ -118,7 +103,8 @@
+  */
+ static inline bool IsWater(TileIndex t)
+ {
+-	return GetWaterTileType(t) == WATER_TILE_CLEAR;
++	assert(IsTileType(t, MP_WATER));
++	return _m[t].m5 == 0;
+ }
+ 
+ /**
+@@ -168,7 +154,8 @@
+  */
+ static inline bool IsCoast(TileIndex t)
+ {
+-	return GetWaterTileType(t) == WATER_TILE_COAST;
++	assert(IsTileType(t, MP_WATER));
++	return _m[t].m5 == 1;
+ }
+ 
+ /**
+@@ -182,23 +169,15 @@
+ }
+ 
+ /**
+- * Get the other tile of the ship depot.
+- * @param t Tile to query, containing one section of a ship depot.
+- * @return Tile containing the other section of the depot.
+- */
+-static inline TileIndex GetOtherShipDepotTile(TileIndex t)
+-{
+-	return t + (HasBit(_m[t].m5, 0) ? -1 : 1) * (HasBit(_m[t].m5, 1) ? TileDiffXY(0, 1) : TileDiffXY(1, 0));
+-}
+-
+-/**
+  * Is it a water tile with a ship depot on it?
+  * @param t Water tile to query.
+  * @return \c true if it is a ship depot tile.
+  */
+ static inline bool IsShipDepot(TileIndex t)
+ {
+-	return IsInsideMM(_m[t].m5, DEPOT_NORTH, DEPOT_END);
++	return IsInsideMM(_m[t].m5, // [0x80..0x83]
++			(1 << 7) + (AXIS_X << 1) + DEPOT_NORTH,
++			(1 << 7) + (AXIS_Y << 1) + DEPOT_END);
+ }
+ 
+ /**
+@@ -212,6 +191,18 @@
+ }
+ 
+ /**
++ * Get the part of a depot.
++ * @param t Water tile to query.
++ * @return The depot part.
++ * @pre IsShipDepotTile(t)
++ */
++static inline DepotPart GetShipDepotPart(TileIndex t)
++{
++	assert(IsShipDepotTile(t));
++	return (DepotPart)GB(_m[t].m5, 0, 1);
++}
++
++/**
+  * Get the axis of the ship depot.
+  * @param t Water tile to query.
+  * @return Axis of the depot.
+@@ -222,13 +213,24 @@
+ }
+ 
+ /**
++ * Get the other tile of the ship depot.
++ * @param t Tile to query, containing one section of a ship depot.
++ * @return Tile containing the other section of the depot.
++ * @pre IsShipDepotTile(t)
++ */
++static inline TileIndex GetOtherShipDepotTile(TileIndex t)
++{
++	return t + (GetShipDepotPart(t) != DEPOT_NORTH ? -1 : 1) * (GetShipDepotAxis(t) != AXIS_X ? TileDiffXY(0, 1) : TileDiffXY(1, 0));
++}
++
++/**
+  * Get the direction of the ship depot.
+  * @param t Water tile to query.
+  * @return Direction of the depot.
+  */
+ static inline DiagDirection GetShipDepotDirection(TileIndex t)
+ {
+-	return XYNSToDiagDir(GetShipDepotAxis(t), GB(_m[t].m5, 0, 1));
++	return XYNSToDiagDir(GetShipDepotAxis(t), GetShipDepotPart(t));
+ }
+ 
+ /**
+@@ -238,10 +240,7 @@
+  */
+ static inline TileIndex GetShipDepotNorthTile(TileIndex t)
+ {
+-	assert(IsShipDepot(t));
+-	TileIndex tile2 = GetOtherShipDepotTile(t);
+-
+-	return t < tile2 ? t : tile2;
++	return (GetShipDepotPart(t) == DEPOT_NORTH) ? t : GetOtherShipDepotTile(t);
+ }
+ 
+ /**
+@@ -251,10 +250,22 @@
+  */
+ static inline bool IsLock(TileIndex t)
+ {
+-	return IsInsideMM(_m[t].m5, LOCK_MIDDLE, LOCK_END);
++	return IsInsideMM(_m[t].m5, // [0x10..0x1F]
++			(1 << 4) + (LOCK_MIDDLE    << 2) + DIAGDIR_BEGIN,
++			(1 << 4) + ((LOCK_END - 1) << 2) + DIAGDIR_END);
+ }
+ 
+ /**
++ * Is it a water tile with a lock?
++ * @param t Water tile to query.
++ * @return \c true if it is a water lock tile.
++ */
++static inline bool IsLockTile(TileIndex t)
++{
++	return IsTileType(t, MP_WATER) && IsLock(t);
++}
++
++/**
+  * Get the direction of the water lock.
+  * @param t Water tile to query.
+  * @return Direction of the lock.
+@@ -265,17 +276,45 @@
+ }
+ 
+ /**
++ * Get the part of a lock.
++ * @param t Water tile to query.
++ * @return The lock part.
++ * @pre IsLockTile(t)
++ */
++static inline LockPart GetLockPart(TileIndex t)
++{
++	assert(IsLockTile(t));
++	return (LockPart)GB(_m[t].m5, 2, 2);
++}
++
++/**
+  * Get a section of a depot or a lock.
+  * @param t Water tile to query.
+  * @return The section.
+  */
+ static inline byte GetSection(TileIndex t)
+ {
+-	assert(GetWaterTileType(t) == WATER_TILE_LOCK || GetWaterTileType(t) == WATER_TILE_DEPOT);
++	assert(IsShipDepotTile(t) || IsLockTile(t));
+ 	return GB(_m[t].m5, 0, 4);
+ }
+ 
+ /**
++ * Get the water tile type at a tile.
++ * @param t Water tile to query.
++ * @return Water tile type at the tile.
++ * @pre IsTileType(t, MP_WATER)
++ */
++static inline WaterTileType GetWaterTileType(TileIndex t)
++{
++	if (IsWater(t)) return WATER_TILE_CLEAR;
++	if (IsCoast(t)) return WATER_TILE_COAST;
++	if (IsLock(t)) return WATER_TILE_LOCK;
++
++	assert(IsShipDepot(t));
++	return WATER_TILE_DEPOT;
++}
++
++/**
+  * Get the random bits of the water tile.
+  * @param t Water tile to query.
+  * @return Random bits of the tile.
+@@ -382,7 +421,7 @@
+ 	_m[t].m2 = did;
+ 	_m[t].m3 = 0;
+ 	_m[t].m4 = 0;
+-	_m[t].m5 = base + a * 2;
++	_m[t].m5 = base | (a << 1) | (1 << 7);
+ 	SB(_m[t].m6, 2, 4, 0);
+ 	_me[t].m7 = 0;
+ }
+@@ -391,11 +430,12 @@
+  * Make a lock section.
+  * @param t Tile to place the water lock section.
+  * @param o Owner of the lock.
+- * @param section Section to place.
++ * @param part Lock part to place.
++ * @param dir Direction of the lock part.
+  * @param original_water_class Original water class.
+  * @see MakeLock
+  */
+-static inline void MakeLockTile(TileIndex t, Owner o, byte section, WaterClass original_water_class)
++static inline void MakeLockTile(TileIndex t, Owner o, LockPart part, DiagDirection dir, WaterClass original_water_class)
+ {
+ 	SetTileType(t, MP_WATER);
+ 	SetTileOwner(t, o);
+@@ -403,7 +443,7 @@
+ 	_m[t].m2 = 0;
+ 	_m[t].m3 = 0;
+ 	_m[t].m4 = 0;
+-	_m[t].m5 = section;
++	_m[t].m5 = dir | (part << 2) | (1 << 4);
+ 	SB(_m[t].m6, 2, 4, 0);
+ 	_me[t].m7 = 0;
+ }
+@@ -420,11 +460,11 @@
+ {
+ 	TileIndexDiff delta = TileOffsByDiagDir(d);
+ 
+-	MakeLockTile(t, o, LOCK_MIDDLE + d, WATER_CLASS_CANAL);
++	MakeLockTile(t, o, LOCK_MIDDLE, d, WATER_CLASS_CANAL);
+ 	/* Keep the current owner for the upper and lower part if it is a
+ 	 * water tile so we can restore the owner after deleting the lock. */
+-	MakeLockTile(t - delta, IsWaterTile(t - delta) ? GetTileOwner(t - delta) : o, LOCK_LOWER + d, wc_lower);
+-	MakeLockTile(t + delta, IsWaterTile(t + delta) ? GetTileOwner(t + delta) : o, LOCK_UPPER + d, wc_upper);
++	MakeLockTile(t - delta, IsWaterTile(t - delta) ? GetTileOwner(t - delta) : o, LOCK_LOWER, d, wc_lower);
++	MakeLockTile(t + delta, IsWaterTile(t + delta) ? GetTileOwner(t + delta) : o, LOCK_UPPER, d, wc_upper);
+ }
+ 
+ #endif /* WATER_MAP_H */

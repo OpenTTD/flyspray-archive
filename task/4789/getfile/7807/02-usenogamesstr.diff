@@ -1,0 +1,143 @@
+Index: src/network/network.cpp
+===================================================================
+--- src/network/network.cpp	(revision 22970)
++++ src/network/network.cpp	(working copy)
+@@ -36,6 +36,7 @@
+ #include "../rev.h"
+ #include "../core/pool_func.hpp"
+ #include "../gfx_func.h"
++#include "../gui.h"
+ #include "table/strings.h"
+ 
+ #ifdef DEBUG_DUMP_COMMANDS
+@@ -78,7 +79,8 @@
+ uint32 _sync_frame;                   ///< The frame to perform the sync check.
+ bool _network_first_time;             ///< Whether we have finished joining or not.
+ bool _network_udp_server;             ///< Is the UDP server started?
+-uint16 _network_udp_broadcast;        ///< Timeout for the UDP broadcasts.
++uint16 _network_udp_search;           ///< Timeout for the UDP game searches.
++bool _network_udp_search_found;       ///< Whether a game has been found in this UDP search or not.
+ uint8 _network_advertise_retries;     ///< The number of advertisement retries we did.
+ CompanyMask _network_company_passworded; ///< Bitmask of the password status of all companies.
+ 
+@@ -836,7 +838,13 @@
+ 		_udp_master_socket->ReceivePackets();
+ 	} else {
+ 		_udp_client_socket->ReceivePackets();
+-		if (_network_udp_broadcast > 0) _network_udp_broadcast--;
++
++		if (_network_udp_search > 0 && --_network_udp_search == 0) {
++			/* Show warning if no servers found by the time a UDP search times out */
++			if (!_network_udp_search_found) ShowErrorMessage(STR_NETWORK_ERROR_NOSERVER, INVALID_STRING_ID, WL_WARNING);
++
++			InvalidateWindowClassesData(WC_NETWORK_WINDOW);
++		}
+ 	}
+ }
+ 
+Index: src/network/network_gui.cpp
+===================================================================
+--- src/network/network_gui.cpp	(revision 22970)
++++ src/network/network_gui.cpp	(working copy)
+@@ -741,6 +741,7 @@
+ 					case 0: NetworkUDPSearchGame(); break;
+ 					case 1: NetworkUDPQueryMasterServer(); break;
+ 				}
++				UpdateNetworkGameWindow(false);
+ 				break;
+ 
+ 			case NGWW_ADD: // Add a server
+@@ -805,6 +806,7 @@
+ 			this->list_pos = SLP_INVALID;
+ 		}
+ 		this->servers.ForceRebuild();
++		this->SetWidgetDisabledState(NGWW_FIND, _network_udp_search != 0);
+ 		this->SetDirty();
+ 	}
+ 
+Index: src/network/network_internal.h
+===================================================================
+--- src/network/network_internal.h	(revision 22970)
++++ src/network/network_internal.h	(working copy)
+@@ -130,7 +130,8 @@
+ extern uint8 _network_reconnect;
+ 
+ extern bool _network_udp_server;
+-extern uint16 _network_udp_broadcast;
++extern uint16 _network_udp_search;
++extern bool _network_udp_search_found;
+ 
+ extern uint8 _network_advertise_retries;
+ 
+Index: src/network/network_udp.cpp
+===================================================================
+--- src/network/network_udp.cpp	(revision 22970)
++++ src/network/network_udp.cpp	(working copy)
+@@ -331,6 +331,8 @@
+ 
+ 	item->online = true;
+ 
++	_network_udp_search_found = true;
++
+ 	UpdateNetworkGameWindow(false);
+ }
+ 
+@@ -441,6 +443,9 @@
+ /** Request the the server-list from the master server */
+ void NetworkUDPQueryMasterServer()
+ {
++	/* We are still searching.. */
++	if (_network_udp_search > 0) return;
++
+ 	Packet p(PACKET_UDP_CLIENT_GET_LIST);
+ 	NetworkAddress out_addr(NETWORK_MASTER_SERVER_HOST, NETWORK_MASTER_SERVER_PORT);
+ 
+@@ -450,6 +455,9 @@
+ 
+ 	_udp_client_socket->SendPacket(&p, &out_addr, true);
+ 
++	_network_udp_search = 300; // Stay searching for 300 ticks
++	_network_udp_search_found = false;
++
+ 	DEBUG(net, 2, "[udp] master server queried at %s", out_addr.GetAddressAsString());
+ }
+ 
+@@ -457,12 +465,14 @@
+ void NetworkUDPSearchGame()
+ {
+ 	/* We are still searching.. */
+-	if (_network_udp_broadcast > 0) return;
++	if (_network_udp_search > 0) return;
+ 
++	NetworkUDPBroadCast(_udp_client_socket);
++
++	_network_udp_search = 300; // Stay searching for 300 ticks
++	_network_udp_search_found = false;
++
+ 	DEBUG(net, 0, "[udp] searching server");
+-
+-	NetworkUDPBroadCast(_udp_client_socket);
+-	_network_udp_broadcast = 300; // Stay searching for 300 ticks
+ }
+ 
+ /** Simpler wrapper struct for NetworkUDPQueryServerThread */
+@@ -648,7 +658,8 @@
+ 	_udp_master_socket = new MasterNetworkUDPSocketHandler(&server);
+ 
+ 	_network_udp_server = false;
+-	_network_udp_broadcast = 0;
++	_network_udp_search = 0;
++	_network_udp_search_found = false;
+ 	_network_udp_mutex->EndCritical();
+ }
+ 
+@@ -668,7 +679,8 @@
+ 	_network_udp_mutex->EndCritical();
+ 
+ 	_network_udp_server = false;
+-	_network_udp_broadcast = 0;
++	_network_udp_search = 0;
++	_network_udp_search_found = false;
+ 	DEBUG(net, 1, "[udp] closed listeners");
+ }
+ 

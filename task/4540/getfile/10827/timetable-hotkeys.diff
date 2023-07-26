@@ -1,0 +1,395 @@
+diff --git a/src/order_gui.cpp b/src/order_gui.cpp
+index 9045fac6b..3d9b2e239 100644
+--- a/src/order_gui.cpp
++++ b/src/order_gui.cpp
+@@ -427,6 +427,8 @@ enum {
+ 	OHK_TRANSFER,
+ 	OHK_NO_UNLOAD,
+ 	OHK_NO_LOAD,
++	OHK_SHARED_ORDER_LIST,
++	OHK_TIMETABLE_VIEW,
+ };
+ 
+ /**
+@@ -1422,6 +1424,11 @@ public:
+ 
+ 	virtual EventState OnHotkey(int hotkey)
+ 	{
++		switch (hotkey) {
++			case OHK_SHARED_ORDER_LIST: ShowVehicleListWindow(this->vehicle); return ES_HANDLED;
++			case OHK_TIMETABLE_VIEW:    ShowTimetableWindow(this->vehicle);   return ES_HANDLED;
++		}
++
+ 		if (this->vehicle->owner != _local_company) return ES_NOT_HANDLED;
+ 
+ 		switch (hotkey) {
+@@ -1525,6 +1532,8 @@ static Hotkey order_hotkeys[] = {
+ 	Hotkey((uint16)0, "transfer", OHK_TRANSFER),
+ 	Hotkey((uint16)0, "no_unload", OHK_NO_UNLOAD),
+ 	Hotkey((uint16)0, "no_load", OHK_NO_LOAD),
++	Hotkey((uint16)0, "shared_order_list", OHK_SHARED_ORDER_LIST),
++	Hotkey((uint16)0, "timetable_view", OHK_TIMETABLE_VIEW),
+ 	HOTKEY_LIST_END
+ };
+ HotkeyList OrdersWindow::hotkeys("order", order_hotkeys);
+diff --git a/src/timetable_gui.cpp b/src/timetable_gui.cpp
+index 664dc8034..9e365fb0c 100644
+--- a/src/timetable_gui.cpp
++++ b/src/timetable_gui.cpp
+@@ -24,6 +24,7 @@
+ #include "date_gui.h"
+ #include "vehicle_gui.h"
+ #include "settings_type.h"
++#include "hotkeys.h"
+ 
+ #include "widgets/timetable_widget.h"
+ 
+@@ -147,8 +148,22 @@ static void ChangeTimetableStartCallback(const Window *w, Date date)
+ 	DoCommandP(0, w->window_number, date, CMD_SET_TIMETABLE_START | CMD_MSG(STR_ERROR_CAN_T_TIMETABLE_VEHICLE));
+ }
+ 
++/** Hotkeys for timetable window. */
++enum {
++	TTHK_CHANGE_TIME,
++	TTHK_CLEAR_TIME,
++	TTHK_CHANGE_SPEED,
++	TTHK_CLEAR_SPEED,
++	TTHK_START_DATE,
++	TTHK_RESET_LATENESS,
++	TTHK_AUTOFILL,
++	TTHK_EXPECTED,
++	TTHK_SHARED_ORDER_LIST,
++	TTHK_ORDER_VIEW,
++};
+ 
+ struct TimetableWindow : Window {
++private:
+ 	int sel_index;
+ 	const Vehicle *vehicle; ///< Vehicle monitored by the window.
+ 	bool show_expected;     ///< Whether we show expected arrival or scheduled
+@@ -157,6 +172,145 @@ struct TimetableWindow : Window {
+ 	Scrollbar *vscroll;
+ 	bool query_is_speed_query; ///< The currently open query window is a speed query and not a time query.
+ 
++	/**
++	 * Handle the click on the change time button.
++	 */
++	void TimetableClick_ChangeTime()
++	{
++		int selected = this->sel_index;
++		if (this->vehicle->owner != _local_company || selected == -1) return;
++		VehicleOrderID real = (selected + 1) / 2;
++
++		if (real >= this->vehicle->GetNumOrders()) real = 0;
++
++		const Order *order = this->vehicle->GetOrder(real);
++		if (selected % 2 == 1) {
++			if (order->IsType(OT_CONDITIONAL) || order->IsType(OT_IMPLICIT)) return;
++		} else {
++			if ((!order->IsType(OT_GOTO_STATION) || (order->GetNonStopType() & ONSF_NO_STOP_AT_DESTINATION_STATION)) && !order->IsType(OT_CONDITIONAL)) return;
++		}
++		StringID current = STR_EMPTY;
++
++		if (order != NULL) {
++			uint time = (selected % 2 == 1) ? order->GetTravelTime() : order->GetWaitTime();
++			if (!_settings_client.gui.timetable_in_ticks) time /= DAY_TICKS;
++
++			if (time != 0) {
++				SetDParam(0, time);
++				current = STR_JUST_INT;
++			}
++		}
++
++		this->query_is_speed_query = false;
++		ShowQueryString(current, STR_TIMETABLE_CHANGE_TIME, 31, this, CS_NUMERAL, QSF_ACCEPT_UNCHANGED);
++	}
++
++	/**
++	 * Handle the click on the clear time button.
++	 */
++	void TimetableClick_ClearTime()
++	{
++		int selected = this->sel_index;
++		if (this->vehicle->owner != _local_company || selected == -1) return;
++		VehicleOrderID real = (selected + 1) / 2;
++
++		if (real >= this->vehicle->GetNumOrders()) real = 0;
++
++		const Order *order = this->vehicle->GetOrder(real);
++		if (selected % 2 == 1) {
++			if (order->IsType(OT_CONDITIONAL) || order->IsType(OT_IMPLICIT)) return;
++		} else {
++			if ((!order->IsType(OT_GOTO_STATION) || (order->GetNonStopType() & ONSF_NO_STOP_AT_DESTINATION_STATION)) && !order->IsType(OT_CONDITIONAL)) return;
++		}
++
++		uint32 p1 = PackTimetableArgs(this->vehicle, this->sel_index, false);
++		DoCommandP(0, p1, 0, CMD_CHANGE_TIMETABLE | CMD_MSG(STR_ERROR_CAN_T_TIMETABLE_VEHICLE));
++	}
++
++	/**
++	 * Handle the click on the change speed button.
++	 */
++	void TimetableClick_ChangeSpeed()
++	{
++		int selected = this->sel_index;
++		if (this->vehicle->owner != _local_company || selected == -1 || selected % 2 != 1 || this->vehicle->type == VEH_AIRCRAFT) return;
++		VehicleOrderID real = (selected + 1) / 2;
++
++		if (real >= this->vehicle->GetNumOrders()) real = 0;
++
++		const Order *order = this->vehicle->GetOrder(real);
++		if (order->IsType(OT_CONDITIONAL) || order->IsType(OT_IMPLICIT)) return;
++		StringID current = STR_EMPTY;
++
++		if (order != NULL) {
++			if (order->GetMaxSpeed() != UINT16_MAX) {
++				SetDParam(0, ConvertKmhishSpeedToDisplaySpeed(order->GetMaxSpeed()));
++				current = STR_JUST_INT;
++			}
++		}
++
++		this->query_is_speed_query = true;
++		ShowQueryString(current, STR_TIMETABLE_CHANGE_SPEED, 31, this, CS_NUMERAL, QSF_NONE);
++	}
++
++	/**
++	 * Handle the click on the clear speed button.
++	 */
++	void TimetableClick_ClearSpeed()
++	{
++		int selected = this->sel_index;
++		if (this->vehicle->owner != _local_company || selected == -1 || selected % 2 != 1 || this->vehicle->type == VEH_AIRCRAFT) return;
++		VehicleOrderID real = (selected + 1) / 2;
++
++		if (real >= this->vehicle->GetNumOrders()) real = 0;
++
++		const Order *order = this->vehicle->GetOrder(real);
++		if (order->IsType(OT_CONDITIONAL) || order->IsType(OT_IMPLICIT)) return;
++
++		uint32 p1 = PackTimetableArgs(this->vehicle, this->sel_index, true);
++		DoCommandP(0, p1, UINT16_MAX, CMD_CHANGE_TIMETABLE | CMD_MSG(STR_ERROR_CAN_T_TIMETABLE_VEHICLE));
++	}
++
++	/**
++	 * Handle the click on the start date button.
++	 */
++	void TimetableClick_StartDate()
++	{
++		if (this->vehicle->owner != _local_company || this->vehicle->orders.list == NULL) return;
++		ShowSetDateWindow(this, this->vehicle->index | (this->vehicle->orders.list->IsCompleteTimetable() && _ctrl_pressed ? 1U << 20 : 0), _date, _cur_year, _cur_year + 15, ChangeTimetableStartCallback);
++	}
++
++	/**
++	 * Handle the click on the reset lateness button.
++	 */
++	void TimetableClick_ResetLateness()
++	{
++		if (this->vehicle->owner != _local_company || this->vehicle->orders.list == NULL) return;
++		DoCommandP(0, this->vehicle->index, 0, CMD_SET_VEHICLE_ON_TIME | CMD_MSG(STR_ERROR_CAN_T_TIMETABLE_VEHICLE));
++	}
++
++	/**
++	 * Handle the click on the autofill button.
++	 */
++	void TimetableClick_Autofill()
++	{
++		if (this->vehicle->owner != _local_company || this->vehicle->orders.list == NULL) return;
++
++		uint32 p2 = 0;
++		if (!HasBit(this->vehicle->vehicle_flags, VF_AUTOFILL_TIMETABLE)) SetBit(p2, 0);
++		if (_ctrl_pressed) SetBit(p2, 1);
++		DoCommandP(0, this->vehicle->index, p2, CMD_AUTOFILL_TIMETABLE | CMD_MSG(STR_ERROR_CAN_T_TIMETABLE_VEHICLE));
++	}
++
++	/**
++	 * Handle the click on the expected / scheduled button.
++	 */
++	void TimetableClick_ToggleExpected()
++	{
++		this->show_expected = !this->show_expected;
++	}
++
++public:
+ 	TimetableWindow(WindowDesc *desc, WindowNumber window_number) :
+ 			Window(desc),
+ 			sel_index(-1),
+@@ -309,7 +463,7 @@ struct TimetableWindow : Window {
+ 			if (selected != -1) {
+ 				const Order *order = v->GetOrder(((selected + 1) / 2) % v->GetNumOrders());
+ 				if (selected % 2 == 1) {
+-					disable = order != NULL && (order->IsType(OT_CONDITIONAL) || order->IsType(OT_IMPLICIT));
++					disable = order == NULL || order->IsType(OT_CONDITIONAL) || order->IsType(OT_IMPLICIT);
+ 				} else {
+ 					disable = order == NULL || ((!order->IsType(OT_GOTO_STATION) || (order->GetNonStopType() & ONSF_NO_STOP_AT_DESTINATION_STATION)) && !order->IsType(OT_CONDITIONAL));
+ 				}
+@@ -515,15 +669,13 @@ struct TimetableWindow : Window {
+ 
+ 	virtual void OnClick(Point pt, int widget, int click_count)
+ 	{
+-		const Vehicle *v = this->vehicle;
+-
+ 		switch (widget) {
+ 			case WID_VT_ORDER_VIEW: // Order view button
+-				ShowOrdersWindow(v);
++				ShowOrdersWindow(this->vehicle);
+ 				break;
+ 
+ 			case WID_VT_TIMETABLE_PANEL: { // Main panel.
+-				int selected = GetOrderFromTimetableWndPt(pt.y, v);
++				int selected = GetOrderFromTimetableWndPt(pt.y, this->vehicle);
+ 
+ 				this->DeleteChildWindows();
+ 				this->sel_index = (selected == INVALID_ORDER || selected == this->sel_index) ? -1 : selected;
+@@ -531,83 +683,39 @@ struct TimetableWindow : Window {
+ 			}
+ 
+ 			case WID_VT_START_DATE: // Change the date that the timetable starts.
+-				ShowSetDateWindow(this, v->index | (v->orders.list->IsCompleteTimetable() && _ctrl_pressed ? 1U << 20 : 0), _date, _cur_year, _cur_year + 15, ChangeTimetableStartCallback);
++				this->TimetableClick_StartDate();
+ 				break;
+ 
+-			case WID_VT_CHANGE_TIME: { // "Wait For" button.
+-				int selected = this->sel_index;
+-				VehicleOrderID real = (selected + 1) / 2;
+-
+-				if (real >= v->GetNumOrders()) real = 0;
+-
+-				const Order *order = v->GetOrder(real);
+-				StringID current = STR_EMPTY;
+-
+-				if (order != NULL) {
+-					uint time = (selected % 2 == 1) ? order->GetTravelTime() : order->GetWaitTime();
+-					if (!_settings_client.gui.timetable_in_ticks) time /= DAY_TICKS;
+-
+-					if (time != 0) {
+-						SetDParam(0, time);
+-						current = STR_JUST_INT;
+-					}
+-				}
+-
+-				this->query_is_speed_query = false;
+-				ShowQueryString(current, STR_TIMETABLE_CHANGE_TIME, 31, this, CS_NUMERAL, QSF_ACCEPT_UNCHANGED);
++			case WID_VT_CHANGE_TIME: // "Wait For" button.
++				this->TimetableClick_ChangeTime();
+ 				break;
+-			}
+ 
+-			case WID_VT_CHANGE_SPEED: { // Change max speed button.
+-				int selected = this->sel_index;
+-				VehicleOrderID real = (selected + 1) / 2;
+-
+-				if (real >= v->GetNumOrders()) real = 0;
+-
+-				StringID current = STR_EMPTY;
+-				const Order *order = v->GetOrder(real);
+-				if (order != NULL) {
+-					if (order->GetMaxSpeed() != UINT16_MAX) {
+-						SetDParam(0, ConvertKmhishSpeedToDisplaySpeed(order->GetMaxSpeed()));
+-						current = STR_JUST_INT;
+-					}
+-				}
+-
+-				this->query_is_speed_query = true;
+-				ShowQueryString(current, STR_TIMETABLE_CHANGE_SPEED, 31, this, CS_NUMERAL, QSF_NONE);
++			case WID_VT_CHANGE_SPEED: // Change max speed button.
++				this->TimetableClick_ChangeSpeed();
+ 				break;
+-			}
+ 
+-			case WID_VT_CLEAR_TIME: { // Clear waiting time.
+-				uint32 p1 = PackTimetableArgs(v, this->sel_index, false);
+-				DoCommandP(0, p1, 0, CMD_CHANGE_TIMETABLE | CMD_MSG(STR_ERROR_CAN_T_TIMETABLE_VEHICLE));
++			case WID_VT_CLEAR_TIME: // Clear waiting time.
++				this->TimetableClick_ClearSpeed();
+ 				break;
+-			}
+ 
+-			case WID_VT_CLEAR_SPEED: { // Clear max speed button.
+-				uint32 p1 = PackTimetableArgs(v, this->sel_index, true);
+-				DoCommandP(0, p1, UINT16_MAX, CMD_CHANGE_TIMETABLE | CMD_MSG(STR_ERROR_CAN_T_TIMETABLE_VEHICLE));
++			case WID_VT_CLEAR_SPEED: // Clear max speed button.
++				this->TimetableClick_ClearSpeed();
+ 				break;
+-			}
+ 
+ 			case WID_VT_RESET_LATENESS: // Reset the vehicle's late counter.
+-				DoCommandP(0, v->index, 0, CMD_SET_VEHICLE_ON_TIME | CMD_MSG(STR_ERROR_CAN_T_TIMETABLE_VEHICLE));
++				this->TimetableClick_ResetLateness();
+ 				break;
+ 
+-			case WID_VT_AUTOFILL: { // Autofill the timetable.
+-				uint32 p2 = 0;
+-				if (!HasBit(v->vehicle_flags, VF_AUTOFILL_TIMETABLE)) SetBit(p2, 0);
+-				if (_ctrl_pressed) SetBit(p2, 1);
+-				DoCommandP(0, v->index, p2, CMD_AUTOFILL_TIMETABLE | CMD_MSG(STR_ERROR_CAN_T_TIMETABLE_VEHICLE));
++			case WID_VT_AUTOFILL: // Autofill the timetable.
++				this->TimetableClick_Autofill();
+ 				break;
+-			}
+ 
+ 			case WID_VT_EXPECTED:
+-				this->show_expected = !this->show_expected;
++				this->TimetableClick_ToggleExpected();
+ 				break;
+ 
+ 			case WID_VT_SHARED_ORDER_LIST:
+-				ShowVehicleListWindow(v);
++				ShowVehicleListWindow(this->vehicle);
+ 				break;
+ 		}
+ 
+@@ -634,6 +742,29 @@ struct TimetableWindow : Window {
+ 		DoCommandP(0, p1, p2, CMD_CHANGE_TIMETABLE | CMD_MSG(STR_ERROR_CAN_T_TIMETABLE_VEHICLE));
+ 	}
+ 
++	virtual EventState OnHotkey(int hotkey)
++	{
++		switch (hotkey) {
++			case TTHK_EXPECTED:          this->TimetableClick_ToggleExpected(); return ES_HANDLED;
++			case TTHK_SHARED_ORDER_LIST: ShowVehicleListWindow(this->vehicle);  return ES_HANDLED;
++			case TTHK_ORDER_VIEW:        ShowOrdersWindow(this->vehicle);       return ES_HANDLED;
++		}
++
++		if (this->vehicle->owner != _local_company) return ES_NOT_HANDLED;
++
++		switch (hotkey) {
++			case TTHK_CHANGE_TIME:        this->TimetableClick_ChangeTime();    break;
++			case TTHK_CLEAR_TIME:         this->TimetableClick_ClearTime();     break;
++			case TTHK_CHANGE_SPEED:       this->TimetableClick_ChangeSpeed();   break;
++			case TTHK_CLEAR_SPEED:        this->TimetableClick_ClearSpeed();    break;
++			case TTHK_START_DATE:         this->TimetableClick_StartDate();     break;
++			case TTHK_RESET_LATENESS:     this->TimetableClick_ResetLateness(); break;
++			case TTHK_AUTOFILL:           this->TimetableClick_Autofill();      break;
++			default: return ES_NOT_HANDLED;
++		}
++		return ES_HANDLED;
++	}
++
+ 	virtual void OnResize()
+ 	{
+ 		/* Update the scroll bar */
+@@ -648,7 +779,24 @@ struct TimetableWindow : Window {
+ 		this->GetWidget<NWidgetStacked>(WID_VT_ARRIVAL_DEPARTURE_SELECTION)->SetDisplayedPlane(_settings_client.gui.timetable_arrival_departure ? 0 : SZSP_NONE);
+ 		this->GetWidget<NWidgetStacked>(WID_VT_EXPECTED_SELECTION)->SetDisplayedPlane(_settings_client.gui.timetable_arrival_departure ? 0 : 1);
+ 	}
++
++	static HotkeyList hotkeys;
++};
++
++static Hotkey timetable_hotkeys[] = {
++	Hotkey((uint16)0, "change_time", TTHK_CHANGE_TIME),
++	Hotkey((uint16)0, "clear_time", TTHK_CLEAR_TIME),
++	Hotkey((uint16)0, "change_speed", TTHK_CHANGE_SPEED),
++	Hotkey((uint16)0, "clear_speed", TTHK_CLEAR_SPEED),
++	Hotkey((uint16)0, "start_date", TTHK_START_DATE),
++	Hotkey((uint16)0, "reset_lateness", TTHK_RESET_LATENESS),
++	Hotkey((uint16)0, "autofill", TTHK_AUTOFILL),
++	Hotkey((uint16)0, "expected", TTHK_EXPECTED),
++	Hotkey((uint16)0, "shared_order_list", TTHK_SHARED_ORDER_LIST),
++	Hotkey((uint16)0, "order_view", TTHK_ORDER_VIEW),
++	HOTKEY_LIST_END
+ };
++HotkeyList TimetableWindow::hotkeys("timetable", timetable_hotkeys);
+ 
+ static const NWidgetPart _nested_timetable_widgets[] = {
+ 	NWidget(NWID_HORIZONTAL),

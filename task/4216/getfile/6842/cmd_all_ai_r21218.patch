@@ -1,0 +1,173 @@
+Index: src/console_cmds.cpp
+===================================================================
+--- src/console_cmds.cpp	(revision 21218)
++++ src/console_cmds.cpp	(working copy)
+@@ -1072,6 +1072,79 @@
+ 	return true;
+ }
+ 
++DEF_CONSOLE_CMD(ConStartAllAI)
++{
++	if (argc == 0 || argc > 2) {
++		IConsoleHelp("Start all AI. Usage: 'start_ai [<AI count>]'");
++		IConsoleHelp("Start all AI. If <AI count> is given, it starts AIs up to reach this count of running AIs.");
++		IConsoleHelp("Otherwise, the competitor setting is used.");
++		return true;
++	}
++
++	if (_game_mode != GM_NORMAL) {
++		IConsoleWarning("AIs can only be managed in a game.");
++		return true;
++	}
++
++	if (Company::GetNumItems() == CompanyPool::MAX_SIZE) {
++		IConsoleWarning("Can't start a new AI (no more free slots).");
++		return true;
++	}
++
++	if (_networking && !_network_server) {
++		IConsoleWarning("Only the server can start a new AI.");
++		return true;
++	}
++
++	if (_networking && !_settings_game.ai.ai_in_multiplayer) {
++		IConsoleWarning("AIs are not allowed in multiplayer by configuration.");
++		IConsoleWarning("Switch AI -> AI in multiplayer to True.");
++		return true;
++	}
++
++	if (!AI::CanStartNew()) {
++		IConsoleWarning("Can't start a new AI.");
++		return true;
++	}
++
++	int total_ai_count;
++	if (argc == 2) {
++		uint32 result;
++		if (GetArgumentInteger(&result, argv[1]) && result < CompanyPool::MAX_SIZE) {
++			total_ai_count = (int)result;
++		} else {
++			IConsolePrintF(CC_DEFAULT, "AI count must be an number between 1 and %d", CompanyPool::MAX_SIZE - 1);
++			IConsoleWarning("Invalid AI count");
++			return true;
++		}
++	} else {
++		total_ai_count = (int)_settings_game.difficulty.max_no_competitors;
++	}
++
++	/* Total AI to start is total_ai_count - current running AIs count */
++	int new_ai_count = total_ai_count;
++	Company *c;
++	FOR_ALL_COMPANIES(c) {
++		if (Company::IsValidAiID(c->index)) {
++			new_ai_count--;
++		}
++	}
++
++	if (new_ai_count < 0) {
++		IConsolePrintF(CC_DEFAULT, "Desired a total if %d AIs. Already %d running AIs.", total_ai_count, total_ai_count - new_ai_count);
++		IConsoleWarning("There is already more AIs running than you requested for.");
++		return true;
++	}
++
++	/* Start the desired AIs */
++	IConsolePrintF(CC_DEFAULT, "Desired a total if %d AIs. Already %d running AIs, starting %d new AIs.", total_ai_count, total_ai_count - new_ai_count, new_ai_count);
++	for (int i = 0; i < new_ai_count; i++) {
++		DoCommandP(0, 1 | INVALID_COMPANY << 16, 0, CMD_COMPANY_CTRL);
++	}
++
++	return true;
++}
++
+ DEF_CONSOLE_CMD(ConReloadAI)
+ {
+ 	if (argc != 2) {
+@@ -1109,6 +1182,34 @@
+ 	return true;
+ }
+ 
++DEF_CONSOLE_CMD(ConReloadAllAI)
++{
++	if (_game_mode != GM_NORMAL) {
++		IConsoleWarning("AIs can only be managed in a game.");
++		return true;
++	}
++
++	if (_networking && !_network_server) {
++		IConsoleWarning("Only the server can reload an AI.");
++		return true;
++	}
++
++	CompanyID company_id;
++	Company *c;
++	FOR_ALL_COMPANIES(c) {
++		company_id = c->index;
++		if (Company::IsValidID(company_id) && !Company::IsHumanID(company_id)) {
++			/* First kill the company of the AI, then start a new one. This should start the current AI again */
++			DoCommandP(0, 2 | company_id << 16, 0, CMD_COMPANY_CTRL);
++			DoCommandP(0, 1 | company_id << 16, 0, CMD_COMPANY_CTRL);
++		}
++	}
++
++	IConsolePrint(CC_DEFAULT, "All AIs reloaded.");
++
++	return true;
++}
++
+ DEF_CONSOLE_CMD(ConStopAI)
+ {
+ 	if (argc != 2) {
+@@ -1145,6 +1246,33 @@
+ 	return true;
+ }
+ 
++DEF_CONSOLE_CMD(ConStopAllAI)
++{
++	if (_game_mode != GM_NORMAL) {
++		IConsoleWarning("AIs can only be managed in a game.");
++		return true;
++	}
++
++	if (_networking && !_network_server) {
++		IConsoleWarning("Only the server can stop an AI.");
++		return true;
++	}
++
++	CompanyID company_id;
++	Company *c;
++	FOR_ALL_COMPANIES(c) {
++		company_id = c->index;
++		if (Company::IsValidID(company_id) && !Company::IsHumanID(company_id)) {
++			/* Now kill the company of the AI. */
++			DoCommandP(0, 2 | company_id << 16, 0, CMD_COMPANY_CTRL);
++			IConsolePrintF(CC_DEFAULT, "AI stopped, company %d deleted.", company_id);
++		}
++
++	}
++
++	return true;
++}
++
+ DEF_CONSOLE_CMD(ConRescanAI)
+ {
+ 	if (argc == 0) {
+@@ -1778,11 +1906,14 @@
+ 	IConsoleAliasRegister("developer",    "setting developer %+");
+ 
+ #ifdef ENABLE_AI
+-	IConsoleCmdRegister("list_ai",      ConListAI);
+-	IConsoleCmdRegister("reload_ai",    ConReloadAI);
+-	IConsoleCmdRegister("rescan_ai",    ConRescanAI);
+-	IConsoleCmdRegister("start_ai",     ConStartAI);
+-	IConsoleCmdRegister("stop_ai",      ConStopAI);
++	IConsoleCmdRegister("list_ai",			ConListAI);
++	IConsoleCmdRegister("reload_ai",		ConReloadAI);
++	IConsoleCmdRegister("reload_all_ai",	ConReloadAllAI);
++	IConsoleCmdRegister("rescan_ai",		ConRescanAI);
++	IConsoleCmdRegister("start_ai",			ConStartAI);
++	IConsoleCmdRegister("start_all_ai",		ConStartAllAI);
++	IConsoleCmdRegister("stop_ai",			ConStopAI);
++	IConsoleCmdRegister("stop_all_ai",		ConStopAllAI);
+ #endif /* ENABLE_AI */
+ 
+ 	/* networking functions */

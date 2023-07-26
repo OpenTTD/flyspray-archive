@@ -1,0 +1,365 @@
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+index 0228f9c30..baab64fef 100644
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -3824,6 +3824,9 @@ STR_ORDERS_DELETE_ALL_TOOLTIP                                   :{BLACK}Delete a
+ STR_ORDERS_STOP_SHARING_BUTTON                                  :{BLACK}Stop sharing
+ STR_ORDERS_STOP_SHARING_TOOLTIP                                 :{BLACK}Stop sharing the order list. Ctrl+Click additionally deletes all orders for this vehicle
+ 
++STR_ORDERS_SHOW_IMPLICIT_BUTTON                                 :{BLACK}Show implicit
++STR_ORDERS_SHOW_IMPLICIT_TOOLTIP                                :{BLACK}Show / hide implicit orders
++
+ STR_ORDERS_GO_TO_BUTTON                                         :{BLACK}Go To
+ STR_ORDER_GO_TO_NEAREST_DEPOT                                   :Go to nearest depot
+ STR_ORDER_GO_TO_NEAREST_HANGAR                                  :Go to nearest hangar
+diff --git a/src/lang/german.txt b/src/lang/german.txt
+index 499eb6ee6..d56db6a0c 100644
+--- a/src/lang/german.txt
++++ b/src/lang/german.txt
+@@ -3825,6 +3825,9 @@ STR_ORDERS_DELETE_ALL_TOOLTIP                                   :{BLACK}Lösche
+ STR_ORDERS_STOP_SHARING_BUTTON                                  :{BLACK}Gemeinsame Aufträge aufheben
+ STR_ORDERS_STOP_SHARING_TOOLTIP                                 :{BLACK}Gemeinsame Auftragliste aufheben. Ctrl+Klick löscht zusätzlich die Auftragliste für dieses Fahrzeug
+ 
++STR_ORDERS_SHOW_IMPLICIT_BUTTON                                 :{BLACK}Zeige implizite
++STR_ORDERS_SHOW_IMPLICIT_TOOLTIP                                :{BLACK}Implizite Aufträge anzeigen / verstecken
++
+ STR_ORDERS_GO_TO_BUTTON                                         :{BLACK}Fahre zu
+ STR_ORDER_GO_TO_NEAREST_DEPOT                                   :Nächstes Depot
+ STR_ORDER_GO_TO_NEAREST_HANGAR                                  :Nächster Hangar
+diff --git a/src/order_gui.cpp b/src/order_gui.cpp
+index 3d9b2e239..2bf41c4d0 100644
+--- a/src/order_gui.cpp
++++ b/src/order_gui.cpp
+@@ -418,6 +418,7 @@ static Order GetOrderCmdFromTile(const Vehicle *v, TileIndex tile)
+ enum {
+ 	OHK_SKIP,
+ 	OHK_DELETE,
++	OHK_SHOW_IMPLICIT,
+ 	OHK_GOTO,
+ 	OHK_NONSTOP,
+ 	OHK_FULLLOAD,
+@@ -464,12 +465,12 @@ enum {
+  * \section bottom-row Bottom row
+  * The second row (the bottom row) is for manipulating the list of orders:
+  * \verbatim
+- * +-----------------+-----------------+-----------------+
+- * |      SKIP       |     DELETE      |      GOTO       |
+- * +-----------------+-----------------+-----------------+
++ * +-----------------+-----------------+-----------------+-----------------+
++ * |      SKIP       |     DELETE      |      GOTO       |  SHOW IMPLICIT  |
++ * +-----------------+-----------------+-----------------+-----------------+
+  * \endverbatim
+  *
+- * For vehicles of other companies, both button rows are not displayed.
++ * For vehicles of other companies, both button rows are not displayed. Instead, only a large version of the Show Implicit toggle button is shown.
+  */
+ struct OrdersWindow : public Window {
+ private:
+@@ -545,8 +546,40 @@ private:
+ 		if ((uint)sel >= this->vscroll->GetCapacity()) return INVALID_VEH_ORDER_ID;
+ 
+ 		sel += this->vscroll->GetPosition();
++		if (sel < 0) return INVALID_VEH_ORDER_ID;
++
++		if (this->IsWidgetLowered(WID_O_SHOW_IMPLICIT)) {
++			return sel <= vehicle->GetNumOrders() ? sel : INVALID_VEH_ORDER_ID;
++		} else {
++			int i = 0;
++			for (const Order *o = vehicle->GetFirstOrder(); o != NULL; ++i, o = o->next) {
++				if (!o->IsType(OT_IMPLICIT) && --sel < 0) return i;
++			}
++			return sel == 0 ? i : INVALID_VEH_ORDER_ID;
++		}
++	}
++
++	/**
++	 * Handle the click on the implicit orders toggle button.
++	 */
++	void OrderClick_ToggleImplicit()
++	{
++		this->ToggleWidgetLoweredState(WID_O_SHOW_IMPLICIT);
+ 
+-		return (sel <= vehicle->GetNumOrders() && sel >= 0) ? sel : INVALID_VEH_ORDER_ID;
++		if (this->IsWidgetLowered(WID_O_SHOW_IMPLICIT)) {
++			this->vscroll->SetCount(this->vehicle->GetNumOrders() + 1);
++		} else {
++			this->vscroll->SetCount(this->vehicle->GetNumManualOrders() + 1);
++			const Order *o = this->vehicle->GetOrder(this->selected_order);
++			if (o != NULL && o->IsType(OT_IMPLICIT)) {
++				this->selected_order = INVALID_VEH_ORDER_ID;
++				this->UpdateButtonState();
++			}
++		}
++
++		this->SetWidgetDirty(WID_O_ORDER_LIST);
++		this->SetWidgetDirty(WID_O_SCROLLBAR);
++		this->SetWidgetDirty(WID_O_SHOW_IMPLICIT);
+ 	}
+ 
+ 	/**
+@@ -776,6 +809,7 @@ public:
+ 		if (v->owner == _local_company) {
+ 			this->DisableWidget(WID_O_EMPTY);
+ 		}
++		this->LowerWidget(WID_O_SHOW_IMPLICIT);
+ 
+ 		this->selected_order = -1;
+ 		this->order_over = INVALID_VEH_ORDER_ID;
+@@ -897,7 +931,11 @@ public:
+ 				break;
+ 		}
+ 
+-		this->vscroll->SetCount(this->vehicle->GetNumOrders() + 1);
++		if (this->IsWidgetLowered(WID_O_SHOW_IMPLICIT)) {
++			this->vscroll->SetCount(this->vehicle->GetNumOrders() + 1);
++		} else {
++			this->vscroll->SetCount(this->vehicle->GetNumManualOrders() + 1);
++		}
+ 		if (gui_scope) this->UpdateButtonState();
+ 
+ 		/* Scroll to the new order. */
+@@ -908,9 +946,13 @@ public:
+ 
+ 	void UpdateButtonState()
+ 	{
+-		if (this->vehicle->owner != _local_company) return; // No buttons are displayed with competitor order windows.
+-
++		/* Disable list of vehicles with the same shared orders if there is no list */
+ 		bool shared_orders = this->vehicle->IsOrderListShared();
++		this->SetWidgetDisabledState(WID_O_SHARED_ORDER_LIST, !shared_orders);
++		this->SetWidgetDirty(WID_O_SHARED_ORDER_LIST);
++
++		if (this->vehicle->owner != _local_company) return; // No other buttons are displayed with competitor order windows.
++
+ 		VehicleOrderID sel = this->OrderGetSel();
+ 		const Order *order = this->vehicle->GetOrder(sel);
+ 
+@@ -1063,9 +1105,6 @@ public:
+ 			}
+ 		}
+ 
+-		/* Disable list of vehicles with the same shared orders if there is no list */
+-		this->SetWidgetDisabledState(WID_O_SHARED_ORDER_LIST, !shared_orders);
+-
+ 		this->SetDirty();
+ 	}
+ 
+@@ -1090,48 +1129,69 @@ public:
+ 
+ 		int y = r.top + WD_FRAMERECT_TOP;
+ 		int line_height = this->GetWidget<NWidgetBase>(WID_O_ORDER_LIST)->resize_y;
++		bool show_implicit = this->IsWidgetLowered(WID_O_SHOW_IMPLICIT);
+ 
+-		int i = this->vscroll->GetPosition();
+-		const Order *order = this->vehicle->GetOrder(i);
++		bool previous_line_visible = false;
++		int line = 0;
++		int i = 0;
++		const Order *order = this->vehicle->GetFirstOrder();
+ 		/* First draw the highlighting underground if it exists. */
+ 		if (this->order_over != INVALID_VEH_ORDER_ID) {
+ 			while (order != NULL) {
+ 				/* Don't draw anything if it extends past the end of the window. */
+-				if (!this->vscroll->IsVisible(i)) break;
+-
+-				if (i != this->selected_order && i == this->order_over) {
+-					/* Highlight dragged order destination. */
+-					int top = (this->order_over < this->selected_order ? y : y + line_height) - WD_FRAMERECT_TOP;
+-					int bottom = min(top + 2, r.bottom - WD_FRAMERECT_BOTTOM);
+-					top = max(top - 3, r.top + WD_FRAMERECT_TOP);
+-					GfxFillRect(r.left + WD_FRAMETEXT_LEFT, top, r.right - WD_FRAMETEXT_RIGHT, bottom, _colour_gradient[COLOUR_GREY][7]);
+-					break;
++				if (!this->vscroll->IsVisible(line)) {
++					if (previous_line_visible) break;
++					if (show_implicit || !order->IsType(OT_IMPLICIT)) line++;
++				} else {
++					previous_line_visible = true;
++
++					if (i != this->selected_order && i == this->order_over) {
++						/* Highlight dragged order destination. */
++						int top = (this->order_over < this->selected_order ? y : y + line_height) - WD_FRAMERECT_TOP;
++						int bottom = min(top + 2, r.bottom - WD_FRAMERECT_BOTTOM);
++						top = max(top - 3, r.top + WD_FRAMERECT_TOP);
++						GfxFillRect(r.left + WD_FRAMETEXT_LEFT, top, r.right - WD_FRAMETEXT_RIGHT, bottom, _colour_gradient[COLOUR_GREY][7]);
++						break;
++					}
++					if (show_implicit || !order->IsType(OT_IMPLICIT)) {
++						y += line_height;
++						line++;
++					}
+ 				}
+-				y += line_height;
+ 
+ 				i++;
+ 				order = order->next;
+ 			}
+ 
+ 			/* Reset counters for drawing the orders. */
++			previous_line_visible = false;
+ 			y = r.top + WD_FRAMERECT_TOP;
+-			i = this->vscroll->GetPosition();
+-			order = this->vehicle->GetOrder(i);
++			line = 0;
++			i = 0;
++			order = this->vehicle->GetFirstOrder();
+ 		}
+ 
+ 		/* Draw the orders. */
+ 		while (order != NULL) {
+ 			/* Don't draw anything if it extends past the end of the window. */
+-			if (!this->vscroll->IsVisible(i)) break;
++			if (!this->vscroll->IsVisible(line)) {
++				if (previous_line_visible) break;
++				if (show_implicit || !order->IsType(OT_IMPLICIT)) line++;
++			} else {
++				previous_line_visible = true;
+ 
+-			DrawOrderString(this->vehicle, order, i, y, i == this->selected_order, false, r.left + WD_FRAMETEXT_LEFT, middle, r.right - WD_FRAMETEXT_RIGHT);
+-			y += line_height;
++				if (show_implicit || !order->IsType(OT_IMPLICIT)) {
++					DrawOrderString(this->vehicle, order, i, y, i == this->selected_order, false, r.left + WD_FRAMETEXT_LEFT, middle, r.right - WD_FRAMETEXT_RIGHT);
++					y += line_height;
++					line++;
++				}
++			}
+ 
+ 			i++;
+ 			order = order->next;
+ 		}
+ 
+-		if (this->vscroll->IsVisible(i)) {
++		if (this->vscroll->IsVisible(line)) {
+ 			StringID str = this->vehicle->IsOrderListShared() ? STR_ORDERS_END_OF_SHARED_ORDERS : STR_ORDERS_END_OF_ORDERS;
+ 			DrawString(rtl ? r.left + WD_FRAMETEXT_LEFT : middle, rtl ? middle : r.right - WD_FRAMETEXT_RIGHT, y, str, (i == this->selected_order) ? TC_WHITE : TC_BLACK);
+ 		}
+@@ -1219,6 +1279,10 @@ public:
+ 				this->OrderClick_Delete();
+ 				break;
+ 
++			case WID_O_SHOW_IMPLICIT:
++				this->OrderClick_ToggleImplicit();
++				break;
++
+ 			case WID_O_STOP_SHARING:
+ 				this->OrderClick_StopSharing();
+ 				break;
+@@ -1425,6 +1489,7 @@ public:
+ 	virtual EventState OnHotkey(int hotkey)
+ 	{
+ 		switch (hotkey) {
++			case OHK_SHOW_IMPLICIT:     this->OrderClick_ToggleImplicit();    return ES_HANDLED;
+ 			case OHK_SHARED_ORDER_LIST: ShowVehicleListWindow(this->vehicle); return ES_HANDLED;
+ 			case OHK_TIMETABLE_VIEW:    ShowTimetableWindow(this->vehicle);   return ES_HANDLED;
+ 		}
+@@ -1523,6 +1588,7 @@ public:
+ static Hotkey order_hotkeys[] = {
+ 	Hotkey('D', "skip", OHK_SKIP),
+ 	Hotkey('F', "delete", OHK_DELETE),
++	Hotkey((uint16)0, "show_implicit", OHK_SHOW_IMPLICIT),
+ 	Hotkey('G', "goto", OHK_GOTO),
+ 	Hotkey('H', "nonstop", OHK_NONSTOP),
+ 	Hotkey('J', "fullload", OHK_FULLLOAD),
+@@ -1593,15 +1659,17 @@ static const NWidgetPart _nested_orders_train_widgets[] = {
+ 	/* Second button row. */
+ 	NWidget(NWID_HORIZONTAL),
+ 		NWidget(NWID_HORIZONTAL, NC_EQUALSIZE),
+-			NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_O_SKIP), SetMinimalSize(124, 12), SetFill(1, 0),
++			NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_O_SKIP), SetMinimalSize(93, 12), SetFill(1, 0),
+ 													SetDataTip(STR_ORDERS_SKIP_BUTTON, STR_ORDERS_SKIP_TOOLTIP), SetResize(1, 0),
+ 			NWidget(NWID_SELECTION, INVALID_COLOUR, WID_O_SEL_BOTTOM_MIDDLE),
+-				NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_O_DELETE), SetMinimalSize(124, 12), SetFill(1, 0),
++				NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_O_DELETE), SetMinimalSize(93, 12), SetFill(1, 0),
+ 														SetDataTip(STR_ORDERS_DELETE_BUTTON, STR_ORDERS_DELETE_TOOLTIP), SetResize(1, 0),
+-				NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_O_STOP_SHARING), SetMinimalSize(124, 12), SetFill(1, 0),
++				NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_O_STOP_SHARING), SetMinimalSize(93, 12), SetFill(1, 0),
+ 														SetDataTip(STR_ORDERS_STOP_SHARING_BUTTON, STR_ORDERS_STOP_SHARING_TOOLTIP), SetResize(1, 0),
+ 			EndContainer(),
+-			NWidget(NWID_BUTTON_DROPDOWN, COLOUR_GREY, WID_O_GOTO), SetMinimalSize(124, 12), SetFill(1, 0),
++			NWidget(WWT_TEXTBTN, COLOUR_GREY, WID_O_SHOW_IMPLICIT), SetMinimalSize(93, 12), SetFill(1, 0),
++													SetDataTip(STR_ORDERS_SHOW_IMPLICIT_BUTTON, STR_ORDERS_SHOW_IMPLICIT_TOOLTIP), SetResize(1, 0),
++			NWidget(NWID_BUTTON_DROPDOWN, COLOUR_GREY, WID_O_GOTO), SetMinimalSize(93, 12), SetFill(1, 0),
+ 													SetDataTip(STR_ORDERS_GO_TO_BUTTON, STR_ORDERS_GO_TO_TOOLTIP), SetResize(1, 0),
+ 		EndContainer(),
+ 		NWidget(WWT_RESIZEBOX, COLOUR_GREY),
+@@ -1667,15 +1735,17 @@ static const NWidgetPart _nested_orders_widgets[] = {
+ 
+ 	/* Second button row. */
+ 	NWidget(NWID_HORIZONTAL),
+-		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_O_SKIP), SetMinimalSize(124, 12), SetFill(1, 0),
++		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_O_SKIP), SetMinimalSize(93, 12), SetFill(1, 0),
+ 											SetDataTip(STR_ORDERS_SKIP_BUTTON, STR_ORDERS_SKIP_TOOLTIP), SetResize(1, 0),
+ 		NWidget(NWID_SELECTION, INVALID_COLOUR, WID_O_SEL_BOTTOM_MIDDLE),
+-			NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_O_DELETE), SetMinimalSize(124, 12), SetFill(1, 0),
++			NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_O_DELETE), SetMinimalSize(93, 12), SetFill(1, 0),
+ 													SetDataTip(STR_ORDERS_DELETE_BUTTON, STR_ORDERS_DELETE_TOOLTIP), SetResize(1, 0),
+-			NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_O_STOP_SHARING), SetMinimalSize(124, 12), SetFill(1, 0),
++			NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_O_STOP_SHARING), SetMinimalSize(93, 12), SetFill(1, 0),
+ 													SetDataTip(STR_ORDERS_STOP_SHARING_BUTTON, STR_ORDERS_STOP_SHARING_TOOLTIP), SetResize(1, 0),
+ 		EndContainer(),
+-		NWidget(NWID_BUTTON_DROPDOWN, COLOUR_GREY, WID_O_GOTO), SetMinimalSize(124, 12), SetFill(1, 0),
++		NWidget(WWT_TEXTBTN, COLOUR_GREY, WID_O_SHOW_IMPLICIT), SetMinimalSize(93, 12), SetFill(1, 0),
++											SetDataTip(STR_ORDERS_SHOW_IMPLICIT_BUTTON, STR_ORDERS_SHOW_IMPLICIT_TOOLTIP), SetResize(1, 0),
++		NWidget(NWID_BUTTON_DROPDOWN, COLOUR_GREY, WID_O_GOTO), SetMinimalSize(93, 12), SetFill(1, 0),
+ 											SetDataTip(STR_ORDERS_GO_TO_BUTTON, STR_ORDERS_GO_TO_TOOLTIP), SetResize(1, 0),
+ 		NWidget(WWT_RESIZEBOX, COLOUR_GREY),
+ 	EndContainer(),
+@@ -1701,15 +1771,18 @@ static const NWidgetPart _nested_other_orders_widgets[] = {
+ 	EndContainer(),
+ 	NWidget(NWID_HORIZONTAL),
+ 		NWidget(WWT_PANEL, COLOUR_GREY, WID_O_ORDER_LIST), SetMinimalSize(372, 72), SetDataTip(0x0, STR_ORDERS_LIST_TOOLTIP), SetResize(1, 1), SetScrollbar(WID_O_SCROLLBAR), EndContainer(),
+-		NWidget(NWID_VERTICAL),
+-			NWidget(NWID_VSCROLLBAR, COLOUR_GREY, WID_O_SCROLLBAR),
+-			NWidget(WWT_RESIZEBOX, COLOUR_GREY),
+-		EndContainer(),
++		NWidget(NWID_VSCROLLBAR, COLOUR_GREY, WID_O_SCROLLBAR),
++	EndContainer(),
++	NWidget(NWID_HORIZONTAL),
++		NWidget(WWT_TEXTBTN, COLOUR_GREY, WID_O_SHOW_IMPLICIT), SetMinimalSize(360, 12), SetFill(1, 0),
++											SetDataTip(STR_ORDERS_SHOW_IMPLICIT_BUTTON, STR_ORDERS_SHOW_IMPLICIT_TOOLTIP), SetResize(1, 0),
++		NWidget(WWT_PUSHIMGBTN, COLOUR_GREY, WID_O_SHARED_ORDER_LIST), SetMinimalSize(12, 12), SetDataTip(SPR_SHARED_ORDERS_ICON, STR_ORDERS_VEH_WITH_SHARED_ORDERS_LIST_TOOLTIP),
++		NWidget(WWT_RESIZEBOX, COLOUR_GREY),
+ 	EndContainer(),
+ };
+ 
+ static WindowDesc _other_orders_desc(
+-	WDP_AUTO, "view_vehicle_orders_competitor", 384, 86,
++	WDP_AUTO, "view_vehicle_orders_competitor", 384, 98,
+ 	WC_VEHICLE_ORDERS, WC_VEHICLE_VIEW,
+ 	WDF_CONSTRUCTION,
+ 	_nested_other_orders_widgets, lengthof(_nested_other_orders_widgets),
+diff --git a/src/script/api/game/game_window.hpp.sq b/src/script/api/game/game_window.hpp.sq
+index f52de827d..ec4e8affb 100644
+--- a/src/script/api/game/game_window.hpp.sq
++++ b/src/script/api/game/game_window.hpp.sq
+@@ -862,6 +862,7 @@ void SQGSWindow_Register(Squirrel *engine)
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_O_SKIP,                                "WID_O_SKIP");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_O_DELETE,                              "WID_O_DELETE");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_O_STOP_SHARING,                        "WID_O_STOP_SHARING");
++	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_O_SHOW_IMPLICIT,                       "WID_O_SHOW_IMPLICIT");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_O_NON_STOP,                            "WID_O_NON_STOP");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_O_GOTO,                                "WID_O_GOTO");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_O_FULL_LOAD,                           "WID_O_FULL_LOAD");
+diff --git a/src/script/api/script_window.hpp b/src/script/api/script_window.hpp
+index fbdffb54b..243a31bdc 100644
+--- a/src/script/api/script_window.hpp
++++ b/src/script/api/script_window.hpp
+@@ -1925,6 +1925,7 @@ public:
+ 		WID_O_SKIP                                   = ::WID_O_SKIP,                                   ///< Skip current order.
+ 		WID_O_DELETE                                 = ::WID_O_DELETE,                                 ///< Delete selected order.
+ 		WID_O_STOP_SHARING                           = ::WID_O_STOP_SHARING,                           ///< Stop sharing orders.
++		WID_O_SHOW_IMPLICIT                          = ::WID_O_SHOW_IMPLICIT,                          ///< Show/Hide implicit orders.
+ 		WID_O_NON_STOP                               = ::WID_O_NON_STOP,                               ///< Goto non-stop to destination.
+ 		WID_O_GOTO                                   = ::WID_O_GOTO,                                   ///< Goto destination.
+ 		WID_O_FULL_LOAD                              = ::WID_O_FULL_LOAD,                              ///< Select full load.
+diff --git a/src/widgets/order_widget.h b/src/widgets/order_widget.h
+index 825f791ea..0189c19ea 100644
+--- a/src/widgets/order_widget.h
++++ b/src/widgets/order_widget.h
+@@ -21,6 +21,7 @@ enum OrderWidgets {
+ 	WID_O_SKIP,                      ///< Skip current order.
+ 	WID_O_DELETE,                    ///< Delete selected order.
+ 	WID_O_STOP_SHARING,              ///< Stop sharing orders.
++	WID_O_SHOW_IMPLICIT,             ///< Show/Hide implicit orders.
+ 	WID_O_NON_STOP,                  ///< Goto non-stop to destination.
+ 	WID_O_GOTO,                      ///< Goto destination.
+ 	WID_O_FULL_LOAD,                 ///< Select full load.

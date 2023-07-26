@@ -1,0 +1,196 @@
+Index: src/ground_vehicle.hpp
+===================================================================
+--- src/ground_vehicle.hpp	(revision 22876)
++++ src/ground_vehicle.hpp	(working copy)
+@@ -71,7 +71,8 @@
+  * virtual uint16      GetCurrentSpeed() const = 0;
+  * virtual uint32      GetRollingFriction() const = 0;
+  * virtual int         GetAccelerationType() const = 0;
+- * virtual int32       GetSlopeSteepness() const = 0;
++ * virtual uint32      GetSlopeSteepness() const = 0;
++ * virtual uint32      GetCurveSlowdown() const = 0;
+  * virtual int         GetDisplayMaxSpeed() const = 0;
+  * virtual uint16      GetMaxTrackSpeed() const = 0;
+  * virtual bool        TileMayHaveSlopedTrack() const = 0;
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 22876)
++++ src/lang/english.txt	(working copy)
+@@ -1120,6 +1120,8 @@
+ STR_CONFIG_SETTING_ROAD_VEHICLE_ACCELERATION_MODEL              :{LTBLUE}Road vehicle acceleration model: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_TRAIN_SLOPE_STEEPNESS                        :{LTBLUE}Slope steepness for trains: {ORANGE}{STRING1}%
+ STR_CONFIG_SETTING_ROAD_VEHICLE_SLOPE_STEEPNESS                 :{LTBLUE}Slope steepness for road vehicles: {ORANGE}{STRING1}%
++STR_CONFIG_SETTING_TRAIN_CURVE_SLOWDOWN                         :{LTBLUE}Curve slowdown for trains: {ORANGE}{STRING1}%
++STR_CONFIG_SETTING_ROAD_VEHICLE_CURVE_SLOWDOWN                  :{LTBLUE}Curve slowdown for road vehicles: {ORANGE}{STRING1}%
+ STR_CONFIG_SETTING_FORBID_90_DEG                                :{LTBLUE}Forbid trains and ships from making 90° turns: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_DISTANT_JOIN_STATIONS                        :{LTBLUE}Allow to join stations not directly adjacent: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_IMPROVEDLOAD                                 :{LTBLUE}Use improved loading algorithm: {ORANGE}{STRING1}
+Index: src/roadveh.h
+===================================================================
+--- src/roadveh.h	(revision 22876)
++++ src/roadveh.h	(working copy)
+@@ -247,6 +247,15 @@
+ 	}
+ 
+ 	/**
++	 * Returns the curve slowdown factor used by this vehicle.
++	 * @return Curve slowdown factor used by the vehicle.
++	 */
++	FORCEINLINE uint32 GetCurveSlowdown() const
++	{
++		return _settings_game.vehicle.roadveh_curve_slowdown;
++	}
++
++	/**
+ 	 * Gets the maximum speed allowed by the track for this vehicle.
+ 	 * @return Since roads don't limit road vehicle speed, it returns always zero.
+ 	 */
+Index: src/roadveh_cmd.cpp
+===================================================================
+--- src/roadveh_cmd.cpp	(revision 22876)
++++ src/roadveh_cmd.cpp	(working copy)
+@@ -400,17 +400,17 @@
+  */
+ FORCEINLINE int RoadVehicle::GetCurrentMaxSpeed() const
+ {
+-	if (_settings_game.vehicle.roadveh_acceleration_model == AM_ORIGINAL) return this->vcache.cached_max_speed;
++	if (_settings_game.vehicle.roadveh_acceleration_model == AM_ORIGINAL || this->GetCurveSlowdown() == 0) return this->vcache.cached_max_speed;
+ 
+ 	int max_speed = this->vcache.cached_max_speed;
+ 
+ 	/* Limit speed to 50% while reversing, 75% in curves. */
+ 	for (const RoadVehicle *u = this; u != NULL; u = u->Next()) {
+ 		if (this->state <= RVSB_TRACKDIR_MASK && IsReversingRoadTrackdir((Trackdir)this->state)) {
+-			max_speed = this->vcache.cached_max_speed / 2;
++			max_speed = (this->vcache.cached_max_speed / 2 * 100) / this->GetCurveSlowdown();
+ 			break;
+ 		} else if ((u->direction & 1) == 0) {
+-			max_speed = this->vcache.cached_max_speed * 3 / 4;
++			max_speed = (this->vcache.cached_max_speed * 3 / 4 * 100) / this->GetCurveSlowdown();
+ 		}
+ 	}
+ 
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 22876)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -228,8 +228,9 @@
+  *  161   22567
+  *  162   22713
+  *  163   22767
++ *  164   xxxxx
+  */
+-extern const uint16 SAVEGAME_VERSION = 163; ///< Current savegame version of OpenTTD.
++extern const uint16 SAVEGAME_VERSION = 164; ///< Current savegame version of OpenTTD.
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 22876)
++++ src/settings_gui.cpp	(working copy)
+@@ -1541,6 +1541,7 @@
+ 	SettingEntry("pf.reverse_at_signals"),
+ 	SettingEntry("vehicle.train_acceleration_model"),
+ 	SettingEntry("vehicle.train_slope_steepness"),
++	SettingEntry("vehicle.train_curve_slowdown"),
+ 	SettingEntry("vehicle.max_train_length"),
+ 	SettingEntry("vehicle.wagon_speed_limits"),
+ 	SettingEntry("vehicle.disable_elrails"),
+@@ -1569,6 +1570,7 @@
+ 	SettingEntry("vehicle.dynamic_engines"),
+ 	SettingEntry("vehicle.roadveh_acceleration_model"),
+ 	SettingEntry("vehicle.roadveh_slope_steepness"),
++	SettingEntry("vehicle.roadveh_curve_slowdown"),
+ 	SettingEntry("vehicle.smoke_amount"),
+ };
+ /** Vehicles sub-page */
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 22876)
++++ src/settings_type.h	(working copy)
+@@ -372,6 +372,8 @@
+ 	uint8  roadveh_acceleration_model;       ///< realistic acceleration for road vehicles
+ 	uint8  train_slope_steepness;            ///< Steepness of hills for trains when using realistic acceleration
+ 	uint8  roadveh_slope_steepness;          ///< Steepness of hills for road vehicles when using realistic acceleration
++	uint8  train_curve_slowdown;             ///< Slowdown factor for curves for trains when using realistic acceleration
++	uint8  roadveh_curve_slowdown;           ///< Slowdown factor for curves for road vehicles when using realistic acceleration
+ 	bool   wagon_speed_limits;               ///< enable wagon speed limits
+ 	bool   disable_elrails;                  ///< when true, the elrails are disabled
+ 	UnitID max_trains;                       ///< max trains in game per company
+Index: src/table/settings.ini
+===================================================================
+--- src/table/settings.ini	(revision 22876)
++++ src/table/settings.ini	(working copy)
+@@ -568,6 +568,29 @@
+ str      = STR_CONFIG_SETTING_ROAD_VEHICLE_SLOPE_STEEPNESS
+ proc     = RoadVehSlopeSteepnessChanged
+ 
++[SDT_VAR]
++base     = GameSettings
++var      = vehicle.train_curve_slowdown
++type     = SLE_UINT8
++from     = 164
++def      = 100
++min      = 0
++max      = 250
++interval = 10
++str      = STR_CONFIG_SETTING_TRAIN_CURVE_SLOWDOWN
++proc     = TrainAccelerationModelChanged
++
++[SDT_VAR]
++base     = GameSettings
++var      = vehicle.roadveh_curve_slowdown
++type     = SLE_UINT8
++from     = 164
++def      = 100
++min      = 0
++max      = 250
++interval = 10
++str      = STR_CONFIG_SETTING_ROAD_VEHICLE_CURVE_SLOWDOWN
++
+ [SDT_BOOL]
+ base     = GameSettings
+ var      = pf.forbid_90_deg
+Index: src/train.h
+===================================================================
+--- src/train.h	(revision 22876)
++++ src/train.h	(working copy)
+@@ -280,6 +280,15 @@
+ 	}
+ 
+ 	/**
++	 * Returns the curve slowdown factor used by this vehicle.
++	 * @return Curve slowdown factor used by the vehicle.
++	 */
++	FORCEINLINE uint32 GetCurveSlowdown() const
++	{
++		return _settings_game.vehicle.train_curve_slowdown;
++	}
++
++	/**
+ 	 * Gets the maximum speed allowed by the track for this vehicle.
+ 	 * @return Maximum speed allowed.
+ 	 */
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 22876)
++++ src/train_cmd.cpp	(working copy)
+@@ -333,7 +333,7 @@
+ 	static const int absolute_max_speed = UINT16_MAX;
+ 	int max_speed = absolute_max_speed;
+ 
+-	if (_settings_game.vehicle.train_acceleration_model == AM_ORIGINAL) return max_speed;
++	if (_settings_game.vehicle.train_acceleration_model == AM_ORIGINAL || this->GetCurveSlowdown() == 0) return max_speed;
+ 
+ 	int curvecount[2] = {0, 0};
+ 
+@@ -388,7 +388,7 @@
+ 		}
+ 	}
+ 
+-	return max_speed;
++	return (max_speed * 100) / this->GetCurveSlowdown();
+ }
+ 
+ /**

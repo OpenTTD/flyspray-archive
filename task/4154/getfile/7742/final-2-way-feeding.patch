@@ -1,0 +1,209 @@
+Index: cargopacket.cpp
+===================================================================
+--- cargopacket.cpp	(revision 22863)
++++ cargopacket.cpp	(working copy)
+@@ -12,7 +12,10 @@
+ #include "stdafx.h"
+ #include "core/pool_func.hpp"
+ #include "economy_base.h"
++#include "vehicle_base.h"
++#include "base_station_base.h"
+ 
++
+ /* Initialize the cargopacket-pool */
+ CargoPacketPool _cargopacket_pool("CargoPacket");
+ INSTANTIATE_POOL_METHODS(CargoPacket)
+@@ -251,8 +254,8 @@
+  * @param data  Depending on mta the data of this variable differs:
+  *              - MTA_FINAL_DELIVERY - Station ID of packet's origin not to remove.
+  *              - MTA_CARGO_LOAD     - Station's tile index of load.
+- *              - MTA_TRANSFER       - Unused.
+- *              - MTA_UNLOAD         - Unused.
++ *              - MTA_TRANSFER       - Station ID of packet's origin not to remove.
++ *              - MTA_UNLOAD         - Station ID of packet's origin not to remove.
+  * @param payment The payment helper.
+  *
+  * @pre mta == MTA_FINAL_DELIVERY || dest != NULL
+@@ -261,7 +264,7 @@
+  */
+ template <class Tinst>
+ template <class Tother_inst>
+-bool CargoList<Tinst>::MoveTo(Tother_inst *dest, uint max_move, MoveToAction mta, CargoPayment *payment, uint data)
++bool CargoList<Tinst>::MoveTo(Tother_inst *dest, uint max_move, MoveToAction mta, CargoPayment *payment, uint data, Vehicle *front)
+ {
+ 	assert(mta == MTA_FINAL_DELIVERY || dest != NULL);
+ 	assert(mta == MTA_UNLOAD || mta == MTA_CARGO_LOAD || payment != NULL);
+@@ -274,7 +277,22 @@
+ 			++it;
+ 			continue;
+ 		}
+-
++		if (front != NULL && front->orders.list != NULL && (front->current_order.GetUnloadType() & OUFB_TRANSFER) && (!(front->current_order.GetLoadType() & OLFB_NO_LOAD)))  {
++			/* if we are in a 2-way feeding situation (transfer and load) only accept cargo that are not just picked up from a station which is in the order list of the vehicle */
++			if (IsTileType(cp->loaded_at_xy, MP_STATION)) {
++				/* to make sure the last station still exists else check will go wrong, so we accept this cargo */
++				if (cp->loaded_at_xy != 0 && GetStationIndex(cp->loaded_at_xy) == data && mta == MTA_TRANSFER) {
++					/* Skip transfering cargo to this station which we just picked up here. */
++					++it;
++					continue;
++				}
++				if (cp->loaded_at_xy != 0 && front != NULL && mta == MTA_CARGO_LOAD && front->orders.list != NULL && front->orders.list->ContainsStation(GetStationIndex(cp->loaded_at_xy)) && front->orders.list->ContainsStation(cp->source) ) {
++					/* Skip loading cargo that originated from this vehicle station list */
++					++it;
++					continue;
++			    }
++			}
++		}
+ 		if (cp->count <= max_move) {
+ 			/* Can move the complete packet */
+ 			max_move -= cp->count;
+@@ -340,6 +358,31 @@
+ 	return it != packets.end();
+ }
+ 
++/** returns if it is allowed to load some of the cargo during a 'transfer and load' order - designed for 2-way feeding **/
++template <class Tinst>
++bool CargoList<Tinst>::LoadingAllowed(Vehicle *front)
++{
++	if (front != NULL && front->orders.list != NULL && (front->current_order.GetUnloadType() & OUFB_TRANSFER) && (!(front->current_order.GetLoadType() & OLFB_NO_LOAD)))  {
++		Iterator it(this->packets.begin());
++		while (it != this->packets.end()) {
++			CargoPacket *cp = *it;
++			if (! (IsTileType(cp->loaded_at_xy, MP_STATION))) {
++				/* last station moved or removed, we can load cargo */
++				return true;
++			}
++			else if (cp->loaded_at_xy == 0 || !(front->orders.list->ContainsStation(GetStationIndex(cp->loaded_at_xy))) || !(front->orders.list->ContainsStation(cp->source)) ) {
++				/* we can only load cargo that is not from a station or last picked up at a station which is in the vehicle orders list */
++				return true;
++			}
++			++it;
++		}
++		// no cargo left which can be loaded, so return false
++		return false;
++	}
++	return true;
++	
++}
++
+ /** Invalidates the cached data and rebuilds it. */
+ template <class Tinst>
+ void CargoList<Tinst>::InvalidateCache()
+@@ -403,8 +446,8 @@
+ template class CargoList<StationCargoList>;
+ 
+ /** Autoreplace Vehicle -> Vehicle 'transfer'. */
+-template bool CargoList<VehicleCargoList>::MoveTo(VehicleCargoList *, uint max_move, MoveToAction mta, CargoPayment *payment, uint data);
++template bool CargoList<VehicleCargoList>::MoveTo(VehicleCargoList *, uint max_move, MoveToAction mta, CargoPayment *payment, uint data, Vehicle *front);
+ /** Cargo unloading at a station. */
+-template bool CargoList<VehicleCargoList>::MoveTo(StationCargoList *, uint max_move, MoveToAction mta, CargoPayment *payment, uint data);
++template bool CargoList<VehicleCargoList>::MoveTo(StationCargoList *, uint max_move, MoveToAction mta, CargoPayment *payment, uint data, Vehicle *front);
+ /** Cargo loading at a station. */
+-template bool CargoList<StationCargoList>::MoveTo(VehicleCargoList *, uint max_move, MoveToAction mta, CargoPayment *payment, uint data);
++template bool CargoList<StationCargoList>::MoveTo(VehicleCargoList *, uint max_move, MoveToAction mta, CargoPayment *payment, uint data, Vehicle *front);
+Index: cargopacket.h
+===================================================================
+--- cargopacket.h	(revision 22863)
++++ cargopacket.h	(working copy)
+@@ -226,6 +226,7 @@
+ 		return this->count;
+ 	}
+ 
++
+ 	/**
+ 	 * Returns source of the first cargo packet in this list.
+ 	 * @return The before mentioned source.
+@@ -249,8 +250,10 @@
+ 	void Truncate(uint max_remaining);
+ 
+ 	template <class Tother_inst>
+-	bool MoveTo(Tother_inst *dest, uint count, MoveToAction mta, CargoPayment *payment, uint data = 0);
++	bool MoveTo(Tother_inst *dest, uint count, MoveToAction mta, CargoPayment *payment, uint data = 0, Vehicle *front = NULL);
+ 
++	bool LoadingAllowed(Vehicle *front);
++
+ 	void InvalidateCache();
+ };
+ 
+Index: economy.cpp
+===================================================================
+--- economy.cpp	(revision 22863)
++++ economy.cpp	(working copy)
+@@ -1216,7 +1216,7 @@
+ 			 * station is still accepting the cargo in the vehicle. It doesn't
+ 			 * accept cargo that was loaded at the same station. */
+ 			if ((front->current_order.GetUnloadType() & (OUFB_UNLOAD | OUFB_TRANSFER)) && (!accepted || v->cargo.Count() == cargo_count)) {
+-				remaining = v->cargo.MoveTo(&ge->cargo, amount_unloaded, front->current_order.GetUnloadType() & OUFB_TRANSFER ? VehicleCargoList::MTA_TRANSFER : VehicleCargoList::MTA_UNLOAD, payment);
++				remaining = v->cargo.MoveTo(&ge->cargo, amount_unloaded, front->current_order.GetUnloadType() & OUFB_TRANSFER ? VehicleCargoList::MTA_TRANSFER : VehicleCargoList::MTA_UNLOAD, payment,last_visited);
+ 				if (!HasBit(ge->acceptance_pickup, GoodsEntry::GES_PICKUP)) {
+ 					InvalidateWindowData(WC_STATION_LIST, last_visited);
+ 					SetBit(ge->acceptance_pickup, GoodsEntry::GES_PICKUP);
+@@ -1279,10 +1279,11 @@
+ 		ge->last_age = _cur_year - front->build_year;
+ 		ge->days_since_pickup = 0;
+ 
+-		/* If there's goods waiting at the station, and the vehicle
++		/* If there's goods waiting at the station which was
++		 * not picked up on the same route and the vehicle
+ 		 * has capacity for it, load it on the vehicle. */
+ 		int cap_left = v->cargo_cap - v->cargo.Count();
+-		if (!ge->cargo.Empty() && cap_left > 0) {
++		if (!ge->cargo.Empty() && (cap_left > 0) && ge->cargo.LoadingAllowed(front)) {
+ 			uint cap = cap_left;
+ 			uint count = ge->cargo.Count();
+ 
+@@ -1324,7 +1325,7 @@
+ 			completely_emptied = false;
+ 			anything_loaded = true;
+ 
+-			ge->cargo.MoveTo(&v->cargo, cap, StationCargoList::MTA_CARGO_LOAD, NULL, st->xy);
++			ge->cargo.MoveTo(&v->cargo, cap, StationCargoList::MTA_CARGO_LOAD, NULL, st->xy, front);
+ 
+ 			st->time_since_load = 0;
+ 			st->last_vehicle_type = v->type;
+Index: order_base.h
+===================================================================
+--- order_base.h	(revision 22863)
++++ order_base.h	(working copy)
+@@ -223,6 +223,7 @@
+ 
+ 	Order *GetOrderAt(int index) const;
+ 
++
+ 	/**
+ 	 * Get the last order of the order chain.
+ 	 * @return the last order of the chain.
+@@ -263,6 +264,8 @@
+ 	 */
+ 	inline uint GetNumVehicles() const { return this->num_vehicles; }
+ 
++	bool ContainsStation(StationID station) const;
++
+ 	bool IsVehicleInSharedOrdersList(const Vehicle *v) const;
+ 	int GetPositionInSharedOrderList(const Vehicle *v) const;
+ 
+Index: order_cmd.cpp
+===================================================================
+--- order_cmd.cpp	(revision 22863)
++++ order_cmd.cpp	(working copy)
+@@ -463,6 +463,20 @@
+ }
+ 
+ /**
++ * Checks if a station is in the vehicle order list
++ * @param station is the StationID to look for
++ * @return whether the StatID is in the vehicle order list
++ */
++
++bool OrderList::ContainsStation (StationID station) const
++{
++	for (Order *o = this->first; o != NULL; o = o->next) {
++		if (o->GetDestination() == station) return true;
++	}
++	return false;
++}
++
++/**
+  * Checks whether all orders of the list have a filled timetable.
+  * @return whether all orders have a filled timetable.
+  */

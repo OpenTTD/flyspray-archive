@@ -1,0 +1,209 @@
+Index: src/genworld.cpp
+===================================================================
+--- src/genworld.cpp	(revision 22846)
++++ src/genworld.cpp	(working copy)
+@@ -124,7 +124,12 @@
+ 			ConvertGroundTilesIntoWaterTiles();
+ 			IncreaseGeneratingWorldProgress(GWP_OBJECT);
+ 		} else {
+-			GenerateLandscape(_gw.mode);
++			if (!GenerateLandscape(_gw.mode)) {
++				_cur_company.Restore();
++				HandleGeneratingWorldAbortion();
++				return;
++			}
++
+ 			GenerateClearTile();
+ 
+ 			/* only generate towns, tree and industries in newgame mode. */
+Index: src/heightmap.cpp
+===================================================================
+--- src/heightmap.cpp	(revision 22846)
++++ src/heightmap.cpp	(working copy)
+@@ -22,6 +22,8 @@
+ 
+ #include "table/strings.h"
+ 
++extern StringID _switch_mode_errorstr, _switch_mode_detailed_errorstr;
++
+ /**
+  * Convert RGB colours to Grayscale using 29.9% Red, 58.7% Green, 11.4% Blue
+  *  (average luminosity formula) -- Dalestan
+@@ -107,20 +109,23 @@
+ 
+ 	fp = FioFOpenFile(filename, "rb", HEIGHTMAP_DIR);
+ 	if (fp == NULL) {
+-		ShowErrorMessage(STR_ERROR_PNGMAP, STR_ERROR_PNGMAP_FILE_NOT_FOUND, WL_ERROR);
++		_switch_mode_errorstr = STR_ERROR_PNGMAP;
++		_switch_mode_detailed_errorstr = STR_ERROR_PNGMAP_FILE_NOT_FOUND;
+ 		return false;
+ 	}
+ 
+ 	png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+ 	if (png_ptr == NULL) {
+-		ShowErrorMessage(STR_ERROR_PNGMAP, STR_ERROR_PNGMAP_MISC, WL_ERROR);
++		_switch_mode_errorstr = STR_ERROR_PNGMAP;
++		_switch_mode_detailed_errorstr = STR_ERROR_PNGMAP_MISC;
+ 		fclose(fp);
+ 		return false;
+ 	}
+ 
+ 	info_ptr = png_create_info_struct(png_ptr);
+ 	if (info_ptr == NULL || setjmp(png_jmpbuf(png_ptr))) {
+-		ShowErrorMessage(STR_ERROR_PNGMAP, STR_ERROR_PNGMAP_MISC, WL_ERROR);
++		_switch_mode_errorstr = STR_ERROR_PNGMAP;
++		_switch_mode_detailed_errorstr = STR_ERROR_PNGMAP_MISC;
+ 		fclose(fp);
+ 		png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+ 		return false;
+@@ -230,14 +235,16 @@
+ 
+ 	f = FioFOpenFile(filename, "rb", HEIGHTMAP_DIR);
+ 	if (f == NULL) {
+-		ShowErrorMessage(STR_ERROR_BMPMAP, STR_ERROR_PNGMAP_FILE_NOT_FOUND, WL_ERROR);
++		_switch_mode_errorstr = STR_ERROR_BMPMAP;
++		_switch_mode_detailed_errorstr = STR_ERROR_PNGMAP_FILE_NOT_FOUND;
+ 		return false;
+ 	}
+ 
+ 	BmpInitializeBuffer(&buffer, f);
+ 
+ 	if (!BmpReadHeader(&buffer, &info, &data)) {
+-		ShowErrorMessage(STR_ERROR_BMPMAP, STR_ERROR_BMPMAP_IMAGE_TYPE, WL_ERROR);
++		_switch_mode_errorstr = STR_ERROR_BMPMAP;
++		_switch_mode_detailed_errorstr = STR_ERROR_BMPMAP_IMAGE_TYPE;
+ 		fclose(f);
+ 		BmpDestroyData(&data);
+ 		return false;
+@@ -245,7 +252,8 @@
+ 
+ 	if (map != NULL) {
+ 		if (!BmpReadBitmap(&buffer, &info, &data)) {
+-			ShowErrorMessage(STR_ERROR_BMPMAP, STR_ERROR_BMPMAP_IMAGE_TYPE, WL_ERROR);
++			_switch_mode_errorstr = STR_ERROR_BMPMAP;
++			_switch_mode_detailed_errorstr = STR_ERROR_BMPMAP_IMAGE_TYPE;
+ 			fclose(f);
+ 			BmpDestroyData(&data);
+ 			return false;
+@@ -447,15 +455,16 @@
+  *  to a landscape representing the heightmap.
+  * It converts pixels to height. The brighter, the higher.
+  * @param filename of the heighmap file to be imported
++ * @return Whether the heightmap was successfully loaded or not
+  */
+-void LoadHeightmap(char *filename)
++bool LoadHeightmap(char *filename)
+ {
+ 	uint x, y;
+ 	byte *map = NULL;
+ 
+ 	if (!ReadHeightMap(filename, &x, &y, &map)) {
+ 		free(map);
+-		return;
++		return false;
+ 	}
+ 
+ 	GrayscaleToMapHeights(x, y, map);
+@@ -463,6 +472,8 @@
+ 
+ 	FixSlopes();
+ 	MarkWholeScreenDirty();
++
++	return true;
+ }
+ 
+ /**
+Index: src/heightmap.h
+===================================================================
+--- src/heightmap.h	(revision 22846)
++++ src/heightmap.h	(working copy)
+@@ -22,7 +22,7 @@
+ };
+ 
+ bool GetHeightmapDimensions(char *filename, uint *x, uint *y);
+-void LoadHeightmap(char *filename);
++bool LoadHeightmap(char *filename);
+ void FlatEmptyWorld(byte tile_height);
+ void FixSlopes();
+ 
+Index: src/landscape.cpp
+===================================================================
+--- src/landscape.cpp	(revision 22846)
++++ src/landscape.cpp	(working copy)
+@@ -1194,7 +1194,12 @@
+ 	}
+ }
+ 
+-void GenerateLandscape(byte mode)
++/**
++ * Generate the landscape, using the given mode parameter and current game settings.
++ * @param mode The GenWorldMode to use (GWM_EMPTY is not handled)
++ * @return Whether the landscape was successfully generated or not
++ */
++bool GenerateLandscape(byte mode)
+ {
+ 	/** Number of steps of landscape generation */
+ 	enum GenLandscapeSteps {
+@@ -1208,7 +1213,7 @@
+ 
+ 	if (mode == GWM_HEIGHTMAP) {
+ 		SetGeneratingWorldProgress(GWP_LANDSCAPE, steps + GLS_HEIGHTMAP);
+-		LoadHeightmap(_file_to_saveload.name);
++		if (!LoadHeightmap(_file_to_saveload.name)) return false;
+ 		IncreaseGeneratingWorldProgress(GWP_LANDSCAPE);
+ 	} else if (_settings_game.game_creation.land_generator == LG_TERRAGENESIS) {
+ 		SetGeneratingWorldProgress(GWP_LANDSCAPE, steps + GLS_TERRAGENESIS);
+@@ -1277,6 +1282,8 @@
+ 	if (_settings_game.game_creation.landscape == LT_TROPIC) CreateDesertOrRainForest();
+ 
+ 	CreateRivers();
++	
++	return true;
+ }
+ 
+ void OnTick_Town();
+Index: src/landscape.h
+===================================================================
+--- src/landscape.h	(revision 22846)
++++ src/landscape.h	(working copy)
+@@ -93,6 +93,6 @@
+ void RunTileLoop();
+ 
+ void InitializeLandscape();
+-void GenerateLandscape(byte mode);
++bool GenerateLandscape(byte mode);
+ 
+ #endif /* LANDSCAPE_H */
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 22846)
++++ src/openttd.cpp	(working copy)
+@@ -71,7 +71,7 @@
+ #include "table/strings.h"
+ 
+ /** Error message to show when switching modes. */
+-StringID _switch_mode_errorstr;
++StringID _switch_mode_errorstr, _switch_mode_detailed_errorstr;
+ 
+ void CallLandscapeTick();
+ void IncreaseDate();
+@@ -459,7 +459,7 @@
+ 
+ 	_game_mode = GM_MENU;
+ 	_switch_mode = SM_MENU;
+-	_switch_mode_errorstr = INVALID_STRING_ID;
++	_switch_mode_errorstr = _switch_mode_detailed_errorstr = INVALID_STRING_ID;
+ 	_config_file = NULL;
+ 
+ 	GetOptData mgo(argc - 1, argv + 1, _options);
+@@ -1008,8 +1008,8 @@
+ 	}
+ 
+ 	if (_switch_mode_errorstr != INVALID_STRING_ID) {
+-		ShowErrorMessage(_switch_mode_errorstr, INVALID_STRING_ID, WL_CRITICAL);
+-		_switch_mode_errorstr = INVALID_STRING_ID;
++		ShowErrorMessage(_switch_mode_errorstr, _switch_mode_detailed_errorstr, WL_CRITICAL);
++		_switch_mode_errorstr = _switch_mode_detailed_errorstr = INVALID_STRING_ID;
+ 	}
+ }
+ 

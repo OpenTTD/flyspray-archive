@@ -1,0 +1,416 @@
+diff --git a/src/script/api/game/game_window.hpp.sq b/src/script/api/game/game_window.hpp.sq
+index ec4e8affb..bfa8ba0cc 100644
+--- a/src/script/api/game/game_window.hpp.sq
++++ b/src/script/api/game/game_window.hpp.sq
+@@ -1151,6 +1151,7 @@ void SQGSWindow_Register(Squirrel *engine)
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_VT_ARRIVAL_DEPARTURE_PANEL,            "WID_VT_ARRIVAL_DEPARTURE_PANEL");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_VT_SCROLLBAR,                          "WID_VT_SCROLLBAR");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_VT_SUMMARY_PANEL,                      "WID_VT_SUMMARY_PANEL");
++	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_VT_SHOW_IMPLICIT,                      "WID_VT_SHOW_IMPLICIT");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_VT_START_DATE,                         "WID_VT_START_DATE");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_VT_CHANGE_TIME,                        "WID_VT_CHANGE_TIME");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_VT_CLEAR_TIME,                         "WID_VT_CLEAR_TIME");
+diff --git a/src/script/api/script_window.hpp b/src/script/api/script_window.hpp
+index 243a31bdc..951ddca13 100644
+--- a/src/script/api/script_window.hpp
++++ b/src/script/api/script_window.hpp
+@@ -2347,6 +2347,7 @@ public:
+ 		WID_VT_ARRIVAL_DEPARTURE_PANEL               = ::WID_VT_ARRIVAL_DEPARTURE_PANEL,               ///< Panel with the expected/scheduled arrivals.
+ 		WID_VT_SCROLLBAR                             = ::WID_VT_SCROLLBAR,                             ///< Scrollbar for the panel.
+ 		WID_VT_SUMMARY_PANEL                         = ::WID_VT_SUMMARY_PANEL,                         ///< Summary panel.
++		WID_VT_SHOW_IMPLICIT                         = ::WID_VT_SHOW_IMPLICIT,                         ///< Show/Hide implicit orders.
+ 		WID_VT_START_DATE                            = ::WID_VT_START_DATE,                            ///< Start date button.
+ 		WID_VT_CHANGE_TIME                           = ::WID_VT_CHANGE_TIME,                           ///< Change time button.
+ 		WID_VT_CLEAR_TIME                            = ::WID_VT_CLEAR_TIME,                            ///< Clear time button.
+diff --git a/src/timetable_gui.cpp b/src/timetable_gui.cpp
+index 9e365fb0c..ac932da21 100644
+--- a/src/timetable_gui.cpp
++++ b/src/timetable_gui.cpp
+@@ -35,8 +35,9 @@
+ 
+ /** Container for the arrival/departure dates of a vehicle */
+ struct TimetableArrivalDeparture {
+-	Ticks arrival;   ///< The arrival time
+-	Ticks departure; ///< The departure time
++	Ticks arrival;   ///< The arrival time.
++	Ticks departure; ///< The departure time.
++	bool implicit;   ///< Type of the associated order; used for hiding implicit orders.
+ };
+ 
+ /**
+@@ -94,13 +95,16 @@ static void FillTimetableArrivalDepartureTable(const Vehicle *v, VehicleOrderID
+ 
+ 	Ticks sum = offset;
+ 	VehicleOrderID i = start;
+-	const Order *order = v->GetOrder(i);
++	const Order *order = v->GetFirstOrder();
+ 
+ 	/* Pre-initialize with unknown time */
+-	for (int i = 0; i < v->GetNumOrders(); ++i) {
++	for (int i = 0; i < v->GetNumOrders(); ++i, order = order->next) {
+ 		table[i].arrival = table[i].departure = INVALID_TICKS;
++		table[i].implicit = order->IsType(OT_IMPLICIT);
+ 	}
+ 
++	order = v->GetOrder(i);
++
+ 	/* Cyclically loop over all orders until we reach the current one again.
+ 	 * As we may start at the current order, do a post-checking loop */
+ 	do {
+@@ -150,6 +154,7 @@ static void ChangeTimetableStartCallback(const Window *w, Date date)
+ 
+ /** Hotkeys for timetable window. */
+ enum {
++	TTHK_SHOW_IMPLICIT,
+ 	TTHK_CHANGE_TIME,
+ 	TTHK_CLEAR_TIME,
+ 	TTHK_CHANGE_SPEED,
+@@ -172,6 +177,35 @@ private:
+ 	Scrollbar *vscroll;
+ 	bool query_is_speed_query; ///< The currently open query window is a speed query and not a time query.
+ 
++	/**
++	 * Handle the click on the implicit orders toggle button.
++	 */
++	void TimetableClick_ToggleImplicit()
++	{
++		this->ToggleWidgetLoweredState(WID_VT_SHOW_IMPLICIT);
++
++		if (this->IsWidgetLowered(WID_VT_SHOW_IMPLICIT)) {
++			this->vscroll->SetCount(this->vehicle->GetNumOrders() * 2);
++		} else {
++			this->vscroll->SetCount(this->vehicle->GetNumManualOrders() * 2);
++
++			int selected = this->sel_index;
++			if (selected != -1) {
++				VehicleOrderID real = (selected + 1) / 2;
++
++				if (real >= this->vehicle->GetNumOrders()) real = 0;
++
++				const Order *order = this->vehicle->GetOrder(real);
++				if (order->IsType(OT_IMPLICIT)) this->sel_index = -1;
++			}
++		}
++
++		this->SetWidgetDirty(WID_VT_TIMETABLE_PANEL);
++		this->SetWidgetDirty(WID_VT_ARRIVAL_DEPARTURE_PANEL);
++		this->SetWidgetDirty(WID_VT_SCROLLBAR);
++		this->SetWidgetDirty(WID_VT_SHOW_IMPLICIT);
++	}
++
+ 	/**
+ 	 * Handle the click on the change time button.
+ 	 */
+@@ -322,6 +356,8 @@ public:
+ 		this->UpdateSelectionStates();
+ 		this->FinishInitNested(window_number);
+ 
++		this->LowerWidget(WID_VT_SHOW_IMPLICIT);
++
+ 		this->owner = this->vehicle->owner;
+ 	}
+ 
+@@ -372,8 +408,34 @@ public:
+ 		if ((uint)sel >= this->vscroll->GetCapacity()) return INVALID_ORDER;
+ 
+ 		sel += this->vscroll->GetPosition();
++		if (sel < 0) return INVALID_ORDER;
++
++		if (IsWidgetLowered(WID_VT_SHOW_IMPLICIT)) {
++			return (sel < v->GetNumOrders() * 2) ? sel : INVALID_ORDER;
++		} else {
++			if (sel >= v->GetNumManualOrders() * 2) return INVALID_ORDER;
++
++			int i = 0;
++			const Order *o = vehicle->GetFirstOrder();
++			bool skip_first = o != NULL && o->IsType(OT_IMPLICIT);
++
++			while (o != NULL) {
++				if (!o->IsType(OT_IMPLICIT) && --sel < 0) return i;
+ 
+-		return (sel < v->GetNumOrders() * 2 && sel >= 0) ? sel : INVALID_ORDER;
++				i++;
++				o = o->next;
++				if (o == NULL) o = vehicle->GetFirstOrder();
++
++				if (!o->IsType(OT_IMPLICIT)) {
++					if (!skip_first && --sel < 0) return i;
++					skip_first = false;
++				}
++
++				i++;
++				if (i >= v->GetNumOrders() * 2) i -= v->GetNumOrders() * 2;
++			}
++			return INVALID_ORDER;
++		}
+ 	}
+ 
+ 	/**
+@@ -456,7 +518,11 @@ public:
+ 		const Vehicle *v = this->vehicle;
+ 		int selected = this->sel_index;
+ 
+-		this->vscroll->SetCount(v->GetNumOrders() * 2);
++		if (this->IsWidgetLowered(WID_VT_SHOW_IMPLICIT)) {
++			this->vscroll->SetCount(v->GetNumOrders() * 2);
++		} else {
++			this->vscroll->SetCount(v->GetNumManualOrders() * 2);
++		}
+ 
+ 		if (v->owner == _local_company) {
+ 			bool disable = true;
+@@ -511,64 +577,94 @@ public:
+ 		switch (widget) {
+ 			case WID_VT_TIMETABLE_PANEL: {
+ 				int y = r.top + WD_FRAMERECT_TOP;
+-				int i = this->vscroll->GetPosition();
+-				VehicleOrderID order_id = (i + 1) / 2;
++				int i = 0;
++				int line = 0;
++				bool previous_line_visible = false;
++				VehicleOrderID order_id = 0;
+ 				bool final_order = false;
+ 
+ 				bool rtl = _current_text_dir == TD_RTL;
+ 				SetDParamMaxValue(0, v->GetNumOrders(), 2);
+ 				int index_column_width = GetStringBoundingBox(STR_ORDER_INDEX).width + 2 * GetSpriteSize(rtl ? SPR_ARROW_RIGHT : SPR_ARROW_LEFT).width + 3;
+ 				int middle = rtl ? r.right - WD_FRAMERECT_RIGHT - index_column_width : r.left + WD_FRAMERECT_LEFT + index_column_width;
+-
+-				const Order *order = v->GetOrder(order_id);
++				bool show_implicit = this->IsWidgetLowered(WID_VT_SHOW_IMPLICIT);
++
++				const Order *order = v->GetFirstOrder();
++				/* The last line is actually part of the first order in the list, shown by wrapping around.
++				 * final_order then stops the loop after the next line is printed.
++				 * To avoid showing this line twice it needs to be skipped the first time.
++				 * If the first drawn order is the first order, this is done automatically because the line would correspond to i == -1, and we start at i == 0.
++				 * Otherwise (i.e. with an implicit order as first order and implicit orders hidden) we need to skip it in another way. */
++				bool skip_first = !show_implicit && order->IsType(OT_IMPLICIT);
+ 				while (order != NULL) {
+ 					/* Don't draw anything if it extends past the end of the window. */
+-					if (!this->vscroll->IsVisible(i)) break;
++					if (!this->vscroll->IsVisible(line)) {
++						/* Did we encounter the visible range yet? */
++						if (previous_line_visible) break;
++					} else {
++						previous_line_visible = true;
+ 
+-					if (i % 2 == 0) {
+-						DrawOrderString(v, order, order_id, y, i == selected, true, r.left + WD_FRAMERECT_LEFT, middle, r.right - WD_FRAMERECT_RIGHT);
++						if (i % 2 == 0) {
++							if (show_implicit || !order->IsType(OT_IMPLICIT)) {
++								DrawOrderString(v, order, order_id, y, i == selected, true, r.left + WD_FRAMERECT_LEFT, middle, r.right - WD_FRAMERECT_RIGHT);
++								y += FONT_HEIGHT_NORMAL;
++							}
++						} else if (!skip_first) {
++							StringID string;
++							TextColour colour = (i == selected) ? TC_WHITE : TC_BLACK;
++							if (order->IsType(OT_CONDITIONAL)) {
++								string = STR_TIMETABLE_NO_TRAVEL;
++							} else if (order->IsType(OT_IMPLICIT)) {
++								string = STR_TIMETABLE_NOT_TIMETABLEABLE;
++								colour = ((i == selected) ? TC_SILVER : TC_GREY) | TC_NO_SHADE;
++							} else if (!order->IsTravelTimetabled()) {
++								if (order->GetTravelTime() > 0) {
++									SetTimetableParams(0, 1, order->GetTravelTime());
++									string = order->GetMaxSpeed() != UINT16_MAX ?
++											STR_TIMETABLE_TRAVEL_FOR_SPEED_ESTIMATED  :
++											STR_TIMETABLE_TRAVEL_FOR_ESTIMATED;
++								} else {
++									string = order->GetMaxSpeed() != UINT16_MAX ?
++											STR_TIMETABLE_TRAVEL_NOT_TIMETABLED_SPEED :
++											STR_TIMETABLE_TRAVEL_NOT_TIMETABLED;
++								}
++							} else {
++								SetTimetableParams(0, 1, order->GetTimetabledTravel());
++								string = order->GetMaxSpeed() != UINT16_MAX ?
++										STR_TIMETABLE_TRAVEL_FOR_SPEED : STR_TIMETABLE_TRAVEL_FOR;
++							}
++							if (show_implicit || !order->IsType(OT_IMPLICIT)) {
++								SetDParam(2, order->GetMaxSpeed());
+ 
++								DrawString(rtl ? r.left + WD_FRAMERECT_LEFT : middle, rtl ? middle : r.right - WD_FRAMERECT_LEFT, y, string, colour);
++								y += FONT_HEIGHT_NORMAL;
++							}
++						}
++					}
++
++					if (show_implicit || !order->IsType(OT_IMPLICIT)) {
++						line++;
++						if (final_order) break;
++						skip_first = false;
++					}
++
++					if (i % 2 == 0) {
+ 						order_id++;
+ 
+ 						if (order_id >= v->GetNumOrders()) {
+-							order = v->GetOrder(0);
++							/* Have we searched the entire order list for the first printable order? */
++							if (final_order) break;
++
++							order = v->GetFirstOrder();
++							order_id -= v->GetNumOrders();
+ 							final_order = true;
+ 						} else {
+ 							order = order->next;
+ 						}
+-					} else {
+-						StringID string;
+-						TextColour colour = (i == selected) ? TC_WHITE : TC_BLACK;
+-						if (order->IsType(OT_CONDITIONAL)) {
+-							string = STR_TIMETABLE_NO_TRAVEL;
+-						} else if (order->IsType(OT_IMPLICIT)) {
+-							string = STR_TIMETABLE_NOT_TIMETABLEABLE;
+-							colour = ((i == selected) ? TC_SILVER : TC_GREY) | TC_NO_SHADE;
+-						} else if (!order->IsTravelTimetabled()) {
+-							if (order->GetTravelTime() > 0) {
+-								SetTimetableParams(0, 1, order->GetTravelTime());
+-								string = order->GetMaxSpeed() != UINT16_MAX ?
+-										STR_TIMETABLE_TRAVEL_FOR_SPEED_ESTIMATED  :
+-										STR_TIMETABLE_TRAVEL_FOR_ESTIMATED;
+-							} else {
+-								string = order->GetMaxSpeed() != UINT16_MAX ?
+-										STR_TIMETABLE_TRAVEL_NOT_TIMETABLED_SPEED :
+-										STR_TIMETABLE_TRAVEL_NOT_TIMETABLED;
+-							}
+-						} else {
+-							SetTimetableParams(0, 1, order->GetTimetabledTravel());
+-							string = order->GetMaxSpeed() != UINT16_MAX ?
+-									STR_TIMETABLE_TRAVEL_FOR_SPEED : STR_TIMETABLE_TRAVEL_FOR;
+-						}
+-						SetDParam(2, order->GetMaxSpeed());
+-
+-						DrawString(rtl ? r.left + WD_FRAMERECT_LEFT : middle, rtl ? middle : r.right - WD_FRAMERECT_LEFT, y, string, colour);
+-
+-						if (final_order) break;
+ 					}
+ 
+ 					i++;
+-					y += FONT_HEIGHT_NORMAL;
++					if (i >= v->GetNumOrders() * 2) i -= v->GetNumOrders() * 2;
+ 				}
+ 				break;
+ 			}
+@@ -590,6 +686,10 @@ public:
+ 
+ 				bool show_late = this->show_expected && v->lateness_counter > DAY_TICKS;
+ 				Ticks offset = show_late ? 0 : -v->lateness_counter;
++				bool show_implicit = this->IsWidgetLowered(WID_VT_SHOW_IMPLICIT);
++
++				bool previous_line_visible = false;
++				int line = 0;
+ 
+ 				bool rtl = _current_text_dir == TD_RTL;
+ 				int abbr_left  = rtl ? r.right - WD_FRAMERECT_RIGHT - this->deparr_abbr_width : r.left + WD_FRAMERECT_LEFT;
+@@ -597,31 +697,40 @@ public:
+ 				int time_left  = rtl ? r.left + WD_FRAMERECT_LEFT : r.right - WD_FRAMERECT_RIGHT - this->deparr_time_width;
+ 				int time_right = rtl ? r.left + WD_FRAMERECT_LEFT + this->deparr_time_width : r.right - WD_FRAMERECT_RIGHT;
+ 
+-				for (int i = this->vscroll->GetPosition(); i / 2 < v->GetNumOrders(); ++i) { // note: i is also incremented in the loop
++				for (int i = 0; i / 2 < v->GetNumOrders(); ++i) {
+ 					/* Don't draw anything if it extends past the end of the window. */
+-					if (!this->vscroll->IsVisible(i)) break;
+-
+-					if (i % 2 == 0) {
+-						if (arr_dep[i / 2].arrival != INVALID_TICKS) {
+-							DrawString(abbr_left, abbr_right, y, STR_TIMETABLE_ARRIVAL_ABBREVIATION, i == selected ? TC_WHITE : TC_BLACK);
+-							if (this->show_expected && i / 2 == earlyID) {
+-								SetDParam(0, _date + arr_dep[i / 2].arrival / DAY_TICKS);
+-								DrawString(time_left, time_right, y, STR_JUST_DATE_TINY, TC_GREEN);
+-							} else {
+-								SetDParam(0, _date + (arr_dep[i / 2].arrival + offset) / DAY_TICKS);
++					if (!this->vscroll->IsVisible(line)) {
++						if (previous_line_visible) break;
++						if (show_implicit || !arr_dep[i / 2].implicit) line++;
++					} else {
++						previous_line_visible = true;
++
++						if (!show_implicit && arr_dep[i / 2].implicit) continue;
++
++						if (i % 2 == 0) {
++							if (arr_dep[i / 2].arrival != INVALID_TICKS) {
++								DrawString(abbr_left, abbr_right, y, STR_TIMETABLE_ARRIVAL_ABBREVIATION, i == selected ? TC_WHITE : TC_BLACK);
++								if (this->show_expected && i / 2 == earlyID) {
++									SetDParam(0, _date + arr_dep[i / 2].arrival / DAY_TICKS);
++									DrawString(time_left, time_right, y, STR_JUST_DATE_TINY, TC_GREEN);
++								} else {
++									SetDParam(0, _date + (arr_dep[i / 2].arrival + offset) / DAY_TICKS);
++									DrawString(time_left, time_right, y, STR_JUST_DATE_TINY,
++											show_late ? TC_RED : i == selected ? TC_WHITE : TC_BLACK);
++								}
++							}
++						} else {
++							if (arr_dep[i / 2].departure != INVALID_TICKS) {
++								DrawString(abbr_left, abbr_right, y, STR_TIMETABLE_DEPARTURE_ABBREVIATION, i == selected ? TC_WHITE : TC_BLACK);
++								SetDParam(0, _date + (arr_dep[i/2].departure + offset) / DAY_TICKS);
+ 								DrawString(time_left, time_right, y, STR_JUST_DATE_TINY,
+ 										show_late ? TC_RED : i == selected ? TC_WHITE : TC_BLACK);
+ 							}
+ 						}
+-					} else {
+-						if (arr_dep[i / 2].departure != INVALID_TICKS) {
+-							DrawString(abbr_left, abbr_right, y, STR_TIMETABLE_DEPARTURE_ABBREVIATION, i == selected ? TC_WHITE : TC_BLACK);
+-							SetDParam(0, _date + (arr_dep[i/2].departure + offset) / DAY_TICKS);
+-							DrawString(time_left, time_right, y, STR_JUST_DATE_TINY,
+-									show_late ? TC_RED : i == selected ? TC_WHITE : TC_BLACK);
+-						}
++
++						y += FONT_HEIGHT_NORMAL;
++						line++;
+ 					}
+-					y += FONT_HEIGHT_NORMAL;
+ 				}
+ 				break;
+ 			}
+@@ -682,6 +791,10 @@ public:
+ 				break;
+ 			}
+ 
++			case WID_VT_SHOW_IMPLICIT:
++				this->TimetableClick_ToggleImplicit();
++				break;
++
+ 			case WID_VT_START_DATE: // Change the date that the timetable starts.
+ 				this->TimetableClick_StartDate();
+ 				break;
+@@ -745,6 +858,7 @@ public:
+ 	virtual EventState OnHotkey(int hotkey)
+ 	{
+ 		switch (hotkey) {
++			case TTHK_SHOW_IMPLICIT:     this->TimetableClick_ToggleImplicit(); return ES_HANDLED;
+ 			case TTHK_EXPECTED:          this->TimetableClick_ToggleExpected(); return ES_HANDLED;
+ 			case TTHK_SHARED_ORDER_LIST: ShowVehicleListWindow(this->vehicle);  return ES_HANDLED;
+ 			case TTHK_ORDER_VIEW:        ShowOrdersWindow(this->vehicle);       return ES_HANDLED;
+@@ -784,6 +898,7 @@ public:
+ };
+ 
+ static Hotkey timetable_hotkeys[] = {
++	Hotkey((uint16)0, "show_implicit", TTHK_SHOW_IMPLICIT),
+ 	Hotkey((uint16)0, "change_time", TTHK_CHANGE_TIME),
+ 	Hotkey((uint16)0, "clear_time", TTHK_CLEAR_TIME),
+ 	Hotkey((uint16)0, "change_speed", TTHK_CHANGE_SPEED),
+@@ -814,7 +929,10 @@ static const NWidgetPart _nested_timetable_widgets[] = {
+ 		EndContainer(),
+ 		NWidget(NWID_VSCROLLBAR, COLOUR_GREY, WID_VT_SCROLLBAR),
+ 	EndContainer(),
+-	NWidget(WWT_PANEL, COLOUR_GREY, WID_VT_SUMMARY_PANEL), SetMinimalSize(400, 22), SetResize(1, 0), EndContainer(),
++	NWidget(NWID_HORIZONTAL),
++		NWidget(WWT_PANEL, COLOUR_GREY, WID_VT_SUMMARY_PANEL), SetMinimalSize(350, 22), SetResize(1, 0), EndContainer(),
++		NWidget(WWT_TEXTBTN, COLOUR_GREY, WID_VT_SHOW_IMPLICIT), SetMinimalSize(50, 22), SetDataTip(STR_ORDERS_SHOW_IMPLICIT_BUTTON, STR_ORDERS_SHOW_IMPLICIT_TOOLTIP),
++	EndContainer(),
+ 	NWidget(NWID_HORIZONTAL),
+ 		NWidget(NWID_HORIZONTAL, NC_EQUALSIZE),
+ 			NWidget(NWID_VERTICAL, NC_EQUALSIZE),
+diff --git a/src/widgets/timetable_widget.h b/src/widgets/timetable_widget.h
+index 09beb6167..4eaf1c283 100644
+--- a/src/widgets/timetable_widget.h
++++ b/src/widgets/timetable_widget.h
+@@ -20,6 +20,7 @@ enum VehicleTimetableWidgets {
+ 	WID_VT_ARRIVAL_DEPARTURE_PANEL,     ///< Panel with the expected/scheduled arrivals.
+ 	WID_VT_SCROLLBAR,                   ///< Scrollbar for the panel.
+ 	WID_VT_SUMMARY_PANEL,               ///< Summary panel.
++	WID_VT_SHOW_IMPLICIT,               ///< Show/Hide implicit orders.
+ 	WID_VT_START_DATE,                  ///< Start date button.
+ 	WID_VT_CHANGE_TIME,                 ///< Change time button.
+ 	WID_VT_CLEAR_TIME,                  ///< Clear time button.

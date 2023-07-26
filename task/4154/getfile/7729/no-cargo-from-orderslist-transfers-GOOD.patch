@@ -1,0 +1,186 @@
+Index: cargopacket.cpp
+===================================================================
+--- cargopacket.cpp	(revision 22851)
++++ cargopacket.cpp	(working copy)
+@@ -12,7 +12,9 @@
+ #include "stdafx.h"
+ #include "core/pool_func.hpp"
+ #include "economy_base.h"
++#include "vehicle_base.h"
+ 
++
+ /* Initialize the cargopacket-pool */
+ CargoPacketPool _cargopacket_pool("CargoPacket");
+ INSTANTIATE_POOL_METHODS(CargoPacket)
+@@ -259,7 +261,7 @@
+  */
+ template <class Tinst>
+ template <class Tother_inst>
+-bool CargoList<Tinst>::MoveTo(Tother_inst *dest, uint max_move, MoveToAction mta, CargoPayment *payment, uint data)
++bool CargoList<Tinst>::MoveTo(Tother_inst *dest, uint max_move, MoveToAction mta, CargoPayment *payment, uint data, Vehicle *v)
+ {
+ 	assert(mta == MTA_FINAL_DELIVERY || dest != NULL);
+ 	assert(mta == MTA_UNLOAD || mta == MTA_CARGO_LOAD || payment != NULL);
+@@ -273,6 +275,16 @@
+ 			continue;
+ 		}
+ 
++		if (v != NULL && mta == MTA_CARGO_LOAD && cp->SourceStationXY() != data && v->First()->orders.list != NULL && v->First()->orders.list->IsCargoFromOrdersList(cp->SourceStation())) {
++				/* Skip loading cargo that originated from this vehicle station list 
++				 * but ofcourse do not skip loading cargo that's originated at this station.
++				 */
++	 			++it;
++				continue;
++			
++        }
++
++
+ 		if (cp->count <= max_move) {
+ 			/* Can move the complete packet */
+ 			max_move -= cp->count;
+@@ -338,6 +350,33 @@
+ 	return it != packets.end();
+ }
+ 
++/** Count cargo that is not in orders list from vehicle **/
++template <class Tinst>
++uint CargoList<Tinst>::CountNotInOrdersList(Vehicle *v)
++{
++    uint count = 0;
++	if (v != NULL && v->First()->orders.list != NULL ) {
++
++		Iterator it(this->packets.begin());
++		while (it != this->packets.end()) {
++			CargoPacket *cp = *it;
++			
++			if ((v->First()->last_station_visited == cp->SourceStation()) || !v->First()->orders.list->IsCargoFromOrdersList(cp->SourceStation())) {
++				/* only count the cargo that is local generated OR
++				 * cargo that is not from an station from the vehicle orders list
++				*/
++				count += cp->count;
++			}
++			++it;
++	}
++    return count;
++   }
++	else { return 0;}
++}
++
++
++
++
+ /** Invalidates the cached data and rebuilds it. */
+ template <class Tinst>
+ void CargoList<Tinst>::InvalidateCache()
+@@ -401,8 +440,8 @@
+ template class CargoList<StationCargoList>;
+ 
+ /** Autoreplace Vehicle -> Vehicle 'transfer'. */
+-template bool CargoList<VehicleCargoList>::MoveTo(VehicleCargoList *, uint max_move, MoveToAction mta, CargoPayment *payment, uint data);
++template bool CargoList<VehicleCargoList>::MoveTo(VehicleCargoList *, uint max_move, MoveToAction mta, CargoPayment *payment, uint data, Vehicle *v);
+ /** Cargo unloading at a station. */
+-template bool CargoList<VehicleCargoList>::MoveTo(StationCargoList *, uint max_move, MoveToAction mta, CargoPayment *payment, uint data);
++template bool CargoList<VehicleCargoList>::MoveTo(StationCargoList *, uint max_move, MoveToAction mta, CargoPayment *payment, uint data, Vehicle *v);
+ /** Cargo loading at a station. */
+-template bool CargoList<StationCargoList>::MoveTo(VehicleCargoList *, uint max_move, MoveToAction mta, CargoPayment *payment, uint data);
++template bool CargoList<StationCargoList>::MoveTo(VehicleCargoList *, uint max_move, MoveToAction mta, CargoPayment *payment, uint data, Vehicle *v);
+Index: cargopacket.h
+===================================================================
+--- cargopacket.h	(revision 22851)
++++ cargopacket.h	(working copy)
+@@ -224,6 +224,7 @@
+ 		return this->count;
+ 	}
+ 
++
+ 	/**
+ 	 * Returns source of the first cargo packet in this list.
+ 	 * @return The before mentioned source.
+@@ -247,8 +248,10 @@
+ 	void Truncate(uint max_remaining);
+ 
+ 	template <class Tother_inst>
+-	bool MoveTo(Tother_inst *dest, uint count, MoveToAction mta, CargoPayment *payment, uint data = 0);
++	bool MoveTo(Tother_inst *dest, uint count, MoveToAction mta, CargoPayment *payment, uint data = 0, Vehicle *v = NULL);
+ 
++	uint CountNotInOrdersList(Vehicle *v);
++
+ 	void InvalidateCache();
+ };
+ 
+Index: economy.cpp
+===================================================================
+--- economy.cpp	(revision 22851)
++++ economy.cpp	(working copy)
+@@ -1268,10 +1268,15 @@
+ 		ge->last_age = _cur_year - u->build_year;
+ 		ge->days_since_pickup = 0;
+ 
++		/* count the cargo that is not sourced from else in the order list from the vehicle */
++
++		uint count_cargo_not_local = ge->cargo.CountNotInOrdersList(v);
++
++
+ 		/* If there's goods waiting at the station, and the vehicle
+ 		 * has capacity for it, load it on the vehicle. */
+ 		int cap_left = v->cargo_cap - v->cargo.Count();
+-		if (!ge->cargo.Empty() && cap_left > 0) {
++		if (!ge->cargo.Empty() && (cap_left > 0) && (count_cargo_not_local > 0)) {
+ 			uint cap = cap_left;
+ 			uint count = ge->cargo.Count();
+ 
+@@ -1313,7 +1318,7 @@
+ 			completely_emptied = false;
+ 			anything_loaded = true;
+ 
+-			ge->cargo.MoveTo(&v->cargo, cap, StationCargoList::MTA_CARGO_LOAD, NULL, st->xy);
++			ge->cargo.MoveTo(&v->cargo, cap, StationCargoList::MTA_CARGO_LOAD, NULL, st->xy, v);
+ 
+ 			st->time_since_load = 0;
+ 			st->last_vehicle_type = v->type;
+Index: order_base.h
+===================================================================
+--- order_base.h	(revision 22851)
++++ order_base.h	(working copy)
+@@ -263,6 +263,9 @@
+ 	 */
+ 	inline uint GetNumVehicles() const { return this->num_vehicles; }
+ 
++    bool IsCargoFromOrdersList(StationID source) const;
++
++
+ 	bool IsVehicleInSharedOrdersList(const Vehicle *v) const;
+ 	int GetPositionInSharedOrderList(const Vehicle *v) const;
+ 
+Index: order_cmd.cpp
+===================================================================
+--- order_cmd.cpp	(revision 22851)
++++ order_cmd.cpp	(working copy)
+@@ -462,7 +462,27 @@
+ 	return count;
+ }
+ 
++
+ /**
++ * Checks if SourceStationID from cargopacket is in vehicle order list
++ * @param source is the SourceStationID from the cargopacket
++ * @return wether the cargopacket SourceStationID is in the vehicle order list
++ */
++
++bool OrderList::IsCargoFromOrdersList (StationID source) const
++{
++       for (Order *o = this->first; o != NULL; o = o->next) {
++                if (o->GetDestination() == source) return true;
++        }
++        return false;
++}
++
++
++
++
++
++
++/**
+  * Checks whether all orders of the list have a filled timetable.
+  * @return whether all orders have a filled timetable.
+  */

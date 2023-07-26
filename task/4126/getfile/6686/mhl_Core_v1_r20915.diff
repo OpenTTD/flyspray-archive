@@ -1,0 +1,548 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(Revision 20915)
++++ src/lang/english.txt	(Arbeitskopie)
+@@ -1349,6 +1349,8 @@
+ 
+ STR_CONFIG_SETTING_MAP_X                                        :{LTBLUE}X-size of map: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_MAP_Y                                        :{LTBLUE}Y-size of map: {ORANGE}{STRING1}
++STR_CONFIG_SETTING_MORE_HEIGHTLEVELS                            :{LTBLUE}Allow more than 16 heightlevels: {ORANGE}{STRING1}
++STR_CONFIG_SETTING_ERROR_NO_CHANGE_TO_OLD_POSSIBLE              :{WHITE}You try to change from allowing more than 16 heightlevels to less than. Unfortunately, there is a mountain of height more than 16 on the map. So sorry, but this is not possible.
+ 
+ STR_CONFIG_SETTING_QUERY_CAPTION                                :{WHITE}Change setting value
+ 
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(Revision 20915)
++++ src/settings_gui.cpp	(Arbeitskopie)
+@@ -1321,6 +1321,7 @@
+ 
+ static SettingEntry _settings_construction[] = {
+ 	SettingEntry(&_settings_construction_signals_page, STR_CONFIG_SETTING_CONSTRUCTION_SIGNALS),
++	SettingEntry("construction.allow_more_heightlevels"),
+ 	SettingEntry("construction.build_on_slopes"),
+ 	SettingEntry("construction.autoslope"),
+ 	SettingEntry("construction.extra_dynamite"),
+Index: src/table/settings.h
+===================================================================
+--- src/table/settings.h	(Revision 20915)
++++ src/table/settings.h	(Arbeitskopie)
+@@ -224,6 +224,42 @@
+ #define NS SGF_NEWGAME_ONLY | SGF_SCENEDIT_TOO
+ #define PC SGF_PER_COMPANY
+ 
++#include "../map_func.h"
++
++static bool AfterChangeOfAllowMoreHeightlevels(int32 p1)
++{
++	/* It's a boolean setting, so anything else would be really strange... */
++	assert(p1 == 0 || p1 == 1);
++
++	/* Allow_more_heightlevels was turned off before, now we turn it on. */
++	if (p1 == 1) {
++
++		/* If we are in game or in the editor, we have to copy
++		 * the heightlevel information to its new place. */
++		if (_game_mode != GM_MENU) {
++			CopyHeightlevelDataFromOldToExtended();
++		}
++
++		return true;
++
++	} else {
++
++		if (_game_mode != GM_MENU) {
++			/* Considering the assertion above, p1 == 0 is true here. */
++			bool success = CopyHeightlevelDataFromExtendedToOld();
++
++			if (!success) {
++				_settings_game.construction.allow_more_heightlevels = true;
++				ShowErrorMessage(STR_CONFIG_SETTING_ERROR_NO_CHANGE_TO_OLD_POSSIBLE, INVALID_STRING_ID, WL_WARNING);
++				return false;
++				}
++			}
++
++
++		return true;
++	}
++}
++
+ static const SettingDesc _music_settings[] = {
+ 	 SDT_VAR(MusicFileSettings, playlist,   SLE_UINT8, S, 0,   0, 0,   5, 1,  STR_NULL, NULL),
+ 	 SDT_VAR(MusicFileSettings, music_vol,  SLE_UINT8, S, 0, 127, 0, 127, 1,  STR_NULL, NULL),
+@@ -367,6 +403,7 @@
+ 	 SDT_CONDVAR(GameSettings, game_creation.snow_line,              SLE_UINT8, 97, SL_MAX_VERSION, 0,NN, DEF_SNOWLINE_HEIGHT * TILE_HEIGHT, MIN_SNOWLINE_HEIGHT * TILE_HEIGHT, DEF_SNOWLINE_HEIGHT * TILE_HEIGHT, 0, STR_NULL,     NULL),
+  SDT_CONDOMANY(GameSettings, vehicle.road_side,                    SLE_UINT8, 97, SL_MAX_VERSION, 0,NN, 1,   1, _roadsides,       STR_NULL,                                  CheckRoadSide, NULL),
+ 
++	SDT_CONDBOOL(GameSettings, construction.allow_more_heightlevels,           MORE_HEIGHTLEVEL_SAVEGAME_VERSION - 1, SL_MAX_VERSION, 0, 0, false,                    STR_CONFIG_SETTING_MORE_HEIGHTLEVELS, AfterChangeOfAllowMoreHeightlevels),
+ 	    SDT_BOOL(GameSettings, construction.build_on_slopes,                                        0,NN,  true,                    STR_CONFIG_SETTING_BUILDONSLOPES,          NULL),
+ 	SDT_CONDBOOL(GameSettings, construction.autoslope,                          75, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_SETTING_AUTOSLOPE,              NULL),
+ 	    SDT_BOOL(GameSettings, construction.extra_dynamite,                                         0, 0,  true,                    STR_CONFIG_SETTING_EXTRADYNAMITE,          NULL),
+Index: src/misc.cpp
+===================================================================
+--- src/misc.cpp	(Revision 20915)
++++ src/misc.cpp	(Arbeitskopie)
+@@ -63,14 +63,20 @@
+ 	 * related to the new game we're about to start/load. */
+ 	UnInitWindowSystem();
+ 
+-	AllocateMap(size_x, size_y);
++	/* Has to be copied before AllocateMap because it's used there. */
++	if (reset_settings) {
++		MakeNewgameSettingsLive();
++	}
+ 
++	/* Also construct _map_heightdata here if needed, because we know 
++	 * wether we need it here. */
++	AllocateMap(size_x, size_y, true);
++
+ 	_pause_mode = PM_UNPAUSED;
+ 	_fast_forward = 0;
+ 	_tick_counter = 0;
+ 	_cur_tileloop_tile = 0;
+ 	_thd.redsq = INVALID_TILE;
+-	if (reset_settings) MakeNewgameSettingsLive();
+ 
+ 	if (reset_date) {
+ 		SetDate(ConvertYMDToDate(_settings_game.game_creation.starting_year, 0, 1), 0);
+Index: src/map_func.h
+===================================================================
+--- src/map_func.h	(Revision 20915)
++++ src/map_func.h	(Arbeitskopie)
+@@ -43,12 +43,55 @@
+  */
+ extern TileExtended *_me;
+ 
++/** 
++ * Pointer to the tile-array saving extended heightlevel data.
++ *
++ * @see map.cpp.
++ */
++extern TileHeightData *_map_heightdata;
++
+ /**
+  * Allocate a new map with the given size.
++ *
++ * The _map_heightdata array is allocated if and only if
++ * allocate_map_heightdata is true and AllowMoreHeightlevels() is true as well.
++ *
++ * Reason for this additional parameter:
++ * This procedure is called in different circumstances.
++ * If we call it during the generation of a new map, everything is ok, we know
++ * about the configuration setting regarding additional heightlevels.
++ *
++ * If, however, we call it while loading a savegame, we call it before
++ * we load the configuration.
++ * So, in this case we call it at a point where we don't know yet wether we need
++ * the _map_heightdata array or not.
++ * So, in this case, we ignore it in this procedure and construct it in
++ * LoadMAPH in misc.cpp if and only if we need it.
+  */
+-void AllocateMap(uint size_x, uint size_y);
++void AllocateMap(uint size_x, uint size_y, bool allocate_map_heightdata);
+ 
+ /**
++ * Copies the contents of the old heightlevel array (4 bits in Tile.type_height)
++ * into the new heightlevel array (_map_heightdata).
++ * Constructs _map_heightdata according to map size.
++ *
++ * Used when switching the allow_more_heightlevel setting.
++ */
++void CopyHeightlevelDataFromOldToExtended();
++
++/**
++ * Copies the contents of the _map_heightdata array into the old place of
++ * heightlevel information in Tile.type_height.
++ *
++ * But only, if all heightlevels can be encoded in 4 bit.
++ * If not, the procedure returns immediately, leaving
++ * some type_height values in their original state and some not.
++ * @return true if and only if all height levels where in the range 
++ *                0 <= height level <= 15.
++ */
++bool CopyHeightlevelDataFromExtendedToOld();
++
++/**
+  * Logarithm of the map size along the X side.
+  * @note try to avoid using this one
+  * @return 2^"return value" == MapSizeX()
+Index: src/map_type.h
+===================================================================
+--- src/map_type.h	(Revision 20915)
++++ src/map_type.h	(Arbeitskopie)
+@@ -35,6 +35,17 @@
+ };
+ 
+ /**
++ * Heightlevel data.
++ * Placed in a separate data structure because this way we can 
++ * avoid allocating memory for the corresponding array if the settings
++ * say that we don't allow additional heightlevels.
++ * (i.e. ConstructionSettings.allow_more_heightlevels is false.)
++ */
++struct TileHeightData {
++	byte heightlevel;
++};
++
++/**
+  * An offset value between to tiles.
+  *
+  * This value is used fro the difference between
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(Revision 20915)
++++ src/settings_type.h	(Arbeitskopie)
+@@ -184,6 +184,7 @@
+ 
+ /** Settings related to construction in-game */
+ struct ConstructionSettings {
++	bool   allow_more_heightlevels;          ///< allow more than just 16 heightlevels
+ 	bool   build_on_slopes;                  ///< allow building on slopes
+ 	bool   autoslope;                        ///< allow terraforming under things
+ 	bool   longbridges;                      ///< allow 100 tile long bridges
+Index: src/map.cpp
+===================================================================
+--- src/map.cpp	(Revision 20915)
++++ src/map.cpp	(Arbeitskopie)
+@@ -12,6 +12,7 @@
+ #include "stdafx.h"
+ #include "debug.h"
+ #include "core/alloc_func.hpp"
++#include "settings_type.h"
+ #include "tile_map.h"
+ 
+ #if defined(_MSC_VER)
+@@ -28,6 +29,7 @@
+ 
+ Tile *_m = NULL;          ///< Tiles of the map
+ TileExtended *_me = NULL; ///< Extended Tiles of the map
++TileHeightData *_map_heightdata = NULL; ///< Heightlevel information
+ 
+ 
+ /*!
+@@ -35,15 +37,16 @@
+  * @param size_x the width of the map along the NE/SW edge
+  * @param size_y the 'height' of the map along the SE/NW edge
+  */
+-void AllocateMap(uint size_x, uint size_y)
++void AllocateMap(uint size_x, uint size_y, bool allocate_map_heightdata)
+ {
+ 	/* Make sure that the map size is within the limits and that
+ 	 * size of both axes is a power of 2. */
+ 	if (!IsInsideMM(size_x, MIN_MAP_SIZE, MAX_MAP_SIZE + 1) ||
+ 			!IsInsideMM(size_y, MIN_MAP_SIZE, MAX_MAP_SIZE + 1) ||
+ 			(size_x & (size_x - 1)) != 0 ||
+-			(size_y & (size_y - 1)) != 0)
++			(size_y & (size_y - 1)) != 0) {
+ 		error("Invalid map size");
++	}
+ 
+ 	DEBUG(map, 1, "Allocating map of size %dx%d", size_x, size_y);
+ 
+@@ -59,9 +62,43 @@
+ 
+ 	_m = CallocT<Tile>(_map_size);
+ 	_me = CallocT<TileExtended>(_map_size);
++
++	if (allocate_map_heightdata && AllowMoreHeightlevels()) {
++		free(_map_heightdata);
++		_map_heightdata = CallocT<TileHeightData>(_map_size);
++	}
+ }
+ 
++void CopyHeightlevelDataFromOldToExtended()
++{
++	free(_map_heightdata);
++	_map_heightdata = CallocT<TileHeightData>(MapSize());
+ 
++	for (TileIndex i = 0; i < MapSize(); i++) {
++		_map_heightdata[i].heightlevel = GB(_m[i].type_height, 0, 4);
++	}
++}
++
++bool CopyHeightlevelDataFromExtendedToOld()
++{
++	for (TileIndex i = 0; i < MapSize(); i++) {
++		uint heightlevel = _map_heightdata[i].heightlevel;
++
++		if (heightlevel >= 16) {
++			/* We can't encode the heightlevel data from the extended array
++			 * in an array of 4 bit values. */
++			return false;
++		} else {
++			SB(_m[i].type_height, 0, 4, heightlevel);
++		}
++	}
++
++	free(_map_heightdata);
++	_map_heightdata = NULL;
++
++	return true;
++}
++
+ #ifdef _DEBUG
+ TileIndex TileAdd(TileIndex tile, TileIndexDiff add,
+ 	const char *exp, const char *file, int line)
+Index: src/tile_type.h
+===================================================================
+--- src/tile_type.h	(Revision 20915)
++++ src/tile_type.h	(Arbeitskopie)
+@@ -18,10 +18,12 @@
+ static const uint TILE_HEIGHT    =  8;            ///< The standard height-difference between tiles on two levels is 8 (z-diff 8)
+ 
+ static const uint MAX_TILE_HEIGHT     = 15;                    ///< Maximum allowed tile height
+-
++static const uint MAX_TILE_HEIGHT_OLD          = 15;                             ///< Maximum allowed tile height - originally :-)
++static const uint MAX_TILE_HEIGHT_EXTENDED     = 255;                            ///< Maximum allowed tile height using the more heightlevels patch
++ 
+ static const uint MIN_SNOWLINE_HEIGHT = 2;                     ///< Minimum snowline height
+ static const uint DEF_SNOWLINE_HEIGHT = 7;                     ///< Default snowline height
+-static const uint MAX_SNOWLINE_HEIGHT = (MAX_TILE_HEIGHT - 2); ///< Maximum allowed snowline height
++static const uint MAX_SNOWLINE_HEIGHT = 13; ///< Maximum allowed snowline height
+ 
+ 
+ /**
+Index: src/saveload/afterload.cpp
+===================================================================
+--- src/saveload/afterload.cpp	(Revision 20915)
++++ src/saveload/afterload.cpp	(Arbeitskopie)
+@@ -435,6 +435,30 @@
+ 
+ bool AfterLoadGame()
+ {
++/* Put this at the very beginning, since the subsequent code in 
++ * AfterLoadGame sometimes uses heightlevel information.
++ * So that code might fail if we load a savegame without extended
++ * heightlevel data, but allow_more_heightlevels is still true
++ * because it was not yet overwritten since the previous game.
++ *
++ * This especially applies when exiting a game and switching
++ * to the intro game. */
++	if (CheckSavegameVersion(MORE_HEIGHTLEVEL_SAVEGAME_VERSION - 1)) {
++		/* Maybe it is still filled from the previous game. If the currently loaded
++		* game was saved with an OpenTTD version where the allow more heightlevels
++		* patch was not yet introduced, we know for sure that it was NOT filled
++		* during SlLoadChunks (because no MAPH chunk can exist in such a savegame). */
++		free(_map_heightdata);
++		_map_heightdata = NULL;
++
++		/* Also, the default for such a game is that this patch is turned off.
++		* However, the player may turn it on using the menu afterwards. */
++		_settings_game.construction.allow_more_heightlevels = false;
++	}
++
++	/* Assure that configuration setting is consistent to the data. */
++	assert(AllowMoreHeightlevels() == (_map_heightdata != NULL));
++
+ 	SetSignalHandlers();
+ 
+ 	TileIndex map_size = MapSize();
+Index: src/saveload/map_sl.cpp
+===================================================================
+--- src/saveload/map_sl.cpp	(Revision 20915)
++++ src/saveload/map_sl.cpp	(Arbeitskopie)
+@@ -13,6 +13,7 @@
+ #include "../map_func.h"
+ #include "../core/bitmath_func.hpp"
+ #include "../fios.h"
++#include "../tile_map.h"
+ 
+ #include "saveload.h"
+ 
+@@ -35,7 +36,9 @@
+ static void Load_MAPS()
+ {
+ 	SlGlobList(_map_dimensions);
+-	AllocateMap(_map_dim_x, _map_dim_y);
++	/* Don't construct _map_heightdata here, because we don't know wether
++	 * we need it before Load_MAPH. */
++	AllocateMap(_map_dim_x, _map_dim_y, false);
+ }
+ 
+ static void Check_MAPS()
+@@ -246,7 +249,77 @@
+ 		SlArray(buf, MAP_SL_BUF_SIZE, SLE_UINT8);
+ 	}
+ }
++/**
++ * The general idea behind loading and saving MAPH:
++ * ===============================================
++ * The _map_heightdata array is not NULL if and only if AllowMoreHeightlevels(),
++ * defined in tile_map.h is true.
++ *
++ * Saving:
++ * ======
++ * So if AllowMoreHeightlevels is true, we have to save it and do so.
++ * However, if AllowMoreHeightlevels is false, we just save a junk named MAPH
++ * with length 0.
++ *
++ * Loading:
++ * =======
++ * If we load an old savegame without MAPH, then Load_MAPH is not even called.
++ * So, in AfterLoadGame, we set _map_heightdata to NULL and
++ * allow_more_heightlevels to false. (The player may turn on this setting
++ * afterwards in game.)
++ *
++ * If, however, we load a new savegame (where MAPH was already introduced),
++ * SlGetFieldLength() was already set to the length of the chunk by LoadChunk.
++ * So, if AllowMoreHeightLevels is false, we get SlGetFieldLength() == 0 here
++ * and set _map_heightdata to NULL accordingly.
++ * Otherwise, we just load _map_heightdata from the chunk..
++ *
++ * For background information about how and where _map_heightdata is
++ * constructed and freed see comment of AllocateMap() in map_func.h.
++ * @see AllocateMap() in map_func.h.
++ */
++static void Load_MAPH()
++{
++	/* Maybe it was still filled from the previous game. */
++	free(_map_heightdata);
++	/* Does free set it to NULL?  I don't know, so I better do it explicitely. */
++	_map_heightdata = NULL;
++	if (SlGetFieldLength() != 0) {
++		/* We didn't construct it before because we didn't know wether we need it
++		 * before - see comment of AllocateMap for a detailed explanation. */
++		_map_heightdata = CallocT<TileHeightData>(MapSize());
+ 
++		SmallStackSafeStackAlloc<uint16, MAP_SL_BUF_SIZE> buf;
++		TileIndex size = MapSize();
++
++		for (TileIndex i = 0; i != size;) {
++			SlArray(buf, MAP_SL_BUF_SIZE, SLE_UINT16);
++			for (uint j = 0; j != MAP_SL_BUF_SIZE; j++) {
++			_map_heightdata[i++].heightlevel = buf[j];
++			}
++		}
++	}
++}
++
++static void Save_MAPH()
++{
++	/* Assure that configuration setting is consistent to the data. */
++	assert(AllowMoreHeightlevels() == (_map_heightdata != NULL));
++
++	if (!AllowMoreHeightlevels()) {
++		SlSetLength(0);
++	} else {
++		SmallStackSafeStackAlloc<uint16, MAP_SL_BUF_SIZE> buf;
++		TileIndex size = MapSize();
++
++		SlSetLength(size * sizeof(uint16));
++		for (TileIndex i = 0; i != size;) {
++			for (uint j = 0; j != MAP_SL_BUF_SIZE; j++) buf[j] = _map_heightdata[i++].heightlevel;
++			SlArray(buf, MAP_SL_BUF_SIZE, SLE_UINT16);
++		}
++	}
++}
++
+ extern const ChunkHandler _map_chunk_handlers[] = {
+ 	{ 'MAPS', Save_MAPS, Load_MAPS, NULL, Check_MAPS, CH_RIFF },
+ 	{ 'MAPT', Save_MAPT, Load_MAPT, NULL, NULL,       CH_RIFF },
+@@ -256,5 +329,6 @@
+ 	{ 'M3HI', Save_MAP4, Load_MAP4, NULL, NULL,       CH_RIFF },
+ 	{ 'MAP5', Save_MAP5, Load_MAP5, NULL, NULL,       CH_RIFF },
+ 	{ 'MAPE', Save_MAP6, Load_MAP6, NULL, NULL,       CH_RIFF },
+-	{ 'MAP7', Save_MAP7, Load_MAP7, NULL, NULL,       CH_RIFF | CH_LAST },
++	{ 'MAP7', Save_MAP7, Load_MAP7, NULL, NULL,       CH_RIFF },
++	{ 'MAPH', Save_MAPH, Load_MAPH, NULL, NULL,       CH_RIFF | CH_LAST },
+ };
+Index: src/tile_map.h
+===================================================================
+--- src/tile_map.h	(Revision 20915)
++++ src/tile_map.h	(Arbeitskopie)
+@@ -15,12 +15,41 @@
+ #include "slope_type.h"
+ #include "map_func.h"
+ #include "core/bitmath_func.hpp"
++#include "core/math_func.hpp"
+ #include "settings_type.h"
+ 
+ /**
+- * Returns the height of a tile
++ * Returns wether more than 16 height levels are allowed.
++ * Basically, this returns the setting of the configuration variable
++ * allow_more_heightlevels.
++ * To avoid having to change multiple occurrences of the config variable
++ * in case some additional condition would get necessary,
++ * I introduced this function.
+  *
+- * This function returns the height of the northern corner of a tile.
++ * @return wether more than 16 height levels are allowed, based on allow_more_heightlevels and game mode.
++ */
++static inline bool AllowMoreHeightlevels()
++{
++	return _settings_game.construction.allow_more_heightlevels;
++}
++
++/**
++ * Returns the maximum heightlevel of a tile based on AllowMoreHeightlevels().
++ * This deduplicates a few if else statements in the code therefore it is usefull to have it here.
++ *
++ *@return MAX_TILE_HEIGHT_EXTENDED or MAX_TILE_HEIGHT_OLD based on AllowMoreHeightlevels()
++ */
++static inline uint GetMaxTileHeight()
++{
++	if (AllowMoreHeightlevels()) {
++		return MAX_TILE_HEIGHT_EXTENDED;
++	} else {
++		return MAX_TILE_HEIGHT_OLD;
++	}
++}
++
++/**
++ * This function returns the height of the northern corner of a tile based on AllowMoreHeightlevels().
+  * This is saved in the global map-array. It does not take affect by
+  * any slope-data of the tile.
+  *
+@@ -31,24 +60,36 @@
+ static inline uint TileHeight(TileIndex tile)
+ {
+ 	assert(tile < MapSize());
+-	return GB(_m[tile].type_height, 0, 4);
++
++	if (AllowMoreHeightlevels()) {
++		return _map_heightdata[tile].heightlevel;
++	} else {
++		return GB(_m[tile].type_height, 0, 4);
++	}
+ }
+ 
+ /**
+- * Sets the height of a tile.
++ * This function sets the height of the northern corner of a tile based on AllowMoreHeightlevels().
+  *
+- * This function sets the height of the northern corner of a tile.
+- *
+  * @param tile The tile to change the height
+  * @param height The new height value of the tile
+  * @pre tile < MapSize()
+- * @pre heigth <= MAX_TILE_HEIGHT
++ * @pre heigth <= GetMaxTileHeight()
+  */
+ static inline void SetTileHeight(TileIndex tile, uint height)
+ {
+ 	assert(tile < MapSize());
+-	assert(height <= MAX_TILE_HEIGHT);
+-	SB(_m[tile].type_height, 0, 4, height);
++
++	if (height > GetMaxTileHeight()) {
++		/* Make sure height is within allowed range. */
++		height = GetMaxTileHeight();
++	}
++
++	if (AllowMoreHeightlevels()) {
++		_map_heightdata[tile].heightlevel = height;
++	} else {
++		SB(_m[tile].type_height, 0, 4, height);
++	}
+ }
+ 
+ /**
+@@ -230,7 +271,6 @@
+ uint GetTileZ(TileIndex tile);
+ uint GetTileMaxZ(TileIndex tile);
+ 
+-
+ /**
+  * Calculate a hash value from a tile position
+  *

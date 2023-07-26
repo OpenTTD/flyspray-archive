@@ -1,0 +1,136 @@
+Feature: Allow separate liveries for steam, diesel and sailing ships.
+
+diff -r d1916f0729c0 src/company_gui.cpp
+--- a/src/company_gui.cpp	Tue Sep 14 20:04:50 2010 +0200
++++ b/src/company_gui.cpp	Tue Sep 14 20:09:24 2010 +0200
+@@ -521,7 +521,7 @@
+ 	LC_OTHER,
+ 	LC_RAIL, LC_RAIL, LC_RAIL, LC_RAIL, LC_RAIL, LC_RAIL, LC_RAIL, LC_RAIL, LC_RAIL, LC_RAIL, LC_RAIL, LC_RAIL, LC_RAIL,
+ 	LC_ROAD, LC_ROAD,
+-	LC_SHIP, LC_SHIP,
++	LC_SHIP, LC_SHIP, LC_SHIP, LC_SHIP, LC_SHIP, LC_SHIP,
+ 	LC_AIRCRAFT, LC_AIRCRAFT, LC_AIRCRAFT,
+ 	LC_ROAD, LC_ROAD,
+ };
+@@ -622,7 +622,7 @@
+ 			1,
+ 			13,
+ 			4,
+-			2,
++			6,
+ 			3,
+ 		};
+ 
+diff -r d1916f0729c0 src/lang/english.txt
+--- a/src/lang/english.txt	Tue Sep 14 20:04:50 2010 +0200
++++ b/src/lang/english.txt	Tue Sep 14 20:09:24 2010 +0200
+@@ -1456,8 +1456,12 @@
+ STR_LIVERY_FREIGHT_WAGON                                        :Freight Wagon
+ STR_LIVERY_BUS                                                  :Bus
+ STR_LIVERY_TRUCK                                                :Lorry
+-STR_LIVERY_PASSENGER_SHIP                                       :Passenger Ferry
+-STR_LIVERY_FREIGHT_SHIP                                         :Freight Ship
++STR_LIVERY_PASSENGER_SHIP_STEAM                                 :Passenger Ferry (Steam)
++STR_LIVERY_PASSENGER_SHIP_DIESEL                                :Passenger Ferry (Diesel)
++STR_LIVERY_PASSENGER_SHIP_SAIL                                  :Passenger Ferry (Sail)
++STR_LIVERY_FREIGHT_SHIP_STEAM                                   :Freight Ship (Steam)
++STR_LIVERY_FREIGHT_SHIP_DIESEL                                  :Freight Ship (Diesel)
++STR_LIVERY_FREIGHT_SHIP_SAIL                                    :Freight Ship (Sail)
+ STR_LIVERY_HELICOPTER                                           :Helicopter
+ STR_LIVERY_SMALL_PLANE                                          :Small Aeroplane
+ STR_LIVERY_LARGE_PLANE                                          :Large Aeroplane
+diff -r d1916f0729c0 src/livery.h
+--- a/src/livery.h	Tue Sep 14 20:04:50 2010 +0200
++++ b/src/livery.h	Tue Sep 14 20:09:24 2010 +0200
+@@ -43,8 +43,12 @@
+ 	LS_TRUCK,
+ 
+ 	/* Ships */
+-	LS_PASSENGER_SHIP,
+-	LS_FREIGHT_SHIP,
++	LS_PASSENGER_SHIP_STEAM,
++	LS_PASSENGER_SHIP_DIESEL,
++	LS_PASSENGER_SHIP_SAIL,
++	LS_FREIGHT_SHIP_STEAM,
++	LS_FREIGHT_SHIP_DIESEL,
++	LS_FREIGHT_SHIP_SAIL,
+ 
+ 	/* Aircraft */
+ 	LS_HELICOPTER,
+diff -r d1916f0729c0 src/saveload/company_sl.cpp
+--- a/src/saveload/company_sl.cpp	Tue Sep 14 20:04:50 2010 +0200
++++ b/src/saveload/company_sl.cpp	Tue Sep 14 20:09:24 2010 +0200
+@@ -285,20 +285,33 @@
+ 	}
+ 
+ 	/* Write each livery entry. */
+-	int num_liveries = CheckSavegameVersion(63) ? LS_END - 4 : (CheckSavegameVersion(85) ? LS_END - 2: LS_END);
++	int num_liveries = LS_END;
++	if (CheckSavegameVersion(63))  num_liveries -= 2; // trams
++	if (CheckSavegameVersion(85))  num_liveries -= 2; // monorail / maglev pax wagons
++	if (CheckSavegameVersion(149)) num_liveries -= 4; // separate ship liveries
++
+ 	if (c != NULL) {
+ 		for (i = 0; i < num_liveries; i++) {
+ 			SlObject(&c->livery[i], _company_livery_desc);
+ 		}
+ 
+-		if (num_liveries < LS_END) {
++		if (num_liveries <= (LS_END - 6)) { //pre version 85
+ 			/* We want to insert some liveries somewhere in between. This means some have to be moved. */
+ 			memmove(&c->livery[LS_FREIGHT_WAGON], &c->livery[LS_PASSENGER_WAGON_MONORAIL], (LS_END - LS_FREIGHT_WAGON) * sizeof(c->livery[0]));
+ 			c->livery[LS_PASSENGER_WAGON_MONORAIL] = c->livery[LS_MONORAIL];
+ 			c->livery[LS_PASSENGER_WAGON_MAGLEV]   = c->livery[LS_MAGLEV];
+ 		}
++		if (num_liveries < LS_END) { //pre version 149
++			/* Amount of ship liveries increases from 2 to 6. This requires some moving */
++			memmove(&c->livery[LS_HELICOPTER], &c->livery[LS_PASSENGER_SHIP_SAIL], (LS_END - LS_HELICOPTER) * sizeof(c->livery[0]));
++			/* Copy old passenger/freight liveries to the new slots */
++			for (LiveryScheme ls = LS_FREIGHT_SHIP_STEAM; ls <= LS_FREIGHT_SHIP_SAIL; ls++) {
++				c->livery[ls] = c->livery[LS_PASSENGER_SHIP_DIESEL]; //freight livery is now in pax-diesel slot
++			}
++			c->livery[LS_PASSENGER_SHIP_DIESEL] = c->livery[LS_PASSENGER_SHIP_SAIL] = c->livery[LS_PASSENGER_SHIP_STEAM];
++		}
+ 
+-		if (num_liveries == LS_END - 4) {
++		if (num_liveries == LS_END - 8) { //pre version 63
+ 			/* Copy bus/truck liveries over to trams */
+ 			c->livery[LS_PASSENGER_TRAM] = c->livery[LS_BUS];
+ 			c->livery[LS_FREIGHT_TRAM]   = c->livery[LS_TRUCK];
+diff -r d1916f0729c0 src/saveload/saveload.cpp
+--- a/src/saveload/saveload.cpp	Tue Sep 14 20:04:50 2010 +0200
++++ b/src/saveload/saveload.cpp	Tue Sep 14 20:09:24 2010 +0200
+@@ -211,8 +211,9 @@
+  *  146   20446
+  *  147   20621
+  *  148   20659
++ *  149   patch_rev
+  */
+-extern const uint16 SAVEGAME_VERSION = 148; ///< current savegame version of OpenTTD
++extern const uint16 SAVEGAME_VERSION = 149; ///< current savegame version of OpenTTD
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+diff -r d1916f0729c0 src/vehicle.cpp
+--- a/src/vehicle.cpp	Tue Sep 14 20:04:50 2010 +0200
++++ b/src/vehicle.cpp	Tue Sep 14 20:09:24 2010 +0200
+@@ -1542,7 +1542,18 @@
+ 			case VEH_SHIP: {
+ 				if (cargo_type == CT_INVALID) cargo_type = e->GetDefaultCargoType();
+ 				if (cargo_type == CT_INVALID) cargo_type = CT_GOODS; // The vehicle does not carry anything, let's pick some freight cargo
+-				scheme = IsCargoInClass(cargo_type, CC_PASSENGERS) ? LS_PASSENGER_SHIP : LS_FREIGHT_SHIP;
++				switch (e->u.ship.shipclass) {
++					case SCL_STEAM:
++						scheme = IsCargoInClass(cargo_type, CC_PASSENGERS) ? LS_PASSENGER_SHIP_STEAM : LS_FREIGHT_SHIP_STEAM;
++						break;
++					case SCL_DIESEL:
++						scheme = IsCargoInClass(cargo_type, CC_PASSENGERS) ? LS_PASSENGER_SHIP_DIESEL : LS_FREIGHT_SHIP_DIESEL;
++						break;
++					case SCL_SAIL:
++						scheme = IsCargoInClass(cargo_type, CC_PASSENGERS) ? LS_PASSENGER_SHIP_SAIL : LS_FREIGHT_SHIP_SAIL;
++						break;
++					default: NOT_REACHED();
++				}
+ 				break;
+ 			}
+ 

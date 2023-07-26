@@ -1,0 +1,451 @@
+diff --git a/src/engine_base.h b/src/engine_base.h
+index 99a15aa..4a230a0 100644
+--- a/src/engine_base.h
++++ b/src/engine_base.h
+@@ -61,6 +61,10 @@ struct Engine : EnginePool::PoolItem<&_engine_pool> {
+ 	struct WagonOverride *overrides;
+ 	uint16 list_position;
+ 
++	Rect cached_size_v; ///< NOSAVE: Maximum sprite size for N or S directions.
++	Rect cached_size_h; ///< NOSAVE: Maximum sprite size for W or E directions.
++	Rect cached_size_d; ///< NOSAVE: Maximum sprite size for all diagonal directions.
++
+ 	Engine();
+ 	Engine(VehicleType type, EngineID base);
+ 	~Engine();
+diff --git a/src/gfx.cpp b/src/gfx.cpp
+index 27f0b90..cc2fe95 100644
+--- a/src/gfx.cpp
++++ b/src/gfx.cpp
+@@ -1164,9 +1164,9 @@ skip_cont:;
+  * @return Sprite size in pixels.
+  * @note The size assumes (0, 0) as top-left coordinate and ignores any part of the sprite drawn at the left or above that position.
+  */
+-Dimension GetSpriteSize(SpriteID sprid, Point *offset, ZoomLevel zoom)
++Dimension GetSpriteSize(SpriteID sprid, Point *offset, ZoomLevel zoom, AllocatorProc *allocator)
+ {
+-	const Sprite *sprite = GetSprite(sprid, ST_NORMAL);
++	const Sprite *sprite = (const Sprite *)GetRawSprite(sprid, ST_NORMAL, allocator);
+ 
+ 	if (offset != NULL) {
+ 		offset->x = UnScaleByZoom(sprite->x_offs, zoom);
+diff --git a/src/gfx_func.h b/src/gfx_func.h
+index 3cb3aa1..43a0312 100644
+--- a/src/gfx_func.h
++++ b/src/gfx_func.h
+@@ -44,6 +44,7 @@
+ 
+ #include "gfx_type.h"
+ #include "strings_type.h"
++#include "spritecache.h"
+ 
+ void GameLoop();
+ 
+@@ -86,7 +87,7 @@ static const int DRAW_STRING_BUFFER = 2048;
+ void RedrawScreenRect(int left, int top, int right, int bottom);
+ void GfxScroll(int left, int top, int width, int height, int xo, int yo);
+ 
+-Dimension GetSpriteSize(SpriteID sprid, Point *offset = NULL, ZoomLevel zoom = ZOOM_LVL_GUI);
++Dimension GetSpriteSize(SpriteID sprid, Point *offset = NULL, ZoomLevel zoom = ZOOM_LVL_GUI, AllocatorProc *allocator = NULL);
+ void DrawSpriteViewport(SpriteID img, PaletteID pal, int x, int y, const SubSprite *sub = NULL);
+ void DrawSprite(SpriteID img, PaletteID pal, int x, int y, const SubSprite *sub = NULL, ZoomLevel zoom = ZOOM_LVL_GUI);
+ 
+diff --git a/src/newgrf.cpp b/src/newgrf.cpp
+index a1dfd79..28621d2 100644
+--- a/src/newgrf.cpp
++++ b/src/newgrf.cpp
+@@ -9035,6 +9035,9 @@ static void AfterLoadGRFs()
+ 	/* Set up custom rail types */
+ 	InitRailTypes();
+ 
++	/* Determine largest sprite size for each engine */
++	CacheEngineSpriteSizes();
++
+ 	Engine *e;
+ 	FOR_ALL_ENGINES_OF_TYPE(e, VEH_ROAD) {
+ 		if (_gted[e->index].rv_max_speed != 0) {
+diff --git a/src/newgrf_engine.cpp b/src/newgrf_engine.cpp
+index fbc6901..7d04581 100644
+--- a/src/newgrf_engine.cpp
++++ b/src/newgrf_engine.cpp
+@@ -1015,6 +1015,7 @@ static const SpriteGroup *GetVehicleSpriteGroup(EngineID engine, const Vehicle *
+ 	return e->grf_prop.spritegroup[CT_DEFAULT];
+ }
+ 
++int _test_count = 0;
+ 
+ SpriteID GetCustomEngineSprite(EngineID engine, const Vehicle *v, Direction direction, EngineImageType image_type)
+ {
+@@ -1022,6 +1023,8 @@ SpriteID GetCustomEngineSprite(EngineID engine, const Vehicle *v, Direction dire
+ 	const SpriteGroup *group = SpriteGroup::Resolve(GetVehicleSpriteGroup(engine, v), &object);
+ 	if (group == NULL || group->GetNumResults() == 0) return 0;
+ 
++	_test_count++;
++
+ 	return group->GetResult() + (direction % group->GetNumResults());
+ }
+ 
+@@ -1113,6 +1116,84 @@ uint GetEngineProperty(EngineID engine, PropertyID property, uint orig_value, co
+ }
+ 
+ 
++static ReusableBuffer<byte> *temp_sprite;
++
++static void *AllocateTemp(size_t size)
++{
++	return temp_sprite->Allocate(size);
++}
++
++static int evaled;
++
++void EvaluateSpriteSize(const SpriteGroup *group, void *data)
++{
++	SpriteID base = group->GetResult();
++	if (base == 0) return;
++
++	byte count = group->GetNumResults();
++
++	Engine *e = (Engine *)data;
++	for (uint i = 0; i < count; i++) {
++		Point pt;
++		Dimension dim = GetSpriteSize(base + i, &pt, ZOOM_LVL_NORMAL); //, &AllocateTemp);
++
++		int right  = dim.width + pt.x;
++		int bottom = dim.height + pt.y;
++
++		Rect *r;
++		switch (i & 3) {
++			case 0: r = &e->cached_size_v; break;
++			case 1:
++			case 3: r = &e->cached_size_d; break;
++			case 2: r = &e->cached_size_h; break;
++		}
++
++		if (pt.x < r->left) r->left = pt.x;
++		if (pt.y < r->top)  r->top = pt.y;
++		if ((int)dim.width  > r->right)  r->right  = dim.width;
++		if ((int)dim.height > r->bottom) r->bottom = dim.height;
++
++		evaled++;
++	}
++
++	IncreaseSpriteLRU();
++}
++
++
++void CacheEngineSpriteSizes()
++{
++	temp_sprite = new ReusableBuffer<byte>();
++
++	evaled = 0;
++
++	static const Rect unset = { INT_MAX, INT_MAX, INT_MIN, INT_MIN };
++	Engine *e;
++	FOR_ALL_ENGINES(e) {
++		e->cached_size_v = e->cached_size_h = e->cached_size_d = unset;
++
++		CargoID cargo;
++		for (cargo = 0; cargo != NUM_CARGO; cargo++) {
++			SpriteGroup::Evaluate(e->grf_prop.spritegroup[cargo], EvaluateSpriteSize, e);
++		}
++		for (uint i = 0; i < e->overrides_count; i++) {
++			const WagonOverride *wo = &e->overrides[i];
++			SpriteGroup::Evaluate(wo->group, EvaluateSpriteSize, e);
++		}
++		SpriteGroup::Evaluate(e->grf_prop.spritegroup[CT_DEFAULT], EvaluateSpriteSize, e);
++
++		printf("Engine ID %d d (%d %d %d %d)\n", e->index, e->cached_size_d.left, e->cached_size_d.top, e->cached_size_d.right, e->cached_size_d.bottom);
++		printf("Engine ID %d h (%d %d %d %d)\n", e->index, e->cached_size_h.left, e->cached_size_h.top, e->cached_size_h.right, e->cached_size_h.bottom);
++		printf("Engine ID %d v (%d %d %d %d)\n", e->index, e->cached_size_v.left, e->cached_size_v.top, e->cached_size_v.right, e->cached_size_v.bottom);
++
++		GfxClearSpriteCache();
++	}
++
++	printf("Evaluated %d sprites\n", evaled);
++
++	delete temp_sprite;
++}
++
++
+ static void DoTriggerVehicle(Vehicle *v, VehicleTrigger trigger, byte base_random_bits, bool first)
+ {
+ 	/* We can't trigger a non-existent vehicle... */
+diff --git a/src/newgrf_engine.h b/src/newgrf_engine.h
+index 7eb65f1..5656a44 100644
+--- a/src/newgrf_engine.h
++++ b/src/newgrf_engine.h
+@@ -101,4 +101,6 @@ void CommitVehicleListOrderChanges();
+ 
+ EngineID GetNewEngineID(const GRFFile *file, VehicleType type, uint16 internal_id);
+ 
++void CacheEngineSpriteSizes();
++
+ #endif /* NEWGRF_ENGINE_H */
+diff --git a/src/newgrf_spritegroup.cpp b/src/newgrf_spritegroup.cpp
+index 7e60e82..d2faee4 100644
+--- a/src/newgrf_spritegroup.cpp
++++ b/src/newgrf_spritegroup.cpp
+@@ -279,6 +279,15 @@ const SpriteGroup *DeterministicSpriteGroup::Resolve(ResolverObject *object) con
+ }
+ 
+ 
++void DeterministicSpriteGroup::Evaluate(EvaluateProc proc, void *data) const
++{
++	for (uint i = 0; i < this->num_ranges; i++) {
++		SpriteGroup::Evaluate(this->ranges[i].group, proc, data);
++	}
++	SpriteGroup::Evaluate(this->default_group, proc, data);
++}
++
++
+ const SpriteGroup *RandomizedSpriteGroup::Resolve(ResolverObject *object) const
+ {
+ 	ScopeResolver *scope = object->GetScope(this->var_scope, this->count);
+@@ -306,11 +315,31 @@ const SpriteGroup *RandomizedSpriteGroup::Resolve(ResolverObject *object) const
+ }
+ 
+ 
++void RandomizedSpriteGroup::Evaluate(EvaluateProc proc, void *data) const
++{
++	for (uint i = 0; i < this->num_groups; i++) {
++		SpriteGroup::Evaluate(this->groups[i], proc, data);
++	}
++}
++
++
+ const SpriteGroup *RealSpriteGroup::Resolve(ResolverObject *object) const
+ {
+ 	return object->ResolveReal(this);
+ }
+ 
++
++void RealSpriteGroup::Evaluate(EvaluateProc proc, void *data) const
++{
++	for (uint i = 0; i < this->num_loaded; i++) {
++		SpriteGroup::Evaluate(this->loaded[i], proc, data);
++	}
++	for (uint i = 0; i < this->num_loading; i++) {
++		SpriteGroup::Evaluate(this->loading[i], proc, data);
++	}
++}
++
++
+ /**
+  * Process registers and the construction stage into the sprite layout.
+  * The passed construction stage might get reset to zero, if it gets incorporated into the layout
+diff --git a/src/newgrf_spritegroup.h b/src/newgrf_spritegroup.h
+index dc05fe4..4c392da 100644
+--- a/src/newgrf_spritegroup.h
++++ b/src/newgrf_spritegroup.h
+@@ -66,16 +66,23 @@ extern SpriteGroupPool _spritegroup_pool;
+ 
+ /* Common wrapper for all the different sprite group types */
+ struct SpriteGroup : SpriteGroupPool::PoolItem<&_spritegroup_pool> {
++public:
++	typedef void (*EvaluateProc)(const SpriteGroup *group, void *data);
++
+ protected:
+ 	SpriteGroup(SpriteGroupType type) : type(type) {}
+ 	/** Base sprite group resolver */
+ 	virtual const SpriteGroup *Resolve(struct ResolverObject *object) const { return this; };
+ 
++	virtual void Evaluate(EvaluateProc proc, void *data) const { proc(this, data); };
++
+ public:
+ 	virtual ~SpriteGroup() {}
+ 
+ 	SpriteGroupType type;
+ 
++//	bool evaluated;
++
+ 	virtual SpriteID GetResult() const { return 0; }
+ 	virtual byte GetNumResults() const { return 0; }
+ 	virtual uint16 GetCallbackResult() const { return CALLBACK_FAILED; }
+@@ -93,6 +100,16 @@ public:
+ 	{
+ 		return group == NULL ? NULL : group->Resolve(object);
+ 	}
++
++	static void Evaluate(const SpriteGroup *group, EvaluateProc proc, void *data)
++	{
++		if (group != NULL) {
++//			if (group->evaluated) return;
++//			((SpriteGroup *)group)->evaluated = true;
++
++			group->Evaluate(proc, data);
++		}
++	}
+ };
+ 
+ 
+@@ -116,6 +133,8 @@ struct RealSpriteGroup : SpriteGroup {
+ 
+ protected:
+ 	const SpriteGroup *Resolve(ResolverObject *object) const;
++
++	void Evaluate(EvaluateProc proc, void *data) const;
+ };
+ 
+ /* Shared by deterministic and random groups. */
+@@ -205,6 +224,8 @@ struct DeterministicSpriteGroup : SpriteGroup {
+ 
+ protected:
+ 	const SpriteGroup *Resolve(ResolverObject *object) const;
++
++	void Evaluate(EvaluateProc proc, void *data) const;
+ };
+ 
+ enum RandomizedSpriteGroupCompareMode {
+@@ -229,6 +250,8 @@ struct RandomizedSpriteGroup : SpriteGroup {
+ 
+ protected:
+ 	const SpriteGroup *Resolve(ResolverObject *object) const;
++
++	void Evaluate(EvaluateProc proc, void *data) const;
+ };
+ 
+ 
+diff --git a/src/openttd.cpp b/src/openttd.cpp
+index be83d4e..84565ac 100644
+--- a/src/openttd.cpp
++++ b/src/openttd.cpp
+@@ -1288,6 +1288,9 @@ static void CheckCaches()
+ 	}
+ }
+ 
++extern int _test_count;
++extern int _test_count2;
++
+ /**
+  * State controlling game loop.
+  * The state must not be changed from anywhere but here.
+@@ -1345,6 +1348,12 @@ void StateGameLoop()
+ 		cur_company.Restore();
+ 	}
+ 
++	if (_tick_counter % 33 == 0) {
++	printf("Lookups %d, draws %d\n", _test_count, _test_count2);
++	_test_count = 0;
++	_test_count2 = 0;
++	}
++
+ 	assert(IsLocalCompany());
+ }
+ 
+diff --git a/src/train_cmd.cpp b/src/train_cmd.cpp
+index c28bc13..b1ebbcd 100644
+--- a/src/train_cmd.cpp
++++ b/src/train_cmd.cpp
+@@ -3479,7 +3479,7 @@ static void ChangeTrainDirRandomly(Train *v)
+ 		if (!(v->vehstatus & VS_HIDDEN)) {
+ 			v->direction = ChangeDir(v->direction, delta[GB(Random(), 0, 2)]);
+ 			v->UpdateDeltaXY(v->direction);
+-			v->cur_image = v->GetImage(v->direction, EIT_ON_MAP);
++			v->cur_image = 0;//v->GetImage(v->direction, EIT_ON_MAP);
+ 			/* Refrain from updating the z position of the vehicle when on
+ 			 * a bridge, because UpdateInclination() will put the vehicle under
+ 			 * the bridge in that case */
+diff --git a/src/vehicle.cpp b/src/vehicle.cpp
+index 5620547..8da7b05 100644
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -953,6 +953,13 @@ void CallVehicleTicks()
+  */
+ static void DoDrawVehicle(const Vehicle *v)
+ {
++	if (v->cur_image == 0) {
++		((Vehicle *)v)->cur_image = v->GetImage(v->direction, EIT_ON_MAP);
++		if (v->type == VEH_AIRCRAFT && v->Next() != NULL) {
++			/* Force update of shadow */
++			((Vehicle *)v->Next())->cur_image = v->cur_image;
++		}
++	}
+ 	SpriteID image = v->cur_image;
+ 	PaletteID pal = PAL_NONE;
+ 
+@@ -1413,6 +1420,18 @@ void VehicleUpdatePosition(Vehicle *v)
+ 	UpdateVehicleTileHash(v, false);
+ }
+ 
++const Rect *GetVehicleCachedRect(const Vehicle *v)
++{
++	Engine *e = Engine::Get(v->engine_type);
++	switch (v->direction & 3) {
++		default: NOT_REACHED();
++		case 0: return &e->cached_size_v;
++		case 1:
++		case 3: return &e->cached_size_d;
++		case 2: return &e->cached_size_h;
++	}
++}
++
+ /**
+  * Update the vehicle on the viewport, updating the right hash and setting the
+  *  new coordinates.
+@@ -1421,20 +1440,16 @@ void VehicleUpdatePosition(Vehicle *v)
+  */
+ void VehicleUpdateViewport(Vehicle *v, bool dirty)
+ {
+-	int img = v->cur_image;
+ 	Point pt = RemapCoords(v->x_pos + v->x_offs, v->y_pos + v->y_offs, v->z_pos);
+-	const Sprite *spr = GetSprite(img, ST_NORMAL);
+-
+-	pt.x += spr->x_offs;
+-	pt.y += spr->y_offs;
++	const Rect *r = GetVehicleCachedRect(v);
+ 
+-	UpdateVehicleViewportHash(v, pt.x, pt.y);
++	UpdateVehicleViewportHash(v, pt.x + r->left, pt.y + r->top);
+ 
+ 	Rect old_coord = v->coord;
+-	v->coord.left   = pt.x;
+-	v->coord.top    = pt.y;
+-	v->coord.right  = pt.x + spr->width + 2 * ZOOM_LVL_BASE;
+-	v->coord.bottom = pt.y + spr->height + 2 * ZOOM_LVL_BASE;
++	v->coord.left   = pt.x + r->left;
++	v->coord.top    = pt.y + r->top;
++	v->coord.right  = pt.x + r->right + 2 * ZOOM_LVL_BASE;
++	v->coord.bottom = pt.y + r->bottom + 2 * ZOOM_LVL_BASE;
+ 
+ 	if (dirty) {
+ 		if (old_coord.left == INVALID_COORD) {
+diff --git a/src/vehicle_base.h b/src/vehicle_base.h
+index ab06695..883b6e3 100644
+--- a/src/vehicle_base.h
++++ b/src/vehicle_base.h
+@@ -1009,9 +1009,10 @@ struct SpecializedVehicle : public Vehicle {
+ 		/* Explicitly choose method to call to prevent vtable dereference -
+ 		 * it gives ~3% runtime improvements in games with many vehicles */
+ 		if (update_delta) ((T *)this)->T::UpdateDeltaXY(this->direction);
+-		SpriteID old_image = this->cur_image;
+-		this->cur_image = ((T *)this)->T::GetImage(this->direction, EIT_ON_MAP);
+-		if (force_update || this->cur_image != old_image) VehicleUpdateViewport(this, true);
++//		SpriteID old_image = this->cur_image;
++		this->cur_image = 0;//((T *)this)->T::GetImage(this->direction, EIT_ON_MAP);
++//		if (force_update || this->cur_image != old_image) 
++		VehicleUpdateViewport(this, true);
+ 	}
+ };
+ 
+diff --git a/src/viewport.cpp b/src/viewport.cpp
+index eac16a6..68d68b1 100644
+--- a/src/viewport.cpp
++++ b/src/viewport.cpp
+@@ -1534,6 +1534,8 @@ static void ViewportDrawChk(const ViewPort *vp, int left, int top, int right, in
+ 	}
+ }
+ 
++int _test_count2 = 0;
++
+ static inline void ViewportDraw(const ViewPort *vp, int left, int top, int right, int bottom)
+ {
+ 	if (right <= vp->left || bottom <= vp->top) return;
+@@ -1548,6 +1550,8 @@ static inline void ViewportDraw(const ViewPort *vp, int left, int top, int right
+ 	if (top < vp->top) top = vp->top;
+ 	if (bottom > vp->top + vp->height) bottom = vp->top + vp->height;
+ 
++	_test_count2++;
++
+ 	ViewportDrawChk(vp, left, top, right, bottom);
+ }
+ 

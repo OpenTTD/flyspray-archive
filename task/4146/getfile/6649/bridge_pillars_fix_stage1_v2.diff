@@ -1,0 +1,208 @@
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 20896)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -827,58 +827,135 @@
+  * @param psid Image and palette of a bridge pillar.
+  * @param ti #TileInfo of current bridge-middle-tile.
+  * @param axis Orientation of bridge.
+- * @param drawfarpillar Whether to draw the pillar at the back
++ * @param type Bridge type.
++ * @param flags for options of drawing bridge pillars.
+  * @param x Sprite X position of front pillar.
+  * @param y Sprite Y position of front pillar.
+  * @param z_bridge Absolute height of bridge bottom.
+  */
+-static void DrawBridgePillars(const PalSpriteID *psid, const TileInfo *ti, Axis axis, bool drawfarpillar, int x, int y, int z_bridge)
++static void DrawBridgePillars(const PalSpriteID *psid, const TileInfo *ti, Axis axis, BridgeType type,
++																	byte flags, int x, int y, int z_bridge)
+ {
+-	/* Do not draw bridge pillars if they are invisible */
+-	if (IsInvisibilitySet(TO_BRIDGES)) return;
++	#define DRAW_PILLAR(image, x, y, z, sub)\
++		AddSortableSpriteToDraw(image, psid->pal, x, y, w, h, dz, z, transparent, 0, 0, -5, sub)
+ 
++	static const byte odd_pillar_height = 5;
++	static const byte bounding_box_size[2]  = {16, 2}; ///< bounding box size
++	static const byte back_pillar_offset[2] = { 0, 9}; ///< sprite position offset of back facing pillar
++	static const byte tileh_bits[4][4] = {
++		{ SLOPE_E, SLOPE_N, SLOPE_W, SLOPE_S }, //DIAGDIR_NE axis X
++		{ SLOPE_W, SLOPE_N, SLOPE_E, SLOPE_S }, //DIAGDIR_NW axis Y
++		{ SLOPE_S, SLOPE_W, SLOPE_N, SLOPE_E }, //DIAGDIR_SW axis X, suspension bridge alternate sprites only
++		{ SLOPE_S, SLOPE_E, SLOPE_N, SLOPE_W }, //DIAGDIR_SE axis Y, suspension bridge alternate sprites only
++	};
++	/* SubSprite for drawing only one pillar from sprite with two pillars. */
++	static const int INF = 1000; // big number compared to sprite size
++	static const SubSprite _odd_pillar_sub_sprite[4] = {
++		{ -INF, -INF, -15, INF }, // North pillar axis X
++		{  -14, -INF, INF, INF }, // South pillar axis X
++		{   16, -INF, INF, INF }, // North pillar axis Y
++		{ -INF, -INF,  15, INF }, // South pillar axis Y
++	};
++
+ 	SpriteID image = psid->sprite;
++	if (image == 0) return;
++	assert(IsValidAxis(axis));
+ 
+-	if (image != 0) {
+-		/* "side" specifies the side the pillars stand on.
+-		 * The length of the pillars is then set to the height of the bridge over the corners of this edge.
+-		 *
+-		 *                axis==AXIS_X  axis==AXIS_Y
+-		 *   side==false      SW            NW
+-		 *   side==true       NE            SE
+-		 *
+-		 * I have no clue, why this was done this way.
+-		 */
+-		bool side = HasBit(image, 0);
++	const bool transparent = IsTransparencySet(TO_BRIDGES);
++	const int dz = BB_HEIGHT_UNDER_BRIDGE - 5;
++	const int w = bounding_box_size[axis];
++	const int h = bounding_box_size[axis ^ 1];
++	int x_back = x - back_pillar_offset[axis];
++	int y_back = y - back_pillar_offset[axis ^ 1];
++	/* skip 2 top rows for back facing pillars hidden by bridge, they are unseen anyway */
++	int z_back = z_bridge - TILE_HEIGHT * 2;
++	/* back_height higher than z_bridge prevents drawing far pillar (flags bit 0) */
++	int back_height = (HasBit(flags, 0)) ? z_bridge + 1 : ti->z;
++	int front_height = ti->z;
++	const byte *p = tileh_bits[axis];
++	bool draw_odd_pillar = false;
+ 
+-		/* "dir" means the edge the pillars stand on */
+-		DiagDirection dir = AxisToDiagDir(axis);
+-		if (side != (axis == AXIS_Y)) dir = ReverseDiagDir(dir);
++	switch(type) {
++		case 0: case 1: case 2: case 9: // wooden, girder and concrete bridges
++			draw_odd_pillar = true;
++			break;
++		case 3: case 4: case 5: // suspension bridges, different pillars for each bridge part
++			if (image == SPR_BTSUS_X_PILLAR_TILE_E || image == SPR_BTSUS_Y_PILLAR_TILE_E) {
++				draw_odd_pillar = true;
++			} else {
++				p = tileh_bits[HasBit(image, 0) * 2 + axis];
++			}
++			break;
+ 
+-		/* Determine ground height under pillars */
+-		int front_height = ti->z;
+-		int back_height = ti->z;
+-		GetSlopeZOnEdge(ti->tileh, dir, &front_height, &back_height);
++		default:;
++	}
+ 
+-		/* x and y size of bounding-box of pillars */
+-		int w = (axis == AXIS_X ? 16 : 2);
+-		int h = (axis == AXIS_X ? 2 : 16);
+-		/* sprite position of back facing pillar */
+-		int x_back = x - (axis == AXIS_X ? 0 : 9);
+-		int y_back = y - (axis == AXIS_X ? 9 : 0);
++	if (draw_odd_pillar) {
++		/* corners under pillars, set to true if corner is raised
++		 * front and back means front and back side of bridge respectively,
++		 * north and south means north and south pillars from that side of bridge respectively,
++		 * FRONT_SOUTH and BACK_NORTH pillars are always in south and north tile corners respectively,
++		 * FRONT_NORTH and BACK_SOUTH pillars are in remaining corners, dependent on axis */
++		enum {
++			FRONT_NORTH,
++			FRONT_SOUTH,
++			BACK_NORTH,
++			BACK_SOUTH
++		};
++		bool corner[4] = { false, false, false, false };
++		byte front_h = 0;
++		byte back_h = 0;
+ 
+-		for (int cur_z = z_bridge; cur_z >= front_height || cur_z >= back_height; cur_z -= TILE_HEIGHT) {
+-			/* Draw front facing pillar */
+-			if (cur_z >= front_height) {
+-				AddSortableSpriteToDraw(image, psid->pal, x, y, w, h, BB_HEIGHT_UNDER_BRIDGE - 5, cur_z, IsTransparencySet(TO_BRIDGES), 0, 0, -5);
+-			}
++		/* store height, add it after we draw odd pillars */
++		if (ti->tileh & p[0]) { front_h = TILE_HEIGHT; corner[FRONT_NORTH] = true; }
++		if (ti->tileh & p[3]) { front_h = TILE_HEIGHT; corner[FRONT_SOUTH] = true; }
++		if (ti->tileh & p[1]) {  back_h = TILE_HEIGHT; corner[ BACK_NORTH] = true; }
++		if (ti->tileh & p[2]) {  back_h = TILE_HEIGHT; corner[ BACK_SOUTH] = true; }
+ 
+-			/* Draw back facing pillar, but not the highest part directly under the bridge-floor */
+-			if (drawfarpillar && cur_z >= back_height && cur_z < z_bridge - (int)TILE_HEIGHT) {
+-				AddSortableSpriteToDraw(image, psid->pal, x_back, y_back, w, h, BB_HEIGHT_UNDER_BRIDGE - 5, cur_z, IsTransparencySet(TO_BRIDGES), 0, 0, -5);
++		if (IsSteepSlope(ti->tileh)) {
++			/* if both front or both back corners are of same height, copy lowest corner from other side */
++			if (corner[FRONT_NORTH] == corner[FRONT_SOUTH]) {
++				front_height += TILE_HEIGHT;
++				corner[FRONT_NORTH] = corner[BACK_NORTH];
++				corner[FRONT_SOUTH] = corner[BACK_SOUTH];
++
++			}	else if (corner[BACK_NORTH] == corner[BACK_SOUTH]) {
++				back_height += TILE_HEIGHT;
++				corner[BACK_NORTH] = corner[FRONT_NORTH];
++				corner[BACK_SOUTH] = corner[FRONT_SOUTH];
+ 			}
+ 		}
++
++		/* draw front facing pillar in lower corner only */
++		if (corner[FRONT_NORTH] != corner[FRONT_SOUTH]) {
++			DRAW_PILLAR(image, x, y, front_height + odd_pillar_height, &_odd_pillar_sub_sprite[corner[FRONT_SOUTH] + axis * 2]);
++		}
++		/* draw back facing pillar in lower corner only */
++		int cur_z = back_height + odd_pillar_height;
++		if (corner[BACK_NORTH] != corner[BACK_SOUTH] && z_back >= cur_z) {
++			DRAW_PILLAR(image, x_back, y_back, cur_z, &_odd_pillar_sub_sprite[corner[BACK_SOUTH] + axis * 2]);
++		}
++
++		/* add stored height for other pillars */
++		front_height += front_h;
++		back_height += back_h;
++
++	} else {
++		if (ti->tileh & p[0]) front_height += TILE_HEIGHT;
++		if (ti->tileh & p[1])  back_height += TILE_HEIGHT;
++		if (IsSteepSlope(ti->tileh)) {
++			if (!(ti->tileh & p[2])) front_height += TILE_HEIGHT;
++			if (!(ti->tileh & p[3]))  back_height += TILE_HEIGHT;
++		}
+ 	}
++
++	for (int cur_z = z_bridge; cur_z >= front_height; cur_z -= TILE_HEIGHT) {
++		DRAW_PILLAR(image, x, y, cur_z, 0);
++	}
++	for (int cur_z = z_back; cur_z >= back_height; cur_z -= TILE_HEIGHT) {
++		DRAW_PILLAR(image, x_back, y_back, cur_z, 0);
++	}
++	#undef DRAW_PILLAR
+ }
+ 
+ /**
+@@ -1190,10 +1267,10 @@
+ 	);
+ 
+ 	const PalSpriteID *psid;
+-	bool drawfarpillar;
++	BridgeType type = GetBridgeType(rampsouth);
++	byte flags;
+ 	if (transport_type != TRANSPORT_WATER) {
+-		BridgeType type =  GetBridgeType(rampsouth);
+-		drawfarpillar = !HasBit(GetBridgeSpec(type)->flags, 0);
++		flags = GetBridgeSpec(type)->flags;
+ 
+ 		uint base_offset;
+ 		if (transport_type == TRANSPORT_RAIL) {
+@@ -1204,7 +1281,7 @@
+ 
+ 		psid = base_offset + GetBridgeSpriteTable(type, piece);
+ 	} else {
+-		drawfarpillar = true;
++		flags = 0;
+ 		psid = _aqueduct_sprites;
+ 	}
+ 
+@@ -1289,7 +1366,7 @@
+ 		}
+ 	} else if (_settings_client.gui.bridge_pillars) {
+ 		/* draw pillars below for high bridges */
+-		DrawBridgePillars(psid, ti, axis, drawfarpillar, x, y, z);
++		DrawBridgePillars(psid, ti, axis, type, flags, x, y, z);
+ 	}
+ }
+ 

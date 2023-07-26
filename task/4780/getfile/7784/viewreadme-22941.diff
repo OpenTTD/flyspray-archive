@@ -1,0 +1,425 @@
+diff --git a/src/fileio_func.h b/src/fileio_func.h
+--- a/src/fileio_func.h
++++ b/src/fileio_func.h
+@@ -14,6 +14,9 @@
+ 
+ #include "fileio_type.h"
+ 
++/* Forward declaration. */
++struct TarFileListEntry;
++
+ void FioSeekTo(size_t pos, int mode);
+ void FioSeekToFile(uint8 slot, size_t pos);
+ size_t FioGetPos();
+@@ -23,6 +26,7 @@
+ uint32 FioReadDword();
+ void FioCloseAll();
+ void FioOpenFile(int slot, const char *filename, Subdirectory subdir);
++FILE *FioFOpenFileTar(TarFileListEntry *entry, size_t *filesize);
+ void FioReadBlock(void *ptr, size_t size);
+ void FioSkipBytes(int n);
+ 
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -2401,6 +2401,7 @@
+ STR_NEWGRF_SETTINGS_MOVEDOWN                                    :{BLACK}Move Down
+ STR_NEWGRF_SETTINGS_MOVEDOWN_TOOLTIP                            :{BLACK}Move the selected NewGRF file down the list
+ STR_NEWGRF_SETTINGS_FILE_TOOLTIP                                :{BLACK}A list of the NewGRF files that are installed. Click a file to change its parameters
++STR_NEWGRF_SETTINGS_VIEW_README                                 :{BLACK}View Readme
+ 
+ STR_NEWGRF_SETTINGS_SET_PARAMETERS                              :{BLACK}Set parameters
+ STR_NEWGRF_SETTINGS_TOGGLE_PALETTE                              :{BLACK}Toggle palette
+@@ -2434,6 +2435,9 @@
+ STR_NEWGRF_PARAMETERS_SETTING                                   :{STRING1}: {ORANGE}{STRING1}
+ STR_NEWGRF_PARAMETERS_NUM_PARAM                                 :{LTBLUE}Number of parameters: {ORANGE}{NUM}
+ 
++# NewGRF readme window
++STR_NEWGRF_README_CAPTION                                       :{WHITE}View NewGRF Readme
++
+ # NewGRF inspect window
+ STR_NEWGRF_INSPECT_CAPTION                                      :{WHITE}Inspect - {STRING5}
+ STR_NEWGRF_INSPECT_PARENT_BUTTON                                :{BLACK}Parent
+diff --git a/src/newgrf_config.cpp b/src/newgrf_config.cpp
+--- a/src/newgrf_config.cpp
++++ b/src/newgrf_config.cpp
+@@ -22,6 +22,7 @@
+ 
+ #include "fileio_func.h"
+ #include "fios.h"
++#include "tar_type.h"
+ 
+ /** Create a new GRFTextWrapper. */
+ GRFTextWrapper::GRFTextWrapper() :
+@@ -831,3 +832,28 @@
+ {
+ 	return (this->ident.grfid & 0x00FFFFFF) == OPENTTD_GRAPHICS_BASE_GRF_ID;
+ }
++
++/**
++ * Search a grf tar archive for an accompanying readme.txt file.
++ * @param cfg The GRFConfig to search.
++ * @return The TarFileListEntry for the readme,  \c NULL otherwise.
++ * @note A GRF can only have a readme if it is inside a tar archive.
++ * @todo Add a newgrf config flag.
++ */
++TarFileListEntry *GRFConfig::GetReadme() const
++{
++	if (this->filename == NULL) return NULL;
++
++	const char *slash = strrchr(this->filename, PATHSEPCHAR);
++	if (slash == NULL) return NULL;
++	int prefix_length = slash - this->filename + 1; // Including the path separator.
++	if (prefix_length + 10 + 1 > MAX_PATH) return NULL; // "foo/" + "readme.txt" + '\0' must fit.
++
++	char readme_path[MAX_PATH];
++	memcpy(readme_path, this->filename, prefix_length);
++	strecpy(readme_path + prefix_length, "readme.txt", lastof(readme_path));
++
++	TarFileList::iterator tar_entry = _tar_filelist.find(readme_path);
++	if (tar_entry == _tar_filelist.end()) return NULL;
++	return &(*tar_entry).second;
++}
+diff --git a/src/newgrf_config.h b/src/newgrf_config.h
+--- a/src/newgrf_config.h
++++ b/src/newgrf_config.h
+@@ -18,6 +18,8 @@
+ #include "misc/countedptr.hpp"
+ #include "fileio_type.h"
+ 
++struct TarFileListEntry;
++
+ /** GRF config bit flags */
+ enum GCF_Flags {
+ 	GCF_SYSTEM,     ///< GRF file is an openttd-internal system grf
+@@ -168,6 +170,8 @@
+ 
+ 	bool IsOpenTTDBaseGRF() const;
+ 
++	TarFileListEntry *GetReadme() const;
++
+ 	const char *GetName() const;
+ 	const char *GetDescription() const;
+ 
+diff --git a/src/newgrf_gui.cpp b/src/newgrf_gui.cpp
+--- a/src/newgrf_gui.cpp
++++ b/src/newgrf_gui.cpp
+@@ -25,6 +25,7 @@
+ #include "core/geometry_func.hpp"
+ #include "newgrf_text.h"
+ #include "fileio_func.h"
++#include "tar_type.h"
+ 
+ #include "table/strings.h"
+ #include "table/sprites.h"
+@@ -446,7 +447,7 @@
+ 	EndContainer(),
+ };
+ 
+-/* Window definition for the change grf parameters window */
++/** Window definition for the change grf parameters window */
+ static const WindowDesc _newgrf_parameters_desc(
+ 	WDP_CENTER, 500, 208,
+ 	WC_GRF_PARAMETERS, WC_NONE,
+@@ -460,6 +461,181 @@
+ 	new NewGRFParametersWindow(&_newgrf_parameters_desc, c);
+ }
+ 
++/** Widgets of the #NewGRFReadmeWindow. */
++enum ShowNewGRFReadmeWidgets {
++	GRW_WIDGET_BACKGROUND, ///< Panel to draw the readme on.
++	GRW_WIDGET_VSCROLLBAR, ///< Vertical scrollbar to scroll through the readme up-and-down.
++	GRW_WIDGET_HSCROLLBAR, ///< Horizontal scrollbar to scroll through the readme left-to-right.
++};
++
++/** Window for displaying the readme of a NewGRF. */
++struct NewGRFReadmeWindow : public Window {
++	GRFConfig *grf_config;               ///< View the readme of this GRFConfig.
++	int line_height;                     ///< Height of a line in the display widget.
++	Scrollbar *vscroll;                  ///< Vertical scrollbar.
++	Scrollbar *hscroll;                  ///< Horizontal scrollbar.
++	char *text;                          ///< Lines of text from the NewGRF's readme.
++	SmallVector<const char *, 64> lines; ///< #text, split into lines in a table with lines.
++	uint max_length;                     ///< The longest line in the readme (in pixels).
++
++	static const int top_spacing    = WD_FRAMETEXT_TOP;    ///< Additional spacing at the top of the #GRW_WIDGET_BACKGROUND widget.
++	static const int bottom_spacing = WD_FRAMETEXT_BOTTOM; ///< Additional spacing at the bottom of the #GRW_WIDGET_BACKGROUND widget.
++
++
++	NewGRFReadmeWindow(const WindowDesc *desc, GRFConfig *c) : Window(), grf_config(c)
++	{
++		this->CreateNestedTree(desc);
++		this->vscroll = this->GetScrollbar(GRW_WIDGET_VSCROLLBAR);
++		this->hscroll = this->GetScrollbar(GRW_WIDGET_HSCROLLBAR);
++		this->FinishInitNested(desc);
++
++		this->LoadReadme();
++	}
++
++	~NewGRFReadmeWindow()
++	{
++		free(this->text);
++	}
++
++	virtual void UpdateWidgetSize(int widget, Dimension *size, const Dimension &padding, Dimension *fill, Dimension *resize)
++	{
++		switch (widget) {
++			case GRW_WIDGET_BACKGROUND:
++				this->line_height = FONT_HEIGHT_NORMAL + 2;
++				resize->height = this->line_height;
++
++				size->height = 4 * resize->height + this->top_spacing + this->bottom_spacing; // At least 4 lines are visible.
++				size->width = max(200u, size->width); // At least 200 pixels wide.
++				break;
++		}
++	}
++
++	virtual void DrawWidget(const Rect &r, int widget) const
++	{
++		if (widget != GRW_WIDGET_BACKGROUND) return;
++
++		DrawPixelInfo new_dpi;
++		if (!FillDrawPixelInfo(&new_dpi, r.left + 1 , r.top + 1, r.right - r.left - 1, r.bottom - r.top - 1)) return;
++
++		DrawPixelInfo *old_dpi = _cur_dpi;
++		_cur_dpi = &new_dpi;
++
++		int left = r.left + WD_FRAMETEXT_LEFT - this->hscroll->GetPosition();
++		int right = left + this->max_length;
++		int top = r.top + WD_TEXTPANEL_TOP - this->line_height;
++		for (uint i = 0; i < this->lines.Length(); i++) {
++			if (i >= this->vscroll->GetCapacity()) break;
++			DrawString(left, right, top, this->lines[i + this->vscroll->GetPosition()], TC_WHITE);
++			top += this->line_height;
++		}
++
++		_cur_dpi = old_dpi;
++	}
++
++	virtual void OnResize()
++	{
++		this->vscroll->SetCapacityFromWidget(this, GRW_WIDGET_BACKGROUND);
++		this->hscroll->SetCapacityFromWidget(this, GRW_WIDGET_BACKGROUND);
++	}
++
++private:
++	/**
++	 * Load the NewGRF's readme text from file, and setup #lines, #max_length, and both scrollbars.
++	 */
++	void LoadReadme()
++	{
++		this->text = NULL;
++
++		/* Does GRF have readme? */
++		TarFileListEntry *tar_entry = this->grf_config->GetReadme();
++		if (tar_entry == NULL) return;
++
++		/* Get text from file */
++		size_t filesize;
++		FILE *handle = FioFOpenFileTar(tar_entry, &filesize);
++		if (handle == NULL) return;
++		this->text = MallocT<char>(filesize + 1);
++		if (fread(this->text, 1, filesize, handle) != filesize) {
++			free(this->text);
++			this->text = NULL;
++			return;
++		}
++		fclose(handle);
++		this->text[filesize] = '\0';
++
++		this->text = TrimWhitespace(this->text);
++
++		/* The first line is, of course, the beginning of the text. */
++		this->lines.Clear();
++		*this->lines.Append() = this->text;
++
++		/* Strip unprintable characters. */
++		char *q = this->text;
++		bool append_next = false;
++ 		for (char *p = this->text; *p != '\0'; p++) {
++			if (append_next) {
++				*this->lines.Append() = q;
++				append_next = false;
++			}
++			if (*p == '\t') *q = ' '; // Change to a space
++			if ((!IsPrintable(*p) && *p != '\n') || *p == '\r') continue;
++
++			if (*p == '\n') {
++				*p = '\0';
++				/* We want to append the next character. */
++				append_next = true;
++			}
++			*q = *p; // Copy the character
++			q++;
++		}
++		*q = '\0';
++
++		/* Initialize scrollbars */
++		this->vscroll->SetCount(this->lines.Length());
++
++		this->max_length = 0;
++		for (uint i = 0; i < this->lines.Length(); i++) {
++			this->max_length = max(this->max_length, GetStringBoundingBox(this->lines[i]).width);
++		}
++		this->hscroll->SetCount(this->max_length + WD_FRAMETEXT_LEFT + WD_FRAMETEXT_RIGHT);
++		this->hscroll->SetStepSize(10); // Speed up horizontal scrollbar
++	}
++};
++
++static const NWidgetPart _nested_newgrf_readme_widgets[] = {
++	NWidget(NWID_HORIZONTAL),
++		NWidget(WWT_CLOSEBOX, COLOUR_MAUVE),
++		NWidget(WWT_CAPTION, COLOUR_MAUVE), SetDataTip(STR_NEWGRF_README_CAPTION, STR_TOOLTIP_WINDOW_TITLE_DRAG_THIS),
++		NWidget(WWT_SHADEBOX, COLOUR_MAUVE),
++		NWidget(WWT_STICKYBOX, COLOUR_MAUVE),
++	EndContainer(),
++	NWidget(NWID_HORIZONTAL),
++		NWidget(WWT_PANEL, COLOUR_MAUVE, GRW_WIDGET_BACKGROUND), SetMinimalSize(200, 125), SetResize(1, 12), SetScrollbar(GRW_WIDGET_VSCROLLBAR),
++		EndContainer(),
++		NWidget(NWID_VERTICAL),
++			NWidget(NWID_VSCROLLBAR, COLOUR_MAUVE, GRW_WIDGET_VSCROLLBAR),
++		EndContainer(),
++	EndContainer(),
++	NWidget(NWID_HORIZONTAL),
++		NWidget(NWID_HSCROLLBAR, COLOUR_MAUVE, GRW_WIDGET_HSCROLLBAR),
++		NWidget(WWT_RESIZEBOX, COLOUR_MAUVE),
++	EndContainer(),
++};
++
++/** Window definition for the grf readme window */
++static const WindowDesc _newgrf_readme_desc(
++	WDP_CENTER, 630, 460,
++	WC_NEWGRF_README, WC_NONE,
++	WDF_UNCLICK_BUTTONS,
++	_nested_newgrf_readme_widgets, lengthof(_nested_newgrf_readme_widgets)
++);
++
++void ShowNewGRFReadmeWindow(GRFConfig *c)
++{
++	DeleteWindowByClass(WC_NEWGRF_README);
++	new NewGRFReadmeWindow(&_newgrf_readme_desc, c);
++}
++
+ static GRFPresetList _grf_preset_list;
+ 
+ class DropDownListPresetItem : public DropDownListItem {
+@@ -497,6 +673,7 @@
+ 	SNGRFS_SCROLL2BAR,
+ 	SNGRFS_NEWGRF_INFO_TITLE,
+ 	SNGRFS_NEWGRF_INFO,
++	SNGRFS_NEWGRF_README,
+ 	SNGRFS_SET_PARAMETERS,
+ 	SNGRFS_TOGGLE_PALETTE,
+ 	SNGRFS_APPLY_CHANGES,
+@@ -575,6 +752,7 @@
+ 	~NewGRFWindow()
+ 	{
+ 		DeleteWindowByClass(WC_GRF_PARAMETERS);
++		DeleteWindowByClass(WC_NEWGRF_README);
+ 
+ 		if (this->editable && !this->execute) {
+ 			CopyGRFConfigList(this->orig_list, this->actives, true);
+@@ -942,6 +1120,16 @@
+ 				this->DeleteChildWindows(WC_QUERY_STRING); // Remove the parameter query window
+ 				break;
+ 
++			case SNGRFS_NEWGRF_README: { // View GRF readme
++				if (this->active_sel == NULL && this->avail_sel == NULL) break;
++
++				GRFConfig *c;
++				if (this->active_sel) c = this->active_sel;
++				else c = new GRFConfig(*this->avail_sel);
++				ShowNewGRFReadmeWindow(c);
++				break;
++			}
++
+ 			case SNGRFS_SET_PARAMETERS: { // Edit parameters
+ 				if (this->active_sel == NULL || !this->editable || !this->show_params || this->active_sel->num_valid_params == 0) break;
+ 
+@@ -995,7 +1183,8 @@
+ 		this->avail_sel = NULL;
+ 		this->avail_pos = -1;
+ 		this->avails.ForceRebuild();
+-		this->DeleteChildWindows(WC_QUERY_STRING); // Remove the parameter query window
++		this->DeleteChildWindows(WC_QUERY_STRING);  // Remove the parameter query window
++		this->DeleteChildWindows(WC_NEWGRF_README); // Remove the view readme window
+ 	}
+ 
+ 	virtual void OnDropdownSelect(int widget, int index)
+@@ -1100,6 +1289,10 @@
+ 			SNGRFS_MOVE_DOWN,
+ 			WIDGET_LIST_END
+ 		);
++
++		const GRFConfig *c = (this->avail_sel == NULL) ? this->active_sel : this->avail_sel;
++		this->SetWidgetDisabledState(SNGRFS_NEWGRF_README, c == NULL || c->GetReadme() == NULL);
++
+ 		this->SetWidgetDisabledState(SNGRFS_SET_PARAMETERS, !this->show_params || disable_all || this->active_sel->num_valid_params == 0);
+ 		this->SetWidgetDisabledState(SNGRFS_TOGGLE_PALETTE, disable_all);
+ 
+@@ -1584,6 +1777,8 @@
+ 	NWidget(WWT_PANEL, COLOUR_MAUVE), SetPadding(0, 0, 2, 0),
+ 		NWidget(WWT_EMPTY, COLOUR_MAUVE, SNGRFS_NEWGRF_INFO_TITLE), SetFill(1, 0), SetResize(1, 0),
+ 		NWidget(WWT_EMPTY, COLOUR_MAUVE, SNGRFS_NEWGRF_INFO), SetFill(1, 1), SetResize(1, 1), SetMinimalSize(150, 100),
++		NWidget(WWT_PUSHTXTBTN, COLOUR_YELLOW, SNGRFS_NEWGRF_README), SetFill(1, 0), SetResize(1, 0),
++				SetDataTip(STR_NEWGRF_SETTINGS_VIEW_README, STR_NULL), SetPadding(2, 2, 2, 2),
+ 	EndContainer(),
+ 	NWidget(NWID_SELECTION, INVALID_COLOUR, SNGRFS_SHOW_APPLY),
+ 		/* Right side, buttons. */
+diff --git a/src/string.cpp b/src/string.cpp
+--- a/src/string.cpp
++++ b/src/string.cpp
+@@ -546,6 +546,31 @@
+ 	return length;
+ }
+ 
++/**
++ * Trim leading and trailing whitespace from a char.
++ * @param str the char to trim.
++ * @return the trimmed char.
++ */
++char *TrimWhitespace(char *str)
++{
++	char *end;
++
++	/* Trim leading space */
++	while(IsWhitespace(*str)) str++;
++
++	/* All spaces? */
++	if(*str == '\0') return str;
++
++	/* Trim trailing space */
++	end = str + strlen(str) - 1;
++	while(end > str && isspace(*end)) end--;
++
++	/* Write new null terminator */
++	*(end+1) = '\0';
++
++	return str;
++}
++
+ #ifdef DEFINE_STRNDUP
+ #include "core/math_func.hpp"
+ char *strndup(const char *s, size_t len)
+diff --git a/src/string_func.h b/src/string_func.h
+--- a/src/string_func.h
++++ b/src/string_func.h
+@@ -79,6 +79,7 @@
+ size_t Utf8Encode(char *buf, WChar c);
+ size_t Utf8TrimString(char *s, size_t maxlen);
+ 
++char *TrimWhitespace(char *str);
+ 
+ static inline WChar Utf8Consume(const char **s)
+ {
+diff --git a/src/window_type.h b/src/window_type.h
+--- a/src/window_type.h
++++ b/src/window_type.h
+@@ -111,6 +111,7 @@
+ 	WC_INDUSTRY_CARGOES,
+ 	WC_GRF_PARAMETERS,
+ 	WC_BUILD_OBJECT,
++	WC_NEWGRF_README,
+ 
+ 	WC_INVALID = 0xFFFF
+ };

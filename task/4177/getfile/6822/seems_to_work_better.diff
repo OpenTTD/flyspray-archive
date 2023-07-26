@@ -1,0 +1,127 @@
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 21143)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -1489,31 +1489,15 @@
+ static const byte TUNNEL_SOUND_FRAME = 1;
+ 
+ /**
+- * Frame when a train should be hidden in a tunnel with a certain direction.
++ * Frame when a vehicle should be hidden in a tunnel with a certain direction.
+  * This differs per direction, because of visibility / bounding box issues.
+  * Note that direction, in this case, is the direction leading into the tunnel.
+- * When entering a tunnel, hide the train when it reaches the given frame.
+- * When leaving a tunnel, show the train when it is one frame further
++ * When entering a tunnel, hide the vehicle when it reaches the given frame.
++ * When leaving a tunnel, show the vehicle when it is one frame further
+  * to the 'outside', i.e. at (TILE_SIZE-1) - (frame) + 1
+  */
+-static const byte _train_tunnel_frame[DIAGDIR_END] = {14, 9, 7, 12};
++extern const byte _tunnel_visibility_frame[DIAGDIR_END] = {12, 8, 8, 12};
+ 
+-/**
+- * Frame when a road vehicle enters a tunnel with a certain direction.
+- * This differs per direction, like for trains. To make it even more fun,
+- * the entry and exit frames are not consistent. This is the entry frame,
+- * the road vehicle should be hidden when it reaches this frame.
+- */
+-static const byte _road_enter_tunnel_frame[DIAGDIR_END] = {13, 8, 8, 13};
+-
+-/**
+- * Frame when a road vehicle exits a tunnel with a certain direction.
+- * Note that 'direction' refers to the tunnel direction, not the
+- * vehicle direction. As stated above, this frame is not the same as the
+- * entry frame, for unclear (historical?) reasons.
+- */
+-static const byte _road_exit_tunnel_frame[DIAGDIR_END] = {2, 7, 9, 4};
+-
+ static VehicleEnterTileStatus VehicleEnter_TunnelBridge(Vehicle *v, TileIndex tile, int x, int y)
+ {
+ 	int z = GetSlopeZ(x, y) - v->z_pos;
+@@ -1539,7 +1523,7 @@
+ 					}
+ 					return VETSB_CONTINUE;
+ 				}
+-				if (frame == _train_tunnel_frame[dir]) {
++				if (frame == _tunnel_visibility_frame[dir]) {
+ 					t->tile = tile;
+ 					t->track = TRACK_BIT_WORMHOLE;
+ 					t->vehstatus |= VS_HIDDEN;
+@@ -1547,7 +1531,7 @@
+ 				}
+ 			}
+ 
+-			if (dir == ReverseDiagDir(vdir) && frame == TILE_SIZE - _train_tunnel_frame[dir] && z == 0) {
++			if (dir == ReverseDiagDir(vdir) && frame == TILE_SIZE - _tunnel_visibility_frame[dir] && z == 0) {
+ 				/* We're at the tunnel exit ?? */
+ 				t->tile = tile;
+ 				t->track = DiagDirToDiagTrackBits(vdir);
+@@ -1560,7 +1544,7 @@
+ 
+ 			/* Enter tunnel? */
+ 			if (rv->state != RVSB_WORMHOLE && dir == vdir) {
+-				if (frame == _road_enter_tunnel_frame[dir]) {
++				if (frame == _tunnel_visibility_frame[dir]) {
+ 					/* Frame should be equal to the next frame number in the RV's movement */
+ 					assert(frame == rv->frame + 1);
+ 					rv->tile = tile;
+@@ -1573,7 +1557,7 @@
+ 			}
+ 
+ 			/* We're at the tunnel exit ?? */
+-			if (dir == ReverseDiagDir(vdir) && frame == _road_exit_tunnel_frame[dir] && z == 0) {
++			if (dir == ReverseDiagDir(vdir) && frame == TILE_SIZE - _tunnel_visibility_frame[dir] && z == 0) {
+ 				rv->tile = tile;
+ 				rv->state = DiagDirToDiagTrackdir(vdir);
+ 				rv->frame = frame;
+Index: src/saveload/afterload.cpp
+===================================================================
+--- src/saveload/afterload.cpp	(revision 21143)
++++ src/saveload/afterload.cpp	(working copy)
+@@ -2319,6 +2319,46 @@
+ 		}
+ 	}
+ 
++	if (CheckSavegameVersion(152)) {
++		/* The moment vehicles go from hidden to visible changed. This means
++		 * that vehicles don't always get visible anymore causing things to
++		 * get messed up just after loading the savegame. This fixes that. */
++		Vehicle *v;
++		FOR_ALL_VEHICLES(v) {
++			/* Is the vehicle hidden and in a tunnel? */
++			if (!(v->vehstatus & VS_HIDDEN) || !IsTunnelTile(v->tile)) continue;
++
++			/* Is the vehicle actually at a tunnel entrance/exit? */
++			TileIndex vtile = TileVirtXY(v->x_pos, v->y_pos);
++			if (!IsTunnelTile(vtile)) continue;
++
++			/* Is the vehicle leaving the tunnel? */
++			const DiagDirection dir = GetTunnelBridgeDirection(vtile);
++			const DiagDirection vdir = DirToDiagDir(v->direction);
++			if (dir != ReverseDiagDir(vdir)) continue;
++
++			/* Are we actually in this tunnel? Or maybe a lower tunnel? */
++			if (GetSlopeZ(v->x_pos, v->y_pos) != v->z_pos) continue;
++
++			/* Should we been made visible already? */
++			byte pos = (DiagDirToAxis(vdir) == AXIS_X ? v->x_pos : v->y_pos) & TILE_UNIT_MASK;
++			byte frame = (vdir == DIAGDIR_NE || vdir == DIAGDIR_NW) ? TILE_SIZE - 1 - pos : pos;
++			extern const byte _tunnel_visibility_frame[DIAGDIR_END];
++			if (frame < TILE_SIZE - _tunnel_visibility_frame[vdir]) continue;
++
++			/* Yes, we should've been made visible. So make us visible and
++			 * set all the related variables to the right values as well. */
++			v->tile = vtile;
++			v->vehstatus &= ~VS_HIDDEN;
++
++			switch (v->type) {
++				case VEH_TRAIN: Train::From(v)->track       = DiagDirToDiagTrackBits(vdir); break;
++				case VEH_ROAD:  RoadVehicle::From(v)->state = DiagDirToDiagTrackdir(vdir);  break;
++				default: NOT_REACHED();
++			}
++		}
++	}
++
+ 	/* Road stops is 'only' updating some caches */
+ 	AfterLoadRoadStops();
+ 	AfterLoadLabelMaps();

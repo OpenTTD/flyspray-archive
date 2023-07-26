@@ -1,0 +1,121 @@
+Introduction
+
+This text should be viewed in the context of FS#4177 and the patches
+supplied there. It is assumed that the reader is already familiar with
+the movement system of vehicles within OpenTTD. Perhaps I should have 
+drawn some diagrams, as they tend to work better in explaining this kind
+of stuff. However, I hope that this text suffices for now.
+
+Objective
+
+The objective of this patch series is to make the process of entering/leaving
+a bridge independent of movement direction, or at least as independent as possible.
+The current code still contains a number of inconsistencies, this patch
+just hightlights them to allow these to be fixed more easily.
+Secondly, it is attempted to reduce the amount of magic numbers
+to the minimum necessary to achieve the desired functionality.
+
+The concept of 'position'
+
+Consider a vehicle moving along the X-axis (top-left <-> bottom right).
+When we examine the position of the vehicle on the tile, we can identify
+two components of this position. The first is the position of the vehicle
+along the X-axis itself. As the vehicle moves, this position changes
+with every movement step (value range: 0 .. 15). The other component
+is along the Y-axis, perpendicular to the direction of movement. This
+component is always 8 (halfway the tile) for trains and thus carries
+no useful information.
+
+What has been said above equally applies for trains moving along
+the Y-axis. Then, the roles of the X- and Y-axes are switched, but
+the rest remains the same. So, the only interesting information is
+the position of the vehicle along the axis it is moving on. In code,
+this becomes the following: (with vdir being the vehicle direction)
+
+byte pos = (DiagDirToAxis(vdir) == AXIS_X ? x : y) & TILE_UNIT_MASK;
+
+
+The concept of 'frame'
+
+With the code above, the axis of movement is taken out of the equation.
+However, there is still a dependency on the direction of movement
+(north- or southbound). Southbound vehicles enter the tile
+at the north edge (pos = 0) and the value of pos increases with
+every movement step. Northbound vehicles, on the other hand, enter
+the tile at the south edge (pos = 15) and the value of pos decreases
+as they move along the tile.
+
+To make the 'movement progress' fully independent of direction, 
+the concept of frame is introduced. This is basically the number
+of steps moved in the direction of the vehicle. For southbound vehicles,
+this is equal to the value of 'pos', while for northbound vehicles, it
+is equal to 15 (the max. position) minus the value of 'pos'. In code:
+
+byte frame = (vdir == DIAGDIR_NE || vdir == DIAGDIR_NW) ? TILE_SIZE - 1 - pos : pos;
+
+
+Equivalence of old hard-coded coordinates and new frame values
+
+My series of patches replaces the use of fractional coordinates
+with the use of the 'frame' as defined above. In the following sections,
+it will be shown that the old fractcoords are equal to the new frames.
+Therefore, the behaviour of the old and new code is identical, except
+that the new code should be easier to modify to allow Cool Stuff (tm)
+like custom bridge heads to be added.
+
+Enter tunnel sound (fractcoord_1)
+Tunnel dir:	   NE    SE    SW    NW
+Vehicle dir:	   NE    SE    SW    NW
+Old code:	{0x8E, 0x18, 0x81, 0xE8}
+Vehicle pos:	   14	  1	1    14
+Vehicle frame:	    1     1     1     1 //equal for all directions, that's nice
+New code:	TUNNEL_SOUND_FRAME = 1
+
+Enter train tunnel (fractcoord_2)
+Tunnel dir:	   NE    SE    SW    NW
+Vehicle dir:	   NE    SE    SW    NW
+Old code:	{0x81, 0x98, 0x87, 0x38}
+Vehicle pos:	    1     9     7     3
+Vehicle frame:	   14     9     7    12
+New code:	  {14,    9,    7,   12}
+
+As can be seen here, vehicles going north enter tunnels later
+than vehicles going south. This makes sense, because vehicles
+going north stay visible much longer. Vehicles going west
+enter tunnels slightly earlier when comparing with those going
+east. The reason of this is unknown to me, but it might be
+related to the way bounding boxes are defined.
+
+
+Exit train tunnel (fractcoord_3)
+Tunnel dir:	   NE    SE    SW    NW
+Vehicle dir:	   SW    NW    NE    SE  //inverted
+Old code:	{0x82, 0x88, 0x86, 0x48} //indexed by tunnel dir!
+Vehicle pos:	    2     8     6     4
+Vehicle frame:	    2     7     9     4  //depends on vehicle dir!
+
+This is equal to (15 - enter_tunnel_frame[tunnel_dir]) + 1
+Adding 1 makes sure that there is no state where a vehicle could both be visible and invisible
+So, the entry/exit frames for trains are nicely consistent with eachother
+
+
+Enter road tunnel (fractcoord_4 and fractcoord_5)
+Tunnel dir:	   NE    SE    SW    NW
+Vehicle dir:	   NE    SE    SW    NW
+Old code 1:	{0x52, 0x85, 0x98, 0x29} //two sets of code for left/right driving RVs
+Old code 2:	{0x92, 0x89, 0x58, 0x25}
+Vehicle pos:	    2     8     8     2
+Vehicle frame:	   13     8     8    13
+New code:	  {13,    8,    8,   13}
+
+Exit road tunnel (fractcoord_6 and fractcoord_7)
+Tunnel dir:	   NE    SE    SW    NW
+Vehicle dir:	   SW    NW    NE    SE  //inverted
+Old code 1:	{0x92, 0x89, 0x56, 0x45} //two sets of code for left/right driving RVs
+Old code 2:	{0x52, 0x85, 0x96, 0x49} //indexed by tunnel dir!
+Vehicle pos:	    2     8     6     4
+Vehicle frame:	    2     7     9     4  //depends on vehicle dir!
+New code:	   {2,    7,    9,    4} //These frames were already used for RV movement, but they also apply to position
+
+Note: The relationship between entry and exit frame, as it exists for trains,
+does not apply here. Why this is the case remains an utter mystery for me.

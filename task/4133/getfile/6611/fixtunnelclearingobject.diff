@@ -1,0 +1,34 @@
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 20829)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -582,15 +582,23 @@
+ 
+ 	/* slope of end tile must be complementary to the slope of the start tile */
+ 	if (end_tileh != ComplementSlope(start_tileh)) {
+-		/* Check if there is a structure on the terraformed tile. Do not add the cost, that will be done by the terraforming
+-		 * Note: Currently the town rating is also affected by this clearing-test. So effectivly the player is punished twice for clearing
+-		 *       the tree on end_tile.
+-		 */
+-		ret = DoCommand(end_tile, 0, 0, DC_AUTO, CMD_LANDSCAPE_CLEAR);
+-		if (ret.Failed()) return_cmd_error(STR_ERROR_UNABLE_TO_EXCAVATE_LAND);
++		/* We need to perform two things here.
++		 *  1) Clear the tile including any associated tiles of multitile objects.
++		 *  2) Terraform the tile including surrounding tiles.
++		 * Unfortunatelly 2) also clears the tile in some cases (e.g. trees), but not all.
++		 * So during the testrun both commands cost money and townrating while we cannot tell
++		 * what share of that cost is a duplicate between 1) and 2).
++		 * To properly replay the command during DC_EXEC we first estimate the cost for clearing,
++		 * then do the terraforming, and finally force-clear whatever there is left.
++		 * This will result in doubled cost of both money and townrating when clearing trees or
++		 * auto-removable objects etc.. */
++		cost.AddCost(DoCommand(end_tile, 0, 0, flags & ~DC_EXEC, CMD_LANDSCAPE_CLEAR));
++		if (cost.Failed()) return_cmd_error(STR_ERROR_UNABLE_TO_EXCAVATE_LAND);
+ 
+ 		ret = DoCommand(end_tile, end_tileh & start_tileh, 0, flags, CMD_TERRAFORM_LAND);
+ 		if (ret.Failed()) return_cmd_error(STR_ERROR_UNABLE_TO_EXCAVATE_LAND);
++
++		DoCommand(end_tile, 0, 0, flags | DC_NO_MODIFY_TOWN_RATING | DC_NO_TEST_TOWN_RATING, CMD_LANDSCAPE_CLEAR);
+ 	} else {
+ 		ret = DoCommand(end_tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
+ 		if (ret.Failed()) return ret;

@@ -1,0 +1,134 @@
+diff -r 7af4b7626a34 src/settings.cpp
+--- a/src/settings.cpp	Sat Jul 30 00:55:53 2011 +0200
++++ b/src/settings.cpp	Sat Jul 30 12:04:20 2011 +0200
+@@ -887,6 +887,13 @@
+ 	return true;
+ }
+ 
++static bool ShowOnlyOwnSignsChanged(int32 p1)
++{
++	InvalidateWindowClassesData(WC_SIGN_LIST, -1);
++	MarkWholeScreenDirty();
++	return true;
++}
++
+ static bool InvalidateVehTimetableWindow(int32 p1)
+ {
+ 	InvalidateWindowClassesData(WC_VEHICLE_TIMETABLE, -2);
+diff -r 7af4b7626a34 src/settings_type.h
+--- a/src/settings_type.h	Sat Jul 30 00:55:53 2011 +0200
++++ b/src/settings_type.h	Sat Jul 30 12:04:20 2011 +0200
+@@ -110,6 +110,7 @@
+ 	bool   station_show_coverage;            ///< whether to highlight coverage area
+ 	bool   persistent_buildingtools;         ///< keep the building tools active after usage
+ 	bool   expenses_layout;                  ///< layout of expenses window
++	bool   show_only_own_signs;              ///< hide signs (including signs of stations) that are not owned by local company
+ 
+ 	uint16 console_backlog_timeout;          ///< the minimum amount of time items should be in the console backlog before they will be removed in ~3 seconds granularity.
+ 	uint16 console_backlog_length;           ///< the minimum amount of items in the console backlog before items will be removed.
+diff -r 7af4b7626a34 src/signs_gui.cpp
+--- a/src/signs_gui.cpp	Sat Jul 30 00:55:53 2011 +0200
++++ b/src/signs_gui.cpp	Sat Jul 30 12:04:20 2011 +0200
+@@ -26,6 +26,7 @@
+ #include "string_func.h"
+ #include "core/geometry_func.hpp"
+ #include "hotkeys.h"
++#include "settings_type.h"
+ 
+ #include "table/strings.h"
+ #include "table/sprites.h"
+@@ -116,11 +117,21 @@
+ 		return (filter_info.case_sensitive ? strstr(buf1, filter_info.string) : strcasestr(buf1, filter_info.string)) != NULL;
+ 	}
+ 
++	/** Filter sign list by owner */
++	static bool CDECL OwnerVisibilityFilter(const Sign * const *a, FilterInfo filter_info)
++	{
++		/* Hide sign if non-own signs are hidden in the viewport */
++		return !_settings_client.gui.show_only_own_signs || (*a)->owner == _local_company;
++	}
++
+ 	/** Filter out signs from the sign list that does not match the name filter */
+ 	void FilterSignList()
+ 	{
+ 		FilterInfo filter_info = {this->filter_string, this->match_case};
+ 		this->signs.Filter(&SignNameFilter, filter_info);
++		if (_settings_client.gui.show_only_own_signs) {
++			this->signs.Filter(&OwnerVisibilityFilter, filter_info);
++		}
+ 	}
+ };
+ 
+@@ -199,7 +210,7 @@
+ 			/* There is no new string -> clear this->filter_string */
+ 			this->filter_string[0] = '\0';
+ 
+-			this->signs.SetFilterState(false);
++			this->signs.SetFilterState(_settings_client.gui.show_only_own_signs); // keep sign list filtering active if only own signs should be shown
+ 			this->DisableWidget(SLW_FILTER_CLEAR_BTN);
+ 		}
+ 
+@@ -374,10 +385,15 @@
+ 	 */
+ 	virtual void OnInvalidateData(int data = 0, bool gui_scope = true)
+ 	{
++		if (data == -1) {
++			/* The _settings_client.gui.show_only_own_signs setting has changed */
++			this->signs.SetFilterState(!StrEmpty(this->filter_string) || _settings_client.gui.show_only_own_signs);
++		}
++
+ 		/* When there is a filter string, we always need to rebuild the list even if
+ 		 * the amount of signs in total is unchanged, as the subset of signs that is
+ 		 * accepted by the filter might has changed. */
+-		if (data == 0 || !StrEmpty(this->filter_string)) { // New or deleted sign, or there is a filter string
++		if (data == 0 || data == -1 || !StrEmpty(this->filter_string)) { // New or deleted sign, changed visibility setting or there is a filter string
+ 			/* This needs to be done in command-scope to enforce rebuilding before resorting invalid data */
+ 			this->signs.ForceRebuild();
+ 		} else { // Change of sign contents while there is no filter string
+diff -r 7af4b7626a34 src/table/settings.ini
+--- a/src/table/settings.ini	Sat Jul 30 00:55:53 2011 +0200
++++ b/src/table/settings.ini	Sat Jul 30 12:04:20 2011 +0200
+@@ -33,6 +33,7 @@
+ static bool CheckFreeformEdges(int32 p1);
+ static bool ChangeDynamicEngines(int32 p1);
+ static bool StationCatchmentChanged(int32 p1);
++static bool ShowOnlyOwnSignsChanged(int32 p1);
+ static bool InvalidateVehTimetableWindow(int32 p1);
+ static bool InvalidateCompanyLiveryWindow(int32 p1);
+ static bool InvalidateNewGRFChangeWindows(int32 p1);
+@@ -2353,6 +2354,12 @@
+ str      = STR_CONFIG_SETTING_EXPENSES_LAYOUT
+ proc     = RedrawScreen
+ 
++[SDTC_BOOL]
++var      = gui.show_only_own_signs
++flags    = SLF_NOT_IN_SAVE | SLF_NO_NETWORK_SYNC
++def      = false
++proc     = ShowOnlyOwnSignsChanged
++
+ 
+ ; For the dedicated build we'll enable dates in logs by default.
+ [SDTC_BOOL]
+diff -r 7af4b7626a34 src/viewport.cpp
+--- a/src/viewport.cpp	Sat Jul 30 00:55:53 2011 +0200
++++ b/src/viewport.cpp	Sat Jul 30 12:04:20 2011 +0200
+@@ -1186,6 +1186,9 @@
+ 		/* Don't draw if the display options are disabled */
+ 		if (!HasBit(_display_opt, is_station ? DO_SHOW_STATION_NAMES : DO_SHOW_WAYPOINT_NAMES)) continue;
+ 
++		/* Don't draw if station is owned by another company and only own signs should be shown. Stations owned by none are never ignored. */
++		if (_settings_client.gui.show_only_own_signs && _local_company != st->owner && st->owner != OWNER_NONE) continue;
++
+ 		ViewportAddString(dpi, ZOOM_LVL_OUT_4X, &st->sign,
+ 				is_station ? STR_VIEWPORT_STATION : STR_VIEWPORT_WAYPOINT,
+ 				(is_station ? STR_VIEWPORT_STATION : STR_VIEWPORT_WAYPOINT) + 1, STR_NULL,
+@@ -1201,6 +1204,9 @@
+ 
+ 	const Sign *si;
+ 	FOR_ALL_SIGNS(si) {
++		/* Don't draw if sign is owned by another company and only own signs should be shown. */
++		if (_settings_client.gui.show_only_own_signs && _local_company != si->owner) continue;
++
+ 		ViewportAddString(dpi, ZOOM_LVL_OUT_4X, &si->sign,
+ 				STR_WHITE_SIGN,
+ 				IsTransparencySet(TO_SIGNS) ? STR_VIEWPORT_SIGN_SMALL_WHITE : STR_VIEWPORT_SIGN_SMALL_BLACK, STR_NULL,

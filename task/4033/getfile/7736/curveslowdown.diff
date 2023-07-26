@@ -1,0 +1,129 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 22858)
++++ src/lang/english.txt	(working copy)
+@@ -1118,8 +1118,9 @@
+ STR_CONFIG_SETTING_SMOKE_AMOUNT                                 :{LTBLUE}Amount of vehicle smoke/sparks: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_TRAIN_ACCELERATION_MODEL                     :{LTBLUE}Train acceleration model: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_ROAD_VEHICLE_ACCELERATION_MODEL              :{LTBLUE}Road vehicle acceleration model: {ORANGE}{STRING1}
+-STR_CONFIG_SETTING_TRAIN_SLOPE_STEEPNESS                        :{LTBLUE}Slope steepness for trains {ORANGE}{STRING1}%
+-STR_CONFIG_SETTING_ROAD_VEHICLE_SLOPE_STEEPNESS                 :{LTBLUE}Slope steepness for road vehicles {ORANGE}{STRING1}%
++STR_CONFIG_SETTING_TRAIN_SLOPE_STEEPNESS                        :{LTBLUE}Slope steepness for trains: {ORANGE}{STRING1}%
++STR_CONFIG_SETTING_ROAD_VEHICLE_SLOPE_STEEPNESS                 :{LTBLUE}Slope steepness for road vehicles: {ORANGE}{STRING1}%
++STR_CONFIG_SETTING_TRAIN_CURVE_SLOWDOWN                         :{LTBLUE}Curve slowdown for trains: {ORANGE}{STRING1}%
+ STR_CONFIG_SETTING_FORBID_90_DEG                                :{LTBLUE}Forbid trains and ships from making 90° turns: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_DISTANT_JOIN_STATIONS                        :{LTBLUE}Allow to join stations not directly adjacent: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_IMPROVEDLOAD                                 :{LTBLUE}Use improved loading algorithm: {ORANGE}{STRING1}
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 22858)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -228,8 +228,9 @@
+  *  161   22567
+  *  162   22713
+  *  163   22767
++ *  164   xxxxx
+  */
+-extern const uint16 SAVEGAME_VERSION = 163; ///< Current savegame version of OpenTTD.
++extern const uint16 SAVEGAME_VERSION = 164; ///< Current savegame version of OpenTTD.
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 22858)
++++ src/settings_gui.cpp	(working copy)
+@@ -1541,6 +1541,7 @@
+ 	SettingEntry("pf.reverse_at_signals"),
+ 	SettingEntry("vehicle.train_acceleration_model"),
+ 	SettingEntry("vehicle.train_slope_steepness"),
++	SettingEntry("vehicle.train_curve_slowdown"),
+ 	SettingEntry("vehicle.max_train_length"),
+ 	SettingEntry("vehicle.wagon_speed_limits"),
+ 	SettingEntry("vehicle.disable_elrails"),
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 22858)
++++ src/settings_type.h	(working copy)
+@@ -372,6 +372,7 @@
+ 	uint8  roadveh_acceleration_model;       ///< realistic acceleration for road vehicles
+ 	uint8  train_slope_steepness;            ///< Steepness of hills for trains when using realistic acceleration
+ 	uint8  roadveh_slope_steepness;          ///< Steepness of hills for road vehicles when using realistic acceleration
++	uint8  train_curve_slowdown;             ///< Slowdown factor for curves for trains when using realistic acceleration
+ 	bool   wagon_speed_limits;               ///< enable wagon speed limits
+ 	bool   disable_elrails;                  ///< when true, the elrails are disabled
+ 	UnitID max_trains;                       ///< max trains in game per company
+Index: src/table/settings.ini
+===================================================================
+--- src/table/settings.ini	(revision 22858)
++++ src/table/settings.ini	(working copy)
+@@ -558,6 +558,18 @@
+ 
+ [SDT_VAR]
+ base     = GameSettings
++var      = vehicle.train_curve_slowdown
++type     = SLE_UINT8
++from     = 164
++def      = 100
++min      = 0
++max      = 250
++interval = 10
++str      = STR_CONFIG_SETTING_TRAIN_CURVE_SLOWDOWN
++proc     = TrainAccelerationModelChanged
++
++[SDT_VAR]
++base     = GameSettings
+ var      = vehicle.roadveh_slope_steepness
+ type     = SLE_UINT8
+ from     = 139
+Index: src/train.h
+===================================================================
+--- src/train.h	(revision 22858)
++++ src/train.h	(working copy)
+@@ -280,6 +280,15 @@
+ 	}
+ 
+ 	/**
++	 * Returns the curve slowdown factor used by this train.
++	 * @return Curve slowdown factor used by the train.
++	 */
++	FORCEINLINE uint32 GetCurveSlowdown() const
++	{
++		return _settings_game.vehicle.train_curve_slowdown;
++	}
++
++	/**
+ 	 * Gets the maximum speed allowed by the track for this vehicle.
+ 	 * @return Maximum speed allowed.
+ 	 */
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 22858)
++++ src/train_cmd.cpp	(working copy)
+@@ -333,7 +333,7 @@
+ 	static const int absolute_max_speed = UINT16_MAX;
+ 	int max_speed = absolute_max_speed;
+ 
+-	if (_settings_game.vehicle.train_acceleration_model == AM_ORIGINAL) return max_speed;
++	if (_settings_game.vehicle.train_acceleration_model == AM_ORIGINAL || this->GetCurveSlowdown() == 0) return max_speed;
+ 
+ 	int curvecount[2] = {0, 0};
+ 
+@@ -355,7 +355,7 @@
+ 			if (lastpos != -1) {
+ 				numcurve++;
+ 				sum += pos - lastpos;
+-				if (pos - lastpos == 1) {
++				if (pos - lastpos == 1 && max_speed > 88) {
+ 					max_speed = 88;
+ 				}
+ 			}
+@@ -388,7 +388,7 @@
+ 		}
+ 	}
+ 
+-	return max_speed;
++	return (max_speed * 100) / this->GetCurveSlowdown();
+ }
+ 
+ /**

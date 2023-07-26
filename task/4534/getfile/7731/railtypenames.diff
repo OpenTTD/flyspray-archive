@@ -1,0 +1,211 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 22855)
++++ src/lang/english.txt	(working copy)
+@@ -2184,6 +2184,7 @@
+ STR_LAND_AREA_INFORMATION_CARGO_ACCEPTED                        :{BLACK}Cargo accepted: {LTBLUE}
+ STR_LAND_AREA_INFORMATION_CARGO_EIGHTS                          :({COMMA}/8 {STRING})
+ STR_LANG_AREA_INFORMATION_RAIL_SPEED_LIMIT                      :{BLACK}Rail speed limit: {LTBLUE}{VELOCITY}
++STR_LAND_AREA_INFORMATION_RAILTYPE_NAME                         :{BLACK}Rail type: {LTBLUE}{STRING}
+ 
+ # Description of land area of different tiles
+ STR_LAI_CLEAR_DESCRIPTION_ROCKS                                 :Rocks
+@@ -3421,6 +3422,12 @@
+ STR_MESSAGE_ESTIMATED_COST                                      :{WHITE}Estimated Cost: {CURRENCY}
+ STR_MESSAGE_ESTIMATED_INCOME                                    :{WHITE}Estimated Income: {CURRENCY}
+ 
++# Railtype names
++STR_RAILTYPE_NAME_RAIL                                          :Rail
++STR_RAILTYPE_NAME_ELRAIL                                        :Electric rail
++STR_RAILTYPE_NAME_MONORAIL                                      :Monorail
++STR_RAILTYPE_NAME_MAGLEV                                        :Maglev track
++
+ # Saveload messages
+ STR_ERROR_SAVE_STILL_IN_PROGRESS                                :{WHITE}Saving still in progress,{}please wait until it is finished!
+ STR_ERROR_AUTOSAVE_FAILED                                       :{WHITE}Autosave failed
+Index: src/misc_gui.cpp
+===================================================================
+--- src/misc_gui.cpp	(revision 22855)
++++ src/misc_gui.cpp	(working copy)
+@@ -169,6 +169,7 @@
+ 		td.airport_name = STR_NULL;
+ 		td.airport_tile_name = STR_NULL;
+ 		td.rail_speed = 0;
++		td.railtype_name = STR_NULL;
+ 
+ 		td.grf = NULL;
+ 
+@@ -277,6 +278,13 @@
+ 			line_nr++;
+ 		}
+ 
++		/* Railtype name */
++		if (td.railtype_name != STR_NULL) {
++			SetDParam(0, td.railtype_name);
++			GetString(this->landinfo_data[line_nr], STR_LAND_AREA_INFORMATION_RAILTYPE_NAME, lastof(this->landinfo_data[line_nr]));
++			line_nr++;
++		}
++
+ 		/* Rail speed limit */
+ 		if (td.rail_speed != 0) {
+ 			SetDParam(0, td.rail_speed);
+Index: src/newgrf.cpp
+===================================================================
+--- src/newgrf.cpp	(revision 22855)
++++ src/newgrf.cpp	(working copy)
+@@ -3473,7 +3473,7 @@
+ 				buf->ReadDWord();
+ 				break;
+ 
+-			case 0x09: // Name of railtype
++			case 0x09: // Toolbar caption
+ 				rti->strings.toolbar_caption = buf->ReadWord();
+ 				_string_to_grf_mapping[&rti->strings.toolbar_caption] = _cur.grffile->grfid;
+ 				break;
+@@ -3558,6 +3558,11 @@
+ 				rti->sorting_order = buf->ReadByte();
+ 				break;
+ 
++			case 0x1B: // (Actual) name of railtype
++				rti->strings.name = buf->ReadWord();
++				_string_to_grf_mapping[&rti->strings.name] = _cur.grffile->grfid;
++				break;
++
+ 			default:
+ 				ret = CIR_UNKNOWN;
+ 				break;
+@@ -3593,13 +3598,14 @@
+ 				break;
+ 			}
+ 
+-			case 0x09: // Name of railtype
++			case 0x09: // Toolbar caption
+ 			case 0x0A: // Menu text
+ 			case 0x0B: // Build window caption
+ 			case 0x0C: // Autoreplace text
+ 			case 0x0D: // New loco
+ 			case 0x13: // Construction cost
+ 			case 0x14: // Speed limit
++			case 0x1B: // (Actual) name of railtype
+ 				buf->ReadWord();
+ 				break;
+ 
+Index: src/rail.h
+===================================================================
+--- src/rail.h	(revision 22855)
++++ src/rail.h	(working copy)
+@@ -151,6 +151,7 @@
+ 		StringID build_caption;
+ 		StringID replace_text;
+ 		StringID new_loco;
++		StringID name;
+ 	} strings;
+ 
+ 	/** sprite number difference between a piece of track on a snowy ground and the corresponding one on normal ground */
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(revision 22855)
++++ src/rail_cmd.cpp	(working copy)
+@@ -113,6 +113,10 @@
+ 			 * other railtypes, the 7 is to be able to place something
+ 			 * before the first (default) rail type. */
+ 			rti->sorting_order = rt << 4 | 7;
++
++			/* Don't copy across the railtype name, leave it undefined. */
++			rti->strings.name = INVALID_STRING_ID;
++
+ 			return rt;
+ 		}
+ 	}
+@@ -2594,6 +2598,7 @@
+ {
+ 	const RailtypeInfo *rti = GetRailTypeInfo(GetRailType(tile));
+ 	td->rail_speed = rti->max_speed;
++	if (rti->strings.name != INVALID_STRING_ID) td->railtype_name = rti->strings.name;
+ 	td->owner[0] = GetTileOwner(tile);
+ 	switch (GetRailTileType(tile)) {
+ 		case RAIL_TILE_NORMAL:
+Index: src/road_cmd.cpp
+===================================================================
+--- src/road_cmd.cpp	(revision 22855)
++++ src/road_cmd.cpp	(working copy)
+@@ -1573,6 +1573,7 @@
+ 
+ 			const RailtypeInfo *rti = GetRailTypeInfo(GetRailType(tile));
+ 			td->rail_speed = rti->max_speed;
++			if (rti->strings.name != INVALID_STRING_ID) td->railtype_name = rti->strings.name;
+ 
+ 			break;
+ 		}
+Index: src/station_cmd.cpp
+===================================================================
+--- src/station_cmd.cpp	(revision 22855)
++++ src/station_cmd.cpp	(working copy)
+@@ -2826,6 +2826,7 @@
+ 
+ 		const RailtypeInfo *rti = GetRailTypeInfo(GetRailType(tile));
+ 		td->rail_speed = rti->max_speed;
++		if (rti->strings.name != INVALID_STRING_ID) td->railtype_name = rti->strings.name;
+ 	}
+ 
+ 	if (IsAirport(tile)) {
+Index: src/table/railtypes.h
+===================================================================
+--- src/table/railtypes.h	(revision 22855)
++++ src/table/railtypes.h	(working copy)
+@@ -54,6 +54,7 @@
+ 			STR_BUY_VEHICLE_TRAIN_RAIL_CAPTION,
+ 			STR_REPLACE_RAIL_VEHICLES,
+ 			STR_ENGINE_PREVIEW_RAILROAD_LOCOMOTIVE,
++			STR_RAILTYPE_NAME_RAIL,
+ 		},
+ 
+ 		/* Offset of snow tiles */
+@@ -147,6 +148,7 @@
+ 			STR_BUY_VEHICLE_TRAIN_ELRAIL_CAPTION,
+ 			STR_REPLACE_ELRAIL_VEHICLES,
+ 			STR_ENGINE_PREVIEW_RAILROAD_LOCOMOTIVE,
++			STR_RAILTYPE_NAME_ELRAIL,
+ 		},
+ 
+ 		/* Offset of snow tiles */
+@@ -236,6 +238,7 @@
+ 			STR_BUY_VEHICLE_TRAIN_MONORAIL_CAPTION,
+ 			STR_REPLACE_MONORAIL_VEHICLES,
+ 			STR_ENGINE_PREVIEW_MONORAIL_LOCOMOTIVE,
++			STR_RAILTYPE_NAME_MONORAIL,
+ 		},
+ 
+ 		/* Offset of snow tiles */
+@@ -325,6 +328,7 @@
+ 			STR_BUY_VEHICLE_TRAIN_MAGLEV_CAPTION,
+ 			STR_REPLACE_MAGLEV_VEHICLES,
+ 			STR_ENGINE_PREVIEW_MAGLEV_LOCOMOTIVE,
++			STR_RAILTYPE_NAME_MAGLEV,
+ 		},
+ 
+ 		/* Offset of snow tiles */
+Index: src/tile_cmd.h
+===================================================================
+--- src/tile_cmd.h	(revision 22855)
++++ src/tile_cmd.h	(working copy)
+@@ -63,6 +63,7 @@
+ 	const char *grf;            ///< newGRF used for the tile contents
+ 	uint64 dparam[2];           ///< Parameters of the \a str string
+ 	uint16 rail_speed;          ///< Speed limit of rail
++	StringID railtype_name;     ///< Name of the railtype
+ };
+ 
+ /**
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 22855)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -1438,6 +1438,7 @@
+ 	if (tt == TRANSPORT_RAIL) {
+ 		const RailtypeInfo *rti = GetRailTypeInfo(GetRailType(tile));
+ 		td->rail_speed = rti->max_speed;
++		if (rti->strings.name != INVALID_STRING_ID) td->railtype_name = rti->strings.name;
+ 
+ 		if (!IsTunnel(tile)) {
+ 			uint16 spd = GetBridgeSpec(GetBridgeType(tile))->speed;
