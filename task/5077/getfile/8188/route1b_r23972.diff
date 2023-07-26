@@ -1,0 +1,728 @@
+diff -r ace482f62075 .hgtags
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/.hgtags	Mon Feb 20 13:10:52 2012 -0700
+@@ -0,0 +1,1 @@
++85368bffa833f4d59996b2683b8ea1c89a4af6d8 orderlistvehiclefriend
+diff -r ace482f62075 src/economy.cpp
+--- a/src/economy.cpp	Mon Feb 20 18:45:21 2012 +0000
++++ b/src/economy.cpp	Mon Feb 20 13:10:52 2012 -0700
+@@ -1499,7 +1499,7 @@
+ 		/* We loaded less cargo than possible for all cargo types and it's not full
+ 		 * load and we're not supposed to wait any longer: stop loading. */
+ 		if (!anything_unloaded && full_load_amount == 0 && !(front->current_order.GetLoadType() & OLFB_FULL_LOAD) &&
+-				front->current_order_time >= (uint)max(front->current_order.wait_time - front->lateness_counter, 0)) {
++				HasBit(front->vehicle_flags, VF_DEPARTURE_AUTHORIZED)) {
+ 			SetBit(front->vehicle_flags, VF_STOP_LOADING);
+ 		}
+ 	} else {
+@@ -1585,6 +1585,8 @@
+ 
+ 		assert(v->load_unload_ticks != 0);
+ 		if (--v->load_unload_ticks == 0) last_loading = v;
++
++		v->orders.list->CheckVehicleDeparture(v);
+ 	}
+ 
+ 	/* We only need to reserve and load/unload up to the last loading vehicle.
+diff -r ace482f62075 src/order_backup.cpp
+--- a/src/order_backup.cpp	Mon Feb 20 18:45:21 2012 +0000
++++ b/src/order_backup.cpp	Mon Feb 20 13:10:52 2012 -0700
+@@ -84,7 +84,7 @@
+ 	if (this->clone != NULL) {
+ 		DoCommand(0, v->index | CO_SHARE << 30, this->clone->index, DC_EXEC, CMD_CLONE_ORDER);
+ 	} else if (this->orders != NULL && OrderList::CanAllocateItem()) {
+-		v->orders.list = new OrderList(this->orders, v);
++		new OrderList(this->orders, v);
+ 		this->orders = NULL;
+ 		/* Make sure buoys/oil rigs are updated in the station list. */
+ 		InvalidateWindowClassesData(WC_STATION_LIST, 0);
+diff -r ace482f62075 src/order_base.h
+--- a/src/order_base.h	Mon Feb 20 18:45:21 2012 +0000
++++ b/src/order_base.h	Mon Feb 20 13:10:52 2012 -0700
+@@ -18,9 +18,11 @@
+ #include "cargo_type.h"
+ #include "depot_type.h"
+ #include "station_type.h"
+-#include "vehicle_type.h"
++#include "vehiclelist.h"
+ #include "date_type.h"
+ 
++static const uint8 DEPARTURE_WAITING = 0xFF;
++
+ typedef Pool<Order, OrderID, 256, 64000> OrderPool;
+ typedef Pool<OrderList, OrderListID, 128, 64000> OrderListPool;
+ extern OrderPool _order_pool;
+@@ -36,6 +38,7 @@
+ 	friend const struct SaveLoad *GetVehicleDescription(VehicleType vt); ///< Saving and loading the current order of vehicles.
+ 	friend void Load_VEHS();                                             ///< Loading of ancient vehicles.
+ 	friend const struct SaveLoad *GetOrderDescription();                 ///< Saving and loading of orders.
++	friend class OrderList;
+ 
+ 	uint8 type;           ///< The type of order + non-stop flags
+ 	uint8 flags;          ///< Load/unload types, depot order/action types.
+@@ -50,6 +53,8 @@
+ 	uint16 wait_time;    ///< How long in ticks to wait at the destination.
+ 	uint16 travel_time;  ///< How long in ticks the journey to this destination should take.
+ 	uint16 max_speed;    ///< How fast the vehicle may go on the way to the destination.
++	uint8 timetable_departures;  ///< How many departure windows are pending, or DEPARTURE_WAITING if a vehicle is waiting.
++	uint8 timetable_lateness;    ///< Value tracking how frequently vehicles are late.
+ 
+ 	Order() : refit_cargo(CT_NO_REFIT), max_speed(UINT16_MAX) {}
+ 	~Order();
+@@ -181,7 +186,11 @@
+ 	/** Checks if this order has travel_time and if needed wait_time set. */
+ 	inline bool IsCompletelyTimetabled() const
+ 	{
+-		if (this->travel_time == 0 && !this->IsType(OT_CONDITIONAL)) return false;
++		/* Implicit or depot orders are just something you do on the way to a real order. */
++		if (this->IsType(OT_IMPLICIT) || this->IsType(OT_GOTO_DEPOT)) return true;
++		/* Conditional can't be timetabled. */
++		if (this->IsType(OT_CONDITIONAL)) return false;
++		if (this->travel_time == 0) return false;
+ 		if (this->wait_time == 0 && this->IsType(OT_GOTO_STATION) && !(this->GetNonStopType() & ONSF_NO_STOP_AT_DESTINATION_STATION)) return false;
+ 		return true;
+ 	}
+@@ -213,12 +222,13 @@
+ 	Vehicle *first_shared;            ///< NOSAVE: pointer to the first vehicle in the shared order chain.
+ 
+ 	Ticks timetable_duration;         ///< NOSAVE: Total duration of the order list
++	Ticks timetable_progress;         ///< How far through the cycle the order list is.
+ 
+ public:
+ 	/** Default constructor producing an invalid order list. */
+ 	OrderList(VehicleOrderID num_orders = INVALID_VEH_ORDER_ID)
+ 		: first(NULL), num_orders(num_orders), num_manual_orders(0), num_vehicles(0), first_shared(NULL),
+-		  timetable_duration(0) { }
++		  timetable_duration(0), timetable_progress(0) { }
+ 
+ 	/**
+ 	 * Create an order list with the given order chain for the given vehicle.
+@@ -232,6 +242,8 @@
+ 
+ 	void Initialize(Order *chain, Vehicle *v);
+ 
++	void Tick();
++
+ 	/**
+ 	 * Get the first order of the order chain.
+ 	 * @return the first order of the chain.
+@@ -285,14 +297,16 @@
+ 
+ 	/**
+ 	 * Adds the given vehicle to this shared order list.
+-	 * @note This is supposed to be called after the vehicle has been inserted
+-	 *       into the shared vehicle chain.
+-	 * @param v vehicle to add to the list
++	 * @param src vehicle to add to the list
++	 * @param dst vehicle to place src after
++	 * @note dst->orders.list must be a valid OrderList pointer (or NULL).  src->orders.list may be invalid and is unconditionally replaced.
+ 	 */
+-	inline void AddVehicle(Vehicle *v) { ++this->num_vehicles; }
++	static void AddVehicle(Vehicle *src, Vehicle *dst);
+ 
+ 	void RemoveVehicle(Vehicle *v);
+ 
++	void CheckVehicleDeparture(Vehicle *v);
++
+ 	bool IsCompleteTimetable() const;
+ 
+ 	/**
+diff -r ace482f62075 src/order_cmd.cpp
+--- a/src/order_cmd.cpp	Mon Feb 20 18:45:21 2012 +0000
++++ b/src/order_cmd.cpp	Mon Feb 20 13:10:52 2012 -0700
+@@ -14,6 +14,7 @@
+ #include "cmd_helper.h"
+ #include "command_func.h"
+ #include "company_func.h"
++#include "date_func.h"
+ #include "news_func.h"
+ #include "strings_func.h"
+ #include "timetable.h"
+@@ -242,6 +243,8 @@
+ 	this->wait_time     = 0;
+ 	this->travel_time   = 0;
+ 	this->max_speed     = UINT16_MAX;
++	this->timetable_departures = 0;
++	this->timetable_lateness = 0;
+ }
+ 
+ /**
+@@ -292,6 +295,8 @@
+  */
+ void OrderList::Initialize(Order *chain, Vehicle *v)
+ {
++	assert(v != NULL);
++
+ 	this->first = chain;
+ 	this->first_shared = v;
+ 
+@@ -299,6 +304,7 @@
+ 	this->num_manual_orders = 0;
+ 	this->num_vehicles = 1;
+ 	this->timetable_duration = 0;
++	this->timetable_progress = 0;
+ 
+ 	for (Order *o = this->first; o != NULL; o = o->next) {
+ 		++this->num_orders;
+@@ -312,6 +318,8 @@
+ 	}
+ 
+ 	for (const Vehicle *u = v->NextShared(); u != NULL; u = u->NextShared()) ++this->num_vehicles;
++
++	v->orders.list = this;
+ }
+ 
+ /**
+@@ -337,6 +345,63 @@
+ 	}
+ }
+ 
++void OrderList::Tick()
++{
++	if (!this->IsCompleteTimetable()) return;
++
++	Ticks newprogress = this->timetable_progress + 1;
++	if (((this->timetable_duration % DAY_TICKS) == 0) && newprogress % DAY_TICKS != _date_fract) {
++		/* Punt until we've resynced with the day.  Just for aesthetics at this point. */
++		return;
++	}
++
++	int offset = this->timetable_duration;  // Start high to avoid C's unhelpful modulus of negatives behaviour.
++	for (Order *order = this->first; order != NULL; order = order->next) {
++		if (order->IsType(OT_IMPLICIT) || order->IsType(OT_GOTO_DEPOT)) continue;
++
++		offset -= order->travel_time + order->wait_time;
++
++		int before = (this->timetable_progress + offset) * (int32)this->num_vehicles / this->timetable_duration;
++		int after = (newprogress + offset) * (int32)this->num_vehicles / this->timetable_duration;
++		if (after > before) {
++			if (order->timetable_departures == DEPARTURE_WAITING) {
++				/* A vehicle is waiting, meaning they're not late. */
++				order->timetable_departures = 0;
++			} else {
++				/* No vehicle waiting.  They're late. */
++				order->timetable_lateness += 20;
++				if (order->timetable_lateness >= 100) {
++					order->timetable_lateness = 0;
++					continue;  // Skip this departure.  Any existing ones remain.
++				}
++			}
++
++			order->timetable_departures = min(order->timetable_departures + 1, 3);
++		}
++	}
++
++	this->timetable_progress = newprogress % this->timetable_duration;
++}
++
++void OrderList::CheckVehicleDeparture(Vehicle *v)
++{
++	if (!this->IsCompleteTimetable() || v->current_order.IsType(OT_IMPLICIT) || HasBit(v->vehicle_flags, VF_DEPARTURE_AUTHORIZED)) return;
++	assert(!v->current_order.IsType(OT_GOTO_DEPOT));
++
++	Order *order = v->GetOrder(v->cur_real_order_index);
++	if (order->timetable_departures == DEPARTURE_WAITING) {
++		/* A vehicle (possibly this one) has already marked the order as waiting, so do nothing. */
++	} else if (order->timetable_departures == 0) {
++		/* Arrival is on-time, so let the Order know. */
++		order->timetable_lateness = max(0, (int)order->timetable_lateness - 10);
++		order->timetable_departures = DEPARTURE_WAITING;
++	} else {
++		/* Pending departures (vehicle is late). */
++		order->timetable_departures -= 1;
++		SetBit(v->vehicle_flags, VF_DEPARTURE_AUTHORIZED);
++	}
++}
++
+ /**
+  * Get a certain order of the order chain.
+  * @param index zero-based index of the order within the chain.
+@@ -449,14 +514,64 @@
+ }
+ 
+ /**
++ * Adds the given vehicle to this shared order list.
++ * @param src vehicle to add to the list
++ * @param dst vehicle to place src after
++ * @note dst->orders.list must be a valid OrderList pointer (or NULL).  src->orders.list may be invalid and is unconditionally replaced.
++ */
++void OrderList::AddVehicle(Vehicle *src, Vehicle *dst)
++{
++	assert(src->previous_shared == NULL && src->next_shared == NULL);
++
++	if (dst->orders.list == NULL)
++		new OrderList(NULL, dst);
++
++	src->next_shared     = dst->next_shared;
++	src->previous_shared = dst;
++	dst->next_shared = src;
++
++	if (src->next_shared != NULL)
++		src->next_shared->previous_shared = src;
++
++	++dst->orders.list->num_vehicles;
++
++	src->orders.list = dst->orders.list;
++}
++
++/**
+  * Removes the vehicle from the shared order list.
+- * @note This is supposed to be called when the vehicle is still in the chain
+  * @param v vehicle to remove from the list
+  */
+ void OrderList::RemoveVehicle(Vehicle *v)
+ {
++	assert(this->num_vehicles >= 2);
++	assert(v->orders.list == this);
++	/* Remember if they were first and the old window number as we may change that. */
++	bool were_first = (this->first_shared == v);
++	VehicleListIdentifier vli(VL_SHARED_ORDERS, v->type, v->owner, this->first_shared->index);
++
+ 	--this->num_vehicles;
+ 	if (v == this->first_shared) this->first_shared = v->NextShared();
++
++	if (!were_first) {
++		/* They are not the first shared one, so only relink the previous one. */
++		v->previous_shared->next_shared = v->NextShared();
++	}
++
++	if (v->next_shared != NULL) v->next_shared->previous_shared = v->previous_shared;
++
++	v->next_shared     = NULL;
++	v->previous_shared = NULL;
++	v->orders.list = NULL;
++
++	if (this->GetNumVehicles() == 1) {
++		/* When there is only one vehicle, remove the shared order list window. */
++		DeleteWindowById(GetWindowClassForVehicleType(v->type), vli.Pack());
++		InvalidateVehicleOrder(this->first_shared, 0);
++	} else if (were_first) {
++		/* If they were the first one, update to the new first one. */
++		InvalidateWindowData(GetWindowClassForVehicleType(v->type), vli.Pack(), this->first_shared->index | (1U << 31));
++	}
+ }
+ 
+ /**
+@@ -490,9 +605,9 @@
+  */
+ bool OrderList::IsCompleteTimetable() const
+ {
++	if (this->timetable_duration == 0) return false;
++
+ 	for (Order *o = this->first; o != NULL; o = o->next) {
+-		/* Implicit orders are, by definition, not timetabled. */
+-		if (o->IsType(OT_IMPLICIT)) continue;
+ 		if (!o->IsCompletelyTimetabled()) return false;
+ 	}
+ 	return true;
+@@ -847,7 +962,7 @@
+ {
+ 	/* Create new order and link in list */
+ 	if (v->orders.list == NULL) {
+-		v->orders.list = new OrderList(new_o, v);
++		new OrderList(new_o, v);
+ 	} else {
+ 		v->orders.list->InsertOrderAt(new_o, sel_ord);
+ 	}
+@@ -1492,10 +1607,8 @@
+ 				 * (We mainly do this to keep the order indices valid and in range.) */
+ 				DeleteVehicleOrders(dst, false, dst->GetNumOrders() != src->GetNumOrders());
+ 
+-				dst->orders.list = src->orders.list;
+-
+ 				/* Link this vehicle in the shared-list */
+-				dst->AddToShared(src);
++				OrderList::AddVehicle(dst, src); // XXX Argument names are backwards
+ 
+ 				InvalidateVehicleOrder(dst, -1);
+ 				InvalidateVehicleOrder(src, -2);
+@@ -1551,13 +1664,13 @@
+ 					order_dst = &(*order_dst)->next;
+ 				}
+ 				if (dst->orders.list == NULL) {
+-					dst->orders.list = new OrderList(first, dst);
++					new OrderList(first, dst);
+ 				} else {
+ 					assert(dst->orders.list->GetFirstOrder() == NULL);
+ 					assert(!dst->orders.list->IsShared());
+ 					delete dst->orders.list;
+ 					assert(OrderList::CanAllocateItem());
+-					dst->orders.list = new OrderList(first, dst);
++					new OrderList(first, dst);
+ 				}
+ 
+ 				InvalidateVehicleOrder(dst, -1);
+@@ -1792,8 +1905,7 @@
+ 
+ 	if (v->IsOrderListShared()) {
+ 		/* Remove ourself from the shared order list. */
+-		v->RemoveFromShared();
+-		v->orders.list = NULL;
++		v->orders.list->RemoveVehicle(v);
+ 	} else if (v->orders.list != NULL) {
+ 		/* Remove the orders */
+ 		v->orders.list->FreeChain(keep_orderlist);
+diff -r ace482f62075 src/saveload/order_sl.cpp
+--- a/src/saveload/order_sl.cpp	Mon Feb 20 18:45:21 2012 +0000
++++ b/src/saveload/order_sl.cpp	Mon Feb 20 13:10:52 2012 -0700
+@@ -111,6 +111,8 @@
+ 		 SLE_CONDVAR(Order, wait_time,      SLE_UINT16,  67, SL_MAX_VERSION),
+ 		 SLE_CONDVAR(Order, travel_time,    SLE_UINT16,  67, SL_MAX_VERSION),
+ 		 SLE_CONDVAR(Order, max_speed,      SLE_UINT16, 172, SL_MAX_VERSION),
++		 SLE_CONDVAR(Order, timetable_departures, SLE_UINT8, 174, SL_MAX_VERSION),
++		 SLE_CONDVAR(Order, timetable_lateness, SLE_UINT8, 174, SL_MAX_VERSION),
+ 
+ 		/* Leftover from the minor savegame version stuff
+ 		 * We will never use those free bytes, but we have to keep this line to allow loading of old savegames */
+@@ -204,6 +206,7 @@
+ {
+ 	static const SaveLoad _orderlist_desc[] = {
+ 		SLE_REF(OrderList, first,              REF_ORDER),
++		SLE_CONDVAR(OrderList, timetable_progress, SLE_UINT16,                       173, SL_MAX_VERSION),
+ 		SLE_END()
+ 	};
+ 
+@@ -229,7 +232,6 @@
+ 		OrderList *list = new (index) OrderList(0);
+ 		SlObject(list, GetOrderListDescription());
+ 	}
+-
+ }
+ 
+ static void Ptrs_ORDL()
+diff -r ace482f62075 src/saveload/saveload.cpp
+--- a/src/saveload/saveload.cpp	Mon Feb 20 18:45:21 2012 +0000
++++ b/src/saveload/saveload.cpp	Mon Feb 20 13:10:52 2012 -0700
+@@ -237,8 +237,9 @@
+  *  171   23835
+  *  172   23947
+  *  173   23967   1.2.x
++ *  174   ??? To be adjusted if accepted :P
+  */
+-extern const uint16 SAVEGAME_VERSION = 173; ///< Current savegame version of OpenTTD.
++extern const uint16 SAVEGAME_VERSION = 174; ///< Current savegame version of OpenTTD.
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+diff -r ace482f62075 src/saveload/vehicle_sl.cpp
+--- a/src/saveload/vehicle_sl.cpp	Mon Feb 20 18:45:21 2012 +0000
++++ b/src/saveload/vehicle_sl.cpp	Mon Feb 20 13:10:52 2012 -0700
+@@ -275,12 +275,14 @@
+ 						 * allowed in these savegames matches the number of OrderLists. As
+ 						 * such each vehicle can get an OrderList and it will (still) fit. */
+ 						assert(OrderList::CanAllocateItem());
+-						v->orders.list = mapping[v->orders.old] = new OrderList(v->orders.old, v);
++						Order *old = v->orders.old;  // OrderList() overwrites this, so save a copy
++						mapping[old] = new OrderList(v->orders.old, v);
+ 					} else {
+-						v->orders.list = mapping[v->orders.old];
+ 						/* For old games (case a) we must create the shared vehicle chain */
+ 						if (IsSavegameVersionBefore(5, 2)) {
+-							v->AddToShared(v->orders.list->GetFirstSharedVehicle());
++							OrderList::AddVehicle(v, mapping[v->orders.old]->GetFirstSharedVehicle());
++						} else {
++							v->orders.list = mapping[v->orders.old];
+ 						}
+ 					}
+ 				} else { // OrderList was saved as such, only recalculate not saved values
+@@ -309,7 +311,7 @@
+ 
+ 				/* As above, allocating OrderList here is safe. */
+ 				assert(OrderList::CanAllocateItem());
+-				v->orders.list = new OrderList(NULL, v);
++				new OrderList(NULL, v);
+ 				for (Vehicle *u = v; u != NULL; u = u->next_shared) {
+ 					u->orders.list = v->orders.list;
+ 				}
+@@ -652,7 +654,8 @@
+ 
+ 		     SLE_VAR(Vehicle, load_unload_ticks,     SLE_UINT16),
+ 		SLEG_CONDVAR(         _cargo_paid_for,       SLE_UINT16,                  45, SL_MAX_VERSION),
+-		 SLE_CONDVAR(Vehicle, vehicle_flags,         SLE_UINT8,                   40, SL_MAX_VERSION),
++		 SLE_CONDVAR(Vehicle, vehicle_flags,         SLE_FILE_U8 | SLE_VAR_U16  , 40, 173),
++		 SLE_CONDVAR(Vehicle, vehicle_flags,         SLE_UINT16,                   174, SL_MAX_VERSION),
+ 
+ 		 SLE_CONDVAR(Vehicle, profit_this_year,      SLE_FILE_I32 | SLE_VAR_I64,   0,  64),
+ 		 SLE_CONDVAR(Vehicle, profit_this_year,      SLE_INT64,                   65, SL_MAX_VERSION),
+diff -r ace482f62075 src/timetable_gui.cpp
+--- a/src/timetable_gui.cpp	Mon Feb 20 18:45:21 2012 +0000
++++ b/src/timetable_gui.cpp	Mon Feb 20 13:10:52 2012 -0700
+@@ -53,6 +53,7 @@
+ 	}
+ }
+ 
++#if 0
+ /**
+  * Sets the arrival or departure string and parameters.
+  * @param param1 the first DParam to fill
+@@ -64,6 +65,7 @@
+ 	SetDParam(param1, STR_JUST_DATE_TINY);
+ 	SetDParam(param2, _date + (ticks / DAY_TICKS));
+ }
++#endif
+ 
+ /**
+  * Check whether it is possible to determine how long the order takes.
+@@ -144,6 +146,7 @@
+ }
+ 
+ 
++#if 0
+ /**
+  * Callback for when a time has been chosen to start the time table
+  * @param window the window related to the setting of the date
+@@ -153,6 +156,7 @@
+ {
+ 	DoCommandP(0, w->window_number, date, CMD_SET_TIMETABLE_START | CMD_MSG(STR_ERROR_CAN_T_TIMETABLE_VEHICLE));
+ }
++#endif
+ 
+ 
+ struct TimetableWindow : Window {
+@@ -328,8 +332,10 @@
+ 			this->SetWidgetDisabledState(WID_VT_CLEAR_SPEED, disable_speed);
+ 			this->SetWidgetDisabledState(WID_VT_SHARED_ORDER_LIST, !v->IsOrderListShared());
+ 
+-			this->EnableWidget(WID_VT_START_DATE);
+-			this->EnableWidget(WID_VT_RESET_LATENESS);
++			this->DisableWidget(WID_VT_START_DATE);
++			this->DisableWidget(WID_VT_RESET_LATENESS);
++			this->DisableWidget(WID_VT_ARRIVAL_DEPARTURE_PANEL);
++			this->DisableWidget(WID_VT_EXPECTED);
+ 			this->EnableWidget(WID_VT_AUTOFILL);
+ 		} else {
+ 			this->DisableWidget(WID_VT_START_DATE);
+@@ -338,6 +344,8 @@
+ 			this->DisableWidget(WID_VT_CHANGE_SPEED);
+ 			this->DisableWidget(WID_VT_CLEAR_SPEED);
+ 			this->DisableWidget(WID_VT_RESET_LATENESS);
++			this->DisableWidget(WID_VT_ARRIVAL_DEPARTURE_PANEL);
++			this->DisableWidget(WID_VT_EXPECTED);
+ 			this->DisableWidget(WID_VT_AUTOFILL);
+ 			this->DisableWidget(WID_VT_SHARED_ORDER_LIST);
+ 		}
+@@ -416,6 +424,7 @@
+ 			}
+ 
+ 			case WID_VT_ARRIVAL_DEPARTURE_PANEL: {
++#if 0
+ 				/* Arrival and departure times are handled in an all-or-nothing approach,
+ 				 * i.e. are only shown if we can calculate all times.
+ 				 * Excluding order lists with only one order makes some things easier.
+@@ -463,6 +472,7 @@
+ 					}
+ 					y += FONT_HEIGHT_NORMAL;
+ 				}
++#endif
+ 				break;
+ 			}
+ 
+@@ -476,6 +486,7 @@
+ 				}
+ 				y += FONT_HEIGHT_NORMAL;
+ 
++#if 0
+ 				if (v->timetable_start != 0) {
+ 					/* We are running towards the first station so we can start the
+ 					 * timetable at the given time. */
+@@ -492,6 +503,7 @@
+ 					SetTimetableParams(0, 1, abs(v->lateness_counter));
+ 					DrawString(r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, y, v->lateness_counter < 0 ? STR_TIMETABLE_STATUS_EARLY : STR_TIMETABLE_STATUS_LATE);
+ 				}
++#endif
+ 				break;
+ 			}
+ 		}
+@@ -525,7 +537,9 @@
+ 			}
+ 
+ 			case WID_VT_START_DATE: // Change the date that the timetable starts.
++#if 0
+ 				ShowSetDateWindow(this, v->index, _date, _cur_year, _cur_year + 15, ChangeTimetableStartCallback);
++#endif
+ 				break;
+ 
+ 			case WID_VT_CHANGE_TIME: { // "Wait For" button.
+@@ -585,7 +599,9 @@
+ 			}
+ 
+ 			case WID_VT_RESET_LATENESS: // Reset the vehicle's late counter.
++#if 0
+ 				DoCommandP(0, v->index, 0, CMD_SET_VEHICLE_ON_TIME | CMD_MSG(STR_ERROR_CAN_T_TIMETABLE_VEHICLE));
++#endif
+ 				break;
+ 
+ 			case WID_VT_AUTOFILL: { // Autofill the timetable.
+@@ -671,14 +687,14 @@
+ 				NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_VT_CLEAR_SPEED), SetResize(1, 0), SetFill(1, 1), SetDataTip(STR_TIMETABLE_CLEAR_SPEED, STR_TIMETABLE_CLEAR_SPEED_TOOLTIP),
+ 			EndContainer(),
+ 			NWidget(NWID_VERTICAL, NC_EQUALSIZE),
+-				NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_VT_START_DATE), SetResize(1, 0), SetFill(1, 1), SetDataTip(STR_TIMETABLE_STARTING_DATE, STR_TIMETABLE_STARTING_DATE_TOOLTIP),
+-				NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_VT_RESET_LATENESS), SetResize(1, 0), SetFill(1, 1), SetDataTip(STR_TIMETABLE_RESET_LATENESS, STR_TIMETABLE_RESET_LATENESS_TOOLTIP),
++				NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_VT_START_DATE), SetResize(1, 0), SetFill(1, 1),
++				NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_VT_RESET_LATENESS), SetResize(1, 0), SetFill(1, 1),
+ 			EndContainer(),
+ 			NWidget(NWID_VERTICAL, NC_EQUALSIZE),
+ 				NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_VT_AUTOFILL), SetResize(1, 0), SetFill(1, 1), SetDataTip(STR_TIMETABLE_AUTOFILL, STR_TIMETABLE_AUTOFILL_TOOLTIP),
+ 				NWidget(NWID_SELECTION, INVALID_COLOUR, WID_VT_EXPECTED_SELECTION),
+-					NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_VT_EXPECTED), SetResize(1, 0), SetFill(1, 1), SetDataTip(STR_BLACK_STRING, STR_TIMETABLE_EXPECTED_TOOLTIP),
+-					NWidget(WWT_PANEL, COLOUR_GREY), SetResize(1, 0), SetFill(1, 1), EndContainer(),
++					NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_VT_EXPECTED), SetResize(1, 0), SetFill(1, 1),
++					NWidget(WWT_PANEL, COLOUR_GREY, WID_VT_EXPECTED), SetResize(1, 0), SetFill(1, 1), EndContainer(),
+ 				EndContainer(),
+ 			EndContainer(),
+ 		EndContainer(),
+diff -r ace482f62075 src/train_cmd.cpp
+--- a/src/train_cmd.cpp	Mon Feb 20 18:45:21 2012 +0000
++++ b/src/train_cmd.cpp	Mon Feb 20 13:10:52 2012 -0700
+@@ -1354,8 +1354,7 @@
+ 		if (v == first && v->IsEngine() && !sell_chain && new_head != NULL && new_head->IsFrontEngine()) {
+ 			/* We are selling the front engine. In this case we want to
+ 			 * 'give' the order, unit number and such to the new head. */
+-			new_head->orders.list = first->orders.list;
+-			new_head->AddToShared(first);
++			OrderList::AddVehicle(new_head, first);
+ 			DeleteVehicleOrders(first);
+ 
+ 			/* Copy other important data from the front engine */
+diff -r ace482f62075 src/vehicle.cpp
+--- a/src/vehicle.cpp	Mon Feb 20 18:45:21 2012 +0000
++++ b/src/vehicle.cpp	Mon Feb 20 13:10:52 2012 -0700
+@@ -847,6 +847,9 @@
+ 
+ 	RunVehicleDayProc();
+ 
++	OrderList *list;
++	FOR_ALL_ORDER_LISTS(list) list->Tick();
++
+ 	Station *st;
+ 	FOR_ALL_STATIONS(st) LoadUnloadStation(st);
+ 
+@@ -1995,7 +1998,14 @@
+ 			uint wait_time = max(this->current_order.wait_time - this->lateness_counter, 0);
+ 
+ 			/* Not the first call for this tick, or still loading */
+-			if (mode || !HasBit(this->vehicle_flags, VF_LOADING_FINISHED) || this->current_order_time < wait_time) return;
++			if (mode || !HasBit(this->vehicle_flags, VF_LOADING_FINISHED)) return;
++			if (this->orders.list->IsCompleteTimetable()) {
++				if (!HasBit(this->vehicle_flags, VF_DEPARTURE_AUTHORIZED)) return;
++
++				ClrBit(this->vehicle_flags, VF_DEPARTURE_AUTHORIZED);
++			} else {
++				if (this->current_order_time < wait_time) return;
++			}
+ 
+ 			this->PlayLeaveStationSound();
+ 
+@@ -2330,65 +2340,6 @@
+ 	}
+ }
+ 
+-/**
+- * Adds this vehicle to a shared vehicle chain.
+- * @param shared_chain a vehicle of the chain with shared vehicles.
+- * @pre !this->IsOrderListShared()
+- */
+-void Vehicle::AddToShared(Vehicle *shared_chain)
+-{
+-	assert(this->previous_shared == NULL && this->next_shared == NULL);
+-
+-	if (shared_chain->orders.list == NULL) {
+-		assert(shared_chain->previous_shared == NULL);
+-		assert(shared_chain->next_shared == NULL);
+-		this->orders.list = shared_chain->orders.list = new OrderList(NULL, shared_chain);
+-	}
+-
+-	this->next_shared     = shared_chain->next_shared;
+-	this->previous_shared = shared_chain;
+-
+-	shared_chain->next_shared = this;
+-
+-	if (this->next_shared != NULL) this->next_shared->previous_shared = this;
+-
+-	shared_chain->orders.list->AddVehicle(this);
+-}
+-
+-/**
+- * Removes the vehicle from the shared order list.
+- */
+-void Vehicle::RemoveFromShared()
+-{
+-	/* Remember if we were first and the old window number before RemoveVehicle()
+-	 * as this changes first if needed. */
+-	bool were_first = (this->FirstShared() == this);
+-	VehicleListIdentifier vli(VL_SHARED_ORDERS, this->type, this->owner, this->FirstShared()->index);
+-
+-	this->orders.list->RemoveVehicle(this);
+-
+-	if (!were_first) {
+-		/* We are not the first shared one, so only relink our previous one. */
+-		this->previous_shared->next_shared = this->NextShared();
+-	}
+-
+-	if (this->next_shared != NULL) this->next_shared->previous_shared = this->previous_shared;
+-
+-
+-	if (this->orders.list->GetNumVehicles() == 1) {
+-		/* When there is only one vehicle, remove the shared order list window. */
+-		DeleteWindowById(GetWindowClassForVehicleType(this->type), vli.Pack());
+-		InvalidateVehicleOrder(this->FirstShared(), 0);
+-	} else if (were_first) {
+-		/* If we were the first one, update to the new first one.
+-		 * Note: FirstShared() is already the new first */
+-		InvalidateWindowData(GetWindowClassForVehicleType(this->type), vli.Pack(), this->FirstShared()->index | (1U << 31));
+-	}
+-
+-	this->next_shared     = NULL;
+-	this->previous_shared = NULL;
+-}
+-
+ void VehiclesYearlyLoop()
+ {
+ 	Vehicle *v;
+diff -r ace482f62075 src/vehicle_base.h
+--- a/src/vehicle_base.h	Mon Feb 20 18:45:21 2012 +0000
++++ b/src/vehicle_base.h	Mon Feb 20 13:10:52 2012 -0700
+@@ -44,6 +44,7 @@
+ 	VF_AUTOFILL_PRES_WAIT_TIME, ///< Whether non-destructive auto-fill should preserve waiting times
+ 	VF_STOP_LOADING,            ///< Don't load anymore during the next load cycle.
+ 	VF_PATHFINDER_LOST,         ///< Vehicle's pathfinder is lost.
++	VF_DEPARTURE_AUTHORIZED,    ///< Vehicle's timetable has given them permission to leave
+ };
+ 
+ /** Bit numbers used to indicate which of the #NewGRFCache values are valid. */
+@@ -117,6 +118,7 @@
+ struct LoadgameState;
+ extern bool LoadOldVehicle(LoadgameState *ls, int num);
+ extern void FixOldVehicles();
++struct OrderList;
+ 
+ struct GRFFile;
+ 
+@@ -134,6 +136,7 @@
+ 	friend void FixOldVehicles();
+ 	friend void AfterLoadVehicles(bool part_of_load);             ///< So we can set the #previous and #first pointers while loading
+ 	friend bool LoadOldVehicle(LoadgameState *ls, int num);       ///< So we can set the proper next pointer while loading
++	friend class OrderList;                                       ///< Manipulation of next_shared and previous_shared
+ 
+ 	char *name;                         ///< Name of vehicle
+ 
+@@ -237,7 +240,7 @@
+ 		Order     *old;             ///< Only used during conversion of old save games
+ 	} orders;                           ///< The orders currently assigned to the vehicle.
+ 
+-	byte vehicle_flags;                 ///< Used for gradual loading and other miscellaneous things (@see VehicleFlags enum)
++	uint16 vehicle_flags;               ///< Used for gradual loading and other miscellaneous things (@see VehicleFlags enum)
+ 
+ 	uint16 load_unload_ticks;           ///< Ticks to wait before starting next cycle.
+ 	GroupID group_id;                   ///< Index of group Pool array
+@@ -532,9 +535,6 @@
+ 	 */
+ 	inline Order *GetFirstOrder() const { return (this->orders.list == NULL) ? NULL : this->orders.list->GetFirstOrder(); }
+ 
+-	void AddToShared(Vehicle *shared_chain);
+-	void RemoveFromShared();
+-
+ 	/**
+ 	 * Get the next vehicle of the shared vehicle chain.
+ 	 * @return the next shared vehicle or NULL when there isn't a next vehicle.

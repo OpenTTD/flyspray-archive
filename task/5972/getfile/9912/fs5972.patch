@@ -1,0 +1,74 @@
+diff --git a/src/textbuf.cpp b/src/textbuf.cpp
+index 116d60b..8a53737 100644
+--- a/src/textbuf.cpp
++++ b/src/textbuf.cpp
+@@ -43,7 +43,7 @@
+  */
+ bool Textbuf::CanDelChar(bool backspace)
+ {
+-	return backspace ? this->caretpos != 0 : this->caretpos < this->bytes - 1;
++	return backspace ? this->caretpos != 0 && this->caretpos != this->markpos : this->caretpos < this->bytes - 1 && (this->markend == 0 || this->caretpos != this->markend);
+ }
+ 
+ /**
+@@ -54,7 +54,8 @@ bool Textbuf::CanDelChar(bool backspace)
+  */
+ bool Textbuf::DeleteChar(uint16 keycode)
+ {
+-	bool word = (keycode & WKC_CTRL) != 0;
++	/* No word deletion inside a marked text. */
++	bool word = this->markend == 0 && (keycode & WKC_CTRL) != 0;
+ 
+ 	keycode &= ~WKC_SPECIAL_KEYS;
+ 	if (keycode != WKC_BACKSPACE && keycode != WKC_DELETE) return false;
+@@ -102,7 +103,16 @@ bool Textbuf::DeleteChar(uint16 keycode)
+ 	memmove(s, s + len, this->bytes - (s - this->buf) - len);
+ 	this->bytes -= len;
+ 
+-	if (backspace) this->caretpos -= len;
++	if (backspace) {
++		if (this->caretpos <= this->markend) this->markend -= len;
++		if (this->caretpos <= this->markpos) this->markpos -= len;
++
++		this->caretpos -= len;
++	} else {
++		if (this->caretpos < this->markend) this->markend -= len;
++		if (this->caretpos < this->markpos) this->markpos -= len;
++	}
++	if (this->markend == this->markpos) this->markpos = this->markend = 0;
+ 
+ 	this->UpdateStringIter();
+ 	this->UpdateWidth();
+@@ -328,6 +338,8 @@ bool Textbuf::MovePos(uint16 keycode)
+ 			size_t pos = this->char_iter->Prev(keycode & WKC_CTRL ? StringIterator::ITER_WORD : StringIterator::ITER_CHARACTER);
+ 			if (pos == StringIterator::END) return true;
+ 
++			if (this->markend != 0 && pos < this->markpos) pos = this->markpos;
++
+ 			this->caretpos = (uint16)pos;
+ 			this->UpdateCaretPosition();
+ 			return true;
+@@ -340,19 +352,21 @@ bool Textbuf::MovePos(uint16 keycode)
+ 			size_t pos = this->char_iter->Next(keycode & WKC_CTRL ? StringIterator::ITER_WORD : StringIterator::ITER_CHARACTER);
+ 			if (pos == StringIterator::END) return true;
+ 
++			if (this->markend != 0 && pos > this->markend) pos = this->markend;
++
+ 			this->caretpos = (uint16)pos;
+ 			this->UpdateCaretPosition();
+ 			return true;
+ 		}
+ 
+ 		case WKC_HOME:
+-			this->caretpos = 0;
++			this->caretpos = this->markend != 0 ? this->markpos : 0;
+ 			this->char_iter->SetCurPosition(this->caretpos);
+ 			this->UpdateCaretPosition();
+ 			return true;
+ 
+ 		case WKC_END:
+-			this->caretpos = this->bytes - 1;
++			this->caretpos = this->markend != 0 ? this->markend : this->bytes - 1;
+ 			this->char_iter->SetCurPosition(this->caretpos);
+ 			this->UpdateCaretPosition();
+ 			return true;

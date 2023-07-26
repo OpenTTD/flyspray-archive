@@ -1,0 +1,137 @@
+Index: src/map.h
+===================================================================
+--- src/map.h	(revision 8078)
++++ src/map.h	(working copy)
+@@ -24,6 +24,7 @@
+ 	byte m4;
+ 	byte m5;
+ 	byte m6;
++	byte m7;
+ } Tile;
+ 
+ extern Tile* _m;
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 8078)
++++ src/train_cmd.cpp	(working copy)
+@@ -2934,6 +2934,8 @@
+ 
+ 	u = v;
+ 	BEGIN_ENUM_WAGONS(v)
++		/* When a vehicle crashes the presence on the track must be removed */
++		RemoveTrackMask(v->tile, v->u.rail.track);
+ 		v->vehstatus |= VS_CRASHED;
+ 	END_ENUM_WAGONS(v)
+ 
+@@ -3018,6 +3020,19 @@
+ 	return NULL;
+ }
+ 
++/**
++ * Set presence on track if the front engine enters or the last wagon leaves a tile.
++ */
++static void UpdateTrainTileCache(Vehicle *u, GetNewVehiclePosResult gp, TrackBits next_track)
++{
++	/* Only the last wagon may clear a tile */
++	if (u->next == NULL)
++		RemoveTrackMask(gp.old_tile, (TrackBits)u->u.rail.track);
++	/* Only the first may trigger it */
++	if (GetPrevVehicleInChain(u) == NULL)
++		SetTrackMask(gp.new_tile, next_track);
++}
++
+ static void TrainController(Vehicle *v, bool update_image)
+ {
+ 	Vehicle *prev;
+@@ -3126,6 +3141,9 @@
+ 					chosen_dir = (Direction)b[2];
+ 				}
+ 
++				/* Keep the collision check updated with information */
++				UpdateTrainTileCache(v, gp, chosen_track);
++
+ 				/* Call the landscape function and tell it that the vehicle entered the tile */
+ 				r = VehicleEnterTile(v, gp.new_tile, gp.x, gp.y);
+ 				if (r & 0x8) {
+@@ -3536,7 +3554,9 @@
+ 
+ 		do {
+ 			TrainController(v, true);
+-			CheckTrainCollision(v);
++			if (GetTrackOverload(v->tile)) {
++				CheckTrainCollision(v);
++			}
+ 			if (v->cur_speed <= 0x100)
+ 				break;
+ 		} while (--j != 0);
+Index: src/rail_map.h
+===================================================================
+--- src/rail_map.h	(revision 8078)
++++ src/rail_map.h	(working copy)
+@@ -6,8 +6,8 @@
+ #include "direction.h"
+ #include "rail.h"
+ #include "tile.h"
++#include "debug.h"
+ 
+-
+ typedef enum RailTileType {
+ 	RAIL_TILE_NORMAL         = 0x0,
+ 	RAIL_TILE_SIGNALS        = 0x40,
+@@ -338,5 +338,56 @@
+ 	_m[t].m4 = 0;
+ 	_m[t].m5 = RAIL_TILE_DEPOT_WAYPOINT | RAIL_SUBTYPE_WAYPOINT | a;
+ }
++/**
++ * Make trains aware to watch out for collisions
++ */
++static inline void SetTrackOverload(TileIndex t)
++{
++	DEBUG(misc, 2, "Turning on collision warning for tile %d", t);
++	/* Turn on first bit on */
++	SB(_m[t].m6, 2, 1, 1);
++}
+ 
++/**
++ * Make trains aware not to watch out for collisions anymore
++ */
++static inline void EndTrackOverload(TileIndex t)
++{
++	DEBUG(misc, 2, "Turning off collision warning for tile %d", t);
++	/* Turn off first bit on */
++	SB(_m[t].m6, 2, 1, 0);
++}
++
++/**
++ * Find out if collision check is needed
++ */
++static inline bool GetTrackOverload(TileIndex t)
++{
++	/* Check if track is overloaded/possible collision chance */
++	return GB(_m[t].m6, 2, 1);
++}
++
++/**
++ * Set the presence of trains in the map, if needed trigger an collision warning
++ */
++static inline void SetTrackMask(TileIndex t, TrackBits b)
++{
++	if ((_m[t].m7 & b) > 0) {
++		SetTrackOverload(t);
++	}
++	_m[t].m7 |= b;
++}
++
++/**
++ * Remove the presence of a train from the map, remove collision warning when active
++ */
++static inline void RemoveTrackMask(TileIndex t, TrackBits b)
++{
++	if (GetTrackOverload(t)) {
++		EndTrackOverload(t);
++	}
++	/* If a track on the same tile shares one or more trackbits and is not connected to the track being exited, this might be problematic, but i see no problems with this */
++	_m[t].m7 -= _m[t].m7 & b;
++}
++
+ #endif /* RAIL_MAP_H */

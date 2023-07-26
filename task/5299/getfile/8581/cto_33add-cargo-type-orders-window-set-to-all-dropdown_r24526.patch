@@ -1,0 +1,119 @@
+# HG changeset patch
+# Parent 36e10db5c6b61fb542069f397661d9ab6cfd016c
+# User sbr
+# Date 1347776665 -7200
+
+Add: A dropdown to set the same order to all cargo types.
+
+diff -r 36e10db5c6b6 src/lang/english.txt
+--- a/src/lang/english.txt	Sat Sep 15 11:17:04 2012 +0200
++++ b/src/lang/english.txt	Sun Sep 16 11:46:52 2012 +0200
+@@ -3695,6 +3695,9 @@
+ STR_CARGO_TYPE_LOAD_ORDERS_DROP_TOOLTIP                         :{BLACK}Change the loading behaviour for this cargo type
+ STR_CARGO_TYPE_UNLOAD_ORDERS_DROP_TOOLTIP                       :{BLACK}Change the unloading behaviour for this cargo type
+ 
++STR_CARGO_TYPE_ORDERS_SET_TO_ALL_LABEL                          :{BLACK}Set all to:
++STR_CARGO_TYPE_ORDERS_SET_TO_ALL_TOOLTIP                        :{BLACK}Set all cargo type orders to the one selected by the dropdown
++
+ # AI debug window
+ STR_AI_DEBUG                                                    :{WHITE}AI/Game Script Debug
+ STR_AI_DEBUG_NAME_AND_VERSION                                   :{BLACK}{RAW_STRING} (v{NUM})
+diff -r 36e10db5c6b6 src/order_gui.cpp
+--- a/src/order_gui.cpp	Sat Sep 15 11:17:04 2012 +0200
++++ b/src/order_gui.cpp	Sun Sep 16 11:46:52 2012 +0200
+@@ -74,6 +74,8 @@
+ 	uint max_cargo_name_width;     ///< Greatest width of cargo names.
+ 	uint max_cargo_dropdown_width; ///< Greatest width of order names.
+ 
++	uint set_to_all_dropdown_sel;     ///< Selected entry for the 'set to all' dropdown
++
+ 	/**
+ 	 * Initialize \c max_cargo_name_width and \c max_cargo_dropdown_width.
+ 	 * @post \c max_cargo_name_width
+@@ -104,6 +106,8 @@
+ 			uint8 order_type = (this->variant == CTOWV_LOAD) ? (uint8) order->GetLoadType(cargo_id) : (uint8) order->GetUnloadType(cargo_id);
+ 			this->GetWidget<NWidgetCore>(WID_CTO_CARGO_DROPDOWN_FIRST + i)->SetDataTip(this->cargo_type_order_dropdown[order_type], tooltip);
+ 		}
++		this->set_to_all_dropdown_sel = 0;
++		this->GetWidget<NWidgetCore>(WID_CTO_SET_TO_ALL_DROPDOWN)->widget_data = this->cargo_type_order_dropdown[this->set_to_all_dropdown_sel];
+ 	}
+ 
+ 	/**
+@@ -152,9 +156,12 @@
+ 		} else if (WID_CTO_CARGO_LABEL_FIRST <= widget && widget <= WID_CTO_CARGO_LABEL_LAST) {
+ 			(*size).width  = max((*size).width,  WD_FRAMERECT_LEFT + this->CARGO_ICON_WIDTH + WD_FRAMETEXT_LEFT + this->max_cargo_name_width + WD_FRAMETEXT_RIGHT + padding.width);
+ 			(*size).height = max((*size).height, (uint) WD_FRAMERECT_TOP + FONT_HEIGHT_NORMAL + WD_FRAMERECT_BOTTOM);
+-		} else if (WID_CTO_CARGO_DROPDOWN_FIRST <= widget && widget <= WID_CTO_CARGO_DROPDOWN_LAST) {
++		} else if ((WID_CTO_CARGO_DROPDOWN_FIRST <= widget && widget <= WID_CTO_CARGO_DROPDOWN_LAST) || widget == WID_CTO_SET_TO_ALL_DROPDOWN) {
+ 			(*size).width  = max((*size).width,  WD_DROPDOWNTEXT_LEFT + this->max_cargo_dropdown_width + WD_DROPDOWNTEXT_RIGHT);
+ 			(*size).height = max((*size).height, (uint) WD_DROPDOWNTEXT_TOP + FONT_HEIGHT_NORMAL + WD_DROPDOWNTEXT_BOTTOM);
++		} else if (widget == WID_CTO_SET_TO_ALL_LABEL) {
++			(*size).width = max((*size).width, this->max_cargo_name_width + WD_FRAMETEXT_RIGHT + padding.width);
++			(*size).height = max((*size).height, (uint) WD_FRAMERECT_TOP + FONT_HEIGHT_NORMAL + WD_FRAMERECT_BOTTOM);
+ 		}
+ 	}
+ 
+@@ -190,6 +197,8 @@
+ 			CargoID cargo_id = GetCargoIDByBitnum(cs->bitnum);
+ 
+ 			ShowDropDownMenu(this, this->cargo_type_order_dropdown, this->GetOrderActionTypeForCargo(cargo_id), widget, 0, this->cargo_type_order_dropdown_hmask);
++		} else if (widget == WID_CTO_SET_TO_ALL_DROPDOWN) {
++			ShowDropDownMenu(this, this->cargo_type_order_dropdown, this->set_to_all_dropdown_sel, widget, 0, this->cargo_type_order_dropdown_hmask);
+ 		}
+ 	}
+ 
+@@ -207,6 +216,16 @@
+ 
+ 			this->GetWidget<NWidgetCore>(widget)->SetDataTip(this->cargo_type_order_dropdown[this->GetOrderActionTypeForCargo(cargo_id)], STR_CARGO_TYPE_LOAD_ORDERS_DROP_TOOLTIP + this->variant);
+ 			this->SetWidgetDirty(widget);
++		} else if (widget == WID_CTO_SET_TO_ALL_DROPDOWN) {
++			for (int i = 0; i < _sorted_standard_cargo_specs_size; i++) {
++				this->OnDropdownSelect(i + WID_CTO_CARGO_DROPDOWN_FIRST, action_type);
++			}
++
++			if (action_type != (int) this->set_to_all_dropdown_sel) {
++				this->set_to_all_dropdown_sel = action_type;
++				this->GetWidget<NWidgetCore>(widget)->widget_data = this->cargo_type_order_dropdown[this->set_to_all_dropdown_sel];
++				this->SetWidgetDirty(widget);
++			}
+ 		}
+ 	}
+ 
+@@ -263,6 +282,13 @@
+ 		NWidget(WWT_LABEL, COLOUR_GREY, WID_CTO_HEADER), SetFill(1, 0), SetResize(1, 0), SetDataTip(STR_NULL, STR_NULL),
+ 	EndContainer(),
+ 	NWidgetFunction(MakeCargoTypeOrdersRows),
++	NWidget(WWT_PANEL, COLOUR_GREY), SetMinimalSize(1, 4), SetFill(1, 0), SetResize(1, 0), EndContainer(), // SPACER
++	NWidget(NWID_HORIZONTAL),
++		NWidget(WWT_PANEL, COLOUR_GREY),
++			NWidget(WWT_TEXT, COLOUR_GREY, WID_CTO_SET_TO_ALL_LABEL), SetPadding(0, 0, 0, WD_FRAMERECT_LEFT + 12 + WD_FRAMETEXT_LEFT), SetFill(1, 0), SetResize(1, 0), SetDataTip(STR_CARGO_TYPE_ORDERS_SET_TO_ALL_LABEL, STR_CARGO_TYPE_ORDERS_SET_TO_ALL_TOOLTIP),
++		EndContainer(),
++		NWidget(WWT_DROPDOWN, COLOUR_GREY, WID_CTO_SET_TO_ALL_DROPDOWN), SetFill(1, 0), SetResize(1, 0), SetDataTip(STR_NULL, STR_CARGO_TYPE_ORDERS_SET_TO_ALL_TOOLTIP),
++	EndContainer(),
+ 	NWidget(NWID_HORIZONTAL),
+ 		NWidget(WWT_TEXTBTN, COLOUR_GREY, WID_CTO_CLOSEBTN), SetFill(1, 0), SetResize(1, 0), SetDataTip(STR_CARGO_TYPE_ORDERS_CLOSE_BUTTON, STR_TOOLTIP_CLOSE_WINDOW),
+ 		NWidget(WWT_RESIZEBOX, COLOUR_GREY),
+diff -r 36e10db5c6b6 src/script/api/script_window.hpp
+--- a/src/script/api/script_window.hpp	Sat Sep 15 11:17:04 2012 +0200
++++ b/src/script/api/script_window.hpp	Sun Sep 16 11:46:52 2012 +0200
+@@ -1817,6 +1817,8 @@
+ 		WID_CTO_CAPTION                      = ::WID_CTO_CAPTION,                      ///< Caption of the window.
+ 		WID_CTO_HEADER                       = ::WID_CTO_HEADER,                       ///< Window header.
+ 		WID_CTO_CLOSEBTN                     = ::WID_CTO_CLOSEBTN,                     ///< Close button.
++		WID_CTO_SET_TO_ALL_LABEL             = ::WID_CTO_SET_TO_ALL_LABEL,             ///< 'Set to all' dropdown label
++		WID_CTO_SET_TO_ALL_DROPDOWN          = ::WID_CTO_SET_TO_ALL_DROPDOWN,          ///< 'Set to all' dropdown
+ 		WID_CTO_CARGO_ROW_FIRST              = ::WID_CTO_CARGO_ROW_FIRST,              ///< First cargo type order row.
+ 		WID_CTO_CARGO_ROW_LAST               = ::WID_CTO_CARGO_ROW_LAST,               ///< Last cargo type order row.
+ 		WID_CTO_CARGO_LABEL_FIRST            = ::WID_CTO_CARGO_LABEL_FIRST,            ///< First cargo label.
+diff -r 36e10db5c6b6 src/widgets/order_widget.h
+--- a/src/widgets/order_widget.h	Sat Sep 15 11:17:04 2012 +0200
++++ b/src/widgets/order_widget.h	Sun Sep 16 11:46:52 2012 +0200
+@@ -48,6 +48,8 @@
+ 	WID_CTO_CAPTION,                                                            ///< Caption of the window.
+ 	WID_CTO_HEADER,                                                             ///< Window header.
+ 	WID_CTO_CLOSEBTN,                                                           ///< Close button.
++	WID_CTO_SET_TO_ALL_LABEL,                                                   ///< 'Set to all' dropdown label
++	WID_CTO_SET_TO_ALL_DROPDOWN,                                                ///< 'Set to all' dropdown
+ 	WID_CTO_CARGO_ROW_FIRST,                                                    ///< First cargo type order row.
+ 	WID_CTO_CARGO_ROW_LAST = WID_CTO_CARGO_ROW_FIRST + NUM_CARGO - 1,           ///< Last cargo type order row.
+ 	WID_CTO_CARGO_LABEL_FIRST,                                                  ///< First cargo label.

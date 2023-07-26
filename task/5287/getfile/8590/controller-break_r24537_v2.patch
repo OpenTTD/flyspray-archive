@@ -1,0 +1,89 @@
+diff -r 3a205f38b824 src/script/api/ai/ai_controller.hpp.sq
+--- a/src/script/api/ai/ai_controller.hpp.sq	Fri Sep 21 22:01:49 2012 +0200
++++ b/src/script/api/ai/ai_controller.hpp.sq	Fri Sep 21 22:11:55 2012 +0200
+@@ -20,6 +20,7 @@
+ 	SQAIController.DefSQStaticMethod(engine, &ScriptController::GetOpsTillSuspend, "GetOpsTillSuspend", 1, ".");
+ 	SQAIController.DefSQStaticMethod(engine, &ScriptController::SetCommandDelay,   "SetCommandDelay",   2, ".i");
+ 	SQAIController.DefSQStaticMethod(engine, &ScriptController::Sleep,             "Sleep",             2, ".i");
++	SQAIController.DefSQStaticMethod(engine, &ScriptController::Break,             "Break",             2, ".s");
+ 	SQAIController.DefSQStaticMethod(engine, &ScriptController::GetSetting,        "GetSetting",        2, ".s");
+ 	SQAIController.DefSQStaticMethod(engine, &ScriptController::GetVersion,        "GetVersion",        1, ".");
+ 	SQAIController.DefSQStaticMethod(engine, &ScriptController::Print,             "Print",             3, ".bs");
+diff -r 3a205f38b824 src/script/api/game/game_controller.hpp.sq
+--- a/src/script/api/game/game_controller.hpp.sq	Fri Sep 21 22:01:49 2012 +0200
++++ b/src/script/api/game/game_controller.hpp.sq	Fri Sep 21 22:11:55 2012 +0200
+@@ -20,6 +20,7 @@
+ 	SQGSController.DefSQStaticMethod(engine, &ScriptController::GetOpsTillSuspend, "GetOpsTillSuspend", 1, ".");
+ 	SQGSController.DefSQStaticMethod(engine, &ScriptController::SetCommandDelay,   "SetCommandDelay",   2, ".i");
+ 	SQGSController.DefSQStaticMethod(engine, &ScriptController::Sleep,             "Sleep",             2, ".i");
++	SQGSController.DefSQStaticMethod(engine, &ScriptController::Break,             "Break",             2, ".s");
+ 	SQGSController.DefSQStaticMethod(engine, &ScriptController::GetSetting,        "GetSetting",        2, ".s");
+ 	SQGSController.DefSQStaticMethod(engine, &ScriptController::GetVersion,        "GetVersion",        1, ".");
+ 	SQGSController.DefSQStaticMethod(engine, &ScriptController::Print,             "Print",             3, ".bs");
+diff -r 3a205f38b824 src/script/api/script_controller.cpp
+--- a/src/script/api/script_controller.cpp	Fri Sep 21 22:01:49 2012 +0200
++++ b/src/script/api/script_controller.cpp	Fri Sep 21 22:11:55 2012 +0200
+@@ -15,10 +15,14 @@
+ #include "../../rev.h"
+ 
+ #include "script_controller.hpp"
++#include "script_error.hpp"
+ #include "../script_fatalerror.hpp"
+ #include "../script_info.hpp"
+ #include "../script_instance.hpp"
+ #include "script_log.hpp"
++#include "../../ai/ai_gui.hpp"
++#include "../../settings_type.h"
++#include "../../network/network.h"
+ 
+ /* static */ void ScriptController::SetCommandDelay(int ticks)
+ {
+@@ -40,6 +44,26 @@
+ 	throw Script_Suspend(ticks, NULL);
+ }
+ 
++/* static */ bool ScriptController::Break(const char* message)
++{
++#ifdef ENABLE_NETWORK
++	EnforcePrecondition(false, !_network_dedicated);
++#endif
++	EnforcePrecondition(false, _settings_client.gui.ai_developer_tools);
++
++	ScriptObject::GetActiveInstance()->Pause();
++
++	char log_message[1024];
++	snprintf(log_message, sizeof(log_message), "Break: %s", message);
++	ScriptLog::Log(ScriptLog::LOG_SQ_ERROR, log_message);
++
++	/* Inform script developer that his script have been paused and
++	 * need manual action to continue. */
++	ShowAIDebugWindow(ScriptObject::GetRootCompany());
++
++	return true;
++}
++
+ /* static */ void ScriptController::Print(bool error_msg, const char *message)
+ {
+ 	ScriptLog::Log(error_msg ? ScriptLog::LOG_SQ_ERROR : ScriptLog::LOG_SQ_INFO, message);
+diff -r 3a205f38b824 src/script/api/script_controller.hpp
+--- a/src/script/api/script_controller.hpp	Fri Sep 21 22:01:49 2012 +0200
++++ b/src/script/api/script_controller.hpp	Fri Sep 21 22:11:55 2012 +0200
+@@ -105,6 +105,18 @@
+ 	static void Sleep(int ticks);
+ 
+ 	/**
++	 * Break execution of the script when script developer tools are active. For
++	 * other users, nothing will happen when you call this function. To ressume
++	 * the script, you have to click on the continue button in the AI debug
++	 * window. It is not recommended to leave calls to this function in scripts
++	 * that you publish or upload to bananas.
++	 * @param message to print in the AI debug window when the break occurs.
++	 * @pre gui.ai_developer_tools setting is enabled.
++	 * @pre it is not a multiplayer game ran by a dedicated server.
++	 */
++	static bool Break(const char* message);
++
++	/**
+ 	 * When Squirrel triggers a print, this function is called.
+ 	 *  Squirrel calls this when 'print' is used, or when the script made an error.
+ 	 * @param error_msg If true, it is a Squirrel error message.

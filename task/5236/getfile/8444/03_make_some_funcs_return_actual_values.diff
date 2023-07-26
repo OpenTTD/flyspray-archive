@@ -1,0 +1,322 @@
+diff --git a/src/ai/ai.hpp b/src/ai/ai.hpp
+--- a/src/ai/ai.hpp
++++ b/src/ai/ai.hpp
+@@ -14,6 +14,7 @@
+ 
+ #include "../script/api/script_event_types.hpp"
+ #include "../core/string_compare_type.hpp"
++#include "ai_scanner.hpp"
+ #include <map>
+ 
+ /** A list that maps AI names to their AIInfo object. */
+@@ -140,6 +141,12 @@
+ 	 * found it is removed from the config.
+ 	 */
+ 	static void Rescan();
++
++	/** Gets the ScriptScanner instance that is used to find AIs */
++	static AIScannerInfo *GetScannerInfo();
++	/** Gets the ScriptScanner instance that is used to find AI Libraries */
++	static AIScannerLibrary *GetScannerLibrary();
++
+ #if defined(ENABLE_NETWORK)
+ 	/** Wrapper function for AIScanner::HasAI */
+ 	static bool HasAI(const struct ContentInfo *ci, bool md5sum);
+diff --git a/src/ai/ai_core.cpp b/src/ai/ai_core.cpp
+--- a/src/ai/ai_core.cpp
++++ b/src/ai/ai_core.cpp
+@@ -352,3 +352,13 @@
+ }
+ 
+ #endif /* defined(ENABLE_NETWORK) */
++
++/* static */ AIScannerInfo *AI::GetScannerInfo()
++{
++	return AI::scanner_info;
++}
++/* static */ AIScannerLibrary *AI::GetScannerLibrary()
++{
++	return AI::scanner_library;
++}
++
+diff --git a/src/base_media_base.h b/src/base_media_base.h
+--- a/src/base_media_base.h
++++ b/src/base_media_base.h
+@@ -201,6 +201,8 @@
+ 		return num + fs.Scan(GetExtension(), BASESET_DIR, Tbase_set::SEARCH_IN_TARS);
+ 	}
+ 
++	static Tbase_set *GetAvailableSets();
++
+ 	static bool SetSet(const char *name);
+ 	static char *GetSetsList(char *p, const char *last);
+ 	static int GetNumSets();
+@@ -217,6 +219,15 @@
+ 	static bool HasSet(const ContentInfo *ci, bool md5sum);
+ };
+ 
++/**
++ * Check whether there's a base set matching some information.
++ * @param ci The content info to compare it to.
++ * @param md5sum Should the MD5 checksum be tested as well?
++ * @param s The list with sets.
++ * @return The filename of the first file of the base set, or \c NULL if there is no match.
++ */
++template <class Tbase_set>
++const char *HasBaseSet(const ContentInfo *ci, bool md5sum, const Tbase_set *s);
+ 
+ /** Types of graphics in the base graphics set */
+ enum GraphicsFileType {
+diff --git a/src/base_media_func.h b/src/base_media_func.h
+--- a/src/base_media_func.h
++++ b/src/base_media_func.h
+@@ -7,7 +7,10 @@
+  * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
+-/** @file base_media_func.h Generic function implementations for base data (graphics, sounds). */
++/**
++ * @file base_media_func.h Generic function implementations for base data (graphics, sounds).
++ * @note You should _never_ include this file due to the SET_TYPE define.
++ */
+ 
+ #include "base_media_base.h"
+ #include "debug.h"
+@@ -274,19 +277,13 @@
+ #if defined(ENABLE_NETWORK)
+ #include "network/network_content.h"
+ 
+-/**
+- * Check whether there's a base set matching some information.
+- * @param ci The content info to compare it to.
+- * @param md5sum Should the MD5 checksum be tested as well?
+- * @param s The list with sets.
+- */
+-template <class Tbase_set> bool HasBaseSet(const ContentInfo *ci, bool md5sum, const Tbase_set *s)
++template <class Tbase_set> const char *HasBaseSet(const ContentInfo *ci, bool md5sum, const Tbase_set *s)
+ {
+ 	for (; s != NULL; s = s->next) {
+ 		if (s->GetNumMissing() != 0) continue;
+ 
+ 		if (s->shortname != ci->unique_id) continue;
+-		if (!md5sum) return true;
++		if (!md5sum) return  s->files[0].filename;
+ 
+ 		byte md5[16];
+ 		memset(md5, 0, sizeof(md5));
+@@ -295,22 +292,27 @@
+ 				md5[j] ^= s->files[i].hash[j];
+ 			}
+ 		}
+-		if (memcmp(md5, ci->md5sum, sizeof(md5)) == 0) return true;
++		if (memcmp(md5, ci->md5sum, sizeof(md5)) == 0) return s->files[0].filename;
+ 	}
+-
+-	return false;
++	return NULL;
+ }
+ 
+ template <class Tbase_set>
+ /* static */ bool BaseMedia<Tbase_set>::HasSet(const ContentInfo *ci, bool md5sum)
+ {
+-	return HasBaseSet(ci, md5sum, BaseMedia<Tbase_set>::available_sets) ||
+-			HasBaseSet(ci, md5sum, BaseMedia<Tbase_set>::duplicate_sets);
++	return (HasBaseSet(ci, md5sum, BaseMedia<Tbase_set>::available_sets) != NULL) ||
++			(HasBaseSet(ci, md5sum, BaseMedia<Tbase_set>::duplicate_sets) != NULL);
+ }
+ 
+ #else
+ 
+ template <class Tbase_set>
++const char *HasBaseSet(const ContentInfo *ci, bool md5sum, const Tbase_set *s)
++{
++	return NULL;
++}
++
++template <class Tbase_set>
+ /* static */ bool BaseMedia<Tbase_set>::HasSet(const ContentInfo *ci, bool md5sum)
+ {
+ 	return false;
+@@ -375,6 +377,16 @@
+ }
+ 
+ /**
++ * Return the available sets.
++ * @return The available sets.
++ */
++template <class Tbase_set>
++/* static */ Tbase_set *BaseMedia<Tbase_set>::GetAvailableSets()
++{
++	return BaseMedia<Tbase_set>::available_sets;
++}
++
++/**
+  * Force instantiation of methods so we don't get linker errors.
+  * @param repl_type the type of the BaseMedia to instantiate
+  * @param set_type  the type of the BaseSet to instantiate
+@@ -390,5 +402,6 @@
+ 	template int repl_type::GetIndexOfUsedSet(); \
+ 	template const set_type *repl_type::GetSet(int index); \
+ 	template const set_type *repl_type::GetUsedSet(); \
+-	template bool repl_type::DetermineBestSet();
++	template bool repl_type::DetermineBestSet(); \
++	template set_type *repl_type::GetAvailableSets();
+ 
+diff --git a/src/fios.cpp b/src/fios.cpp
+--- a/src/fios.cpp
++++ b/src/fios.cpp
+@@ -561,8 +561,9 @@
+ 
+ /** Basic data to distinguish a scenario. Used in the server list window */
+ struct ScenarioIdentifier {
+-	uint32 scenid;    ///< ID for the scenario (generated by content)
+-	uint8 md5sum[16]; ///< MD5 checksum of file
++	uint32 scenid;           ///< ID for the scenario (generated by content).
++	uint8 md5sum[16];        ///< MD5 checksum of file.
++	char filename[MAX_PATH]; ///< filename of the file.
+ 
+ 	bool operator == (const ScenarioIdentifier &other) const
+ 	{
+@@ -606,6 +607,7 @@
+ 		int fret = fscanf(f, "%i", &id.scenid);
+ 		FioFCloseFile(f);
+ 		if (fret != 1) return false;
++		strecpy(id.filename, filename, lastof(id.filename));
+ 
+ 		Md5 checksum;
+ 		uint8 buffer[1024];
+@@ -638,24 +640,34 @@
+ static ScenarioScanner _scanner;
+ 
+ /**
+- * Check whether we've got a given scenario based on its unique ID.
+- * @param ci the content info to compare it to
+- * @param md5sum whether to look at the md5sum or the id
+- * @return true if we've got the scenario
++ * Find a given scenario based on its unique ID.
++ * @param ci The content info to compare it to.
++ * @param md5sum Whether to look at the md5sum or the id.
++ * @return The filename of the file, else \c NULL.
+  */
+-bool HasScenario(const ContentInfo *ci, bool md5sum)
++const char *FindScenario(const ContentInfo *ci, bool md5sum)
+ {
+ 	_scanner.Scan(false);
+ 
+ 	for (ScenarioIdentifier *id = _scanner.Begin(); id != _scanner.End(); id++) {
+-		if (md5sum ?
+-				(memcmp(id->md5sum, ci->md5sum, sizeof(id->md5sum)) == 0) :
+-				(id->scenid == ci->unique_id)) {
+-			return true;
++		if (md5sum ? (memcmp(id->md5sum, ci->md5sum, sizeof(id->md5sum)) == 0)
++		           : (id->scenid == ci->unique_id)) {
++			return id->filename;
+ 		}
+ 	}
+ 
+-	return false;
++	return NULL;
++}
++
++/**
++ * Check whether we've got a given scenario based on its unique ID.
++ * @param ci The content info to compare it to.
++ * @param md5sum Whether to look at the md5sum or the id.
++ * @return True iff we've got the scenario.
++ */
++bool HasScenario(const ContentInfo *ci, bool md5sum)
++{
++	return (FindScenario(ci, md5sum) != NULL);
+ }
+ 
+ /**
+diff --git a/src/fios.h b/src/fios.h
+--- a/src/fios.h
++++ b/src/fios.h
+@@ -15,6 +15,7 @@
+ #include "gfx_type.h"
+ #include "company_base.h"
+ #include "newgrf_config.h"
++#include "network/core/tcp_content.h"
+ 
+ 
+ typedef SmallMap<uint, CompanyProperties *> CompanyPropertiesMap;
+@@ -180,4 +181,6 @@
+ void BuildFileList();
+ void SetFiosType(const byte fiostype);
+ 
++const char *FindScenario(const ContentInfo *ci, bool md5sum);
++
+ #endif /* FIOS_H */
+diff --git a/src/game/game.hpp b/src/game/game.hpp
+--- a/src/game/game.hpp
++++ b/src/game/game.hpp
+@@ -13,6 +13,7 @@
+ #define GAME_HPP
+ 
+ #include "../core/string_compare_type.hpp"
++#include "game_scanner.hpp"
+ #include <map>
+ 
+ /** A list that maps AI names to their AIInfo object. */
+@@ -101,6 +102,10 @@
+ 	static bool HasGame(const struct ContentInfo *ci, bool md5sum);
+ 	static bool HasGameLibrary(const ContentInfo *ci, bool md5sum);
+ #endif
++	/** Gets the ScriptScanner instance that is used to find Game scripts */
++	static GameScannerInfo *GetScannerInfo();
++	/** Gets the ScriptScanner instance that is used to find Game Libraries */
++	static GameScannerLibrary *GetScannerLibrary();
+ 
+ private:
+ 	static uint frame_counter;                        ///< Tick counter for the Game code.
+diff --git a/src/game/game_core.cpp b/src/game/game_core.cpp
+--- a/src/game/game_core.cpp
++++ b/src/game/game_core.cpp
+@@ -253,3 +253,12 @@
+ }
+ 
+ #endif /* defined(ENABLE_NETWORK) */
++
++/* static */ GameScannerInfo *Game::GetScannerInfo()
++{
++	return Game::scanner_info;
++}
++/* static */ GameScannerLibrary *Game::GetScannerLibrary()
++{
++	return Game::scanner_library;
++}
+diff --git a/src/script/script_scanner.cpp b/src/script/script_scanner.cpp
+--- a/src/script/script_scanner.cpp
++++ b/src/script/script_scanner.cpp
+@@ -271,4 +271,12 @@
+ 	return false;
+ }
+ 
++const char *ScriptScanner::FindScript(const ContentInfo *ci, bool md5sum)
++{
++	for (ScriptInfoList::iterator it = this->info_list.begin(); it != this->info_list.end(); it++) {
++		if (IsSameScript(ci, md5sum, (*it).second, this->GetDirectory())) return (*it).second->GetMainScript();
++	}
++	return NULL;
++}
++
+ #endif /* ENABLE_NETWORK */
+diff --git a/src/script/script_scanner.hpp b/src/script/script_scanner.hpp
+--- a/src/script/script_scanner.hpp
++++ b/src/script/script_scanner.hpp
+@@ -69,6 +69,14 @@
+ 	 */
+ 	bool HasScript(const struct ContentInfo *ci, bool md5sum);
+ 
++	/**
++	 * Find a script of a #ContentInfo
++	 * @param ci The information to compare to.
++	 * @param md5sum Whether to check the MD5 checksum.
++	 * @return A filename of a file of the content, else \c NULL.
++	 */
++	const char *FindScript(const ContentInfo *ci, bool md5sum);
++
+ 	/* virtual */ bool AddFile(const char *filename, size_t basepath_length, const char *tar_filename);
+ 
+ 	/**

@@ -1,0 +1,205 @@
+diff --git a/src/fileio.cpp b/src/fileio.cpp
+index 7e4d21f..c629dbf 100644
+--- a/src/fileio.cpp
++++ b/src/fileio.cpp
+@@ -309,6 +309,26 @@ bool FioCheckFileExists(const char *filename, Subdirectory subdir)
+ }
+ 
+ /**
++ * Returns the time of given file's last modification.
++ * @param filename the file to check
++ * @return a timestamp or 0 in case of errors
++ */
++time_t FileMTime(const char *filename)
++{
++#ifdef WIN32
++	struct _stat sb;
++	if (_tstat(OTTD2FS(filename), &sb) == 0) {
++#else
++	struct stat sb;
++	if (stat(filename, &sb) == 0) {
++#endif
++		return sb.st_mtime;
++	} else {
++		return 0;
++	}
++}
++
++/**
+  * Test whether the given filename exists.
+  * @param filename the file to test.
+  * @return true if and only if the file exists.
+diff --git a/src/fileio_func.h b/src/fileio_func.h
+index 6dea50e..b3c82f1 100644
+--- a/src/fileio_func.h
++++ b/src/fileio_func.h
+@@ -14,6 +14,7 @@
+ 
+ #include "core/enum_type.hpp"
+ #include "fileio_type.h"
++#include <time.h>
+ 
+ void FioSeekTo(size_t pos, int mode);
+ void FioSeekToFile(uint8 slot, size_t pos);
+@@ -64,6 +65,7 @@ bool FileExists(const char *filename);
+ const char *FioTarFirstDir(const char *tarname, Subdirectory subdir);
+ void FioTarAddLink(const char *src, const char *dest, Subdirectory subdir);
+ bool ExtractTar(const char *tar_filename, Subdirectory subdir);
++time_t FileMTime(const char *filename);
+ 
+ extern char *_personal_dir; ///< custom directory for personal settings, saves, newgrf, etc.
+ 
+diff --git a/src/fios.cpp b/src/fios.cpp
+index ffbe573..c145c18 100644
+--- a/src/fios.cpp
++++ b/src/fios.cpp
+@@ -257,17 +257,7 @@ bool FiosFileScanner::AddFile(const char *filename, size_t basepath_length, cons
+ 	}
+ 
+ 	FiosItem *fios = _fios_items.Append();
+-#ifdef WIN32
+-	struct _stat sb;
+-	if (_tstat(OTTD2FS(filename), &sb) == 0) {
+-#else
+-	struct stat sb;
+-	if (stat(filename, &sb) == 0) {
+-#endif
+-		fios->mtime = sb.st_mtime;
+-	} else {
+-		fios->mtime = 0;
+-	}
++	fios->mtime = FileMTime(filename);
+ 
+ 	fios->type = type;
+ 	strecpy(fios->name, filename, lastof(fios->name));
+diff --git a/src/fios.h b/src/fios.h
+index bf35461..a3a0977 100644
+--- a/src/fios.h
++++ b/src/fios.h
+@@ -40,6 +40,8 @@ struct LoadCheckData {
+ 	struct LoggedAction *gamelog_action;          ///< Gamelog actions
+ 	uint gamelog_actions;                         ///< Number of gamelog actions
+ 
++	struct tm *mtime;                             ///< Time when the savegame file was modified.
++
+ 	LoadCheckData() : error_data(NULL), grfconfig(NULL), gamelog_action(NULL)
+ 	{
+ 		this->Clear();
+diff --git a/src/fios_gui.cpp b/src/fios_gui.cpp
+index 5266d6f..1660da9 100644
+--- a/src/fios_gui.cpp
++++ b/src/fios_gui.cpp
+@@ -66,6 +66,11 @@ void LoadCheckData::Clear()
+ 	this->gamelog_actions = 0;
+ 
+ 	ClearGRFConfigList(&this->grfconfig);
++
++	if (this->mtime != NULL) {
++		delete this->mtime;
++		this->mtime = NULL;
++	}
+ }
+ 
+ /** Load game/scenario with optional content download */
+@@ -432,6 +437,23 @@ public:
+ 					}
+ 					if (y > y_max) break;
+ 
++					/* Savegame file's modification time, if available. */
++					if (_load_check_data.mtime != NULL) {
++
++						y += WD_PAR_VSEP_NORMAL;
++						if (y > y_max) break;
++
++						uint32 day = _load_check_data.mtime->tm_mday;
++						/* tm_mon are the month since January */
++						uint32 month = _load_check_data.mtime->tm_mon + 1;
++						/* tm_year stores the years since 1900 */
++						uint32 year = _load_check_data.mtime->tm_year + 1900;
++						SetDParam(0, ConvertYMDToDate(year, month, day));
++						DrawString(r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, y, STR_SAVELOAD_DETAIL_FILE_MTIME);
++						y += FONT_HEIGHT_NORMAL;
++						if (y > y_max) break;
++					}
++
+ 					/* Hide the company stuff for scenarios */
+ 					if (_saveload_mode != SLD_LOAD_SCENARIO && _saveload_mode != SLD_SAVE_SCENARIO) {
+ 						y += FONT_HEIGHT_NORMAL;
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+index d4302e4..11cc05e 100644
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -2507,6 +2507,7 @@ STR_SAVELOAD_DETAIL_CAPTION                                     :{BLACK}Game Det
+ STR_SAVELOAD_DETAIL_NOT_AVAILABLE                               :{BLACK}No information available
+ STR_SAVELOAD_DETAIL_COMPANY_INDEX                               :{SILVER}{COMMA}: {WHITE}{STRING1}
+ STR_SAVELOAD_DETAIL_GRFSTATUS                                   :{SILVER}NewGRF: {WHITE}{STRING}
++STR_SAVELOAD_DETAIL_FILE_MTIME                                  :{SILVER}Saved: {WHITE}{DATE_LONG}
+ 
+ STR_SAVELOAD_OSKTITLE                                           :{BLACK}Enter a name for the savegame
+ 
+diff --git a/src/saveload/saveload.cpp b/src/saveload/saveload.cpp
+index f9e5696..3ecf10d 100644
+--- a/src/saveload/saveload.cpp
++++ b/src/saveload/saveload.cpp
+@@ -1788,12 +1788,13 @@ static void SlFixPointers()
+ struct FileReader : LoadFilter {
+ 	FILE *file; ///< The file to read from.
+ 	long begin; ///< The begin of the file.
++	time_t mtime; ///< Time when the file was modified.
+ 
+ 	/**
+ 	 * Create the file reader, so it reads from a specific file.
+ 	 * @param file The file to read from.
+ 	 */
+-	FileReader(FILE *file) : LoadFilter(NULL), file(file), begin(ftell(file))
++	FileReader(FILE *file, uint64 mtime) : LoadFilter(NULL), file(file), begin(ftell(file)), mtime(mtime)
+ 	{
+ 	}
+ 
+@@ -2515,6 +2516,24 @@ SaveOrLoadResult SaveWithFilter(SaveFilter *writer, bool threaded)
+ }
+ 
+ /**
++ * If the filter is a FileReader get file's modification time and save it in
++ * _load_check_data.mtime
++ *
++ * @param reader  The filter to read the savegame from.
++ * @return Return the result of the action. #SL_OK or #SL_ERROR.
++ */
++SaveOrLoadResult SlLoadMetaInformation(LoadFilter *reader)
++{
++	FileReader *file;
++	if (NULL != (file = dynamic_cast<FileReader*>(reader))) {
++		_load_check_data.mtime = new struct tm;
++		if (localtime_r(&file->mtime, _load_check_data.mtime) != 0)
++			return SL_ERROR;
++	}
++	return SL_OK;
++}
++
++/**
+  * Actually perform the loading of a "non-old" savegame.
+  * @param reader     The filter to read the savegame from.
+  * @param load_check Whether to perform the checking ("preview") or actually load the game.
+@@ -2624,6 +2643,7 @@ static SaveOrLoadResult DoLoad(LoadFilter *reader, bool load_check)
+ 		/* Load chunks into _load_check_data.
+ 		 * No pools are loaded. References are not possible, and thus do not need resolving. */
+ 		SlLoadCheckChunks();
++		SlLoadMetaInformation(reader);
+ 	} else {
+ 		/* Load chunks and resolve references */
+ 		SlLoadChunks();
+@@ -2735,11 +2755,12 @@ SaveOrLoadResult SaveOrLoad(const char *filename, int mode, Subdirectory sb, boo
+ 
+ 			return DoSave(new FileWriter(fh), threaded);
+ 		}
++		time_t mtime = FileMTime(filename);
+ 
+ 		/* LOAD game */
+ 		assert(mode == SL_LOAD || mode == SL_LOAD_CHECK);
+ 		DEBUG(desync, 1, "load: %s", filename);
+-		return DoLoad(new FileReader(fh), mode == SL_LOAD_CHECK);
++		return DoLoad(new FileReader(fh, mtime), mode == SL_LOAD_CHECK);
+ 	} catch (...) {
+ 		ClearSaveLoadState();
+ 

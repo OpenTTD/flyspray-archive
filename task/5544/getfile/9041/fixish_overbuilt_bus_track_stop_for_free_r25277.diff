@@ -1,0 +1,68 @@
+diff -r d3a1a092df3b src/station_cmd.cpp
+--- a/src/station_cmd.cpp	Thu May 23 08:39:17 2013 +0200
++++ b/src/station_cmd.cpp	Thu May 23 10:07:32 2013 +0200
+@@ -862,15 +862,16 @@
+  * @param invalid_dirs Prohibited directions (set of DiagDirections).
+  * @param is_drive_through True if trying to build a drive-through station.
+  * @param is_truck_stop True when building a truck stop, false otherwise.
+- * @param axis Axis of a drive-through road stop.
++ * @param dir Entrance direction.
+  * @param station StationID to be queried and returned if available.
+  * @param rts Road types to build.
+  * @return The cost in case of success, or an error code if it failed.
+  */
+-static CommandCost CheckFlatLandRoadStop(TileArea tile_area, DoCommandFlag flags, uint invalid_dirs, bool is_drive_through, bool is_truck_stop, Axis axis, StationID *station, RoadTypes rts)
++static CommandCost CheckFlatLandRoadStop(TileArea tile_area, DoCommandFlag flags, uint invalid_dirs, bool is_drive_through, bool is_truck_stop, DiagDirection dir, StationID *station, RoadTypes rts)
+ {
+ 	CommandCost cost(EXPENSES_CONSTRUCTION);
+ 	int allowed_z = -1;
++	uint num_already_built = 0;
+ 
+ 	TILE_AREA_LOOP(cur_tile, tile_area) {
+ 		CommandCost ret = CheckBuildableTile(cur_tile, invalid_dirs, allowed_z, !is_drive_through);
+@@ -888,10 +889,17 @@
+ 						is_drive_through != IsDriveThroughStopTile(cur_tile)) {
+ 					return ClearTile_Station(cur_tile, DC_AUTO); // Get error message.
+ 				}
++				DiagDirection cur_dir = GetRoadStopDir(cur_tile);
+ 				/* Drive-through station in the wrong direction. */
+-				if (is_drive_through && IsDriveThroughStopTile(cur_tile) && DiagDirToAxis(GetRoadStopDir(cur_tile)) != axis){
++				if (is_drive_through && DiagDirToAxis(cur_dir) != DiagDirToAxis(dir)) {
+ 					return_cmd_error(STR_ERROR_DRIVE_THROUGH_DIRECTION);
+ 				}
++				/* When overbuilding with the same type and direction don't count costs again for this tile. */
++				if (is_drive_through || dir == cur_dir) {
++					num_already_built++;
++					cost.AddCost(-_price[is_truck_stop ? PR_BUILD_STATION_TRUCK : PR_BUILD_STATION_BUS]);
++				}
++				/* Check if the underlying station is allowed to be joined to. */
+ 				StationID st = GetStationIndex(cur_tile);
+ 				if (*station == INVALID_STATION) {
+ 					*station = st;
+@@ -903,7 +911,7 @@
+ 			bool build_over_road = is_drive_through && IsNormalRoadTile(cur_tile);
+ 			/* Road bits in the wrong direction. */
+ 			RoadBits rb = IsNormalRoadTile(cur_tile) ? GetAllRoadBits(cur_tile) : ROAD_NONE;
+-			if (build_over_road && (rb & (axis == AXIS_X ? ROAD_Y : ROAD_X)) != 0) {
++			if (build_over_road && (rb & (DiagDirToAxis(dir) == AXIS_X ? ROAD_Y : ROAD_X)) != 0) {
+ 				/* Someone was pedantic and *NEEDED* three fracking different error messages. */
+ 				switch (CountBits(rb)) {
+ 					case 1:
+@@ -956,6 +964,8 @@
+ 		}
+ 	}
+ 
++	if (num_already_built == tile_area.w * tile_area.h) return_cmd_error(STR_ERROR_ALREADY_BUILT);
++
+ 	return cost;
+ }
+ 
+@@ -1805,7 +1815,7 @@
+ 	/* Total road stop cost. */
+ 	CommandCost cost(EXPENSES_CONSTRUCTION, roadstop_area.w * roadstop_area.h * _price[type ? PR_BUILD_STATION_TRUCK : PR_BUILD_STATION_BUS]);
+ 	StationID est = INVALID_STATION;
+-	ret = CheckFlatLandRoadStop(roadstop_area, flags, is_drive_through ? 5 << ddir : 1 << ddir, is_drive_through, type, DiagDirToAxis(ddir), &est, rts);
++	ret = CheckFlatLandRoadStop(roadstop_area, flags, is_drive_through ? 5 << ddir : 1 << ddir, is_drive_through, type, ddir, &est, rts);
+ 	if (ret.Failed()) return ret;
+ 	cost.AddCost(ret);
+ 

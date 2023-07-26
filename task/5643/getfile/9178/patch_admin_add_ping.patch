@@ -1,0 +1,152 @@
+
+<!-- saved from url=(0059)http://devs.opendune.org/~xaroth/patch_admin_add_ping.patch -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1"></head><body><pre style="word-wrap: break-word; white-space: pre-wrap;">Index: src/network/core/tcp_admin.cpp
+===================================================================
+--- src/network/core/tcp_admin.cpp	(revision 25578)
++++ src/network/core/tcp_admin.cpp	(working copy)
+@@ -61,6 +61,7 @@
+ 		case ADMIN_PACKET_ADMIN_CHAT:             return this-&gt;Receive_ADMIN_CHAT(p);
+ 		case ADMIN_PACKET_ADMIN_RCON:             return this-&gt;Receive_ADMIN_RCON(p);
+ 		case ADMIN_PACKET_ADMIN_GAMESCRIPT:       return this-&gt;Receive_ADMIN_GAMESCRIPT(p);
++		case ADMIN_PACKET_ADMIN_PING:             return this-&gt;Receive_ADMIN_PING(p);
+ 
+ 		case ADMIN_PACKET_SERVER_FULL:            return this-&gt;Receive_SERVER_FULL(p);
+ 		case ADMIN_PACKET_SERVER_BANNED:          return this-&gt;Receive_SERVER_BANNED(p);
+@@ -87,6 +88,7 @@
+ 		case ADMIN_PACKET_SERVER_CONSOLE:         return this-&gt;Receive_SERVER_CONSOLE(p);
+ 		case ADMIN_PACKET_SERVER_CMD_NAMES:       return this-&gt;Receive_SERVER_CMD_NAMES(p);
+ 		case ADMIN_PACKET_SERVER_CMD_LOGGING:     return this-&gt;Receive_SERVER_CMD_LOGGING(p);
++		case ADMIN_PACKET_SERVER_PONG:            return this-&gt;Receive_SERVER_PONG(p);
+ 
+ 		default:
+ 			if (this-&gt;HasClientQuit()) {
+@@ -136,6 +138,7 @@
+ NetworkRecvStatus NetworkAdminSocketHandler::Receive_ADMIN_CHAT(Packet *p) { return this-&gt;ReceiveInvalidPacket(ADMIN_PACKET_ADMIN_CHAT); }
+ NetworkRecvStatus NetworkAdminSocketHandler::Receive_ADMIN_RCON(Packet *p) { return this-&gt;ReceiveInvalidPacket(ADMIN_PACKET_ADMIN_RCON); }
+ NetworkRecvStatus NetworkAdminSocketHandler::Receive_ADMIN_GAMESCRIPT(Packet *p) { return this-&gt;ReceiveInvalidPacket(ADMIN_PACKET_ADMIN_GAMESCRIPT); }
++NetworkRecvStatus NetworkAdminSocketHandler::Receive_ADMIN_PING(Packet *p) { return this-&gt;ReceiveInvalidPacket(ADMIN_PACKET_ADMIN_PING); }
+ 
+ NetworkRecvStatus NetworkAdminSocketHandler::Receive_SERVER_FULL(Packet *p) { return this-&gt;ReceiveInvalidPacket(ADMIN_PACKET_SERVER_FULL); }
+ NetworkRecvStatus NetworkAdminSocketHandler::Receive_SERVER_BANNED(Packet *p) { return this-&gt;ReceiveInvalidPacket(ADMIN_PACKET_SERVER_BANNED); }
+@@ -162,5 +165,6 @@
+ NetworkRecvStatus NetworkAdminSocketHandler::Receive_SERVER_CONSOLE(Packet *p) { return this-&gt;ReceiveInvalidPacket(ADMIN_PACKET_SERVER_CONSOLE); }
+ NetworkRecvStatus NetworkAdminSocketHandler::Receive_SERVER_CMD_NAMES(Packet *p) { return this-&gt;ReceiveInvalidPacket(ADMIN_PACKET_SERVER_CMD_NAMES); }
+ NetworkRecvStatus NetworkAdminSocketHandler::Receive_SERVER_CMD_LOGGING(Packet *p) { return this-&gt;ReceiveInvalidPacket(ADMIN_PACKET_SERVER_CMD_LOGGING); }
++NetworkRecvStatus NetworkAdminSocketHandler::Receive_SERVER_PONG(Packet *p) { return this-&gt;ReceiveInvalidPacket(ADMIN_PACKET_SERVER_PONG); }
+ 
+ #endif /* ENABLE_NETWORK */
+Index: src/network/core/tcp_admin.h
+===================================================================
+--- src/network/core/tcp_admin.h	(revision 25578)
++++ src/network/core/tcp_admin.h	(working copy)
+@@ -33,6 +33,7 @@
+ 	ADMIN_PACKET_ADMIN_CHAT,             ///&lt; The admin sends a chat message to be distributed.
+ 	ADMIN_PACKET_ADMIN_RCON,             ///&lt; The admin sends a remote console command.
+ 	ADMIN_PACKET_ADMIN_GAMESCRIPT,       ///&lt; The admin sends a JSON string for the GameScript.
++	ADMIN_PACKET_ADMIN_PING,             ///&lt; The admin sends a PING request.
+ 
+ 	ADMIN_PACKET_SERVER_FULL = 100,      ///&lt; The server tells the admin it cannot accept the admin.
+ 	ADMIN_PACKET_SERVER_BANNED,          ///&lt; The server tells the admin it is banned.
+@@ -60,6 +61,7 @@
+ 	ADMIN_PACKET_SERVER_CMD_NAMES,       ///&lt; The server sends out the names of the DoCommands to the admins.
+ 	ADMIN_PACKET_SERVER_CMD_LOGGING,     ///&lt; The server gives the admin copies of incoming command packets.
+ 	ADMIN_PACKET_SERVER_GAMESCRIPT,      ///&lt; The server gives the admin information from the GameScript in JSON.
++	ADMIN_PACKET_SERVER_PONG,            ///&lt; The server gives a PONG response to a PING request.
+ 
+ 	INVALID_ADMIN_PACKET = 0xFF,         ///&lt; An invalid marker for admin packets.
+ };
+@@ -180,7 +182,16 @@
+ 	 */
+ 	virtual NetworkRecvStatus Receive_ADMIN_GAMESCRIPT(Packet *p);
+ 
++
+ 	/**
++	 * Ping the server, requesting the server to respond.
++	 * uint32 Payload data, which will be sent back in the response.
++	 * @param p The packet that was just received.
++	 * @return The state the network should have.
++	 */
++	virtual NetworkRecvStatus Receive_ADMIN_PING(Packet *p);
++
++	/**
+ 	 * The server is full (connection gets closed).
+ 	 * @param p The packet that was just received.
+ 	 * @return The state the network should have.
+@@ -454,6 +465,14 @@
+ 	 */
+ 	virtual NetworkRecvStatus Receive_SERVER_CMD_LOGGING(Packet *p);
+ 
++	/**
++	 * Send a response to a Ping request.
++	 * uint32 Payload data, which was sent with the original Ping request.
++	 * @param p The packet that was just received.
++	 * @return The state the network should have.
++	 */
++	virtual NetworkRecvStatus Receive_SERVER_PONG(Packet *p);
++
+ 	NetworkRecvStatus HandlePacket(Packet *p);
+ public:
+ 	NetworkRecvStatus CloseConnection(bool error = true);
+Index: src/network/network_admin.cpp
+===================================================================
+--- src/network/network_admin.cpp	(revision 25578)
++++ src/network/network_admin.cpp	(working copy)
+@@ -620,6 +620,20 @@
+ 	return NETWORK_RECV_STATUS_OKAY;
+ }
+ 
++/**
++ * Send a pong response
++ * @param payload The payload originally sent by the client.
++ */
++NetworkRecvStatus ServerNetworkAdminSocketHandler::SendPong(uint32 payload)
++{
++	Packet *p = new Packet(ADMIN_PACKET_SERVER_PONG);
++
++	p-&gt;Send_uint32(payload);
++	this-&gt;SendPacket(p);
++
++	return NETWORK_RECV_STATUS_OKAY;
++}
++
+ /***********
+  * Receiving functions
+  ************/
+@@ -771,6 +785,16 @@
+ 	return NETWORK_RECV_STATUS_OKAY;
+ }
+ 
++NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_PING(Packet *p)
++{
++	if (this-&gt;status == ADMIN_STATUS_INACTIVE) return this-&gt;SendError(NETWORK_ERROR_NOT_EXPECTED);
++
++	uint32 payload = p-&gt;Recv_uint32();
++	DEBUG(net, 4, "[admin] Ping from '%s' (%s): '%d'", this-&gt;admin_name, this-&gt;admin_version, payload);
++
++	return this-&gt;SendPong(payload);
++}
++
+ /*
+  * Useful wrapper functions
+  */
+Index: src/network/network_admin.h
+===================================================================
+--- src/network/network_admin.h	(revision 25578)
++++ src/network/network_admin.h	(working copy)
+@@ -35,6 +35,7 @@
+ 	virtual NetworkRecvStatus Receive_ADMIN_CHAT(Packet *p);
+ 	virtual NetworkRecvStatus Receive_ADMIN_RCON(Packet *p);
+ 	virtual NetworkRecvStatus Receive_ADMIN_GAMESCRIPT(Packet *p);
++	virtual NetworkRecvStatus Receive_ADMIN_PING(Packet *p);
+ 
+ 	NetworkRecvStatus SendProtocol();
+ public:
+@@ -69,6 +70,7 @@
+ 	NetworkRecvStatus SendGameScript(const char *json);
+ 	NetworkRecvStatus SendCmdNames();
+ 	NetworkRecvStatus SendCmdLogging(ClientID client_id, const CommandPacket *cp);
++	NetworkRecvStatus SendPong(uint32 payload);
+ 
+ 	static void Send();
+ 	static void AcceptConnection(SOCKET s, const NetworkAddress &amp;address);
+</pre></body></html>

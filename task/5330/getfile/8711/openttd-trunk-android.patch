@@ -1,0 +1,275 @@
+--- src/debug.cpp	2012-10-31 23:39:00.000000000 +0200
++++ src/debug.cpp	2012-11-22 19:01:14.510763002 +0200
+@@ -16,6 +16,9 @@
+ #include "string_func.h"
+ #include "fileio_func.h"
+ #include "settings_type.h"
++#ifdef __ANDROID__
++#include <android/log.h>
++#endif
+ 
+ #include <time.h>
+ 
+@@ -82,6 +85,9 @@
+  */
+ static void debug_print(const char *dbg, const char *buf)
+ {
++#ifdef __ANDROID__
++	__android_log_print(ANDROID_LOG_INFO, "OpenTTD", "[%s] %s", dbg, buf);
++#endif
+ #if defined(ENABLE_NETWORK)
+ 	if (_debug_socket != INVALID_SOCKET) {
+ 		char buf2[1024 + 32];
+--- src/fontcache.cpp	2012-10-31 23:39:00.000000000 +0200
++++ src/fontcache.cpp	2012-11-23 20:02:36.768406013 +0200
+@@ -808,7 +808,15 @@
+ 	return ret;
+ }
+ 
+-#else /* without WITH_FONTCONFIG */
++#elif defined(__ANDROID__) /* end if defined(WITH_FONTCONFIG) */
++FT_Error GetFontByFaceName(const char *font_name, FT_Face *face) {return FT_Err_Cannot_Open_Resource;}
++bool SetFallbackFont(FreeTypeSettings *settings, const char *language_isocode, int winlangid, MissingGlyphSearcher *callback)
++{
++	callback->SetFontNames(settings, "fonts/FreeSans.ttf"); /* We don't really have other fonts on Android, other than our own */
++	callback->FindMissingGlyphs(NULL);
++	return true;
++}
++#else /* end if defined(__ANDROID__) */
+ FT_Error GetFontByFaceName(const char *font_name, FT_Face *face) {return FT_Err_Cannot_Open_Resource;}
+ bool SetFallbackFont(FreeTypeSettings *settings, const char *language_isocode, int winlangid, MissingGlyphSearcher *callback) { return false; }
+ #endif /* WITH_FONTCONFIG */
+--- src/music/libtimidity.cpp	2012-10-31 23:38:54.000000000 +0200
++++ src/music/libtimidity.cpp	2012-11-22 19:01:14.510763002 +0200
+@@ -13,6 +13,7 @@
+ #include "../openttd.h"
+ #include "../sound_type.h"
+ #include "../debug.h"
++#include "../core/math_func.hpp"
+ #include "libtimidity.h"
+ #include <fcntl.h>
+ #include <sys/types.h>
+@@ -22,6 +23,7 @@
+ #include <sys/stat.h>
+ #include <errno.h>
+ #include <timidity.h>
++#include <SDL.h>
+ #if defined(PSP)
+ #include <pspaudiolib.h>
+ #endif /* PSP */
+@@ -51,6 +53,24 @@
+ 	}
+ }
+ #endif /* PSP */
++#ifdef __ANDROID__
++/* Android does not have Midi chip, we have to route the libtimidity output through SDL audio output */
++void Android_MidiMixMusic(Sint16 *stream, int len)
++{
++	if (_midi.status == MIDI_PLAYING) {
++		Sint16 buf[16384];
++		while( len > 0 )
++		{
++			int minlen = min(sizeof(buf), len);
++			mid_song_read_wave(_midi.song, stream, min(sizeof(buf), len*2));
++			for( Uint16 i = 0; i < minlen; i++ )
++				stream[i] += buf[i];
++			stream += minlen;
++			len -= minlen;
++		}
++	}
++}
++#endif /* __ANDROID__ */
+ 
+ /** Factory for the libtimidity driver. */
+ static FMusicDriver_LibTimidity iFMusicDriver_LibTimidity;
+--- src/network/core/os_abstraction.h	2012-10-31 23:38:59.000000000 +0200
++++ src/network/core/os_abstraction.h	2012-11-22 19:01:14.506763002 +0200
+@@ -161,7 +161,7 @@
+ #		include <net/if.h>
+ /* According to glibc/NEWS, <ifaddrs.h> appeared in glibc-2.3. */
+ #		if !defined(__sgi__) && !defined(SUNOS) && !defined(__MORPHOS__) && !defined(__BEOS__) && !defined(__HAIKU__) && !defined(__INNOTEK_LIBC__) \
+-		   && !(defined(__GLIBC__) && (__GLIBC__ <= 2) && (__GLIBC_MINOR__ <= 2)) && !defined(__dietlibc__) && !defined(HPUX)
++		   && !(defined(__GLIBC__) && (__GLIBC__ <= 2) && (__GLIBC_MINOR__ <= 2)) && !defined(__dietlibc__) && !defined(HPUX) && !defined(__ANDROID__)
+ /* If for any reason ifaddrs.h does not exist on your system, comment out
+  *   the following two lines and an alternative way will be used to fetch
+  *   the list of IPs from the system. */
+--- src/os/unix/crashlog_unix.cpp	2012-10-31 23:38:54.000000000 +0200
++++ src/os/unix/crashlog_unix.cpp	2012-11-22 19:01:14.506763002 +0200
+@@ -141,7 +141,11 @@
+ };
+ 
+ /** The signals we want our crash handler to handle. */
++#ifdef __ANDROID__
++static const int _signals_to_handle[] = { }; // Default Android signal handler will give us stack trace
++#else
+ static const int _signals_to_handle[] = { SIGSEGV, SIGABRT, SIGFPE, SIGBUS, SIGILL };
++#endif
+ 
+ /**
+  * Entry point for the crash handler.
+--- src/os/unix/unix.cpp	2012-10-31 23:38:54.000000000 +0200
++++ src/os/unix/unix.cpp	2012-11-22 19:01:14.506763002 +0200
+@@ -25,7 +25,7 @@
+ 
+ #ifdef __APPLE__
+ 	#include <sys/mount.h>
+-#elif (defined(_POSIX_VERSION) && _POSIX_VERSION >= 200112L) || defined(__GLIBC__)
++#elif ((defined(_POSIX_VERSION) && _POSIX_VERSION >= 200112L) || defined(__GLIBC__)) && !defined(__ANDROID__)
+ 	#define HAS_STATVFS
+ #endif
+ 
+@@ -254,6 +254,11 @@
+ void cocoaReleaseAutoreleasePool();
+ #endif
+ 
++#ifdef __ANDROID__
++#define main SDL_main
++extern "C" int CDECL main(int, char *[]);
++#endif
++
+ int CDECL main(int argc, char *argv[])
+ {
+ 	int ret;
+--- src/osk_gui.cpp	2012-10-31 23:39:00.000000000 +0200
++++ src/osk_gui.cpp	2012-11-22 19:01:14.506763002 +0200
+@@ -21,6 +21,9 @@
+ 
+ #include "table/sprites.h"
+ #include "table/strings.h"
++#ifdef __ANDROID__
++#include <SDL_screenkeyboard.h>
++#endif
+ 
+ char _keyboard_opt[2][OSK_KEYBOARD_ENTRIES * 4 + 1];
+ static WChar _keyboard[2][OSK_KEYBOARD_ENTRIES];
+@@ -439,6 +442,14 @@
+ 
+ 	GetKeyboardLayout();
+ 	new OskWindow(&_osk_desc, parent, button, cancel, ok);
++#ifdef __ANDROID__
++	SDL_ANDROID_GetScreenKeyboardTextInput(parent->text.buf, parent->text.max_bytes); /* Invoke Android built-in screen keyboard */
++	OskWindow *osk = dynamic_cast<OskWindow *>(FindWindowById(WC_OSK, 0));
++	free(osk->orig_str_buf);
++	osk->orig_str_buf = strdup(osk->qs->text.buf);
++
++	osk->SetDirty();
++#endif
+ }
+ 
+ /**
+--- src/script/api/script_date.cpp	2012-10-31 23:38:58.000000000 +0200
++++ src/script/api/script_date.cpp	2012-11-22 19:01:14.510763002 +0200
+@@ -9,8 +9,8 @@
+ 
+ /** @file script_date.cpp Implementation of ScriptDate. */
+ 
++#include "../../stdafx.h" /* Have to be included before time.h, if we want UINT32_MAX macro defined on Android */
+ #include <time.h>
+-#include "../../stdafx.h"
+ #include "script_date.hpp"
+ #include "../../date_func.h"
+ 
+--- src/sound/sdl_s.cpp	2012-10-31 23:38:54.000000000 +0200
++++ src/sound/sdl_s.cpp	2012-11-22 19:01:14.506763002 +0200
+@@ -21,6 +21,10 @@
+ /** Factory for the SDL sound driver. */
+ static FSoundDriver_SDL iFSoundDriver_SDL;
+ 
++#ifdef __ANDROID__
++extern void Android_MidiMixMusic(Sint16 *stream, int len);
++#endif
++
+ /**
+  * Callback that fills the sound buffer.
+  * @param userdata Ignored.
+@@ -30,6 +34,9 @@
+ static void CDECL fill_sound_buffer(void *userdata, Uint8 *stream, int len)
+ {
+ 	MxMixSamples(stream, len / 4);
++#if defined(__ANDROID__) && defined(LIBTIMIDITY)
++	Android_MidiMixMusic((Sint16 *)stream, len / 2);
++#endif
+ }
+ 
+ const char *SoundDriver_SDL::Start(const char * const *parm)
+--- src/video/sdl_v.cpp	2012-10-31 23:38:49.000000000 +0200
++++ src/video/sdl_v.cpp	2012-11-22 19:01:14.506763002 +0200
+@@ -25,6 +25,9 @@
+ #include "../fileio_func.h"
+ #include "sdl_v.h"
+ #include <SDL.h>
++#ifdef __ANDROID__
++#include <SDL_screenkeyboard.h>
++#endif
+ 
+ static FVideoDriver_SDL iFVideoDriver_SDL;
+ 
+@@ -241,7 +244,14 @@
+ 			SDL_CALL SDL_FreeSurface(icon);
+ 		}
+ 	}
+-
++#ifdef __ANDROID__
++	SDL_Rect r;
++	r.h = SDL_ListModes(NULL, 0)[0]->h / 10;
++	r.w = r.h;
++	r.x = SDL_ListModes(NULL, 0)[0]->w - r.w;
++	r.y = SDL_ListModes(NULL, 0)[0]->h - r.h;
++	SDL_ANDROID_SetScreenKeyboardButtonPos(SDL_ANDROID_SCREENKEYBOARD_BUTTON_TEXT, &r);
++#endif
+ 	/* DO NOT CHANGE TO HWSURFACE, IT DOES NOT WORK */
+ 	newscreen = SDL_CALL SDL_SetVideoMode(w, h, bpp, SDL_SWSURFACE | SDL_HWPALETTE | (_fullscreen ? SDL_FULLSCREEN : SDL_RESIZABLE));
+ 	if (newscreen == NULL) {
+@@ -381,6 +391,8 @@
+ 	if (sym->scancode == 49) key = WKC_BACKSPACE;
+ #elif defined(__sgi__)
+ 	if (sym->scancode == 22) key = WKC_BACKQUOTE;
++#elif defined(__ANDROID__)
++	if (sym->scancode == SDLK_BACKQUOTE) key = WKC_BACKQUOTE;
+ #else
+ 	if (sym->scancode == 49) key = WKC_BACKQUOTE;
+ #endif
+@@ -456,7 +468,7 @@
+ 			}
+ 			HandleMouseEvents();
+ 			break;
+-
++#ifndef __ANDROID__
+ 		case SDL_ACTIVEEVENT:
+ 			if (!(ev.active.state & SDL_APPMOUSEFOCUS)) break;
+ 
+@@ -467,7 +479,7 @@
+ 				_cursor.in_window = false;
+ 			}
+ 			break;
+-
++#endif /* not __ANDROID__ */
+ 		case SDL_QUIT:
+ 			HandleExitGameRequest();
+ 			break;
+@@ -480,13 +492,14 @@
+ 				HandleKeypress(ConvertSdlKeyIntoMy(&ev.key.keysym));
+ 			}
+ 			break;
+-
++#ifndef __ANDROID__
+ 		case SDL_VIDEORESIZE: {
+ 			int w = max(ev.resize.w, 64);
+ 			int h = max(ev.resize.h, 64);
+ 			CreateMainSurface(w, h);
+ 			break;
+ 		}
++#endif /* not __ANDROID__ */
+ 		case SDL_VIDEOEXPOSE: {
+ 			/* Force a redraw of the entire screen. Note
+ 			 * that SDL 1.2 seems to do this automatically
+@@ -519,6 +532,9 @@
+ 	SDL_CALL SDL_EnableUNICODE(1);
+ 
+ 	_draw_threaded = GetDriverParam(parm, "no_threads") == NULL && GetDriverParam(parm, "no_thread") == NULL;
++#ifdef __ANDROID__
++	_draw_threaded = false;
++#endif
+ 
+ 	return NULL;
+ }

@@ -1,0 +1,224 @@
+Index: src/map.h
+===================================================================
+--- src/map.h	(revision 8085)
++++ src/map.h	(working copy)
+@@ -24,6 +24,7 @@
+ 	byte m4;
+ 	byte m5;
+ 	byte m6;
++	byte m7;
+ } Tile;
+ 
+ extern Tile* _m;
+Index: src/misc.cpp
+===================================================================
+--- src/misc.cpp	(revision 8085)
++++ src/misc.cpp	(working copy)
+@@ -591,7 +591,35 @@
+ 	}
+ }
+ 
++static void Load_MAP7(void)
++{
++	uint size = MapSize();
++	uint i;
+ 
++	for (i = 0; i != size;) {
++		uint8 buf[4096];
++		uint j;
++
++		SlArray(buf, lengthof(buf), SLE_UINT8);
++		for (j = 0; j != lengthof(buf); j++) _m[i++].m7 = buf[j];
++	}
++}
++
++static void Save_MAP7(void)
++{
++	uint size = MapSize();
++	uint i;
++
++	SlSetLength(size);
++	for (i = 0; i != size;) {
++		uint8 buf[4096];
++		uint j;
++
++		for (j = 0; j != lengthof(buf); j++) buf[j] = _m[i++].m7;
++		SlArray(buf, lengthof(buf), SLE_UINT8);
++	}
++}
++
+ static void Save_CHTS(void)
+ {
+ 	byte count = sizeof(_cheats)/sizeof(Cheat);
+@@ -627,6 +655,7 @@
+ 	{ 'M3HI', Save_MAP4,     Load_MAP4,     CH_RIFF },
+ 	{ 'MAP5', Save_MAP5,     Load_MAP5,     CH_RIFF },
+ 	{ 'MAPE', Save_MAP6,     Load_MAP6,     CH_RIFF },
++	{ 'MAP7', Save_MAP7,     Load_MAP7,     CH_RIFF },
+ 
+ 	{ 'NAME', Save_NAME,     Load_NAME,     CH_ARRAY},
+ 	{ 'DATE', SaveLoad_DATE, SaveLoad_DATE, CH_RIFF},
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 8085)
++++ src/train_cmd.cpp	(working copy)
+@@ -2934,6 +2934,20 @@
+ 
+ 	u = v;
+ 	BEGIN_ENUM_WAGONS(v)
++		/* When a vehicle crashes the presence on the track must be removed */
++		/* If a train collides on a bridge the other end of the bridge must be cleaned up as well */
++		if (IsTileType(v->tile, MP_TUNNELBRIDGE)) {
++			ClearTrackMask(v->tile);
++			if (IsBridge(v->tile)) {
++				DEBUG(misc, 2, "Crashed on bridge, tile=%d", v->tile);
++				ClearTrackMask(GetOtherBridgeEnd(v->tile));
++			} else if (IsTunnel(v->tile)) {
++				DEBUG(misc, 2, "Crashed in tunnel, tile=%d", v->tile);
++				ClearTrackMask(GetOtherTunnelEnd(v->tile));
++			}
++		} else {
++			RemoveTrackMask(v->tile, v->u.rail.track);
++		}
+ 		v->vehstatus |= VS_CRASHED;
+ 	END_ENUM_WAGONS(v)
+ 
+@@ -3018,6 +3032,37 @@
+ 	return NULL;
+ }
+ 
++/**
++ * Set presence on track if the front engine enters or the last wagon leaves a tile.
++ */
++static void UpdateTrainTileCache(Vehicle *u, GetNewVehiclePosResult gp, TrackBits next_track)
++{
++	/* Only the last wagon may clear a tile */
++	if (u->next == NULL) {
++		RemoveTrackMask(gp.old_tile, (TrackBits)u->u.rail.track);
++		/* If on a bridge or in a tunnel, the other end must be freed as well */
++		if (IsTileType(gp.old_tile, MP_TUNNELBRIDGE)) {
++			if (IsBridge(gp.old_tile) && (!MayHaveBridgeAbove(gp.new_tile) || (MayHaveBridgeAbove(gp.new_tile) && !IsBridgeAbove(gp.new_tile)))) {
++				RemoveTrackMask(GetOtherBridgeEnd(gp.old_tile), (TrackBits)u->u.rail.track);
++			} else if (IsTunnel(gp.old_tile) && !IsTunnelInWay(gp.new_tile, u->z_height)) {
++				RemoveTrackMask(GetOtherTunnelEnd(gp.old_tile), (TrackBits)u->u.rail.track);
++			}
++		}
++	}
++	/* Only the first may trigger it */
++	if (GetPrevVehicleInChain(u) == NULL) {
++		SetTrackMask(gp.new_tile, next_track);
++		/* When entering a bridge or tunnel the other end must be activated as well */
++		if (IsTileType(gp.new_tile, MP_TUNNELBRIDGE)) {
++			if (IsBridge(gp.new_tile)) {
++				SetTrackMask(GetOtherBridgeEnd(gp.new_tile), next_track);
++			} else {
++				SetTrackMask(GetOtherTunnelEnd(gp.new_tile), next_track);
++			}
++		}
++	}
++}
++
+ static void TrainController(Vehicle *v, bool update_image)
+ {
+ 	Vehicle *prev;
+@@ -3126,6 +3171,9 @@
+ 					chosen_dir = (Direction)b[2];
+ 				}
+ 
++				/* Keep the collision check updated with information */
++				UpdateTrainTileCache(v, gp, chosen_track);
++
+ 				/* Call the landscape function and tell it that the vehicle entered the tile */
+ 				r = VehicleEnterTile(v, gp.new_tile, gp.x, gp.y);
+ 				if (r & 0x8) {
+@@ -3536,7 +3584,9 @@
+ 
+ 		do {
+ 			TrainController(v, true);
+-			CheckTrainCollision(v);
++			if (GetTrackOverload(v->tile)) {
++				CheckTrainCollision(v);
++			}
+ 			if (v->cur_speed <= 0x100)
+ 				break;
+ 		} while (--j != 0);
+Index: src/rail_map.h
+===================================================================
+--- src/rail_map.h	(revision 8085)
++++ src/rail_map.h	(working copy)
+@@ -6,8 +6,8 @@
+ #include "direction.h"
+ #include "rail.h"
+ #include "tile.h"
++#include "debug.h"
+ 
+-
+ typedef enum RailTileType {
+ 	RAIL_TILE_NORMAL         = 0x0,
+ 	RAIL_TILE_SIGNALS        = 0x40,
+@@ -338,5 +338,65 @@
+ 	_m[t].m4 = 0;
+ 	_m[t].m5 = RAIL_TILE_DEPOT_WAYPOINT | RAIL_SUBTYPE_WAYPOINT | a;
+ }
++/**
++ * Make trains aware to watch out for collisions
++ */
++static inline void SetTrackOverload(TileIndex t)
++{
++	DEBUG(misc, 2, "Turning on collision warning for tile %d", t);
++	/* Turn on first bit on */
++	SB(_m[t].m6, 2, 1, 1);
++}
+ 
++/**
++ * Make trains aware not to watch out for collisions anymore
++ */
++static inline void EndTrackOverload(TileIndex t)
++{
++	DEBUG(misc, 2, "Turning off collision warning for tile %d", t);
++	/* Turn off first bit on */
++	SB(_m[t].m6, 2, 1, 0);
++}
++
++/**
++ * Find out if collision check is needed
++ */
++static inline bool GetTrackOverload(TileIndex t)
++{
++	/* Check if track is overloaded/possible collision chance */
++	return GB(_m[t].m6, 2, 1);
++}
++
++/**
++ * Set the presence of trains in the map, if needed trigger an collision warning
++ */
++static inline void SetTrackMask(TileIndex t, TrackBits b)
++{
++	if ((_m[t].m7 & b) > 0) {
++		SetTrackOverload(t);
++	}
++	_m[t].m7 |= b;
++}
++
++/**
++ * Remove the presence of a train from the map, remove collision warning when active
++ */
++static inline void RemoveTrackMask(TileIndex t, TrackBits b)
++{
++	if (GetTrackOverload(t)) {
++		EndTrackOverload(t);
++	}
++	/* If a track on the same tile shares one or more trackbits and is not connected to the track being exited, this might be problematic, but i see no problems with this */
++	_m[t].m7 -= _m[t].m7 & b;
++}
++
++/**
++ * Remove the presence of all trains a tile, remove collision warning as well, needed for bridges
++ */
++static inline void ClearTrackMask(TileIndex t)
++{
++	EndTrackOverload(t);
++	_m[t].m7 = 0;
++}
++
+ #endif /* RAIL_MAP_H */

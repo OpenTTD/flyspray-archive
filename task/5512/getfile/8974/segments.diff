@@ -1,0 +1,93 @@
+diff --git a/src/gfx.cpp b/src/gfx.cpp
+index 05d6bb9..cdfb437 100644
+--- a/src/gfx.cpp
++++ b/src/gfx.cpp
+@@ -192,6 +192,59 @@ void GfxFillRect(int left, int top, int right, int bottom, int colour, FillRectM
+ }
+ 
+ /**
++ * Get the margin to be added to the line around the screen so that the
++ * resulting numbers can be cleanly divided by grade, to avoid flickering.
++ * @param base Number to be divided.
++ * @param grade Number to be divided by.
++ * @param width Component of base number that can be increased.
++ * @return Resulting margin.
++ */
++static inline int GfxLineGetMargin(int base, int grade, int width)
++{
++	int abs_grade = abs(grade);
++	int grade_offset = abs(base + width) % abs_grade;
++	int margin = width;
++	if (grade_offset != 0) {
++		if (base + width < 0) {
++			margin += grade_offset;
++		} else {
++			margin += abs_grade - grade_offset;
++		}
++		assert((margin + base) % abs_grade == 0);
++	}
++	return margin;
++}
++
++/**
++ * Clamp a point on a line into the screen. Use the original coordinates of the
++ * line equation and add some margin around the screen to avoid flickering from
++ * rounding errors. Don't clamp the point if it's inside the margin as that
++ * would result in drawing a longer line in the end.
++ * @param dim1 Primary coordinate of the point, the one to be clamped.
++ * @param dim2 Secondary coordinate of the point.
++ * @param orig1 Original primary coordinate the line equation was calculated with.
++ * @param orig2 Original secondary coordinate the line equation was calculated with.
++ * @param margin1 Margin for lower end by primary coordinate.
++ * @param margin2 Margin for higher end by primary coordinate.
++ * @param grade1 Primary component of line gradient.
++ * @param grade2 Secondary component of line gradient.
++ * @param screen_size Size of the screen in primary coordinate direction.
++ */
++static inline void GfxLineClampPoint(int &dim1, int &dim2, int orig1, int orig2,
++		int margin1, int margin2, int grade1, int grade2, int screen_size)
++{
++	if (dim1 < -margin1) {
++		assert(abs(margin1 + orig1) % abs(grade1) == 0);
++		dim2 = orig2 - (margin1 + orig1) / grade1 * grade2;
++		dim1 = -margin1;
++	} else if (dim1 > screen_size + margin2) {
++		assert(abs(screen_size + margin2 - orig1) % abs(grade1) == 0);
++		dim2 = orig2 + (screen_size + margin2 - orig1) / grade1 * grade2;
++		dim1 = screen_size + margin2;
++	}
++}
++
++/**
+  * Check line clipping by using a linear equation and draw the visible part of
+  * the line given by x/y and x2/y2.
+  * @param video Destination pointer to draw into.
+@@ -246,11 +299,23 @@ static inline void GfxDoDrawLine(void *video, int x, int y, int x2, int y2, int
+ 		return;
+ 	}
+ 
+-	/* It is possible to use the line equation to further reduce the amount of
+-	 * work the blitter has to do by shortening the effective line segment.
+-	 * However, in order to get that right and prevent the flickering effects
+-	 * of rounding errors so much additional code has to be run here that in
+-	 * the general case the effect is not noticable. */
++	/* Add some margin around the screen to avoid flickering. */
++	int margin_bottom = GfxLineGetMargin(y, grade_y, width);
++	int margin_top = GfxLineGetMargin(screen_height - y, grade_y, width);
++	int margin_left = GfxLineGetMargin(x, grade_x, width);
++	int margin_right = GfxLineGetMargin(screen_width - x, grade_x, width);
++
++	int x_orig = x;
++	int y_orig = y;
++
++	GfxLineClampPoint(x, y, x_orig, y_orig, margin_left, margin_right,
++			grade_x, grade_y, screen_width);
++	GfxLineClampPoint(y, x, y_orig, x_orig, margin_bottom, margin_top,
++			grade_y, grade_x, screen_height);
++	GfxLineClampPoint(x2, y2, x_orig, y_orig, margin_left, margin_right,
++			grade_x, grade_y, screen_width);
++	GfxLineClampPoint(y2, x2, y_orig, x_orig, margin_bottom, margin_top,
++			grade_y, grade_x, screen_height);
+ 
+ 	blitter->DrawLine(video, x, y, x2, y2, screen_width, screen_height, colour, width);
+ }

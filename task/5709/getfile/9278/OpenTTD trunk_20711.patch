@@ -1,0 +1,341 @@
+# HG changeset patch
+# User Wormnest
+# Date 1376508596 -7200
+#      Wed Aug 14 21:29:56 2013 +0200
+# Node ID cae74849db7e68819a4bc10bcd452e04651af7a5
+# Parent  39454dac9f6af059d1ba7729d731f403a60517c9
+Change: Add filtering capabilities to the news history window.
+
+diff -r 39454dac9f6a -r cae74849db7e src/news_gui.cpp
+--- a/src/news_gui.cpp	Wed Aug 14 21:29:56 2013 +0200
++++ b/src/news_gui.cpp	Wed Aug 14 21:29:56 2013 +0200
+@@ -18,6 +18,7 @@
+ #include "vehicle_base.h"
+ #include "vehicle_func.h"
+ #include "vehicle_gui.h"
++#include "cargotype.h"
+ #include "station_base.h"
+ #include "industry.h"
+ #include "town.h"
+@@ -665,7 +666,9 @@
+ 	ni->next = NULL;
+ 	_latest_news = ni;
+ 
+-	SetWindowDirty(WC_MESSAGE_HISTORY, 0);
++	/* Using InvalidateWindowData instead of SetWindowDirty.
++	 * Giving data a value of 1 as a signal that the list of news has to be rebuilt. */
++	InvalidateWindowData(WC_MESSAGE_HISTORY, 0, 1, false);
+ }
+ 
+ /**
+@@ -764,7 +767,9 @@
+ 
+ 	delete ni;
+ 
+-	SetWindowDirty(WC_MESSAGE_HISTORY, 0);
++	/* Using InvalidateWindowData instead of SetWindowDirty.
++	 * Giving data a value of 1 as a signal that the list of news has to be rebuilt. */
++	InvalidateWindowData(WC_MESSAGE_HISTORY, 0, 1, false);
+ }
+ 
+ /**
+@@ -1009,6 +1014,7 @@
+ };
+ 
+ static byte _last_filter_criteria = 0; // 0 = all news unfiltered
++typedef GUIList<const NewsItem*> GUINewsHistoryList;
+ 
+ struct MessageHistoryWindow : Window {
+ 	static const int top_spacing;    ///< Additional spacing at the top of the #WID_MH_BACKGROUND widget.
+@@ -1023,6 +1029,7 @@
+ 	static const uint32 cargo_filter_max;
+ 	static uint32 cargo_filter;           ///< Filter fo cargo types to include
+ 
++	GUINewsHistoryList news;              ///< List of filtered news items
+ 	Scrollbar *vscroll;
+ 
+ 	MessageHistoryWindow(WindowDesc *desc) : Window(desc)
+@@ -1030,9 +1037,105 @@
+ 		this->CreateNestedTree();
+ 		this->vscroll = this->GetScrollbar(WID_MH_SCROLLBAR);
+ 		this->FinishInitNested(); // Initializes 'this->line_height' and 'this->date_width'.
++
++		/* Initialize cargo and vehicle_filter filters. */
++		const CargoSpec *cs;
++		FOR_ALL_SORTED_STANDARD_CARGOSPECS(cs) {
++			if (!HasBit(this->cargo_filter, cs->Index())) continue;
++			this->LowerWidget(WID_MH_CARGOSTART + index);
++		}
++		if (this->cargo_filter == this->cargo_filter_max) this->cargo_filter = _cargo_mask;
++
++		for (uint i = 0; i < 5; i++) {
++			if (HasBit(this->vehicle_filter, i)) this->LowerWidget(i + WID_MH_TRAIN);
++		}
++
++		this->news.ForceRebuild();
+ 		this->OnInvalidateData(0);
+ 	}
+ 
++	/**
++	 * (Re)Build list of filtered news
++	 */
++	void BuildNewsList()
++	{
++		if (!this->news.NeedRebuild()) return;
++
++		this->news.Clear();
++
++		/* Iterate over all news items and filter if needed. */
++		NewsItem *next;
++		for (NewsItem *ni= _oldest_news; ni != NULL; ni = next) {
++			next = ni->next;
++			/* Don't filter news when all news filter is selected. */
++			if (this->news_filter_criteria == 0) {
++				*this->news.Append() = ni;
++			}
++			else if (ni->type == this->news_filter_criteria-1) {
++				/* Filter news items based on the selected type of news. */
++				switch (ni->reftype1) {
++					case NR_VEHICLE:
++					case NR_ENGINE: {
++						VehicleType vtype = VEH_TRAIN;
++						CargoID cid = 0;
++						if (ni->reftype1 == NR_VEHICLE) {
++							const Vehicle *v = Vehicle::Get(ni->ref1);
++							vtype = v->type;
++							cid = v->cargo_type;
++						}
++						else if (ni->reftype1 == NR_ENGINE) {
++							const Engine *e = Engine::Get(ni->ref1);
++							vtype = e->type;
++							cid = e->info.cargo_type;
++						}
++						byte veh_type = vtype;
++						/* Since road vehicles are taking up 2 spots we need to increase higher values (ship and airplane). */
++						if (vtype > VEH_ROAD) {
++							veh_type++;
++						}
++						else {
++							/*
++							 * For road vehicles we need to determine whether it's for passengers or cargo.
++							 * Trucks keep the VEH_ROAD number, for buses we increase the number.
++							 */
++							if (vtype == VEH_ROAD) {
++								if (IsCargoInClass(cid, CC_PASSENGERS)) {
++									veh_type++;
++								}
++							}
++						}
++						/* Check if the vehicle is of a type that's turned on in our filter. */
++						if (HasBit(this->vehicle_filter, veh_type)) {
++							*this->news.Append() = ni;
++						}
++						break;
++					}
++
++					case NR_INDUSTRY: {
++						/* Note that for industries that produce 2 cargos we can't distinguish
++						 * which cargo the news is about since that information isn't sent
++						 * in the NewsItem. Thus we always select for both cargos. */
++						const Industry *ind = Industry::Get((IndustryID)ni->ref1);
++						if (HasBit(this->cargo_filter, ind->produced_cargo[0]) || HasBit(this->cargo_filter, ind->produced_cargo[1])) {
++							*this->news.Append() = ni;
++						}
++						break;
++					}
++
++					default: {
++						*this->news.Append() = ni;
++						break;
++					}
++				}
++			}
++		}
++
++		this->news.Compact();
++		this->news.RebuildDone();
++
++		this->vscroll->SetCount(this->news.Length()); // Update the scrollbar
++	}
++
+ 	/** Populate the news type list and set the news filter criteria. */
+ 	void SetNewsFilterArray()
+ 	{
+@@ -1112,6 +1215,7 @@
+ 
+ 	virtual void OnPaint()
+ 	{
++		this->BuildNewsList();
+ 		this->OnInvalidateData(0);
+ 		this->DrawWidgets();
+ 	}
+@@ -1142,14 +1246,10 @@
+ 				break;
+ 		}
+ 
+-		if (widget != WID_MH_BACKGROUND || _total_news == 0) return;
++		if (widget != WID_MH_BACKGROUND || this->news.Length() == 0) return;
+ 
+ 		/* Find the first news item to display. */
+-		NewsItem *ni = _latest_news;
+-		for (int n = this->vscroll->GetPosition(); n > 0; n--) {
+-			ni = ni->prev;
+-			if (ni == NULL) return;
+-		}
++		int i = this->news.Length()-this->vscroll->GetPosition()-1;
+ 
+ 		/* Fill the widget with news items. */
+ 		int y = r.top + this->top_spacing;
+@@ -1158,44 +1258,140 @@
+ 		uint date_right = rtl ? r.right - WD_FRAMERECT_RIGHT : r.left + WD_FRAMERECT_LEFT + this->date_width;
+ 		uint news_left  = rtl ? r.left + WD_FRAMERECT_LEFT : r.left + WD_FRAMERECT_LEFT + this->date_width + WD_FRAMERECT_RIGHT;
+ 		uint news_right = rtl ? r.right - WD_FRAMERECT_RIGHT - this->date_width - WD_FRAMERECT_RIGHT : r.right - WD_FRAMERECT_RIGHT;
++		const NewsItem *ni;
+ 		for (int n = this->vscroll->GetCapacity(); n > 0; n--) {
++			ni = this->news[i];
++			if (ni == NULL) return;
++
+ 			SetDParam(0, ni->date);
+ 			DrawString(date_left, date_right, y, STR_SHORT_DATE);
+ 
+ 			DrawNewsString(news_left, news_right, y, TC_WHITE, ni);
+ 			y += this->line_height;
+ 
+-			ni = ni->prev;
+-			if (ni == NULL) return;
++			i--;
++			if (i < 0) return;
+ 		}
+ 	}
+ 
+ 	/**
+ 	 * Some data on this window has become invalid.
+-	 * @param data Information about the changed data.
++	 * @param data Information about the changed data. If data=1 there was a change in the list of news items.
+ 	 * @param gui_scope Whether the call is done from GUI scope. You may not do everything when not in GUI scope. See #InvalidateWindowData() for details.
+ 	 */
+ 	virtual void OnInvalidateData(int data = 0, bool gui_scope = true)
+ 	{
+-		if (!gui_scope) return;
+-		this->vscroll->SetCount(_total_news);
++		if (data == 1) {
++			this->news.ForceRebuild();
++		}
+ 	}
+ 
+ 	virtual void OnClick(Point pt, int widget, int click_count)
+ 	{
+-		if (widget == WID_MH_BACKGROUND) {
+-			NewsItem *ni = _latest_news;
+-			if (ni == NULL) return;
+-
+-			for (int n = this->vscroll->GetScrolledRowFromWidget(pt.y, this, WID_MH_BACKGROUND, WD_FRAMERECT_TOP, this->line_height); n > 0; n--) {
+-				ni = ni->prev;
++		switch (widget) {
++			case WID_MH_BACKGROUND: {
++				const NewsItem *ni;
++				/* Determine which news item in the filtered list was clicked. */
++				int n = this->vscroll->GetScrolledRowFromWidget(pt.y, this, WID_MH_BACKGROUND, WD_FRAMERECT_TOP, this->line_height);
++				/* Make sure we clicked a valid row. */
++				if (n >= (int)this->news.Length()) return;
++				ni = this->news[this->news.Length()-n-1];
+ 				if (ni == NULL) return;
++				ShowNewsMessage(ni);
++				break;
+ 			}
+ 
+-			ShowNewsMessage(ni);
++			case WID_MH_NEWS_FILTER_DROPDOWN: { // Select news filtering criteria dropdown menu
++				ShowDropDownMenu(this, news_filter_texts, this->news_filter_criteria, WID_MH_NEWS_FILTER_DROPDOWN, 0, 0);
++				break;
++			}
++
++			case WID_MH_TRAIN:
++			case WID_MH_TRUCK:
++			case WID_MH_BUS:
++			case WID_MH_AIRPLANE:
++			case WID_MH_SHIP:
++				if (_ctrl_pressed) {
++					ToggleBit(this->vehicle_filter, widget - WID_MH_TRAIN);
++					this->ToggleWidgetLoweredState(widget);
++				} else {
++					uint i;
++					FOR_EACH_SET_BIT(i, this->vehicle_filter) {
++						this->RaiseWidget(i + WID_MH_TRAIN);
++					}
++					this->vehicle_filter = 1 << (widget - WID_MH_TRAIN);
++					this->LowerWidget(widget);
++				}
++				this->news.ForceRebuild();
++				this->SetDirty();
++				break;
++
++			case WID_MH_VEHICLEALL:
++				for (uint i = WID_MH_TRAIN; i <= WID_MH_AIRPLANE; i++) {
++					this->LowerWidget(i);
++				}
++
++				this->vehicle_filter = VTFN_TRAIN | VTFN_TRUCK | VTFN_BUS | VTFN_SHIP | VTFN_AIRCRAFT;
++				this->news.ForceRebuild();
++				this->SetDirty();
++				break;
++
++			case WID_MH_CARGOALL: {
++				for (uint i = 0; i < _sorted_standard_cargo_specs_size; i++) {
++					this->LowerWidget(WID_MH_CARGOSTART + i);
++				}
++
++				this->cargo_filter = _cargo_mask;
++				this->news.ForceRebuild();
++				this->SetDirty();
++				break;
++			}
++
++			default:
++				if (widget >= WID_MH_CARGOSTART) {
++					/* Determine the selected cargo type */
++					const CargoSpec *cs = _sorted_cargo_specs[widget - WID_MH_CARGOSTART];
++
++					if (_ctrl_pressed) {
++						ToggleBit(this->cargo_filter, cs->Index());
++						this->ToggleWidgetLoweredState(widget);
++					} else {
++						for (uint i = 0; i < _sorted_standard_cargo_specs_size; i++) {
++							this->RaiseWidget(WID_MH_CARGOSTART + i);
++						}
++
++						this->cargo_filter = 0;
++
++						SetBit(this->cargo_filter, cs->Index());
++						this->LowerWidget(widget);
++					}
++					this->news.ForceRebuild();
++					this->SetDirty();
++				}
++				break;
++
+ 		}
+ 	}
+ 
++	/**
++	 * An item from the dropdown news type list was selected
++	 * @param widget The dropdown widget this select belongs to.
++	 * @param index The index in the list that was selected.
++	 */
++	virtual void OnDropdownSelect(int widget, int index)
++	{
++		switch (widget) {
++			case WID_MH_NEWS_FILTER_DROPDOWN:
++				if (this->news_filter_criteria != index) {
++					this->news_filter_criteria = index;
++					_last_filter_criteria = this->news_filter[this->news_filter_criteria];
++					this->news.ForceRebuild();
++				}
++				break;
++		}
++		this->SetDirty();
++	}
++
+ 	virtual void OnResize()
+ 	{
+ 		this->vscroll->SetCapacityFromWidget(this, WID_MH_BACKGROUND);

@@ -1,0 +1,216 @@
+From ca1aa2cba25cf069ab46ae3e3415d4cbc7810c81 Mon Sep 17 00:00:00 2001
+From: Chris Angelico <rosuav@gmail.com>
+Date: Sat, 22 Sep 2012 14:05:40 +1000
+Subject: [PATCH] Make max loan and borrow/repay increment configurable in
+ Advanced Settings
+
+---
+ src/company_cmd.cpp               |    3 ++-
+ src/company_gui.cpp               |    3 ++-
+ src/economy.cpp                   |    3 ++-
+ src/lang/english.txt              |    2 ++
+ src/misc_cmd.cpp                  |   16 ++++++++++------
+ src/script/api/script_company.cpp |    3 ++-
+ src/settings.cpp                  |    7 +++++++
+ src/settings_gui.cpp              |    1 +
+ src/settings_type.h               |    1 +
+ src/table/settings.ini            |   16 +++++++++++++---
+ 10 files changed, 42 insertions(+), 13 deletions(-)
+
+diff --git a/src/company_cmd.cpp b/src/company_cmd.cpp
+index e5c62ea..192d9ff 100644
+--- a/src/company_cmd.cpp
++++ b/src/company_cmd.cpp
+@@ -543,7 +543,8 @@ Company *DoStartupNewCompany(bool is_ai, CompanyID company = INVALID_COMPANY)
+ 	ResetCompanyLivery(c);
+ 	_company_colours[c->index] = (Colours)c->colour;
+ 
+-	c->money = c->current_loan = (100000ll * _economy.inflation_prices >> 16) / 50000 * 50000;
++	uint8 factor = _settings_game.economy.loan_scale_factor;
++	c->money = c->current_loan = (100000ll * _economy.inflation_prices >> 16) / 50000 * 50000 * (factor?factor:1);
+ 
+ 	c->share_owners[0] = c->share_owners[1] = c->share_owners[2] = c->share_owners[3] = INVALID_OWNER;
+ 
+diff --git a/src/company_gui.cpp b/src/company_gui.cpp
+index 654eb94..9cd698d 100644
+--- a/src/company_gui.cpp
++++ b/src/company_gui.cpp
+@@ -297,7 +297,8 @@ struct CompanyFinancesWindow : Window {
+ 
+ 			case WID_CF_INCREASE_LOAN:
+ 			case WID_CF_REPAY_LOAN:
+-				SetDParam(0, LOAN_INTERVAL);
++				uint8 factor = _settings_game.economy.loan_scale_factor;
++				SetDParam(0, LOAN_INTERVAL * (factor?factor:1));
+ 				break;
+ 		}
+ 	}
+diff --git a/src/economy.cpp b/src/economy.cpp
+index d767524..52a9c0a 100644
+--- a/src/economy.cpp
++++ b/src/economy.cpp
+@@ -686,7 +686,8 @@ void AddInflation(bool check_year)
+ void RecomputePrices()
+ {
+ 	/* Setup maximum loan */
+-	_economy.max_loan = (_settings_game.difficulty.max_loan * _economy.inflation_prices >> 16) / 50000 * 50000;
++	uint8 factor = _settings_game.economy.loan_scale_factor;
++	_economy.max_loan = (_settings_game.difficulty.max_loan * _economy.inflation_prices >> 16) / 50000 * 50000 * (factor?factor:1);
+ 
+ 	/* Setup price bases */
+ 	for (Price i = PR_BEGIN; i < PR_END; i++) {
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+index b78aebd..9a54340 100644
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -1205,6 +1205,8 @@ STR_CONFIG_SETTING_ALLOW_GIVE_MONEY                             :Allow sending m
+ STR_CONFIG_SETTING_ALLOW_GIVE_MONEY_HELPTEXT                    :Allow transfer of money between companies in multiplayer mode
+ STR_CONFIG_SETTING_FREIGHT_TRAINS                               :Weight multiplier for freight to simulate heavy trains: {STRING2}
+ STR_CONFIG_SETTING_FREIGHT_TRAINS_HELPTEXT                      :Set the impact of carrying freight in trains. A higher value makes carrying freight more demanding for trains, especially at hills
++STR_CONFIG_SETTING_LOAN_SCALE_FACTOR                            :Loan scale factor: {STRING2}
++STR_CONFIG_SETTING_LOAN_SCALE_FACTOR_HELPTEXT                   :Increase maximum loan and borrow/repay amount by the specified factor
+ STR_CONFIG_SETTING_PLANE_SPEED                                  :Plane speed factor: {STRING2}
+ STR_CONFIG_SETTING_PLANE_SPEED_HELPTEXT                         :Set the relative speed of planes compared to other vehicle types, to reduce the amount of income of transport by aircraft
+ STR_CONFIG_SETTING_PLANE_SPEED_VALUE                            :1 / {COMMA}
+diff --git a/src/misc_cmd.cpp b/src/misc_cmd.cpp
+index c2a4ee8..3ee35e2 100644
+--- a/src/misc_cmd.cpp
++++ b/src/misc_cmd.cpp
+@@ -45,16 +45,18 @@ CommandCost CmdIncreaseLoan(TileIndex tile, DoCommandFlag flags, uint32 p1, uint
+ 	}
+ 
+ 	Money loan;
++	uint8 factor = _settings_game.economy.loan_scale_factor;
++	int interval = LOAN_INTERVAL * (factor?factor:1);
+ 	switch (p2) {
+ 		default: return CMD_ERROR; // Invalid method
+ 		case 0: // Take some extra loan
+-			loan = LOAN_INTERVAL;
++			loan = min(_economy.max_loan - c->current_loan, (Money)interval);
+ 			break;
+ 		case 1: // Take a loan as big as possible
+ 			loan = _economy.max_loan - c->current_loan;
+ 			break;
+ 		case 2: // Take the given amount of loan
+-			if ((int32)p1 < LOAN_INTERVAL || c->current_loan + (int32)p1 > _economy.max_loan || p1 % LOAN_INTERVAL != 0) return CMD_ERROR;
++			if ((int32)p1 < interval || c->current_loan + (int32)p1 > _economy.max_loan || p1 % interval != 0) return CMD_ERROR;
+ 			loan = p1;
+ 			break;
+ 	}
+@@ -89,17 +91,19 @@ CommandCost CmdDecreaseLoan(TileIndex tile, DoCommandFlag flags, uint32 p1, uint
+ 	if (c->current_loan == 0) return_cmd_error(STR_ERROR_LOAN_ALREADY_REPAYED);
+ 
+ 	Money loan;
++	uint8 factor = _settings_game.economy.loan_scale_factor;
++	int interval = LOAN_INTERVAL * (factor?factor:1);
+ 	switch (p2) {
+ 		default: return CMD_ERROR; // Invalid method
+ 		case 0: // Pay back one step
+-			loan = min(c->current_loan, (Money)LOAN_INTERVAL);
++			loan = min(c->current_loan, (Money)interval);
+ 			break;
+ 		case 1: // Pay back as much as possible
+-			loan = max(min(c->current_loan, c->money), (Money)LOAN_INTERVAL);
+-			loan -= loan % LOAN_INTERVAL;
++			loan = max(min(c->current_loan, c->money), (Money)interval);
++			loan -= loan % interval;
+ 			break;
+ 		case 2: // Repay the given amount of loan
+-			if (p1 % LOAN_INTERVAL != 0 || (int32)p1 < LOAN_INTERVAL || p1 > c->current_loan) return CMD_ERROR; // Invalid amount to loan
++			if (p1 % interval != 0 || (int32)p1 < interval || p1 > c->current_loan) return CMD_ERROR; // Invalid amount to loan
+ 			loan = p1;
+ 			break;
+ 	}
+diff --git a/src/script/api/script_company.cpp b/src/script/api/script_company.cpp
+index 8e19904..53062b1 100644
+--- a/src/script/api/script_company.cpp
++++ b/src/script/api/script_company.cpp
+@@ -189,7 +189,8 @@
+ 
+ /* static */ Money ScriptCompany::GetLoanInterval()
+ {
+-	return LOAN_INTERVAL;
++	uint8 factor = _settings_game.economy.loan_scale_factor;
++	return LOAN_INTERVAL * (factor?factor:1);
+ }
+ 
+ /* static */ bool ScriptCompany::SetLoanAmount(int32 loan)
+diff --git a/src/settings.cpp b/src/settings.cpp
+index 7183694..8eecff0 100644
+--- a/src/settings.cpp
++++ b/src/settings.cpp
+@@ -989,6 +989,13 @@ static bool InvalidateAISettingsWindow(int32 p1)
+ 	return true;
+ }
+ 
++static bool InvalidatePrices(int32 p1)
++{
++	RecomputePrices();
++	InvalidateWindowClassesData(WC_FINANCES);
++	return true;
++}
++
+ /**
+  * Update the town authority window after a town authority setting change.
+  * @param p1 Unused.
+diff --git a/src/settings_gui.cpp b/src/settings_gui.cpp
+index 8cfda04..6667def 100644
+--- a/src/settings_gui.cpp
++++ b/src/settings_gui.cpp
+@@ -1586,6 +1586,7 @@ static SettingEntry _settings_economy[] = {
+ 	SettingEntry(&_settings_economy_scripts_page, STR_CONFIG_SETTING_ECONOMY_SCRIPTS),
+ 	SettingEntry("economy.inflation"),
+ 	SettingEntry("economy.smooth_economy"),
++	SettingEntry("economy.loan_scale_factor"),
+ 	SettingEntry("economy.feeder_payment_share"),
+ 	SettingEntry("economy.infrastructure_maintenance"),
+ };
+diff --git a/src/settings_type.h b/src/settings_type.h
+index 1b09e4f..1f00c2d 100644
+--- a/src/settings_type.h
++++ b/src/settings_type.h
+@@ -407,6 +407,7 @@ struct EconomySettings {
+ 	bool   bribe;                            ///< enable bribing the local authority
+ 	bool   smooth_economy;                   ///< smooth economy
+ 	bool   allow_shares;                     ///< allow the buying/selling of shares
++	uint8  loan_scale_factor;                ///< max loan/loan increment scaling factor, default 1, must be >0
+ 	uint8  feeder_payment_share;             ///< percentage of leg payment to virtually pay in feeder systems
+ 	byte   dist_local_authority;             ///< distance for town local authority, default 20
+ 	bool   exclusive_rights;                 ///< allow buying exclusive rights
+diff --git a/src/table/settings.ini b/src/table/settings.ini
+index 45e2609..f7b7ea5 100644
+--- a/src/table/settings.ini
++++ b/src/table/settings.ini
+@@ -40,6 +40,7 @@ static bool InvalidateIndustryViewWindow(int32 p1);
+ static bool InvalidateAISettingsWindow(int32 p1);
+ static bool RedrawTownAuthority(int32 p1);
+ static bool InvalidateCompanyInfrastructureWindow(int32 p1);
++static bool InvalidatePrices(int32 p1);
+ static bool ZoomMinMaxChanged(int32 p1);
+ 
+ #ifdef ENABLE_NETWORK
+@@ -1075,9 +1076,18 @@ def      = false
+ str      = STR_CONFIG_SETTING_MULTIPINDTOWN
+ strhelp  = STR_CONFIG_SETTING_MULTIPINDTOWN_HELPTEXT
+ 
+-[SDT_NULL]
+-length   = 1
+-to       = 140
++[SDT_VAR]
++base     = GameSettings
++var      = economy.loan_scale_factor
++type     = SLE_UINT8
++def      = 1
++min      = 1
++max      = 255
++interval = 1
++str      = STR_CONFIG_SETTING_LOAN_SCALE_FACTOR
++strhelp  = STR_CONFIG_SETTING_LOAN_SCALE_FACTOR_HELPTEXT
++strval   = STR_JUST_COMMA
++proc     = InvalidatePrices
+ 
+ [SDT_BOOL]
+ base     = GameSettings
+-- 
+1.7.9.GIT
+

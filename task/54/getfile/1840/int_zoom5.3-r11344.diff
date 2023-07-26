@@ -1,0 +1,339 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 11344)
++++ src/lang/english.txt	(working copy)
+@@ -3314,6 +3314,11 @@
+ STR_DATE_SHORT                                                  :{STRING} {NUM}
+ STR_DATE_LONG                                                   :{STRING} {STRING} {NUM}
+ 
++############ range for smallmap-specific start
++STR_ZOOM_IN_SMALLMAP                                            :{BLACK}Zoom in
++STR_ZOOM_OUT_SMALLMAP                                           :{BLACK}Zoom out
++STR_SMALLMAP_ZOOMDISPLAY                                        :{TINYFONT}{BLACK}Zoom: {COMMA}%
++
+ ########
+ 
+ STR_FEEDER_CARGO_VALUE                                          :{BLACK}Transfer Credits: {LTBLUE}{CURRENCY}
+Index: src/smallmap_gui.cpp
+===================================================================
+--- src/smallmap_gui.cpp	(revision 11344)
++++ src/smallmap_gui.cpp	(working copy)
+@@ -27,6 +27,7 @@
+ #include "sound.h"
+ #include "variables.h"
+ #include "blitter/factory.hpp"
++#include "debug.h"
+ 
+ static const Widget _smallmap_widgets[] = {
+ {  WWT_CLOSEBOX,   RESIZE_NONE,    13,     0,    10,     0,    13, STR_00C5,                STR_018B_CLOSE_WINDOW},
+@@ -42,12 +43,24 @@
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   328,   349,   180,   201, SPR_IMG_COMPANY_GENERAL, STR_0196_SHOW_LAND_OWNERS_ON_MAP},
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   262,   283,   158,   179, SPR_IMG_SMALLMAP,        STR_SMALLMAP_CENTER},
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   262,   283,   180,   201, SPR_IMG_TOWN,            STR_0197_TOGGLE_TOWN_NAMES_ON_OFF},
+-{     WWT_PANEL,    RESIZE_RTB,    13,     0,   261,   158,   201, 0x0,                     STR_NULL},
++{    WWT_IMGBTN,   RESIZE_LRTB,    13,   240,   261,   158,   179, SPR_IMG_ZOOMIN,          STR_ZOOM_IN_SMALLMAP},
++{    WWT_IMGBTN,   RESIZE_LRTB,    13,   240,   261,   180,   201, SPR_IMG_ZOOMOUT,         STR_ZOOM_OUT_SMALLMAP},
++{     WWT_PANEL,    RESIZE_RTB,    13,     0,   239,   158,   201, 0x0,                     STR_NULL},
+ {     WWT_PANEL,    RESIZE_RTB,    13,     0,   337,   202,   213, 0x0,                     STR_NULL},
+ { WWT_RESIZEBOX,   RESIZE_LRTB,    13,   338,   349,   202,   213, 0x0,                     STR_RESIZE_BUTTON},
+ {  WIDGETS_END},
+ };
+ 
++
++/* SMALLMAP_MAX_ZOOM should be a factor 100 bigger than
++ * SMALLMAP_MIN_ZOOM
++ */
++enum {
++   SMALLMAP_MAX_ZOOM  = 800,
++   SMALLMAP_BASE_ZOOM = 100,
++   SMALLMAP_MIN_ZOOM  =   6
++};
++
+ static int _smallmap_type;
+ static bool _smallmap_show_towns = true;
+ 
+@@ -263,22 +276,25 @@
+  * @param reps Number of lines to draw
+  * @param mask ?
+  * @param proc Pointer to the colour function
++ * @param zoom the zoom factor (times SMALLMAP_BASE_ZOOM), i.e. SMALLMAP_BASE_ZOOM means no zooming with respect to original
+  * @see GetSmallMapPixels(TileIndex)
+  */
+-static void DrawSmallMapStuff(void *dst, uint xc, uint yc, int pitch, int reps, uint32 mask, GetSmallMapPixels *proc)
++static void DrawSmallMapStuff(void *dst, uint xc, uint yc, int pitch, int reps, uint32 mask, GetSmallMapPixels *proc, int zoom)
+ {
+ 	Blitter *blitter = BlitterFactoryBase::GetCurrentBlitter();
+ 	void *dst_ptr_abs_end = blitter->MoveTo(_screen.dst_ptr, 0, _screen.height);
+ 	void *dst_ptr_end = blitter->MoveTo(dst_ptr_abs_end, -4, 0);
+ 
+ 	do {
+-		/* check if the tile (xc,yc) is within the map range */
+-		if (xc < MapMaxX() && yc < MapMaxY()) {
++		uint x = xc * SMALLMAP_BASE_ZOOM / zoom;
++		uint y = yc * SMALLMAP_BASE_ZOOM / zoom;
++		/* check if the tile (x, y) is within the map range */
++		if (x < MapMaxX() && y < MapMaxY()) {
+ 			/* check if the dst pointer points to a pixel inside the screen buffer */
+ 			if (dst < _screen.dst_ptr) continue;
+ 			if (dst >= dst_ptr_abs_end) continue;
+ 
+-			uint32 val = proc(TileXY(xc, yc)) & mask;
++			uint32 val = proc(TileXY(x, y)) & mask;
+ 			uint8 *val8 = (uint8 *)&val;
+ 
+ 			if (dst <= dst_ptr_end) {
+@@ -522,6 +538,7 @@
+ 	int tile_x;
+ 	int tile_y;
+ 	ViewPort *vp;
++	int zoom = WP(w, smallmap_d).zoom;
+ 
+ 	old_dpi = _cur_dpi;
+ 	_cur_dpi = dpi;
+@@ -597,7 +614,7 @@
+ 		/* number of lines */
+ 		reps = (dpi->height - y + 1) / 2;
+ 		if (reps > 0) {
+-			DrawSmallMapStuff(ptr, tile_x, tile_y, dpi->pitch * 2, reps, mask, _smallmap_draw_procs[type]);
++			DrawSmallMapStuff(ptr, tile_x, tile_y, dpi->pitch * 2, reps, mask, _smallmap_draw_procs[type], zoom);
+ 		}
+ 
+ skip_column:
+@@ -625,8 +642,10 @@
+ 					(v->vehstatus & (VS_HIDDEN | VS_UNCLICKABLE)) == 0) {
+ 				/* Remap into flat coordinates. */
+ 				Point pt = RemapCoords(
+-					v->x_pos / TILE_SIZE - WP(w,smallmap_d).scroll_x / TILE_SIZE, // divide each one separately because (a-b)/c != a/c-b/c in integer world
+-					v->y_pos / TILE_SIZE - WP(w,smallmap_d).scroll_y / TILE_SIZE, //    dtto
++					v->x_pos * zoom / SMALLMAP_BASE_ZOOM / TILE_SIZE - WP(w,smallmap_d).scroll_x / TILE_SIZE,
++					// divide each one separately because (a-b)/c != a/c-b/c in integer world
++					v->y_pos * zoom / SMALLMAP_BASE_ZOOM / TILE_SIZE - WP(w,smallmap_d).scroll_y / TILE_SIZE,
++					// ditto
+ 					0);
+ 				x = pt.x;
+ 				y = pt.y;
+@@ -668,8 +687,8 @@
+ 		FOR_ALL_TOWNS(t) {
+ 			/* Remap the town coordinate */
+ 			Point pt = RemapCoords(
+-				(int)(TileX(t->xy) * TILE_SIZE - WP(w, smallmap_d).scroll_x) / TILE_SIZE,
+-				(int)(TileY(t->xy) * TILE_SIZE - WP(w, smallmap_d).scroll_y) / TILE_SIZE,
++				(int)(TileX(t->xy) * TILE_SIZE * zoom / SMALLMAP_BASE_ZOOM - WP(w, smallmap_d).scroll_x) / TILE_SIZE,
++				(int)(TileY(t->xy) * TILE_SIZE * zoom / SMALLMAP_BASE_ZOOM - WP(w, smallmap_d).scroll_y) / TILE_SIZE,
+ 				0);
+ 			x = pt.x - WP(w,smallmap_d).subscroll + 3 - (t->sign.width_2 >> 1);
+ 			y = pt.y;
+@@ -695,10 +714,10 @@
+ 
+ 		pt = RemapCoords(WP(w, smallmap_d).scroll_x, WP(w, smallmap_d).scroll_y, 0);
+ 
+-		x = vp->virtual_left - pt.x;
+-		y = vp->virtual_top - pt.y;
+-		x2 = (x + vp->virtual_width) / TILE_SIZE;
+-		y2 = (y + vp->virtual_height) / TILE_SIZE;
++		x = vp->virtual_left * zoom / SMALLMAP_BASE_ZOOM - pt.x;
++		y = vp->virtual_top  * zoom / SMALLMAP_BASE_ZOOM - pt.y;
++		x2 = (x + vp->virtual_width  * zoom / SMALLMAP_BASE_ZOOM) / TILE_SIZE;
++		y2 = (y + vp->virtual_height * zoom / SMALLMAP_BASE_ZOOM) / TILE_SIZE;
+ 		x /= TILE_SIZE;
+ 		y /= TILE_SIZE;
+ 
+@@ -718,10 +737,11 @@
+ {
+ 	int x, y;
+ 	ViewPort *vp;
++	int zoom = WP(w, smallmap_d).zoom;
+ 	vp = FindWindowById(WC_MAIN_WINDOW, 0)->viewport;
+ 
+-	x  = ((vp->virtual_width  - (w->widget[4].right  - w->widget[4].left) * TILE_SIZE) / 2 + vp->virtual_left) / 4;
+-	y  = ((vp->virtual_height - (w->widget[4].bottom - w->widget[4].top ) * TILE_SIZE) / 2 + vp->virtual_top ) / 2 - TILE_SIZE * 2;
++	x  = ((vp->virtual_width  * zoom / SMALLMAP_BASE_ZOOM - (w->widget[4].right  - w->widget[4].left) * TILE_SIZE) / 2 + vp->virtual_left * zoom / SMALLMAP_BASE_ZOOM) / 4;
++	y  = ((vp->virtual_height * zoom / SMALLMAP_BASE_ZOOM - (w->widget[4].bottom - w->widget[4].top ) * TILE_SIZE) / 2 + vp->virtual_top  * zoom / SMALLMAP_BASE_ZOOM) / 2 - TILE_SIZE * 2;
+ 	WP(w, smallmap_d).scroll_x = (y - x) & ~0xF;
+ 	WP(w, smallmap_d).scroll_y = (x + y) & ~0xF;
+ 	SetWindowDirty(w);
+@@ -729,6 +749,7 @@
+ 
+ static void SmallMapWindowProc(Window *w, WindowEvent *e)
+ {
++	int zoom = WP(w, smallmap_d).zoom;
+ 	switch (e->event) {
+ 		case WE_PAINT: {
+ 			const LegendAndColour *tbl;
+@@ -773,6 +794,9 @@
+ 				return;
+ 
+ 			DrawSmallMap(&new_dpi, w, _smallmap_type, _smallmap_show_towns);
++			SetDParam(0, zoom);
++			/* Put the zoom percentage on the status bar. */
++			DrawString(4, w->height - 10, STR_SMALLMAP_ZOOMDISPLAY, 0);
+ 		} break;
+ 
+ 		case WE_CLICK:
+@@ -791,9 +815,9 @@
+ 					 */
+ 					_left_button_clicked = false;
+ 
+-					pt = RemapCoords(WP(w,smallmap_d).scroll_x, WP(w,smallmap_d).scroll_y, 0);
+-					WP(w2, vp_d).dest_scrollpos_x = pt.x + ((_cursor.pos.x - w->left + 2) << 4) - (w2->viewport->virtual_width >> 1);
+-					WP(w2, vp_d).dest_scrollpos_y = pt.y + ((_cursor.pos.y - w->top - 16) << 4) - (w2->viewport->virtual_height >> 1);
++					pt = RemapCoords(WP(w, smallmap_d).scroll_x, WP(w, smallmap_d).scroll_y, 0);
++					WP(w2, vp_d).dest_scrollpos_x = pt.x * SMALLMAP_BASE_ZOOM / zoom + ((_cursor.pos.x - w->left + 2) << 4) * SMALLMAP_BASE_ZOOM / zoom - (w2->viewport->virtual_width >> 1);
++					WP(w2, vp_d).dest_scrollpos_y = pt.y * SMALLMAP_BASE_ZOOM / zoom + ((_cursor.pos.y - w->top - 16) << 4) * SMALLMAP_BASE_ZOOM / zoom - (w2->viewport->virtual_height >> 1);
+ 
+ 					SetWindowDirty(w);
+ 				} break;
+@@ -826,6 +850,26 @@
+ 					SetWindowDirty(w);
+ 					SndPlayFx(SND_15_BEEP);
+ 					break;
++
++				case 13: // Zoom in
++					if (!(zoom >= SMALLMAP_MAX_ZOOM)) {
++						if (zoom < 100) {
++							WP(w, smallmap_d).zoom_target = min(SMALLMAP_MAX_ZOOM, ((1000 / (100 / WP(w, smallmap_d).zoom)) * 2) / 10);
++						} else {
++							WP(w, smallmap_d).zoom_target = max((int)SMALLMAP_MIN_ZOOM, WP(w, smallmap_d).zoom * 2);
++						}
++						SndPlayFx(SND_15_BEEP);
++						SetWindowDirty(w);
++					}
++					break;
++
++				case 14: // Zoom out
++					if (!(zoom <= SMALLMAP_MIN_ZOOM)) {
++						WP(w, smallmap_d).zoom_target = max((int)SMALLMAP_MIN_ZOOM, WP(w, smallmap_d).zoom / 2);
++						SndPlayFx(SND_15_BEEP);
++						SetWindowDirty(w);
++					}
++					break;
+ 				}
+ 			break;
+ 
+@@ -843,6 +887,27 @@
+ 			if ((++w->vscroll.pos & 0x1F) == 0) SetWindowDirty(w);
+ 			break;
+ 
++		case WE_MOUSEWHEEL:
++			// dont interrupt a previous zoom
++			if (WP(w,smallmap_d).zoom != WP(w,smallmap_d).zoom_target)
++				break;
++
++			if (e->we.wheel.wheel < 0 && !(zoom >= SMALLMAP_MAX_ZOOM)) {
++				/* Zoom in */
++				if (zoom < 100) {
++					WP(w, smallmap_d).zoom_target = min(SMALLMAP_MAX_ZOOM, ((1000 / (100 / WP(w, smallmap_d).zoom)) * (-2 * e->we.wheel.wheel)) / 10);
++				} else {
++					WP(w, smallmap_d).zoom_target = min(SMALLMAP_MAX_ZOOM, WP(w, smallmap_d).zoom * (-2 * e->we.wheel.wheel));
++				}
++			} else if (e->we.wheel.wheel > 0 && !(zoom <= SMALLMAP_MIN_ZOOM)) {
++				/* Zoom out */
++				WP(w, smallmap_d).zoom_target = max((int)SMALLMAP_MIN_ZOOM, WP(w, smallmap_d).zoom / ( 2 * e->we.wheel.wheel));
++			} else {
++				break;
++			}
++			SetWindowDirty(w);
++			break;
++
+ 		case WE_SCROLL: {
+ 			int x;
+ 			int y;
+@@ -851,6 +916,8 @@
+ 			int hy;
+ 			int hvx;
+ 			int hvy;
++			int maxx;
++			int maxy;
+ 
+ 			_cursor.fix_at = true;
+ 
+@@ -884,16 +951,18 @@
+ 				x = -hvx;
+ 				sub = 0;
+ 			}
+-			if (x > (int)MapMaxX() * TILE_SIZE - hvx) {
+-				x = MapMaxX() * TILE_SIZE - hvx;
++			maxx = (int)MapMaxX() * TILE_SIZE  * zoom / SMALLMAP_BASE_ZOOM - hvx;
++			if (x > maxx) {
++				x = maxx;
+ 				sub = 0;
+ 			}
+ 			if (y < -hvy) {
+ 				y = -hvy;
+ 				sub = 0;
+ 			}
+-			if (y > (int)MapMaxY() * TILE_SIZE - hvy) {
+-				y = MapMaxY() * TILE_SIZE - hvy;
++			maxy = (int)MapMaxY() * TILE_SIZE  * zoom / SMALLMAP_BASE_ZOOM - hvy;
++			if (y > maxy) {
++				y = maxy;
+ 				sub = 0;
+ 			}
+ 
+@@ -903,6 +972,43 @@
+ 
+ 			SetWindowDirty(w);
+ 		} break;
++
++		case WE_TICK:
++			if (_scrolling_viewport) {
++				WP(w, smallmap_d).zoom = WP(w, smallmap_d).zoom_target;
++				break;
++			}
++			if (zoom != WP(w, smallmap_d).zoom_target) {
++				int diff = WP(w, smallmap_d).zoom_target - WP(w, smallmap_d).zoom;
++				int diff_abs = myabs(diff);
++//				if (diff_abs <= 5) {
++//					WP(w, smallmap_d).zoom = WP(w, smallmap_d).zoom_target;
++//				} else
++				if (diff > 0) {
++					/* This will add 10%, resulting in 5 constant "smooth zoom" steps. (Zoom in) */
++					if (WP(w, smallmap_d).zoom_target > WP(w, smallmap_d).zoom + WP(w, smallmap_d).zoom_target / 10) {
++						WP(w, smallmap_d).zoom += WP(w, smallmap_d).zoom_target / 10;
++					} else {
++						WP(w, smallmap_d).zoom = WP(w, smallmap_d).zoom_target;
++					}
++					DEBUG(misc, 1, "addition, zoom %i, zoom_target %i", WP(w, smallmap_d).zoom, WP(w, smallmap_d).zoom_target);
++				} else if (diff < 0) {
++					/* This will subtract 20%, resulting in 5 constant "smooth zoom" steps. (Zoom out) */
++					if (WP(w, smallmap_d).zoom_target < WP(w, smallmap_d).zoom - (WP(w, smallmap_d).zoom_target / 10) * 2) {
++						WP(w, smallmap_d).zoom -= (WP(w, smallmap_d).zoom_target > 10) ? (WP(w, smallmap_d).zoom_target / 10) * 2 : 1;
++					} else {
++						WP(w, smallmap_d).zoom = WP(w, smallmap_d).zoom_target;
++					}
++					DEBUG(misc, 1, "subtraction, zoom %i, zoom_target %i", WP(w, smallmap_d).zoom, WP(w, smallmap_d).zoom_target);
++				}
++
++				SetWindowWidgetDisabledState(w, 13, WP(w, smallmap_d).zoom == SMALLMAP_MAX_ZOOM);
++				SetWindowWidgetDisabledState(w, 14, WP(w, smallmap_d).zoom == SMALLMAP_MIN_ZOOM);
++
++				SmallMapCenterOnCurrentPos(w);
++				SetWindowDirty(w);
++			}
++			break;
+ 	}
+ }
+ 
+@@ -924,6 +1030,9 @@
+ 	LowerWindowWidget(w, _smallmap_type + 5);
+ 	SetWindowWidgetLoweredState(w, 12, _smallmap_show_towns);
+ 
++	WP(w, smallmap_d).zoom        = SMALLMAP_BASE_ZOOM;
++	WP(w, smallmap_d).zoom_target = SMALLMAP_BASE_ZOOM;
++
+ 	SmallMapCenterOnCurrentPos(w);
+ }
+ 
+Index: src/window.h
+===================================================================
+--- src/window.h	(revision 11344)
++++ src/window.h	(working copy)
+@@ -387,6 +387,8 @@
+ 	int32 scroll_x;
+ 	int32 scroll_y;
+ 	int32 subscroll;
++   int zoom;
++   int zoom_target;
+ };
+ assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(smallmap_d));
+ 

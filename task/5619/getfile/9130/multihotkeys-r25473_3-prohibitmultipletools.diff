@@ -1,0 +1,366 @@
+diff a/src/ai/ai_gui.cpp b/src/ai/ai_gui.cpp
+--- a/src/ai/ai_gui.cpp
++++ b/src/ai/ai_gui.cpp
+@@ -1407,12 +1407,12 @@
+  * @param hotkey Hotkey
+  * @return HES_NORMAL_HANDLED if the hotkey was handled as there are no tool hotkeys in this window, HES_NOT_HANDLED otherwise.
+  */
+-static HotkeyEventState AIDebugGlobalHotkeys(int hotkey)
++static HotkeyEventState AIDebugGlobalHotkeys(int hotkey, bool tool_forbidden)
+ {
+-	if (_game_mode != GM_NORMAL) return HES_NOT_HANDLED;
++	if (_game_mode != GM_NORMAL || FindWindowById(WC_AI_DEBUG, 0) != NULL) return HES_NOT_HANDLED;
+ 	Window *w = ShowAIDebugWindow(INVALID_COMPANY);
+ 	if (w == NULL) return HES_NOT_HANDLED;
+-	w->OnHotkey(hotkey);
++	w->OnHotkey(hotkey, tool_forbidden);
+ 	return HES_NORMAL_HANDLED;
+ }
+ 
+diff a/src/airport_gui.cpp b/src/airport_gui.cpp
+--- a/src/airport_gui.cpp
++++ b/src/airport_gui.cpp
+@@ -143,12 +143,12 @@
+  * @param hotkey Hotkey
+  * @return The return value of OnHotkey (normally HES_TOOL_HANDLED if the key was handled because there are only tool hotkeys in this window), or HES_NOT_HANDLED if the hotkey could not be handled.
+  */
+-static HotkeyEventState AirportToolbarGlobalHotkeys(int hotkey)
++static HotkeyEventState AirportToolbarGlobalHotkeys(int hotkey, bool tool_forbidden)
+ {
+-	if (_game_mode != GM_NORMAL || !CanBuildVehicleInfrastructure(VEH_AIRCRAFT)) return HES_NOT_HANDLED;
++	if (_game_mode != GM_NORMAL || !CanBuildVehicleInfrastructure(VEH_AIRCRAFT) || FindWindowById(WC_BUILD_TOOLBAR, TRANSPORT_AIR) != NULL || tool_forbidden) return HES_NOT_HANDLED;
+ 	Window *w = ShowBuildAirToolbar();
+ 	if (w == NULL) return HES_NOT_HANDLED;
+-	return w->OnHotkey(hotkey);
++	return w->OnHotkey(hotkey, tool_forbidden);
+ }
+ 
+ static Hotkey airtoolbar_hotkeys[] = {
+diff a/src/dock_gui.cpp b/src/dock_gui.cpp
+--- a/src/dock_gui.cpp
++++ b/src/dock_gui.cpp
+@@ -274,12 +274,12 @@
+  * @param hotkey Hotkey
+  * @return The return value of OnHotkey (normally HES_TOOL_HANDLED if the key was handled because there are only tool hotkeys in this window), or HES_NOT_HANDLED if the hotkey could not be handled.
+  */
+-static HotkeyEventState DockToolbarGlobalHotkeys(int hotkey)
++static HotkeyEventState DockToolbarGlobalHotkeys(int hotkey, bool tool_forbidden)
+ {
+-	if (_game_mode != GM_NORMAL) return HES_NOT_HANDLED;
++	if (_game_mode != GM_NORMAL || FindWindowById(WC_BUILD_TOOLBAR, TRANSPORT_WATER) != NULL || tool_forbidden) return HES_NOT_HANDLED;
+ 	Window *w = ShowBuildDocksToolbar();
+ 	if (w == NULL) return HES_NOT_HANDLED;
+-	return w->OnHotkey(hotkey);
++	return w->OnHotkey(hotkey, tool_forbidden);
+ }
+ 
+ const uint16 _dockstoolbar_aqueduct_keys[] = {'B', '8', 0};
+diff a/src/hotkeys.cpp b/src/hotkeys.cpp
+--- a/src/hotkeys.cpp
++++ b/src/hotkeys.cpp
+@@ -348,14 +348,14 @@
+ 	SaveLoadHotkeys(true);
+ }
+ 
+-void HandleGlobalHotkeys(uint16 key, uint16 keycode)
++void HandleGlobalHotkeys(uint16 key, uint16 keycode, bool tool_forbidden)
+ {
+ 	for (HotkeyList **list = _hotkey_lists->Begin(); list != _hotkey_lists->End(); ++list) {
+ 		if ((*list)->global_hotkey_handler == NULL) continue;
+ 
+ 		int hotkey = -1;
+ 		hotkey = (*list)->CheckMatch(keycode, hotkey, true);
+-		if (hotkey >= 0 && ((*list)->global_hotkey_handler(hotkey) != HES_NOT_HANDLED)) return;
++		if (hotkey >= 0 && ((*list)->global_hotkey_handler(hotkey, tool_forbidden) != HES_NOT_HANDLED)) return;
+ 	}
+ }
+ 
+diff a/src/hotkeys.h b/src/hotkeys.h
+--- a/src/hotkeys.h
++++ b/src/hotkeys.h
+@@ -39,7 +39,7 @@
+  * List of hotkeys for a window.
+  */
+ struct HotkeyList {
+-	typedef HotkeyEventState (*GlobalHotkeyHandlerFunc)(int hotkey);
++	typedef HotkeyEventState (*GlobalHotkeyHandlerFunc)(int hotkey, bool hotkey_forbidden);
+ 
+ 	HotkeyList(const char *ini_group, Hotkey *items, GlobalHotkeyHandlerFunc global_hotkey_handler = NULL);
+ 	~HotkeyList();
+@@ -67,6 +67,6 @@
+ void SaveHotkeysToConfig();
+ 
+ 
+-void HandleGlobalHotkeys(uint16 key, uint16 keycode);
++void HandleGlobalHotkeys(uint16 key, uint16 keycode, bool tool_forbidden);
+ 
+ #endif /* HOTKEYS_H */
+diff a/src/main_gui.cpp b/src/main_gui.cpp
+--- a/src/main_gui.cpp
++++ b/src/main_gui.cpp
+@@ -280,7 +280,7 @@
+ 		}
+ 	}
+ 
+-	virtual HotkeyEventState OnHotkey(int hotkey)
++	virtual HotkeyEventState OnHotkey(int hotkey, bool tool_forbidden)
+ 	{
+ 		if (hotkey == GHK_QUIT) {
+ 			HandleExitGameRequest();
+diff a/src/order_gui.cpp b/src/order_gui.cpp
+--- a/src/order_gui.cpp
++++ b/src/order_gui.cpp
+@@ -1445,7 +1445,7 @@
+ 		}
+ 	}
+ 
+-	virtual HotkeyEventState OnHotkey(int hotkey)
++	virtual HotkeyEventState OnHotkey(int hotkey, bool tool_forbidden)
+ 	{
+ 		if (this->vehicle->owner != _local_company) return HES_NOT_HANDLED;
+ 
+@@ -1453,6 +1453,7 @@
+ 			case OHK_SKIP:           this->OrderClick_Skip();         break;
+ 			case OHK_DELETE:         this->OrderClick_Delete();       break;
+ 			case OHK_GOTO:
++				if (tool_forbidden) return HES_NOT_HANDLED;
+ 				this->OrderClick_Goto();
+ 				return HES_TOOL_HANDLED;
+ 			case OHK_NONSTOP:        this->OrderClick_Nonstop(-1);    break;
+diff a/src/rail_gui.cpp b/src/rail_gui.cpp
+--- a/src/rail_gui.cpp
++++ b/src/rail_gui.cpp
+@@ -597,10 +597,11 @@
+ 		if (_ctrl_pressed) RailToolbar_CtrlChanged(this);
+ 	}
+ 
+-	virtual HotkeyEventState OnHotkey(int hotkey)
++	virtual HotkeyEventState OnHotkey(int hotkey, bool tool_forbidden)
+ 	{
++		if (tool_forbidden) return HES_NOT_HANDLED; // there are only tools in this toolbar, nothing else
+ 		MarkTileDirtyByTile(TileVirtXY(_thd.pos.x, _thd.pos.y)); // redraw tile selection
+-		return Window::OnHotkey(hotkey);
++		return Window::OnHotkey(hotkey, tool_forbidden);
+ 	}
+ 
+ 	virtual void OnPlaceObject(Point pt, TileIndex tile)
+@@ -760,13 +761,13 @@
+  * @param hotkey Hotkey
+  * @return The return value of OnHotkey (normally HES_TOOL_HANDLED if the key was handled because there are only tool hotkeys in this window), or HES_NOT_HANDLED if the hotkey could not be handled.
+  */
+-static HotkeyEventState RailToolbarGlobalHotkeys(int hotkey)
++static HotkeyEventState RailToolbarGlobalHotkeys(int hotkey, bool tool_forbidden)
+ {
+-	if (_game_mode != GM_NORMAL || !CanBuildVehicleInfrastructure(VEH_TRAIN)) return HES_NOT_HANDLED;
++	if (_game_mode != GM_NORMAL || !CanBuildVehicleInfrastructure(VEH_TRAIN) || FindWindowById(WC_BUILD_TOOLBAR, TRANSPORT_RAIL) != NULL || tool_forbidden) return HES_NOT_HANDLED;
+ 	extern RailType _last_built_railtype;
+ 	Window *w = ShowBuildRailToolbar(_last_built_railtype);
+ 	if (w == NULL) return HES_NOT_HANDLED;
+-	return w->OnHotkey(hotkey);
++	return w->OnHotkey(hotkey, tool_forbidden);
+ }
+ 
+ const uint16 _railtoolbar_autorail_keys[] = {'5', 'A' | WKC_GLOBAL_HOTKEY, 0};
+diff a/src/road_gui.cpp b/src/road_gui.cpp
+--- a/src/road_gui.cpp
++++ b/src/road_gui.cpp
+@@ -473,10 +473,11 @@
+ 		if (_ctrl_pressed) RoadToolbar_CtrlChanged(this);
+ 	}
+ 
+-	virtual HotkeyEventState OnHotkey(int hotkey)
++	virtual HotkeyEventState OnHotkey(int hotkey, bool tool_forbidden)
+ 	{
++		if (tool_forbidden) return HES_NOT_HANDLED; // there are only tools in this toolbar
+ 		MarkTileDirtyByTile(TileVirtXY(_thd.pos.x, _thd.pos.y)); // redraw tile selection
+-		return Window::OnHotkey(hotkey);
++		return Window::OnHotkey(hotkey, tool_forbidden);
+ 	}
+ 
+ 	virtual void OnPlaceObject(Point pt, TileIndex tile)
+@@ -665,17 +666,20 @@
+  * @param hotkey Hotkey
+  * @return The return value of OnHotkey (normally HES_TOOL_HANDLED if the key was handled because there are only tool hotkeys in this window), or HES_NOT_HANDLED if the hotkey could not be handled.
+  */
+-static HotkeyEventState RoadToolbarGlobalHotkeys(int hotkey)
++static HotkeyEventState RoadToolbarGlobalHotkeys(int hotkey, bool tool_forbidden)
+ {
++	if (tool_forbidden) return HES_NOT_HANDLED;
+ 	Window *w = NULL;
+ 	switch (_game_mode) {
+ 		case GM_NORMAL: {
++			if (FindWindowById(WC_BUILD_TOOLBAR, TRANSPORT_ROAD) != NULL) return HES_NOT_HANDLED;
+ 			extern RoadType _last_built_roadtype;
+ 			w = ShowBuildRoadToolbar(_last_built_roadtype);
+ 			break;
+ 		}
+ 
+ 		case GM_EDITOR:
++			if (FindWindowById(WC_BUILD_TOOLBAR, TRANSPORT_ROAD) != NULL) return HES_NOT_HANDLED;
+ 			w = ShowBuildRoadScenToolbar();
+ 			break;
+ 
+@@ -684,7 +688,7 @@
+ 	}
+ 
+ 	if (w == NULL) return HES_NOT_HANDLED;
+-	return w->OnHotkey(hotkey);
++	return w->OnHotkey(hotkey, tool_forbidden);
+ }
+ 
+ static Hotkey roadtoolbar_hotkeys[] = {
+diff a/src/signs_gui.cpp b/src/signs_gui.cpp
+--- a/src/signs_gui.cpp
++++ b/src/signs_gui.cpp
+@@ -281,7 +281,7 @@
+ 		}
+ 	}
+ 
+-	virtual HotkeyEventState OnHotkey(int hotkey)
++	virtual HotkeyEventState OnHotkey(int hotkey, bool tool_forbidden)
+ 	{
+ 		switch (hotkey) {
+ 			case SLHK_FOCUS_FILTER_BOX:
+@@ -343,12 +343,12 @@
+  * @param hotkey Hotkey
+  * @return HES_NORMAL_HANDLED if the hotkey was handled as there are no tool hotkeys in this window, HES_NOT_HANDLED otherwise.
+  */
+-static HotkeyEventState SignListGlobalHotkeys(int hotkey)
++static HotkeyEventState SignListGlobalHotkeys(int hotkey, bool tool_forbidden)
+ {
+-	if (_game_mode == GM_MENU) return HES_NOT_HANDLED;
++	if (_game_mode == GM_MENU || FindWindowById(WC_SIGN_LIST, 0) != NULL) return HES_NOT_HANDLED;
+ 	Window *w = ShowSignList();
+ 	if (w == NULL) return HES_NOT_HANDLED;
+-	return w->OnHotkey(hotkey);
++	return w->OnHotkey(hotkey, tool_forbidden);
+ }
+ 
+ static Hotkey signlist_hotkeys[] = {
+diff a/src/terraform_gui.cpp b/src/terraform_gui.cpp
+--- a/src/terraform_gui.cpp
++++ b/src/terraform_gui.cpp
+@@ -295,12 +295,12 @@
+  * @param hotkey Hotkey
+  * @return The return value of OnHotkey (normally HES_TOOL_HANDLED if the key was handled because there are only tool hotkeys in this window), or HES_NOT_HANDLED if the hotkey could not be handled.
+  */
+-static HotkeyEventState TerraformToolbarGlobalHotkeys(int hotkey)
++static HotkeyEventState TerraformToolbarGlobalHotkeys(int hotkey, bool tool_forbidden)
+ {
+-	if (_game_mode != GM_NORMAL) return HES_NOT_HANDLED;
++	if (_game_mode != GM_NORMAL || FindWindowById(WC_SCEN_LAND_GEN, 0) != NULL || tool_forbidden) return HES_NOT_HANDLED;
+ 	Window *w = ShowTerraformToolbar(NULL);
+ 	if (w != NULL) return HES_NOT_HANDLED;
+-	return w->OnHotkey(hotkey);
++	return w->OnHotkey(hotkey, tool_forbidden);
+ }
+ 
+ static Hotkey terraform_hotkeys[] = {
+@@ -721,12 +721,12 @@
+  * @param hotkey Hotkey
+  * @return The return value of OnHotkey (normally HES_TOOL_HANDLED if the key was handled because there are only tool hotkeys in this window), or HES_NOT_HANDLED if the hotkey could not be handled.
+  */
+-static HotkeyEventState TerraformToolbarEditorGlobalHotkeys(int hotkey)
++static HotkeyEventState TerraformToolbarEditorGlobalHotkeys(int hotkey, bool tool_forbidden)
+ {
+-	if (_game_mode != GM_EDITOR) return HES_NOT_HANDLED;
++	if (_game_mode != GM_EDITOR || FindWindowById(WC_SCEN_LAND_GEN, 0) != NULL || tool_forbidden) return HES_NOT_HANDLED;
+ 	Window *w = ShowEditorTerraformToolbar();
+ 	if (w == NULL) return HES_NOT_HANDLED;
+-	return w->OnHotkey(hotkey);
++	return w->OnHotkey(hotkey, tool_forbidden);
+ }
+ 
+ static Hotkey terraform_editor_hotkeys[] = {
+diff a/src/toolbar_gui.cpp b/src/toolbar_gui.cpp
+--- a/src/toolbar_gui.cpp
++++ b/src/toolbar_gui.cpp
+@@ -1660,7 +1660,7 @@
+ 		if (cbf != CBF_NONE) this->last_started_action = cbf;
+ 	}
+ 
+-	virtual HotkeyEventState OnHotkey(int hotkey)
++	virtual HotkeyEventState OnHotkey(int hotkey, bool tool_forbidden)
+ 	{
+ 		switch (hotkey) {
+ 			case MTHK_PAUSE: ToolbarPauseClick(this); break;
+diff a/src/window.cpp b/src/window.cpp
+--- a/src/window.cpp
++++ b/src/window.cpp
+@@ -472,11 +472,12 @@
+ /**
+  * A hotkey has been pressed.
+  * @param hotkey  Hotkey index, by default a widget index of a button or editbox.
++ * @param tool_forbidden true if another tool has been activated by this keystroke, false if this hotkey assignment may activate a tool.
+  * @return #HES_TOOL_HANDLED if the key press has been handled, and the hotkey is not unavailable for some reason, otherwise HES_NOT_HANDLED.
+  */
+-HotkeyEventState Window::OnHotkey(int hotkey)
++HotkeyEventState Window::OnHotkey(int hotkey, bool tool_forbidden)
+ {
+-	if (hotkey < 0) return HES_NOT_HANDLED;
++	if (tool_forbidden || hotkey < 0) return HES_NOT_HANDLED;
+ 
+ 	NWidgetCore *nw = this->GetWidget<NWidgetCore>(hotkey);
+ 	if (nw == NULL || nw->IsDisabled()) return HES_NOT_HANDLED;
+@@ -2481,12 +2482,17 @@
+ 
+ 	/* Call the event, start with the uppermost window, but ignore the toolbar. */
+ 	Window *w;
++	bool tool_forbidden = false;
+ 	FOR_ALL_WINDOWS_FROM_FRONT(w) {
+ 		if (w->window_class == WC_MAIN_TOOLBAR) continue;
+ 		if (w->window_desc->hotkeys != NULL) {
+ 			int hotkey = -1;
+ 			hotkey = w->window_desc->hotkeys->CheckMatch(keycode, hotkey);
+-			if (hotkey >= 0 && w->OnHotkey(hotkey) != HES_NOT_HANDLED) return;
++			if (hotkey >= 0) {
++				HotkeyEventState s = w->OnHotkey(hotkey, tool_forbidden);
++				if (s == HES_TOOL_HANDLED) tool_forbidden = true;
++				if (s == HES_TOOL_HANDLED || s == HES_NORMAL_HANDLED) return;
++			}
+ 		}
+ 		if (w->OnKeyPress(key, keycode) == ES_HANDLED) return;
+ 	}
+@@ -2497,12 +2503,16 @@
+ 		if (w->window_desc->hotkeys != NULL) {
+ 			int hotkey = -1;
+ 			hotkey = w->window_desc->hotkeys->CheckMatch(keycode, hotkey);
+-			if (hotkey >= 0 && w->OnHotkey(hotkey) != HES_NOT_HANDLED) return;
++			if (hotkey >= 0) {
++				HotkeyEventState s = w->OnHotkey(hotkey, tool_forbidden);
++				if (s == HES_TOOL_HANDLED) tool_forbidden = true;
++				if (s == HES_TOOL_HANDLED || s == HES_NORMAL_HANDLED) return;
++			}
+ 		}
+ 		if (w->OnKeyPress(key, keycode) == ES_HANDLED) return;
+ 	}
+ 
+-	HandleGlobalHotkeys(key, keycode);
++	HandleGlobalHotkeys(key, keycode, tool_forbidden);
+ }
+ 
+ /**
+diff a/src/window_gui.h b/src/window_gui.h
+--- a/src/window_gui.h
++++ b/src/window_gui.h
+@@ -595,7 +595,7 @@
+ 	 */
+ 	virtual EventState OnKeyPress(uint16 key, uint16 keycode) { return ES_NOT_HANDLED; }
+ 
+-	virtual HotkeyEventState OnHotkey(int hotkey);
++	virtual HotkeyEventState OnHotkey(int hotkey, bool tool_forbidden);
+ 
+ 	/**
+ 	 * The state of the control key has changed
+diff a/src/window_type.h b/src/window_type.h
+--- a/src/window_type.h
++++ b/src/window_type.h
+@@ -699,7 +699,7 @@
+ 
+ /** State of handling a hotkey event. */
+ enum HotkeyEventState {
+-	HES_TOOL_HANDLED,   ///< the hotkey activated a tool.
++	HES_TOOL_HANDLED,   ///< the hotkey activated a tool and any following tool hotkeys on the same key should be ignored.
+ 	HES_NORMAL_HANDLED, ///< the hotkey didn't activate a tool.
+ 	HES_NOT_HANDLED,    ///< the hotkey didn't have any associated action.
+ };

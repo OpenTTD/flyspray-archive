@@ -1,0 +1,203 @@
+# HG changeset patch
+# Parent 07a8cdbbf16d75319546407c1225c06bddd7dae5
+# User sbr
+# Date 1347700624 -7200
+
+Add: Cargo type orders dropdowns to CargoTypeOrdersWindow.
+
+diff -r 07a8cdbbf16d src/lang/english.txt
+--- a/src/lang/english.txt	Sat Sep 15 11:06:38 2012 +0200
++++ b/src/lang/english.txt	Sun Sep 16 11:46:45 2012 +0200
+@@ -3691,6 +3691,10 @@
+ STR_CARGO_TYPE_ORDERS_UNLOAD_TITLE                              :{GOLD}Select unload order per cargo type:
+ STR_CARGO_TYPE_ORDERS_CLOSE_BUTTON                              :{BLACK}Close
+ 
++STR_CARGO_TYPE_ORDERS_DROP_FULL_LOAD                            :Full load
++STR_CARGO_TYPE_LOAD_ORDERS_DROP_TOOLTIP                         :{BLACK}Change the loading behaviour for this cargo type
++STR_CARGO_TYPE_UNLOAD_ORDERS_DROP_TOOLTIP                       :{BLACK}Change the unloading behaviour for this cargo type
++
+ # AI debug window
+ STR_AI_DEBUG                                                    :{WHITE}AI/Game Script Debug
+ STR_AI_DEBUG_NAME_AND_VERSION                                   :{BLACK}{RAW_STRING} (v{NUM})
+diff -r 07a8cdbbf16d src/order_gui.cpp
+--- a/src/order_gui.cpp	Sat Sep 15 11:06:38 2012 +0200
++++ b/src/order_gui.cpp	Sun Sep 16 11:46:45 2012 +0200
+@@ -36,6 +36,28 @@
+ 	CTOWV_UNLOAD = 1,
+ };
+ 
++/** Cargo type orders strings for load dropdowns. */
++static const StringID _cargo_type_load_order_drowdown[] = {
++	STR_ORDER_DROP_LOAD_IF_POSSIBLE,      // OLF_LOAD_IF_POSSIBLE
++	STR_EMPTY,
++	STR_CARGO_TYPE_ORDERS_DROP_FULL_LOAD, // OLFB_FULL_LOAD
++	STR_EMPTY,
++	STR_ORDER_DROP_NO_LOADING,            // OLFB_NO_LOAD
++	INVALID_STRING_ID
++};
++static const uint32 _cargo_type_load_order_drowdown_hidden_mask = 0xA; // 01010
++
++/** Cargo type orders strings for unload dropdowns. */
++static const StringID _cargo_type_unload_order_drowdown[] = {
++	STR_ORDER_DROP_UNLOAD_IF_ACCEPTED, // OUF_UNLOAD_IF_POSSIBLE
++	STR_ORDER_DROP_UNLOAD,             // OUFB_UNLOAD
++	STR_ORDER_DROP_TRANSFER,           // OUFB_TRANSFER
++	STR_EMPTY,
++	STR_ORDER_DROP_NO_UNLOADING,       // OUFB_NO_UNLOAD
++	INVALID_STRING_ID
++};
++static const uint32 _cargo_type_unload_order_drowdown_hidden_mask = 0x8; // 01000
++
+ struct CargoTypeOrdersWindow : public Window {
+ private:
+ 	CargoTypeOrdersWindowVariant variant;
+@@ -46,11 +68,16 @@
+ 	static const uint8 CARGO_ICON_WIDTH  = 12;
+ 	static const uint8 CARGO_ICON_HEIGHT =  8;
+ 
++	const StringID *cargo_type_order_dropdown; ///< Strings used to populate order dropdowns.
++	uint32 cargo_type_order_dropdown_hmask;    ///< Hidden mask for order dropdowns.
++
+ 	uint max_cargo_name_width;     ///< Greatest width of cargo names.
++	uint max_cargo_dropdown_width; ///< Greatest width of order names.
+ 
+ 	/**
+-	 * Initialize \c max_cargo_name_width
++	 * Initialize \c max_cargo_name_width and \c max_cargo_dropdown_width.
+ 	 * @post \c max_cargo_name_width
++	 * @post \c max_cargo_dropdown_width
+ 	 */
+ 	void InitMaxWidgetWidth()
+ 	{
+@@ -59,6 +86,35 @@
+ 			SetDParam(0, _sorted_cargo_specs[i]->name);
+ 			this->max_cargo_name_width = max(this->max_cargo_name_width, GetStringBoundingBox(STR_JUST_STRING).width);
+ 		}
++		this->max_cargo_dropdown_width = 0;
++		for (int i = 0; this->cargo_type_order_dropdown[i] != INVALID_STRING_ID; i++) {
++			SetDParam(0, this->cargo_type_order_dropdown[i]);
++			this->max_cargo_dropdown_width = max(this->max_cargo_dropdown_width, GetStringBoundingBox(STR_JUST_STRING).width);
++		}
++	}
++
++	/** Populate the selected entry of order dropdowns. */
++	void InitDropdownSelectedTypes()
++	{
++		StringID tooltip = STR_CARGO_TYPE_LOAD_ORDERS_DROP_TOOLTIP + this->variant;
++		const Order *order = this->vehicle->GetOrder(this->order_id);
++		for (int i = 0; i < _sorted_standard_cargo_specs_size; i++) {
++			const CargoSpec *cs = _sorted_cargo_specs[i];
++			CargoID cargo_id = GetCargoIDByBitnum(cs->bitnum);
++			uint8 order_type = (this->variant == CTOWV_LOAD) ? (uint8) order->GetLoadType(cargo_id) : (uint8) order->GetUnloadType(cargo_id);
++			this->GetWidget<NWidgetCore>(WID_CTO_CARGO_DROPDOWN_FIRST + i)->SetDataTip(this->cargo_type_order_dropdown[order_type], tooltip);
++		}
++	}
++
++	/**
++	 * Returns the load/unload type of this order for the specified cargo.
++	 * @param cargo_id The cargo index for wich we want the load/unload type.
++	 * @return an OrderLoadFlags if \c load_variant = true, an OrderUnloadFlags otherwise.
++	 */
++	uint8 GetOrderActionTypeForCargo(CargoID cargo_id)
++	{
++		const Order *order = this->vehicle->GetOrder(this->order_id);
++		return (this->variant == CTOWV_LOAD) ? (uint8) order->GetLoadType(cargo_id) : (uint8) order->GetUnloadType(cargo_id);
+ 	}
+ 
+ public:
+@@ -73,6 +129,8 @@
+ 	CargoTypeOrdersWindow(const WindowDesc *desc, const Vehicle *v, VehicleOrderID order_id, CargoTypeOrdersWindowVariant variant) : Window()
+ 	{
+ 		this->variant = variant;
++		this->cargo_type_order_dropdown = (this->variant == CTOWV_LOAD) ? _cargo_type_load_order_drowdown : _cargo_type_unload_order_drowdown;
++		this->cargo_type_order_dropdown_hmask = (this->variant == CTOWV_LOAD) ? _cargo_type_load_order_drowdown_hidden_mask : _cargo_type_unload_order_drowdown_hidden_mask;
+ 		this->InitMaxWidgetWidth();
+ 
+ 		this->vehicle = v;
+@@ -81,6 +139,7 @@
+ 		this->CreateNestedTree(desc);
+ 		this->GetWidget<NWidgetCore>(WID_CTO_CAPTION)->SetDataTip(STR_CARGO_TYPE_ORDERS_LOAD_CAPTION + this->variant, STR_TOOLTIP_WINDOW_TITLE_DRAG_THIS);
+ 		this->GetWidget<NWidgetCore>(WID_CTO_HEADER)->SetDataTip(STR_CARGO_TYPE_ORDERS_LOAD_TITLE + this->variant, STR_NULL);
++		this->InitDropdownSelectedTypes();
+ 		this->FinishInitNested(desc, v->index);
+ 
+ 		this->owner = v->owner;
+@@ -93,6 +152,9 @@
+ 		} else if (WID_CTO_CARGO_LABEL_FIRST <= widget && widget <= WID_CTO_CARGO_LABEL_LAST) {
+ 			(*size).width  = max((*size).width,  WD_FRAMERECT_LEFT + this->CARGO_ICON_WIDTH + WD_FRAMETEXT_LEFT + this->max_cargo_name_width + WD_FRAMETEXT_RIGHT + padding.width);
+ 			(*size).height = max((*size).height, (uint) WD_FRAMERECT_TOP + FONT_HEIGHT_NORMAL + WD_FRAMERECT_BOTTOM);
++		} else if (WID_CTO_CARGO_DROPDOWN_FIRST <= widget && widget <= WID_CTO_CARGO_DROPDOWN_LAST) {
++			(*size).width  = max((*size).width,  WD_DROPDOWNTEXT_LEFT + this->max_cargo_dropdown_width + WD_DROPDOWNTEXT_RIGHT);
++			(*size).height = max((*size).height, (uint) WD_DROPDOWNTEXT_TOP + FONT_HEIGHT_NORMAL + WD_DROPDOWNTEXT_BOTTOM);
+ 		}
+ 	}
+ 
+@@ -123,6 +185,28 @@
+ 	{
+ 		if (widget == WID_CTO_CLOSEBTN) {
+ 			delete this;
++		} else if (WID_CTO_CARGO_DROPDOWN_FIRST <= widget && widget <= WID_CTO_CARGO_DROPDOWN_LAST) {
++			const CargoSpec *cs = _sorted_cargo_specs[widget - WID_CTO_CARGO_DROPDOWN_FIRST];
++			CargoID cargo_id = GetCargoIDByBitnum(cs->bitnum);
++
++			ShowDropDownMenu(this, this->cargo_type_order_dropdown, this->GetOrderActionTypeForCargo(cargo_id), widget, 0, this->cargo_type_order_dropdown_hmask);
++		}
++	}
++
++	virtual void OnDropdownSelect(int widget, int action_type)
++	{
++		if (WID_CTO_CARGO_DROPDOWN_FIRST <= widget && widget <= WID_CTO_CARGO_DROPDOWN_LAST) {
++			const CargoSpec *cs = _sorted_cargo_specs[widget - WID_CTO_CARGO_DROPDOWN_FIRST];
++			CargoID cargo_id = GetCargoIDByBitnum(cs->bitnum);
++			uint8 order_action_type = this->GetOrderActionTypeForCargo(cargo_id);
++
++			if (action_type == order_action_type) return;
++
++			ModifyOrderFlags mof = (this->variant == CTOWV_LOAD) ? MOF_CARGO_TYPE_LOAD : MOF_CARGO_TYPE_UNLOAD;
++			DoCommandP(this->vehicle->tile, this->vehicle->index + (this->order_id << 20), mof | (action_type << 4) | (cargo_id << 15), CMD_MODIFY_ORDER | CMD_MSG(STR_ERROR_CAN_T_MODIFY_THIS_ORDER));
++
++			this->GetWidget<NWidgetCore>(widget)->SetDataTip(this->cargo_type_order_dropdown[this->GetOrderActionTypeForCargo(cargo_id)], STR_CARGO_TYPE_LOAD_ORDERS_DROP_TOOLTIP + this->variant);
++			this->SetWidgetDirty(widget);
+ 		}
+ 	}
+ 
+@@ -158,9 +242,14 @@
+ 		label->SetFill(1, 0);
+ 		label->SetResize(1, 0);
+ 		horiz->Add(label);
++		/* Orders dropdown */
++		NWidgetLeaf *dropdown = new NWidgetLeaf(WWT_DROPDOWN, COLOUR_GREY, WID_CTO_CARGO_DROPDOWN_FIRST + i, STR_NULL, STR_EMPTY);
++		dropdown->SetFill(1, 0);
++		dropdown->SetResize(1, 0);
++		horiz->Add(dropdown);
+ 	}
+ 
+-	*biggest_index = WID_CTO_CARGO_LABEL_LAST;
++	*biggest_index = WID_CTO_CARGO_DROPDOWN_LAST;
+ 	return ver;
+ }
+ 
+diff -r 07a8cdbbf16d src/script/api/script_window.hpp
+--- a/src/script/api/script_window.hpp	Sat Sep 15 11:06:38 2012 +0200
++++ b/src/script/api/script_window.hpp	Sun Sep 16 11:46:45 2012 +0200
+@@ -1821,6 +1821,8 @@
+ 		WID_CTO_CARGO_ROW_LAST               = ::WID_CTO_CARGO_ROW_LAST,               ///< Last cargo type order row.
+ 		WID_CTO_CARGO_LABEL_FIRST            = ::WID_CTO_CARGO_LABEL_FIRST,            ///< First cargo label.
+ 		WID_CTO_CARGO_LABEL_LAST             = ::WID_CTO_CARGO_LABEL_LAST,             ///< Last cargo label.
++		WID_CTO_CARGO_DROPDOWN_FIRST         = ::WID_CTO_CARGO_DROPDOWN_FIRST,         ///< First order dropdown.
++		WID_CTO_CARGO_DROPDOWN_LAST          = ::WID_CTO_CARGO_DROPDOWN_LAST,          ///< Last order dropdown.
+ 	};
+ 
+ 	/** Widgets of the #OskWindow class. */
+diff -r 07a8cdbbf16d src/widgets/order_widget.h
+--- a/src/widgets/order_widget.h	Sat Sep 15 11:06:38 2012 +0200
++++ b/src/widgets/order_widget.h	Sun Sep 16 11:46:45 2012 +0200
+@@ -52,6 +52,8 @@
+ 	WID_CTO_CARGO_ROW_LAST = WID_CTO_CARGO_ROW_FIRST + NUM_CARGO - 1,           ///< Last cargo type order row.
+ 	WID_CTO_CARGO_LABEL_FIRST,                                                  ///< First cargo label.
+ 	WID_CTO_CARGO_LABEL_LAST = WID_CTO_CARGO_LABEL_FIRST + NUM_CARGO - 1,       ///< Last cargo label.
++	WID_CTO_CARGO_DROPDOWN_FIRST,                                               ///< First order dropdown.
++	WID_CTO_CARGO_DROPDOWN_LAST = WID_CTO_CARGO_DROPDOWN_FIRST + NUM_CARGO - 1, ///< Last order dropdown.
+ };
+ 
+ #endif /* WIDGETS_ORDER_WIDGET_H */

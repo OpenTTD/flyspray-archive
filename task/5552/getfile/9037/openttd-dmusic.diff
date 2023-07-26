@@ -1,0 +1,143 @@
+Index: src/music/dmusic.cpp
+===================================================================
+--- src/music/dmusic.cpp	(revision 25266)
++++ src/music/dmusic.cpp	(working copy)
+@@ -30,6 +30,7 @@
+ 
+ /** the performance object controls manipulation of the segments */
+ static IDirectMusicPerformance *performance = NULL;
++static IDirectMusic *music = NULL;
+ 
+ /** the loader object can load many types of DMusic related files */
+ static IDirectMusicLoader *loader = NULL;
+@@ -58,6 +59,7 @@
+ 
+ static ProcPtrs proc;
+ 
++extern int _debug_driver_level;
+ 
+ const char *MusicDriver_DMusic::Start(const char * const *parm)
+ {
+@@ -87,15 +89,106 @@
+ 	}
+ 
+ 	/* initialize it */
+-	if (FAILED(performance->Init(NULL, NULL, NULL))) {
++	if (FAILED(performance->Init(&music, NULL, NULL))) {
+ 		performance->Release();
+ 		performance = NULL;
+ 		proc.CoUninitialize();
+ 		return "Failed to initialize performance object";
+ 	}
+ 
++	DMUS_PORTCAPS dmus_caps;
++	this->port = GetDriverParamInt(parm, "port", -1);
++
++	if (_debug_driver_level > 0) {
++
++		char port_desc[DMUS_MAX_DESCRIPTION];
++
++		/* Set to 0 the DMUS_PORTCAPS structure */
++		ZeroMemory(&dmus_caps, sizeof(dmus_caps));
++		dmus_caps.dwSize = sizeof(DMUS_PORTCAPS);
++
++		DEBUG(driver, 1, "Detected DirectMusic ports:");
++		for (int i = 0; (music->EnumPort(i, &dmus_caps) == S_OK); i++) {
++
++			/* print port info */
++			if (dmus_caps.dwClass == DMUS_PC_OUTPUTCLASS) {
++				WideCharToMultiByte(CP_ACP, 0, dmus_caps.wszDescription, -1, port_desc, DMUS_MAX_DESCRIPTION, NULL, NULL);
++				DEBUG(driver, 1, " %d: %s%s", i, port_desc, ((i == this->port) ? " (selected)" : ""));
++			}
++
++			ZeroMemory(&dmus_caps, sizeof(dmus_caps));
++			dmus_caps.dwSize = sizeof(DMUS_PORTCAPS);
++		}
++	}
++
++	if (this->port > -1) {
++
++		DMUS_PORTPARAMS dmus_params;
++		IDirectMusicPort *music_port;
++
++		/* Sets to 0 the port capabilities structure */
++		ZeroMemory(&dmus_params, sizeof(DMUS_PORTPARAMS));
++		/* Sets the params for this port */
++		dmus_params.dwSize          = sizeof(DMUS_PORTPARAMS);
++		dmus_params.dwValidParams   = DMUS_PORTPARAMS_CHANNELGROUPS;
++		dmus_params.dwChannelGroups = 1;
++
++		/* Set to 0 the DMUS_PORTCAPS structure */
++		ZeroMemory(&dmus_caps, sizeof(dmus_caps));
++		dmus_caps.dwSize = sizeof(DMUS_PORTCAPS);
++
++		if (FAILED(music->EnumPort(this->port, &dmus_caps))) {
++			performance->Release();
++			performance = NULL;
++			proc.CoUninitialize();
++			return "Failed to enumerate port";
++		}
++
++		if (dmus_caps.dwClass != DMUS_PC_OUTPUTCLASS) {
++			performance->Release();
++			performance = NULL;
++			proc.CoUninitialize();
++			return "Selected port is not an output class";
++		}
++
++		/* The midi port is created here */
++		if (FAILED(music->CreatePort(dmus_caps.guidPort, &dmus_params, &music_port, NULL))) {
++			performance->Release();
++			performance = NULL;
++			proc.CoUninitialize();
++			return "Failed to create port";
++		}
++
++		/* We have to activate it */
++		if (FAILED(music_port->Activate(TRUE))) {
++			music_port->Release();
++			performance->Release();
++			performance = NULL;
++			proc.CoUninitialize();
++			return "Failed to activate port";
++		}
++
++		/* Add the port to the performance */
++		if (FAILED(performance->AddPort(music_port))) {
++			music_port->Release();
++			performance->Release();
++			performance = NULL;
++			proc.CoUninitialize();
++			return "Failed to add port";
++		}
++
++		/* Assigns a block of 16 performance channels to the performance
++		 * NOTE: This method must be called when a port has been added to a performance, except when the default port has been added */
++		if (FAILED(performance->AssignPChannelBlock(0, music_port, 1))) {
++			music_port->Release();
++			performance->Release();
++			performance = NULL;
++			proc.CoUninitialize();
++			return "Failed to assign PChannel block";
++		}
++
+ 	/* choose default Windows synth */
+-	if (FAILED(performance->AddPort(NULL))) {
++	} else if (FAILED(performance->AddPort(NULL))) {
+ 		performance->CloseDown();
+ 		performance->Release();
+ 		performance = NULL;
+Index: src/music/dmusic.h
+===================================================================
+--- src/music/dmusic.h	(revision 25266)
++++ src/music/dmusic.h	(working copy)
+@@ -16,6 +16,9 @@
+ 
+ /** Music player making use of DirectX. */
+ class MusicDriver_DMusic: public MusicDriver {
++private:
++	int port;
++
+ public:
+ 	/* virtual */ const char *Start(const char * const *param);
+ 

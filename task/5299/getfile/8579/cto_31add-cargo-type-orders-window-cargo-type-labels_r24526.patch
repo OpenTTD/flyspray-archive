@@ -1,0 +1,157 @@
+# HG changeset patch
+# Parent ad173a418831eb9a4a664f9cb630ac406b151058
+# User sbr
+# Date 1347699998 -7200
+
+Add: Cargo type labels to CargoTypeOrdersWindow.
+
+diff -r ad173a418831 src/order_gui.cpp
+--- a/src/order_gui.cpp	Sat Sep 15 10:45:42 2012 +0200
++++ b/src/order_gui.cpp	Sun Sep 16 11:46:43 2012 +0200
+@@ -42,6 +42,25 @@
+ 
+ 	const Vehicle *vehicle;  ///< Vehicle owning the orders being displayed and manipulated.
+ 	VehicleOrderID order_id; ///< Index of the order concerned by this window.
++
++	static const uint8 CARGO_ICON_WIDTH  = 12;
++	static const uint8 CARGO_ICON_HEIGHT =  8;
++
++	uint max_cargo_name_width;     ///< Greatest width of cargo names.
++
++	/**
++	 * Initialize \c max_cargo_name_width
++	 * @post \c max_cargo_name_width
++	 */
++	void InitMaxWidgetWidth()
++	{
++		this->max_cargo_name_width = 0;
++		for (int i = 0; i < _sorted_standard_cargo_specs_size; i++) {
++			SetDParam(0, _sorted_cargo_specs[i]->name);
++			this->max_cargo_name_width = max(this->max_cargo_name_width, GetStringBoundingBox(STR_JUST_STRING).width);
++		}
++	}
++
+ public:
+ 	/**
+ 	 * Instantiate a new CargoTypeOrdersWindow.
+@@ -54,6 +73,7 @@
+ 	CargoTypeOrdersWindow(const WindowDesc *desc, const Vehicle *v, VehicleOrderID order_id, CargoTypeOrdersWindowVariant variant) : Window()
+ 	{
+ 		this->variant = variant;
++		this->InitMaxWidgetWidth();
+ 
+ 		this->vehicle = v;
+ 		this->order_id = order_id;
+@@ -70,6 +90,32 @@
+ 	{
+ 		if (widget == WID_CTO_HEADER) {
+ 			(*size).height = max((*size).height, (uint) WD_FRAMERECT_TOP + FONT_HEIGHT_NORMAL + WD_FRAMERECT_BOTTOM);
++		} else if (WID_CTO_CARGO_LABEL_FIRST <= widget && widget <= WID_CTO_CARGO_LABEL_LAST) {
++			(*size).width  = max((*size).width,  WD_FRAMERECT_LEFT + this->CARGO_ICON_WIDTH + WD_FRAMETEXT_LEFT + this->max_cargo_name_width + WD_FRAMETEXT_RIGHT + padding.width);
++			(*size).height = max((*size).height, (uint) WD_FRAMERECT_TOP + FONT_HEIGHT_NORMAL + WD_FRAMERECT_BOTTOM);
++		}
++	}
++
++	virtual void DrawWidget(const Rect &r, int widget) const
++	{
++		if (WID_CTO_CARGO_LABEL_FIRST <= widget && widget <= WID_CTO_CARGO_LABEL_LAST) {
++			const CargoSpec *cs = _sorted_cargo_specs[widget - WID_CTO_CARGO_LABEL_FIRST];
++			bool rtl = (_current_text_dir == TD_RTL);
++
++			/* Draw cargo icon. */
++			int rect_left   = rtl ? r.right - WD_FRAMETEXT_RIGHT - this->CARGO_ICON_WIDTH : r.left + WD_FRAMERECT_LEFT;
++			int rect_right  = rect_left + this->CARGO_ICON_WIDTH;
++			int rect_top    = r.top + WD_FRAMERECT_TOP + ((r.bottom - WD_FRAMERECT_BOTTOM - r.top - WD_FRAMERECT_TOP) - this->CARGO_ICON_HEIGHT) / 2;
++			int rect_bottom = rect_top + this->CARGO_ICON_HEIGHT;
++			GfxFillRect(rect_left, rect_top, rect_right, rect_bottom, PC_BLACK);
++			GfxFillRect(rect_left + 1, rect_top + 1, rect_right - 1, rect_bottom - 1, cs->legend_colour);
++
++			/* Draw cargo name */
++			int text_left  = rtl ? r.left + WD_FRAMETEXT_LEFT : rect_right + WD_FRAMETEXT_LEFT;
++			int text_right = rtl ? rect_left - WD_FRAMETEXT_LEFT : r.right - WD_FRAMETEXT_RIGHT;
++			int text_top   = r.top + WD_FRAMERECT_TOP;
++			SetDParam(0, cs->name);
++			DrawString(text_left, text_right, text_top, STR_BLACK_STRING);
+ 		}
+ 	}
+ 
+@@ -90,6 +136,34 @@
+ 	}
+ };
+ 
++/**
++ * Make a list of panel for each available cargo type.
++ * Each panel contains a label to display the cargo name.
++ * @param biggest_index Storage for collecting the biggest index used in the returned tree
++ * @return A vertical container of cargo type orders rows.
++ * @post \c *biggest_index contains the largest used index in the tree.
++ */
++static NWidgetBase *MakeCargoTypeOrdersRows(int *biggest_index)
++{
++	NWidgetVertical *ver = new NWidgetVertical;
++
++	for (int i = 0; i < _sorted_standard_cargo_specs_size; i++) {
++		/* Cargo row */
++		NWidgetBackground *panel = new NWidgetBackground(WWT_PANEL, COLOUR_GREY, WID_CTO_CARGO_ROW_FIRST + i);
++		ver->Add(panel);
++		NWidgetHorizontal *horiz = new NWidgetHorizontal;
++		panel->Add(horiz);
++		/* Cargo label */
++		NWidgetBackground *label = new NWidgetBackground(WWT_PANEL, COLOUR_GREY, WID_CTO_CARGO_LABEL_FIRST + i);
++		label->SetFill(1, 0);
++		label->SetResize(1, 0);
++		horiz->Add(label);
++	}
++
++	*biggest_index = WID_CTO_CARGO_LABEL_LAST;
++	return ver;
++}
++
+ /** Widgets definition of CargoTypeOrdersWindow. */
+ static const NWidgetPart _nested_cargo_type_orders_widgets[] = {
+ 	NWidget(NWID_HORIZONTAL),
+@@ -99,6 +173,7 @@
+ 	NWidget(WWT_PANEL, COLOUR_GREY),
+ 		NWidget(WWT_LABEL, COLOUR_GREY, WID_CTO_HEADER), SetFill(1, 0), SetResize(1, 0), SetDataTip(STR_NULL, STR_NULL),
+ 	EndContainer(),
++	NWidgetFunction(MakeCargoTypeOrdersRows),
+ 	NWidget(NWID_HORIZONTAL),
+ 		NWidget(WWT_TEXTBTN, COLOUR_GREY, WID_CTO_CLOSEBTN), SetFill(1, 0), SetResize(1, 0), SetDataTip(STR_CARGO_TYPE_ORDERS_CLOSE_BUTTON, STR_TOOLTIP_CLOSE_WINDOW),
+ 		NWidget(WWT_RESIZEBOX, COLOUR_GREY),
+diff -r ad173a418831 src/script/api/script_window.hpp
+--- a/src/script/api/script_window.hpp	Sat Sep 15 10:45:42 2012 +0200
++++ b/src/script/api/script_window.hpp	Sun Sep 16 11:46:43 2012 +0200
+@@ -1817,6 +1817,10 @@
+ 		WID_CTO_CAPTION                      = ::WID_CTO_CAPTION,                      ///< Caption of the window.
+ 		WID_CTO_HEADER                       = ::WID_CTO_HEADER,                       ///< Window header.
+ 		WID_CTO_CLOSEBTN                     = ::WID_CTO_CLOSEBTN,                     ///< Close button.
++		WID_CTO_CARGO_ROW_FIRST              = ::WID_CTO_CARGO_ROW_FIRST,              ///< First cargo type order row.
++		WID_CTO_CARGO_ROW_LAST               = ::WID_CTO_CARGO_ROW_LAST,               ///< Last cargo type order row.
++		WID_CTO_CARGO_LABEL_FIRST            = ::WID_CTO_CARGO_LABEL_FIRST,            ///< First cargo label.
++		WID_CTO_CARGO_LABEL_LAST             = ::WID_CTO_CARGO_LABEL_LAST,             ///< Last cargo label.
+ 	};
+ 
+ 	/** Widgets of the #OskWindow class. */
+diff -r ad173a418831 src/widgets/order_widget.h
+--- a/src/widgets/order_widget.h	Sat Sep 15 10:45:42 2012 +0200
++++ b/src/widgets/order_widget.h	Sun Sep 16 11:46:43 2012 +0200
+@@ -12,6 +12,8 @@
+ #ifndef WIDGETS_ORDER_WIDGET_H
+ #define WIDGETS_ORDER_WIDGET_H
+ 
++#include "../cargo_type.h"
++
+ /** Widgets of the #OrdersWindow class. */
+ enum OrderWidgets {
+ 	WID_O_CAPTION,                   ///< Caption of the window.
+@@ -46,6 +48,10 @@
+ 	WID_CTO_CAPTION,                                                            ///< Caption of the window.
+ 	WID_CTO_HEADER,                                                             ///< Window header.
+ 	WID_CTO_CLOSEBTN,                                                           ///< Close button.
++	WID_CTO_CARGO_ROW_FIRST,                                                    ///< First cargo type order row.
++	WID_CTO_CARGO_ROW_LAST = WID_CTO_CARGO_ROW_FIRST + NUM_CARGO - 1,           ///< Last cargo type order row.
++	WID_CTO_CARGO_LABEL_FIRST,                                                  ///< First cargo label.
++	WID_CTO_CARGO_LABEL_LAST = WID_CTO_CARGO_LABEL_FIRST + NUM_CARGO - 1,       ///< Last cargo label.
+ };
+ 
+ #endif /* WIDGETS_ORDER_WIDGET_H */

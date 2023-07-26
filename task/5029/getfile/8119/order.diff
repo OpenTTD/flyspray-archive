@@ -1,0 +1,320 @@
+diff -r b6087922dcd5 src/order_backup.cpp
+--- a/src/order_backup.cpp	Sun Jan 29 00:14:36 2012 +0000
++++ b/src/order_backup.cpp	Sun Jan 29 17:13:43 2012 -0700
+@@ -84,7 +84,7 @@
+ 	if (this->clone != NULL) {
+ 		DoCommand(0, v->index | CO_SHARE << 30, this->clone->index, DC_EXEC, CMD_CLONE_ORDER);
+ 	} else if (this->orders != NULL && OrderList::CanAllocateItem()) {
+-		v->orders.list = new OrderList(this->orders, v);
++		new OrderList(this->orders, v);
+ 		this->orders = NULL;
+ 		/* Make sure buoys/oil rigs are updated in the station list. */
+ 		InvalidateWindowClassesData(WC_STATION_LIST, 0);
+diff -r b6087922dcd5 src/order_base.h
+--- a/src/order_base.h	Sun Jan 29 00:14:36 2012 +0000
++++ b/src/order_base.h	Sun Jan 29 17:13:43 2012 -0700
+@@ -18,7 +18,7 @@
+ #include "cargo_type.h"
+ #include "depot_type.h"
+ #include "station_type.h"
+-#include "vehicle_type.h"
++#include "vehiclelist.h"
+ #include "date_type.h"
+ 
+ typedef Pool<Order, OrderID, 256, 64000> OrderPool;
+@@ -284,11 +284,11 @@
+ 
+ 	/**
+ 	 * Adds the given vehicle to this shared order list.
+-	 * @note This is supposed to be called after the vehicle has been inserted
+-	 *       into the shared vehicle chain.
+-	 * @param v vehicle to add to the list
++	 * @param src vehicle to add to the list
++	 * @param dst vehicle to place src after
++	 * @note dst->orders.list must be a valid OrderList pointer (or NULL).  src->orders.list may be invalid and is unconditionally replaced.
+ 	 */
+-	inline void AddVehicle(Vehicle *v) { ++this->num_vehicles; }
++	static void AddVehicle(Vehicle *src, Vehicle *dst);
+ 
+ 	void RemoveVehicle(Vehicle *v);
+ 
+diff -r b6087922dcd5 src/order_cmd.cpp
+--- a/src/order_cmd.cpp	Sun Jan 29 00:14:36 2012 +0000
++++ b/src/order_cmd.cpp	Sun Jan 29 17:13:43 2012 -0700
+@@ -290,6 +290,10 @@
+  */
+ void OrderList::Initialize(Order *chain, Vehicle *v)
+ {
++	assert(v != NULL);
++	assert(v->previous_shared == NULL);
++	assert(v->next_shared == NULL);
++
+ 	this->first = chain;
+ 	this->first_shared = v;
+ 
+@@ -310,6 +314,8 @@
+ 	}
+ 
+ 	for (const Vehicle *u = v->NextShared(); u != NULL; u = u->NextShared()) ++this->num_vehicles;
++	
++	v->orders.list = this;
+ }
+ 
+ /**
+@@ -447,14 +453,66 @@
+ }
+ 
+ /**
++ * Adds the given vehicle to this shared order list.
++ * @param src vehicle to add to the list
++ * @param dst vehicle to place src after
++ * @note dst->orders.list must be a valid OrderList pointer (or NULL).  src->orders.list may be invalid and is unconditionally replaced.
++ */
++void OrderList::AddVehicle(Vehicle *src, Vehicle *dst)
++{
++	assert(src->previous_shared == NULL && src->next_shared == NULL);
++
++	if (dst->orders.list == NULL)
++		new OrderList(NULL, dst);
++
++	src->next_shared     = dst->next_shared;
++	src->previous_shared = dst;
++	dst->next_shared = src;
++
++	if (src->next_shared != NULL)
++		src->next_shared->previous_shared = src;
++
++	++dst->orders.list->num_vehicles;
++
++	src->orders.list = dst->orders.list;
++}
++
++/**
+  * Removes the vehicle from the shared order list.
+- * @note This is supposed to be called when the vehicle is still in the chain
+  * @param v vehicle to remove from the list
+  */
+ void OrderList::RemoveVehicle(Vehicle *v)
+ {
++	assert(this->num_vehicles >= 2);
++	assert(v->orders.list == this);
++	/* Remember if they were first and the old window number as we may change that. */
++	bool were_first = (this->first_shared == v);
++	VehicleListIdentifier vli(VL_SHARED_ORDERS, v->type, v->owner, this->first_shared->index);
++
+ 	--this->num_vehicles;
+-	if (v == this->first_shared) this->first_shared = v->NextShared();
++	if (v == this->first_shared)
++		this->first_shared = v->NextShared();
++
++	if (!were_first) {
++		/* They are not the first shared one, so only relink the previous one. */
++		v->previous_shared->next_shared = v->NextShared();
++	}
++
++	if (v->next_shared != NULL)
++		v->next_shared->previous_shared = v->previous_shared;
++
++	v->next_shared     = NULL;
++	v->previous_shared = NULL;
++	v->orders.list = NULL;
++
++	if (this->GetNumVehicles() == 1) {
++		/* When there is only one vehicle, remove the shared order list window. */
++		DeleteWindowById(GetWindowClassForVehicleType(v->type), vli.Pack());
++		InvalidateVehicleOrder(this->first_shared, 0);
++	} else if (were_first) {
++		/* If they were the first one, update to the new first one. */
++		InvalidateWindowData(GetWindowClassForVehicleType(v->type), vli.Pack(), this->first_shared->index | (1U << 31));
++	}
+ }
+ 
+ /**
+@@ -845,7 +903,7 @@
+ {
+ 	/* Create new order and link in list */
+ 	if (v->orders.list == NULL) {
+-		v->orders.list = new OrderList(new_o, v);
++		new OrderList(new_o, v);
+ 	} else {
+ 		v->orders.list->InsertOrderAt(new_o, sel_ord);
+ 	}
+@@ -1490,10 +1548,8 @@
+ 				 * (We mainly do this to keep the order indices valid and in range.) */
+ 				DeleteVehicleOrders(dst, false, dst->GetNumOrders() != src->GetNumOrders());
+ 
+-				dst->orders.list = src->orders.list;
+-
+ 				/* Link this vehicle in the shared-list */
+-				dst->AddToShared(src);
++				OrderList::AddVehicle(dst, src); // XXX Argument names are backwards
+ 
+ 				InvalidateVehicleOrder(dst, -1);
+ 				InvalidateVehicleOrder(src, -2);
+@@ -1549,13 +1605,13 @@
+ 					order_dst = &(*order_dst)->next;
+ 				}
+ 				if (dst->orders.list == NULL) {
+-					dst->orders.list = new OrderList(first, dst);
++					new OrderList(first, dst);
+ 				} else {
+ 					assert(dst->orders.list->GetFirstOrder() == NULL);
+ 					assert(!dst->orders.list->IsShared());
+ 					delete dst->orders.list;
+ 					assert(OrderList::CanAllocateItem());
+-					dst->orders.list = new OrderList(first, dst);
++					new OrderList(first, dst);
+ 				}
+ 
+ 				InvalidateVehicleOrder(dst, -1);
+@@ -1790,8 +1846,7 @@
+ 
+ 	if (v->IsOrderListShared()) {
+ 		/* Remove ourself from the shared order list. */
+-		v->RemoveFromShared();
+-		v->orders.list = NULL;
++		v->orders.list->RemoveVehicle(v);
+ 	} else if (v->orders.list != NULL) {
+ 		/* Remove the orders */
+ 		v->orders.list->FreeChain(keep_orderlist);
+diff -r b6087922dcd5 src/saveload/vehicle_sl.cpp
+--- a/src/saveload/vehicle_sl.cpp	Sun Jan 29 00:14:36 2012 +0000
++++ b/src/saveload/vehicle_sl.cpp	Sun Jan 29 17:13:43 2012 -0700
+@@ -275,12 +275,14 @@
+ 						 * allowed in these savegames matches the number of OrderLists. As
+ 						 * such each vehicle can get an OrderList and it will (still) fit. */
+ 						assert(OrderList::CanAllocateItem());
+-						v->orders.list = mapping[v->orders.old] = new OrderList(v->orders.old, v);
++						Order *old = v->orders.old;  // OrderList() overwrites this, so save a copy
++						mapping[old] = new OrderList(v->orders.old, v);
+ 					} else {
+-						v->orders.list = mapping[v->orders.old];
+ 						/* For old games (case a) we must create the shared vehicle chain */
+ 						if (IsSavegameVersionBefore(5, 2)) {
+-							v->AddToShared(v->orders.list->GetFirstSharedVehicle());
++							OrderList::AddVehicle(v, mapping[v->orders.old]->GetFirstSharedVehicle());
++						} else {
++							v->orders.list = mapping[v->orders.old];
+ 						}
+ 					}
+ 				} else { // OrderList was saved as such, only recalculate not saved values
+@@ -309,7 +311,7 @@
+ 
+ 				/* As above, allocating OrderList here is safe. */
+ 				assert(OrderList::CanAllocateItem());
+-				v->orders.list = new OrderList(NULL, v);
++				new OrderList(NULL, v);
+ 				for (Vehicle *u = v; u != NULL; u = u->next_shared) {
+ 					u->orders.list = v->orders.list;
+ 				}
+diff -r b6087922dcd5 src/train_cmd.cpp
+--- a/src/train_cmd.cpp	Sun Jan 29 00:14:36 2012 +0000
++++ b/src/train_cmd.cpp	Sun Jan 29 17:13:43 2012 -0700
+@@ -1353,8 +1353,7 @@
+ 		if (v == first && v->IsEngine() && !sell_chain && new_head != NULL && new_head->IsFrontEngine()) {
+ 			/* We are selling the front engine. In this case we want to
+ 			 * 'give' the order, unit number and such to the new head. */
+-			new_head->orders.list = first->orders.list;
+-			new_head->AddToShared(first);
++			OrderList::AddVehicle(new_head, first);
+ 			DeleteVehicleOrders(first);
+ 
+ 			/* Copy other important data from the front engine */
+diff -r b6087922dcd5 src/vehicle.cpp
+--- a/src/vehicle.cpp	Sun Jan 29 00:14:36 2012 +0000
++++ b/src/vehicle.cpp	Sun Jan 29 17:13:43 2012 -0700
+@@ -2324,65 +2324,6 @@
+ 	}
+ }
+ 
+-/**
+- * Adds this vehicle to a shared vehicle chain.
+- * @param shared_chain a vehicle of the chain with shared vehicles.
+- * @pre !this->IsOrderListShared()
+- */
+-void Vehicle::AddToShared(Vehicle *shared_chain)
+-{
+-	assert(this->previous_shared == NULL && this->next_shared == NULL);
+-
+-	if (shared_chain->orders.list == NULL) {
+-		assert(shared_chain->previous_shared == NULL);
+-		assert(shared_chain->next_shared == NULL);
+-		this->orders.list = shared_chain->orders.list = new OrderList(NULL, shared_chain);
+-	}
+-
+-	this->next_shared     = shared_chain->next_shared;
+-	this->previous_shared = shared_chain;
+-
+-	shared_chain->next_shared = this;
+-
+-	if (this->next_shared != NULL) this->next_shared->previous_shared = this;
+-
+-	shared_chain->orders.list->AddVehicle(this);
+-}
+-
+-/**
+- * Removes the vehicle from the shared order list.
+- */
+-void Vehicle::RemoveFromShared()
+-{
+-	/* Remember if we were first and the old window number before RemoveVehicle()
+-	 * as this changes first if needed. */
+-	bool were_first = (this->FirstShared() == this);
+-	VehicleListIdentifier vli(VL_SHARED_ORDERS, this->type, this->owner, this->FirstShared()->index);
+-
+-	this->orders.list->RemoveVehicle(this);
+-
+-	if (!were_first) {
+-		/* We are not the first shared one, so only relink our previous one. */
+-		this->previous_shared->next_shared = this->NextShared();
+-	}
+-
+-	if (this->next_shared != NULL) this->next_shared->previous_shared = this->previous_shared;
+-
+-
+-	if (this->orders.list->GetNumVehicles() == 1) {
+-		/* When there is only one vehicle, remove the shared order list window. */
+-		DeleteWindowById(GetWindowClassForVehicleType(this->type), vli.Pack());
+-		InvalidateVehicleOrder(this->FirstShared(), 0);
+-	} else if (were_first) {
+-		/* If we were the first one, update to the new first one.
+-		 * Note: FirstShared() is already the new first */
+-		InvalidateWindowData(GetWindowClassForVehicleType(this->type), vli.Pack(), this->FirstShared()->index | (1U << 31));
+-	}
+-
+-	this->next_shared     = NULL;
+-	this->previous_shared = NULL;
+-}
+-
+ void VehiclesYearlyLoop()
+ {
+ 	Vehicle *v;
+diff -r b6087922dcd5 src/vehicle_base.h
+--- a/src/vehicle_base.h	Sun Jan 29 00:14:36 2012 +0000
++++ b/src/vehicle_base.h	Sun Jan 29 17:13:43 2012 -0700
+@@ -117,6 +117,7 @@
+ struct LoadgameState;
+ extern bool LoadOldVehicle(LoadgameState *ls, int num);
+ extern void FixOldVehicles();
++struct OrderList;
+ 
+ struct GRFFile;
+ 
+@@ -134,6 +135,7 @@
+ 	friend void FixOldVehicles();
+ 	friend void AfterLoadVehicles(bool part_of_load);             ///< So we can set the #previous and #first pointers while loading
+ 	friend bool LoadOldVehicle(LoadgameState *ls, int num);       ///< So we can set the proper next pointer while loading
++	friend class OrderList;                                       ///< Manipulation of next_shared and previous_shared
+ 
+ 	char *name;                         ///< Name of vehicle
+ 
+@@ -532,9 +534,6 @@
+ 	 */
+ 	inline Order *GetFirstOrder() const { return (this->orders.list == NULL) ? NULL : this->orders.list->GetFirstOrder(); }
+ 
+-	void AddToShared(Vehicle *shared_chain);
+-	void RemoveFromShared();
+-
+ 	/**
+ 	 * Get the next vehicle of the shared vehicle chain.
+ 	 * @return the next shared vehicle or NULL when there isn't a next vehicle.

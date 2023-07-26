@@ -1,0 +1,135 @@
+diff -r 0216f96ab919 src/misc_gui.cpp
+--- a/src/misc_gui.cpp	Sun Sep 09 19:12:23 2012 +0200
++++ b/src/misc_gui.cpp	Sun Sep 09 20:04:57 2012 +0200
+@@ -740,6 +740,7 @@
+ 			break;
+ 
+ 		case WKC_BACKSPACE: case WKC_DELETE:
++		case WKC_CTRL | WKC_BACKSPACE: case WKC_CTRL | WKC_DELETE:
+ 			if (this->text.DeleteChar(keycode)) w->SetWidgetDirty(wid);
+ 			break;
+ 
+diff -r 0216f96ab919 src/textbuf.cpp
+--- a/src/textbuf.cpp	Sun Sep 09 19:12:23 2012 +0200
++++ b/src/textbuf.cpp	Sun Sep 09 20:04:57 2012 +0200
+@@ -27,11 +27,54 @@
+ int _caret_timer;
+ 
+ 
+-/* Delete a character at the caret position in a text buf.
+- * If backspace is set, delete the character before the caret,
+- * else delete the character after it. */
++/**
++ * Checks if it is possible to delete a character.
++ * @param backspace if set, delete the character before the caret,
++ * otherwise, delete the character after it.
++ * @return true if a character can be deleted in the given direction.
++ */
++bool Textbuf::CanDelChar(bool backspace)
++{
++	if (backspace)
++		return this->caretpos != 0;
++	else
++		return this->caretpos < this->bytes - 1;
++}
++
++/**
++ * Get the next character that will be removed by DelChar.
++ * @param backspace if set, delete the character before the caret,
++ * otherwise, delete the character after it.
++ * @return the next character that will be removed by DelChar.
++ * @warning You should ensure Textbuf::CanDelChar returns true before calling this function.
++ */
++WChar Textbuf::GetNextDelChar(bool backspace)
++{
++	assert(this->CanDelChar(backspace));
++
++	WChar c;
++	if (backspace) {
++		const char *s = Utf8PrevChar(this->buf + this->caretpos);
++		Utf8Decode(&c, s);
++	}
++	else
++	{
++		c = this->buf[this->caretpos];
++	}
++
++	return c;
++}
++
++/**
++ * Delete a character at the caret position in a text buf.
++ * @param backspace if set, delete the character before the caret,
++ * else delete the character after it.
++ * @warning You should ensure Textbuf::CanDelChar returns true before calling this function.
++ */
+ void Textbuf::DelChar(bool backspace)
+ {
++	assert(this->CanDelChar(backspace));
++
+ 	WChar c;
+ 	char *s = this->buf + this->caretpos;
+ 
+@@ -60,11 +103,45 @@
+  */
+ bool Textbuf::DeleteChar(int delmode)
+ {
+-	if (delmode == WKC_BACKSPACE && this->caretpos != 0) {
+-		this->DelChar(true);
+-		return true;
+-	} else if (delmode == WKC_DELETE && this->caretpos < this->bytes - 1) {
+-		this->DelChar(false);
++	if (delmode == WKC_BACKSPACE || delmode == WKC_DELETE)
++	{
++		bool backspace = delmode == WKC_BACKSPACE;
++		if (CanDelChar(backspace)) {
++			this->DelChar(backspace);
++			return true;
++		}
++		return false;
++	}
++
++	if (delmode == (WKC_CTRL | WKC_BACKSPACE) || delmode == (WKC_CTRL | WKC_DELETE))
++	{
++		bool backspace = delmode == (WKC_CTRL | WKC_BACKSPACE);
++
++		if (!CanDelChar(backspace)) return false;
++
++		/* Unconditionally delete one char to the left. */
++		this->DelChar(backspace);
++		if (!CanDelChar(backspace)) return false;
++		WChar c = this->GetNextDelChar(backspace);
++
++		/* Backspace: Delete left whitespaces.
++		 * Delete:    Delete right word.
++		 */
++		while ((backspace && IsWhitespace(c)) ||
++				(!backspace && !IsWhitespace(c))) {
++			this->DelChar(backspace);
++			if (!this->CanDelChar(backspace)) return true;
++			c = this->GetNextDelChar(backspace);
++		}
++		/* Backspace: Delete left word.
++		 * Delete:    Delete right whitespaces.
++		 */
++		while ((backspace && !IsWhitespace(c)) ||
++				(!backspace && IsWhitespace(c))) {
++			this->DelChar(backspace);
++			if (!this->CanDelChar(backspace)) return true;
++			c = this->GetNextDelChar(backspace);
++		}
+ 		return true;
+ 	}
+ 
+diff -r 0216f96ab919 src/textbuf_type.h
+--- a/src/textbuf_type.h	Sun Sep 09 19:12:23 2012 +0200
++++ b/src/textbuf_type.h	Sun Sep 09 20:04:57 2012 +0200
+@@ -39,6 +39,8 @@
+ 	void UpdateSize();
+ 
+ private:
++	bool CanDelChar(bool backspace);
++	WChar GetNextDelChar(bool backspace);
+ 	void DelChar(bool backspace);
+ 	bool CanMoveCaretLeft();
+ 	WChar MoveCaretLeft();

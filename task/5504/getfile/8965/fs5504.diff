@@ -1,0 +1,1047 @@
+Index: src/console_gui.cpp
+===================================================================
+--- src/console_gui.cpp	(revision 25092)
++++ src/console_gui.cpp	(working copy)
+@@ -240,60 +240,67 @@
+ 	{
+ 		if (_focused_window != this) return ES_NOT_HANDLED;
+ 
+-		const int scroll_height = (this->height / this->line_height) - 1;
+ 		switch (keycode) {
+-			case WKC_UP:
+-				IConsoleHistoryNavigate(1);
+-				this->SetDirty();
+-				break;
++			case WKC_BACKQUOTE:
++				IConsoleSwitch();
++				return ES_HANDLED;
+ 
+-			case WKC_DOWN:
+-				IConsoleHistoryNavigate(-1);
+-				this->SetDirty();
+-				break;
++			case (WKC_CTRL | 'L'):
++				IConsoleCmdExec("clear");
++				return ES_HANDLED;
++		}
+ 
+-			case WKC_SHIFT | WKC_PAGEDOWN:
+-				this->Scroll(-scroll_height);
+-				break;
++		switch (key) {
++			case CC_UP:
++			case CC_DOWN: {
++				int direction = key == CC_UP ? 1 : -1;
++				switch (keycode & WKC_SPECIAL_KEYS) {
++					case WKC_NONE:
++						IConsoleHistoryNavigate(direction);
++						this->SetDirty();
++						break;
+ 
+-			case WKC_SHIFT | WKC_PAGEUP:
+-				this->Scroll(scroll_height);
++					case WKC_SHIFT:
++						this->Scroll(direction);
++						break;
++				}
+ 				break;
++			}
+ 
+-			case WKC_SHIFT | WKC_DOWN:
+-				this->Scroll(-1);
++			case CC_PAGEUP:
++			case CC_PAGEDOWN: {
++				int direction = key == CC_PAGEUP ? 1 : -1;
++				const int scroll_height = (this->height / this->line_height) - 1;
++				switch (keycode & WKC_SPECIAL_KEYS) {
++					case WKC_SHIFT:
++						this->Scroll(direction * scroll_height);
++						break;
++				}
+ 				break;
++			}
+ 
+-			case WKC_SHIFT | WKC_UP:
+-				this->Scroll(1);
+-				break;
++			case CC_RETURN:
++				switch (keycode & WKC_SPECIAL_KEYS) {
++					case WKC_NONE: {
++						/* We always want the ] at the left side; we always force these strings to be left
++						 * aligned anyway. So enforce this in all cases by addding a left-to-right marker,
++						 * otherwise it will be drawn at the wrong side with right-to-left texts. */
++						IConsolePrintF(CC_COMMAND, LRM "] %s", _iconsole_cmdline.buf);
++						const char *cmd = IConsoleHistoryAdd(_iconsole_cmdline.buf);
++						IConsoleClearCommand();
+ 
+-			case WKC_BACKQUOTE:
+-				IConsoleSwitch();
+-				break;
++						if (cmd != NULL) IConsoleCmdExec(cmd);
++						break;
++					}
+ 
+-			case WKC_RETURN: case WKC_NUM_ENTER: {
+-				/* We always want the ] at the left side; we always force these strings to be left
+-				 * aligned anyway. So enforce this in all cases by addding a left-to-right marker,
+-				 * otherwise it will be drawn at the wrong side with right-to-left texts. */
+-				IConsolePrintF(CC_COMMAND, LRM "] %s", _iconsole_cmdline.buf);
+-				const char *cmd = IConsoleHistoryAdd(_iconsole_cmdline.buf);
+-				IConsoleClearCommand();
+-
+-				if (cmd != NULL) IConsoleCmdExec(cmd);
++					case WKC_CTRL:
++						_iconsole_mode = (_iconsole_mode == ICONSOLE_FULL) ? ICONSOLE_OPENED : ICONSOLE_FULL;
++						IConsoleResize(this);
++						MarkWholeScreenDirty();
++						break;
++				}
+ 				break;
+-			}
+ 
+-			case WKC_CTRL | WKC_RETURN:
+-				_iconsole_mode = (_iconsole_mode == ICONSOLE_FULL) ? ICONSOLE_OPENED : ICONSOLE_FULL;
+-				IConsoleResize(this);
+-				MarkWholeScreenDirty();
+-				break;
+-
+-			case (WKC_CTRL | 'L'):
+-				IConsoleCmdExec("clear");
+-				break;
+-
+ 			default:
+ 				if (_iconsole_cmdline.HandleKeyPress(key, keycode) != HKPR_NOT_HANDLED) {
+ 					IConsoleWindow::scroll = 0;
+Index: src/video/sdl_v.cpp
+===================================================================
+--- src/video/sdl_v.cpp	(revision 25092)
++++ src/video/sdl_v.cpp	(working copy)
+@@ -431,72 +431,95 @@
+ 	uint16 vk_from;
+ #endif
+ 	byte vk_count;
+-	byte map_to;
++	byte wkc;
++	ControlCharacter cc;
+ };
+ 
+-#define AS(x, z) {x, 0, z}
+-#define AM(x, y, z, w) {x, (byte)(y - x), z}
++#define AS(sdl, wkc, cc) {sdl, 0, wkc, cc}
++#define AM(sdl_from, sdl_to, wkc_from, wkc_to) {sdl_from, (byte)(sdl_to - sdl_from), wkc_from, CC_NONE}
+ 
+ static const VkMapping _vk_mapping[] = {
+ 	/* Pageup stuff + up/down */
+-	AM(SDLK_PAGEUP, SDLK_PAGEDOWN, WKC_PAGEUP, WKC_PAGEDOWN),
+-	AS(SDLK_UP,     WKC_UP),
+-	AS(SDLK_DOWN,   WKC_DOWN),
+-	AS(SDLK_LEFT,   WKC_LEFT),
+-	AS(SDLK_RIGHT,  WKC_RIGHT),
++	AS(SDLK_PAGEUP,       WKC_PAGEUP,      CC_PAGEUP),
++	AS(SDLK_PAGEDOWN,     WKC_PAGEDOWN,    CC_PAGEDOWN),
+ 
+-	AS(SDLK_HOME,   WKC_HOME),
+-	AS(SDLK_END,    WKC_END),
++	AS(SDLK_UP,           WKC_UP,          CC_UP),
++	AS(SDLK_DOWN,         WKC_DOWN,        CC_DOWN),
++	AS(SDLK_LEFT,         WKC_LEFT,        CC_LEFT),
++	AS(SDLK_RIGHT,        WKC_RIGHT,       CC_RIGHT),
+ 
+-	AS(SDLK_INSERT, WKC_INSERT),
+-	AS(SDLK_DELETE, WKC_DELETE),
++	AS(SDLK_HOME,         WKC_HOME,        CC_HOME),
++	AS(SDLK_END,          WKC_END,         CC_END),
+ 
++	AS(SDLK_INSERT,       WKC_INSERT,      CC_INSERT),
++	AS(SDLK_DELETE,       WKC_DELETE,      CC_DELETE),
++
+ 	/* Map letters & digits */
+ 	AM(SDLK_a, SDLK_z, 'A', 'Z'),
+ 	AM(SDLK_0, SDLK_9, '0', '9'),
+ 
+-	AS(SDLK_ESCAPE,    WKC_ESC),
+-	AS(SDLK_PAUSE,     WKC_PAUSE),
+-	AS(SDLK_BACKSPACE, WKC_BACKSPACE),
++	AS(SDLK_ESCAPE,       WKC_ESC,         CC_ESC),
++	AS(SDLK_PAUSE,        WKC_PAUSE,       CC_NONE),
++	AS(SDLK_BACKSPACE,    WKC_BACKSPACE,   CC_BACKSPACE),
+ 
+-	AS(SDLK_SPACE,     WKC_SPACE),
+-	AS(SDLK_RETURN,    WKC_RETURN),
+-	AS(SDLK_TAB,       WKC_TAB),
++	AS(SDLK_SPACE,        WKC_SPACE,       CC_SPACE),
++	AS(SDLK_RETURN,       WKC_RETURN,      CC_RETURN),
++	AS(SDLK_TAB,          WKC_TAB,         CC_TAB),
+ 
+ 	/* Function keys */
+ 	AM(SDLK_F1, SDLK_F12, WKC_F1, WKC_F12),
+ 
+ 	/* Numeric part. */
+-	AM(SDLK_KP0, SDLK_KP9, '0', '9'),
+-	AS(SDLK_KP_DIVIDE,   WKC_NUM_DIV),
+-	AS(SDLK_KP_MULTIPLY, WKC_NUM_MUL),
+-	AS(SDLK_KP_MINUS,    WKC_NUM_MINUS),
+-	AS(SDLK_KP_PLUS,     WKC_NUM_PLUS),
+-	AS(SDLK_KP_ENTER,    WKC_NUM_ENTER),
+-	AS(SDLK_KP_PERIOD,   WKC_NUM_DECIMAL),
++	AS(SDLK_KP_DIVIDE,    WKC_NUM_DIV,     CC_NONE),
++	AS(SDLK_KP_MULTIPLY,  WKC_NUM_MUL,     CC_NONE),
++	AS(SDLK_KP_MINUS,     WKC_NUM_MINUS,   CC_NONE),
++	AS(SDLK_KP_PLUS,      WKC_NUM_PLUS,    CC_NONE),
++	AS(SDLK_KP_ENTER,     WKC_NUM_ENTER,   CC_RETURN),
++	AS(SDLK_KP_PERIOD,    WKC_NUM_DECIMAL, CC_NONE),
+ 
++	AS(SDLK_KP0,          WKC_NUM_0,       CC_INSERT),
++	AS(SDLK_KP1,          WKC_NUM_1,       CC_END),
++	AS(SDLK_KP2,          WKC_NUM_2,       CC_DOWN),
++	AS(SDLK_KP3,          WKC_NUM_3,       CC_PAGEDOWN),
++	AS(SDLK_KP4,          WKC_NUM_4,       CC_LEFT),
++	AS(SDLK_KP5,          WKC_NUM_5,       CC_NONE),
++	AS(SDLK_KP6,          WKC_NUM_6,       CC_RIGHT),
++	AS(SDLK_KP7,          WKC_NUM_7,       CC_HOME),
++	AS(SDLK_KP8,          WKC_NUM_8,       CC_UP),
++	AS(SDLK_KP9,          WKC_NUM_9,       CC_PAGEUP),
++
+ 	/* Other non-letter keys */
+-	AS(SDLK_SLASH,        WKC_SLASH),
+-	AS(SDLK_SEMICOLON,    WKC_SEMICOLON),
+-	AS(SDLK_EQUALS,       WKC_EQUALS),
+-	AS(SDLK_LEFTBRACKET,  WKC_L_BRACKET),
+-	AS(SDLK_BACKSLASH,    WKC_BACKSLASH),
+-	AS(SDLK_RIGHTBRACKET, WKC_R_BRACKET),
++	AS(SDLK_SLASH,        WKC_SLASH,       CC_NONE),
++	AS(SDLK_SEMICOLON,    WKC_SEMICOLON,   CC_NONE),
++	AS(SDLK_EQUALS,       WKC_EQUALS,      CC_NONE),
++	AS(SDLK_LEFTBRACKET,  WKC_L_BRACKET,   CC_NONE),
++	AS(SDLK_BACKSLASH,    WKC_BACKSLASH,   CC_NONE),
++	AS(SDLK_RIGHTBRACKET, WKC_R_BRACKET,   CC_NONE),
+ 
+-	AS(SDLK_QUOTE,   WKC_SINGLEQUOTE),
+-	AS(SDLK_COMMA,   WKC_COMMA),
+-	AS(SDLK_MINUS,   WKC_MINUS),
+-	AS(SDLK_PERIOD,  WKC_PERIOD)
++	AS(SDLK_QUOTE,        WKC_SINGLEQUOTE, CC_NONE),
++	AS(SDLK_COMMA,        WKC_COMMA,       CC_NONE),
++	AS(SDLK_MINUS,        WKC_MINUS,       CC_NONE),
++	AS(SDLK_PERIOD,       WKC_PERIOD,      CC_NONE)
+ };
+ 
+ static uint32 ConvertSdlKeyIntoMy(SDL_keysym *sym)
+ {
+ 	const VkMapping *map;
+ 	uint key = 0;
++	uint unicode = sym->unicode;
+ 
++	/* Check whether we understand the 'unicode' code, and clear it if not */
++	if (!IsPrintable(unicode) &&
++			unicode != CC_BACKSPACE && unicode != CC_TAB && unicode != CC_RETURN &&
++			unicode != CC_ESC && unicode != CC_DELETE) unicode = CC_NONE;
++
+ 	for (map = _vk_mapping; map != endof(_vk_mapping); ++map) {
+ 		if ((uint)(sym->sym - map->vk_from) <= map->vk_count) {
+-			key = sym->sym - map->vk_from + map->map_to;
++			key = sym->sym - map->vk_from + map->wkc;
++
++			/* If SDL already associated a keycode, then keep it.
++			 * This esp. affects the behaviour of the numpad keys. */
++			if (unicode == 0) unicode = map->cc;
+ 			break;
+ 		}
+ 	}
+@@ -525,7 +548,7 @@
+ 	if (sym->mod & KMOD_CTRL)  key |= WKC_CTRL;
+ 	if (sym->mod & KMOD_ALT)   key |= WKC_ALT;
+ 
+-	return (key << 16) + sym->unicode;
++	return (key << 16) + unicode;
+ }
+ 
+ int VideoDriver_SDL::PollEvent()
+@@ -744,15 +767,15 @@
+ 			/* determine which directional keys are down */
+ 			_dirkeys =
+ #if SDL_VERSION_ATLEAST(1, 3, 0)
+-				(keys[SDL_SCANCODE_LEFT]  ? 1 : 0) |
+-				(keys[SDL_SCANCODE_UP]    ? 2 : 0) |
+-				(keys[SDL_SCANCODE_RIGHT] ? 4 : 0) |
+-				(keys[SDL_SCANCODE_DOWN]  ? 8 : 0);
++				(keys[SDL_SCANCODE_LEFT]  || (!(mod & KMOD_NUM) && keys[SDL_SCANCODE_KP_4]) ? 1 : 0) |
++				(keys[SDL_SCANCODE_UP]    || (!(mod & KMOD_NUM) && keys[SDL_SCANCODE_KP_8]) ? 2 : 0) |
++				(keys[SDL_SCANCODE_RIGHT] || (!(mod & KMOD_NUM) && keys[SDL_SCANCODE_KP_6]) ? 4 : 0) |
++				(keys[SDL_SCANCODE_DOWN]  || (!(mod & KMOD_NUM) && keys[SDL_SCANCODE_KP_2]) ? 8 : 0);
+ #else
+-				(keys[SDLK_LEFT]  ? 1 : 0) |
+-				(keys[SDLK_UP]    ? 2 : 0) |
+-				(keys[SDLK_RIGHT] ? 4 : 0) |
+-				(keys[SDLK_DOWN]  ? 8 : 0);
++				(keys[SDLK_LEFT]  || (!(mod & KMOD_NUM) && keys[SDLK_KP4]) ? 1 : 0) |
++				(keys[SDLK_UP]    || (!(mod & KMOD_NUM) && keys[SDLK_KP8]) ? 2 : 0) |
++				(keys[SDLK_RIGHT] || (!(mod & KMOD_NUM) && keys[SDLK_KP6]) ? 4 : 0) |
++				(keys[SDLK_DOWN]  || (!(mod & KMOD_NUM) && keys[SDLK_KP2]) ? 8 : 0);
+ #endif
+ 			if (old_ctrl_pressed != _ctrl_pressed) HandleCtrlChanged();
+ 
+Index: src/gfx_type.h
+===================================================================
+--- src/gfx_type.h	(revision 25092)
++++ src/gfx_type.h	(working copy)
+@@ -26,6 +26,11 @@
+ 	PaletteID pal;    ///< The palette (use \c PAL_NONE) if not needed)
+ };
+ 
++/**
++ * Key scan codes.
++ * Note: Only use these keycodes for hotkeys and stuff associated to the physical position of the key on the keyboard.
++ * Use #ControlCharacter, if you are interested in the canonical semantics associated to a key.
++ */
+ enum WindowKeyCodes {
+ 	WKC_SHIFT = 0x8000,
+ 	WKC_CTRL  = 0x4000,
+@@ -87,25 +92,59 @@
+ 
+ 	/* Numerical keyboard */
+ 	WKC_NUM_DIV     = 138,
+-	WKC_NUM_MUL     = 139,
+-	WKC_NUM_MINUS   = 140,
+-	WKC_NUM_PLUS    = 141,
+-	WKC_NUM_ENTER   = 142,
+-	WKC_NUM_DECIMAL = 143,
++	WKC_NUM_MUL,
++	WKC_NUM_MINUS,
++	WKC_NUM_PLUS,
++	WKC_NUM_ENTER,
++	WKC_NUM_DECIMAL,
++	WKC_NUM_0,
++	WKC_NUM_1,
++	WKC_NUM_2,
++	WKC_NUM_3,
++	WKC_NUM_4,
++	WKC_NUM_5,
++	WKC_NUM_6,
++	WKC_NUM_7,
++	WKC_NUM_8,
++	WKC_NUM_9,
+ 
+ 	/* Other keys */
+-	WKC_SLASH       = 144, ///< / Forward slash
+-	WKC_SEMICOLON   = 145, ///< ; Semicolon
+-	WKC_EQUALS      = 146, ///< = Equals
+-	WKC_L_BRACKET   = 147, ///< [ Left square bracket
+-	WKC_BACKSLASH   = 148, ///< \ Backslash
+-	WKC_R_BRACKET   = 149, ///< ] Right square bracket
+-	WKC_SINGLEQUOTE = 150, ///< ' Single quote
+-	WKC_COMMA       = 151, ///< , Comma
+-	WKC_PERIOD      = 152, ///< . Period
+-	WKC_MINUS       = 153, ///< - Minus
++	WKC_SLASH,             ///< / Forward slash
++	WKC_SEMICOLON,         ///< ; Semicolon
++	WKC_EQUALS,            ///< = Equals
++	WKC_L_BRACKET,         ///< [ Left square bracket
++	WKC_BACKSLASH,         ///< \ Backslash
++	WKC_R_BRACKET,         ///< ] Right square bracket
++	WKC_SINGLEQUOTE,       ///< ' Single quote
++	WKC_COMMA,             ///< , Comma
++	WKC_PERIOD,            ///< . Period
++	WKC_MINUS,             ///< - Minus
+ };
+ 
++/**
++ * Control characters for text editing.
++ * Common control characters are mapped in the common way.
++ * Others are just inserted somewhere.
++ */
++enum ControlCharacter {
++	CC_NONE         =   0,
++	CC_BACKSPACE    = '\b', // 8
++	CC_TAB          = '\t', // 9
++	CC_RETURN       = '\r', // 13
++	CC_LEFT         =  14,
++	CC_RIGHT        =  15,
++	CC_UP           =  16,
++	CC_DOWN         =  17,
++	CC_HOME         =  18,
++	CC_END          =  19,
++	CC_PAGEUP       =  20,
++	CC_PAGEDOWN     =  21,
++	CC_INSERT       =  26,
++	CC_ESC          =  27,
++	CC_SPACE        = ' ',  // 32
++	CC_DELETE       = 127,
++};
++
+ /** A single sprite of a list of animated cursors */
+ struct AnimCursor {
+ 	static const CursorID LAST = MAX_UVALUE(CursorID);
+Index: src/fios_gui.cpp
+===================================================================
+--- src/fios_gui.cpp	(revision 25092)
++++ src/fios_gui.cpp	(working copy)
+@@ -617,7 +617,7 @@
+ 
+ 	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+ 	{
+-		if (keycode == WKC_ESC) {
++		if (key == CC_ESC) {
+ 			delete this;
+ 			return ES_HANDLED;
+ 		}
+Index: src/textbuf.cpp
+===================================================================
+--- src/textbuf.cpp	(revision 25092)
++++ src/textbuf.cpp	(working copy)
+@@ -98,46 +98,48 @@
+ /**
+  * Delete a character from a textbuffer, either with 'Delete' or 'Backspace'
+  * The character is delete from the position the caret is at
+- * @param keycode Type of deletion, either WKC_BACKSPACE or WKC_DELETE
++ * @param key Type of deletion, either CC_BACKSPACE or CC_DELETE.
++ * @param keycode Modifier keys for deletion.
+  * @return Return true on successful change of Textbuf, or false otherwise
+  */
+-bool Textbuf::DeleteChar(uint16 keycode)
++bool Textbuf::DeleteChar(uint16 key, uint16 keycode)
+ {
+-	if (keycode == WKC_BACKSPACE || keycode == WKC_DELETE) {
+-		bool backspace = keycode == WKC_BACKSPACE;
+-		if (CanDelChar(backspace)) {
+-			this->DelChar(backspace);
+-			return true;
+-		}
+-		return false;
+-	}
++	bool backspace = key == CC_BACKSPACE;
+ 
+-	if (keycode == (WKC_CTRL | WKC_BACKSPACE) || keycode == (WKC_CTRL | WKC_DELETE)) {
+-		bool backspace = keycode == (WKC_CTRL | WKC_BACKSPACE);
++	switch (keycode & WKC_SPECIAL_KEYS) {
++		case WKC_NONE:
++			if (CanDelChar(backspace)) {
++				this->DelChar(backspace);
++				return true;
++			}
++			return false;
+ 
+-		if (!CanDelChar(backspace)) return false;
+-		WChar c = this->GetNextDelChar(backspace);
++		case WKC_CTRL: {
++			if (!CanDelChar(backspace)) return false;
++			WChar c = this->GetNextDelChar(backspace);
+ 
+-		/* Backspace: Delete left whitespaces.
+-		 * Delete:    Delete right word.
+-		 */
+-		while (backspace ? IsWhitespace(c) : !IsWhitespace(c)) {
+-			this->DelChar(backspace);
+-			if (!this->CanDelChar(backspace)) return true;
+-			c = this->GetNextDelChar(backspace);
++			/* Backspace: Delete left whitespaces.
++			 * Delete:    Delete right word.
++			 */
++			while (backspace ? IsWhitespace(c) : !IsWhitespace(c)) {
++				this->DelChar(backspace);
++				if (!this->CanDelChar(backspace)) return true;
++				c = this->GetNextDelChar(backspace);
++			}
++			/* Backspace: Delete left word.
++			 * Delete:    Delete right whitespaces.
++			 */
++			while (backspace ? !IsWhitespace(c) : IsWhitespace(c)) {
++				this->DelChar(backspace);
++				if (!this->CanDelChar(backspace)) return true;
++				c = this->GetNextDelChar(backspace);
++			}
++			return true;
+ 		}
+-		/* Backspace: Delete left word.
+-		 * Delete:    Delete right whitespaces.
+-		 */
+-		while (backspace ? !IsWhitespace(c) : IsWhitespace(c)) {
+-			this->DelChar(backspace);
+-			if (!this->CanDelChar(backspace)) return true;
+-			c = this->GetNextDelChar(backspace);
+-		}
+-		return true;
++
++		default:
++			return false;
+ 	}
+-
+-	return false;
+ }
+ 
+ /**
+@@ -276,74 +278,89 @@
+ /**
+  * Handle text navigation with arrow keys left/right.
+  * This defines where the caret will blink and the next character interaction will occur
+- * @param keycode Direction in which navigation occurs (WKC_CTRL |) WKC_LEFT, (WKC_CTRL |) WKC_RIGHT, WKC_END, WKC_HOME
++ * @param key Direction in which navigation occurs CC_LEFT, CC_RIGHT, CC_END, CC_HOME
++ * @param keycode Modified keys like WKC_CTRL.
+  * @return Return true on successful change of Textbuf, or false otherwise
+  */
+-bool Textbuf::MovePos(uint16 keycode)
++bool Textbuf::MovePos(uint16 key, uint16 keycode)
+ {
+-	switch (keycode) {
+-		case WKC_LEFT:
+-			if (this->CanMoveCaretLeft()) {
+-				this->MoveCaretLeft();
+-				return true;
+-			}
+-			break;
++	switch (keycode & WKC_SPECIAL_KEYS) {
++		case WKC_NONE:
++			switch (key) {
++				case CC_LEFT:
++					if (this->CanMoveCaretLeft()) {
++						this->MoveCaretLeft();
++						return true;
++					}
++					break;
+ 
+-		case WKC_CTRL | WKC_LEFT: {
+-			if (!this->CanMoveCaretLeft()) break;
++				case CC_RIGHT:
++					if (this->CanMoveCaretRight()) {
++						this->MoveCaretRight();
++						return true;
++					}
++					break;
+ 
+-			/* Unconditionally move one char to the left. */
+-			WChar c = this->MoveCaretLeft();
+-			/* Consume left whitespaces. */
+-			while (IsWhitespace(c)) {
+-				if (!this->CanMoveCaretLeft()) return true;
+-				c = this->MoveCaretLeft();
+-			}
+-			/* Consume left word. */
+-			while (!IsWhitespace(c)) {
+-				if (!this->CanMoveCaretLeft()) return true;
+-				c = this->MoveCaretLeft();
+-			}
+-			/* Place caret at the beginning of the left word. */
+-			this->MoveCaretRight();
+-			return true;
+-		}
++				case CC_HOME:
++					this->caretpos = 0;
++					this->caretxoffs = 0;
++					return true;
+ 
+-		case WKC_RIGHT:
+-			if (this->CanMoveCaretRight()) {
+-				this->MoveCaretRight();
+-				return true;
++				case CC_END:
++					this->caretpos = this->bytes - 1;
++					this->caretxoffs = this->pixels;
++					return true;
++
++				default:
++					break;
+ 			}
+ 			break;
+ 
+-		case WKC_CTRL | WKC_RIGHT: {
+-			if (!this->CanMoveCaretRight()) break;
++		case WKC_CTRL:
++			switch (key) {
++				case CC_LEFT: {
++					if (!this->CanMoveCaretLeft()) break;
+ 
+-			/* Unconditionally move one char to the right. */
+-			WChar c = this->MoveCaretRight();
+-			/* Continue to consume current word. */
+-			while (!IsWhitespace(c)) {
+-				if (!this->CanMoveCaretRight()) return true;
+-				c = this->MoveCaretRight();
+-			}
+-			/* Consume right whitespaces. */
+-			while (IsWhitespace(c)) {
+-				if (!this->CanMoveCaretRight()) return true;
+-				c = this->MoveCaretRight();
+-			}
+-			return true;
+-		}
++					/* Unconditionally move one char to the left. */
++					WChar c = this->MoveCaretLeft();
++					/* Consume left whitespaces. */
++					while (IsWhitespace(c)) {
++						if (!this->CanMoveCaretLeft()) return true;
++						c = this->MoveCaretLeft();
++					}
++					/* Consume left word. */
++					while (!IsWhitespace(c)) {
++						if (!this->CanMoveCaretLeft()) return true;
++						c = this->MoveCaretLeft();
++					}
++					/* Place caret at the beginning of the left word. */
++					this->MoveCaretRight();
++					return true;
++				}
+ 
+-		case WKC_HOME:
+-			this->caretpos = 0;
+-			this->caretxoffs = 0;
+-			return true;
++				case CC_RIGHT: {
++					if (!this->CanMoveCaretRight()) break;
+ 
+-		case WKC_END:
+-			this->caretpos = this->bytes - 1;
+-			this->caretxoffs = this->pixels;
+-			return true;
++					/* Unconditionally move one char to the right. */
++					WChar c = this->MoveCaretRight();
++					/* Continue to consume current word. */
++					while (!IsWhitespace(c)) {
++						if (!this->CanMoveCaretRight()) return true;
++						c = this->MoveCaretRight();
++					}
++					/* Consume right whitespaces. */
++					while (IsWhitespace(c)) {
++						if (!this->CanMoveCaretRight()) return true;
++						c = this->MoveCaretRight();
++					}
++					return true;
++				}
+ 
++				default:
++					break;
++			}
++			break;
++
+ 		default:
+ 			break;
+ 	}
+@@ -456,10 +473,6 @@
+ 	bool edited = false;
+ 
+ 	switch (keycode) {
+-		case WKC_ESC: return HKPR_CANCEL;
+-
+-		case WKC_RETURN: case WKC_NUM_ENTER: return HKPR_CONFIRM;
+-
+ #ifdef WITH_COCOA
+ 		case (WKC_META | 'V'):
+ #endif
+@@ -475,21 +488,33 @@
+ 			edited = true;
+ 			break;
+ 
+-		case WKC_BACKSPACE: case WKC_DELETE:
+-		case WKC_CTRL | WKC_BACKSPACE: case WKC_CTRL | WKC_DELETE:
+-			edited = this->DeleteChar(keycode);
+-			break;
++		default:
++			switch (key) {
++				case CC_ESC:
++					return HKPR_CANCEL;
+ 
+-		case WKC_LEFT: case WKC_RIGHT: case WKC_END: case WKC_HOME:
+-		case WKC_CTRL | WKC_LEFT: case WKC_CTRL | WKC_RIGHT:
+-			this->MovePos(keycode);
+-			break;
++				case CC_RETURN:
++					return HKPR_CONFIRM;
+ 
+-		default:
+-			if (IsValidChar(key, this->afilter)) {
+-				edited = this->InsertChar(key);
+-			} else {
+-				return HKPR_NOT_HANDLED;
++				case CC_BACKSPACE:
++				case CC_DELETE:
++					edited = this->DeleteChar(key, keycode);
++					break;
++
++				case CC_LEFT:
++				case CC_RIGHT:
++				case CC_HOME:
++				case CC_END:
++					this->MovePos(key, keycode);
++					break;
++
++				default:
++					if (IsValidChar(key, this->afilter)) {
++						edited = this->InsertChar(key);
++					} else {
++						return HKPR_NOT_HANDLED;
++					}
++					break;
+ 			}
+ 			break;
+ 	}
+Index: src/misc_gui.cpp
+===================================================================
+--- src/misc_gui.cpp	(revision 25092)
++++ src/misc_gui.cpp	(working copy)
+@@ -1029,15 +1029,14 @@
+ 	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+ 	{
+ 		/* ESC closes the window, Enter confirms the action */
+-		switch (keycode) {
+-			case WKC_RETURN:
+-			case WKC_NUM_ENTER:
++		switch (key) {
++			case CC_RETURN:
+ 				if (this->proc != NULL) {
+ 					this->proc(this->parent, true);
+ 					this->proc = NULL;
+ 				}
+ 				/* FALL THROUGH */
+-			case WKC_ESC:
++			case CC_ESC:
+ 				delete this;
+ 				return ES_HANDLED;
+ 		}
+Index: src/fontcache.cpp
+===================================================================
+--- src/fontcache.cpp	(revision 25092)
++++ src/fontcache.cpp	(working copy)
+@@ -1214,6 +1214,9 @@
+ 		return SpriteExists(sprite) ? GetSprite(sprite, ST_FONT)->width + (size != FS_NORMAL && size != FS_MONO) : 0;
+ 	}
+ 
++	/* Catch 0x7F and such */
++	if (!IsPrintable(key)) return 0;
++
+ 	glyph = GetGlyphPtr(size, key);
+ 	if (glyph == NULL || glyph->sprite == NULL) {
+ 		GetGlyph(size, key);
+Index: src/newgrf_gui.cpp
+===================================================================
+--- src/newgrf_gui.cpp	(revision 25092)
++++ src/newgrf_gui.cpp	(working copy)
+@@ -1238,33 +1238,35 @@
+ 	{
+ 		if (!this->editable) return ES_NOT_HANDLED;
+ 
+-		switch (keycode) {
+-			case WKC_UP:
++		if ((keycode & WKC_SPECIAL_KEYS) != 0) return ES_NOT_HANDLED;
++
++		switch (key) {
++			case CC_UP:
+ 				/* scroll up by one */
+ 				if (this->avail_pos > 0) this->avail_pos--;
+ 				break;
+ 
+-			case WKC_DOWN:
++			case CC_DOWN:
+ 				/* scroll down by one */
+ 				if (this->avail_pos < (int)this->avails.Length() - 1) this->avail_pos++;
+ 				break;
+ 
+-			case WKC_PAGEUP:
++			case CC_PAGEUP:
+ 				/* scroll up a page */
+ 				this->avail_pos = (this->avail_pos < this->vscroll2->GetCapacity()) ? 0 : this->avail_pos - this->vscroll2->GetCapacity();
+ 				break;
+ 
+-			case WKC_PAGEDOWN:
++			case CC_PAGEDOWN:
+ 				/* scroll down a page */
+ 				this->avail_pos = min(this->avail_pos + this->vscroll2->GetCapacity(), (int)this->avails.Length() - 1);
+ 				break;
+ 
+-			case WKC_HOME:
++			case CC_HOME:
+ 				/* jump to beginning */
+ 				this->avail_pos = 0;
+ 				break;
+ 
+-			case WKC_END:
++			case CC_END:
+ 				/* jump to end */
+ 				this->avail_pos = this->avails.Length() - 1;
+ 				break;
+Index: src/error_gui.cpp
+===================================================================
+--- src/error_gui.cpp	(revision 25092)
++++ src/error_gui.cpp	(working copy)
+@@ -302,7 +302,7 @@
+ 
+ 	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+ 	{
+-		if (keycode != WKC_SPACE) return ES_NOT_HANDLED;
++		if (key != CC_SPACE) return ES_NOT_HANDLED;
+ 		delete this;
+ 		return ES_HANDLED;
+ 	}
+Index: src/news_gui.cpp
+===================================================================
+--- src/news_gui.cpp	(revision 25092)
++++ src/news_gui.cpp	(working copy)
+@@ -451,7 +451,7 @@
+ 
+ 	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+ 	{
+-		if (keycode == WKC_SPACE) {
++		if (key == CC_SPACE) {
+ 			/* Don't continue. */
+ 			delete this;
+ 			return ES_HANDLED;
+Index: src/string_func.h
+===================================================================
+--- src/string_func.h	(revision 25092)
++++ src/string_func.h	(working copy)
+@@ -173,6 +173,8 @@
+ static inline bool IsPrintable(WChar c)
+ {
+ 	if (c < 0x20)   return false;
++	if (c == 0x7F)  return false;
++	/* We threat 0x80 to 0x9F as valid characters, since some of them are actually provided by the base graphics. */
+ 	if (c < 0xE000) return true;
+ 	if (c < 0xE200) return false;
+ 	return true;
+Index: src/network/network_content_gui.cpp
+===================================================================
+--- src/network/network_content_gui.cpp	(revision 25092)
++++ src/network/network_content_gui.cpp	(working copy)
+@@ -801,35 +801,36 @@
+ 
+ 	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+ 	{
+-		switch (keycode) {
+-			case WKC_UP:
++		if ((keycode & WKC_SPECIAL_KEYS) != 0) return ES_NOT_HANDLED;
++		switch (key) {
++			case CC_UP:
+ 				/* scroll up by one */
+ 				if (this->list_pos > 0) this->list_pos--;
+ 				break;
+-			case WKC_DOWN:
++			case CC_DOWN:
+ 				/* scroll down by one */
+ 				if (this->list_pos < (int)this->content.Length() - 1) this->list_pos++;
+ 				break;
+-			case WKC_PAGEUP:
++			case CC_PAGEUP:
+ 				/* scroll up a page */
+ 				this->list_pos = (this->list_pos < this->vscroll->GetCapacity()) ? 0 : this->list_pos - this->vscroll->GetCapacity();
+ 				break;
+-			case WKC_PAGEDOWN:
++			case CC_PAGEDOWN:
+ 				/* scroll down a page */
+ 				this->list_pos = min(this->list_pos + this->vscroll->GetCapacity(), (int)this->content.Length() - 1);
+ 				break;
+-			case WKC_HOME:
++			case CC_HOME:
+ 				/* jump to beginning */
+ 				this->list_pos = 0;
+ 				break;
+-			case WKC_END:
++			case CC_END:
+ 				/* jump to end */
+ 				this->list_pos = this->content.Length() - 1;
+ 				break;
+ 
+-			case WKC_SPACE:
+-			case WKC_RETURN:
+-				if (keycode == WKC_RETURN || !IsWidgetFocused(WID_NCL_FILTER)) {
++			case CC_SPACE:
++			case CC_RETURN:
++				if (key == CC_RETURN || !IsWidgetFocused(WID_NCL_FILTER)) {
+ 					if (this->selected != NULL) {
+ 						_network_content_client.ToggleSelectedState(this->selected);
+ 						this->content.ForceResort();
+Index: src/network/network_chat_gui.cpp
+===================================================================
+--- src/network/network_chat_gui.cpp	(revision 25092)
++++ src/network/network_chat_gui.cpp	(working copy)
+@@ -501,7 +501,7 @@
+ 	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+ 	{
+ 		EventState state = ES_NOT_HANDLED;
+-		if (keycode == WKC_TAB) {
++		if ((keycode & WKC_SPECIAL_KEYS) == 0 && key == CC_TAB) {
+ 			ChatTabCompletion();
+ 			state = ES_HANDLED;
+ 		}
+Index: src/network/network_gui.cpp
+===================================================================
+--- src/network/network_gui.cpp	(revision 25092)
++++ src/network/network_gui.cpp	(working copy)
+@@ -798,34 +798,34 @@
+ 		EventState state = ES_NOT_HANDLED;
+ 
+ 		/* handle up, down, pageup, pagedown, home and end */
+-		if (keycode == WKC_UP || keycode == WKC_DOWN || keycode == WKC_PAGEUP || keycode == WKC_PAGEDOWN || keycode == WKC_HOME || keycode == WKC_END) {
++		if ((keycode & WKC_SPECIAL_KEYS) == 0 && (key == CC_UP || key == CC_DOWN || key == CC_PAGEUP || key == CC_PAGEDOWN || key == CC_HOME || key == CC_END)) {
+ 			if (this->servers.Length() == 0) return ES_HANDLED;
+-			switch (keycode) {
+-				case WKC_UP:
++			switch (key) {
++				case CC_UP:
+ 					/* scroll up by one */
+ 					if (this->list_pos == SLP_INVALID) return ES_HANDLED;
+ 					if (this->list_pos > 0) this->list_pos--;
+ 					break;
+-				case WKC_DOWN:
++				case CC_DOWN:
+ 					/* scroll down by one */
+ 					if (this->list_pos == SLP_INVALID) return ES_HANDLED;
+ 					if (this->list_pos < this->servers.Length() - 1) this->list_pos++;
+ 					break;
+-				case WKC_PAGEUP:
++				case CC_PAGEUP:
+ 					/* scroll up a page */
+ 					if (this->list_pos == SLP_INVALID) return ES_HANDLED;
+ 					this->list_pos = (this->list_pos < this->vscroll->GetCapacity()) ? 0 : this->list_pos - this->vscroll->GetCapacity();
+ 					break;
+-				case WKC_PAGEDOWN:
++				case CC_PAGEDOWN:
+ 					/* scroll down a page */
+ 					if (this->list_pos == SLP_INVALID) return ES_HANDLED;
+ 					this->list_pos = min(this->list_pos + this->vscroll->GetCapacity(), (int)this->servers.Length() - 1);
+ 					break;
+-				case WKC_HOME:
++				case CC_HOME:
+ 					/* jump to beginning */
+ 					this->list_pos = 0;
+ 					break;
+-				case WKC_END:
++				case CC_END:
+ 					/* jump to end */
+ 					this->list_pos = this->servers.Length() - 1;
+ 					break;
+@@ -843,11 +843,12 @@
+ 		}
+ 
+ 		if (this->server != NULL) {
+-			if (keycode == WKC_DELETE) { // Press 'delete' to remove servers
++			if ((keycode & WKC_SPECIAL_KEYS) == 0 && key == CC_DELETE) { // Press 'delete' to remove servers
+ 				NetworkGameListRemoveItem(this->server);
+ 				if (this->server == this->last_joined) this->last_joined = NULL;
+ 				this->server = NULL;
+ 				this->list_pos = SLP_INVALID;
++				return ES_HANDLED;
+ 			}
+ 		}
+ 
+Index: src/textbuf_type.h
+===================================================================
+--- src/textbuf_type.h	(revision 25092)
++++ src/textbuf_type.h	(working copy)
+@@ -16,11 +16,11 @@
+ #include "strings_type.h"
+ 
+ /**
+- * Return values for Textbuf::HandleKeypress
++ * Return values for Textbuf::HandleKeyPress
+  */
+ enum HandleKeyPressResult
+ {
+-	HKPR_EDITING,     ///< Textbuf content changed.
++	HKPR_EDITING,     ///< Editbox content changed.
+ 	HKPR_CURSOR,      ///< Non-text change, e.g. cursor position.
+ 	HKPR_CONFIRM,     ///< Return or enter key pressed.
+ 	HKPR_CANCEL,      ///< Escape key pressed.
+@@ -52,8 +52,8 @@
+ 
+ 	bool InsertChar(uint32 key);
+ 
+-	bool DeleteChar(uint16 keycode);
+-	bool MovePos(uint16 keycode);
++	bool DeleteChar(uint16 key, uint16 keycode = 0);
++	bool MovePos(uint16 key, uint16 keycode = 0);
+ 
+ 	HandleKeyPressResult HandleKeyPress(uint16 key, uint16 keycode);
+ 
+@@ -68,7 +68,6 @@
+ 	WChar MoveCaretLeft();
+ 	bool CanMoveCaretRight();
+ 	WChar MoveCaretRight();
+-
+ };
+ 
+ #endif /* TEXTBUF_TYPE_H */
+Index: src/osk_gui.cpp
+===================================================================
+--- src/osk_gui.cpp	(revision 25092)
++++ src/osk_gui.cpp	(working copy)
+@@ -127,7 +127,7 @@
+ 
+ 		switch (widget) {
+ 			case WID_OSK_BACKSPACE:
+-				if (this->qs->text.DeleteChar(WKC_BACKSPACE)) this->OnEditboxChanged(WID_OSK_TEXT);
++				if (this->qs->text.DeleteChar(CC_BACKSPACE)) this->OnEditboxChanged(WID_OSK_TEXT);
+ 				break;
+ 
+ 			case WID_OSK_SPECIAL:
+@@ -155,11 +155,11 @@
+ 				break;
+ 
+ 			case WID_OSK_LEFT:
+-				if (this->qs->text.MovePos(WKC_LEFT)) this->InvalidateData();
++				if (this->qs->text.MovePos(CC_LEFT)) this->InvalidateData();
+ 				break;
+ 
+ 			case WID_OSK_RIGHT:
+-				if (this->qs->text.MovePos(WKC_RIGHT)) this->InvalidateData();
++				if (this->qs->text.MovePos(CC_RIGHT)) this->InvalidateData();
+ 				break;
+ 
+ 			case WID_OSK_OK:
+@@ -181,7 +181,7 @@
+ 					return;
+ 				} else { // or reset to original string
+ 					qs->text.Assign(this->orig_str_buf);
+-					qs->text.MovePos(WKC_END);
++					qs->text.MovePos(CC_END);
+ 					this->OnEditboxChanged(WID_OSK_TEXT);
+ 					delete this;
+ 				}
+Index: src/highscore_gui.cpp
+===================================================================
+--- src/highscore_gui.cpp	(revision 25092)
++++ src/highscore_gui.cpp	(working copy)
+@@ -70,11 +70,11 @@
+ 		 * quit key is enough so the main toolbar can handle it. */
+ 		if (IsQuitKey(keycode)) return ES_NOT_HANDLED;
+ 
+-		switch (keycode) {
++		switch (key) {
+ 			/* Keys for telling we want to go on */
+-			case WKC_RETURN:
+-			case WKC_ESC:
+-			case WKC_SPACE:
++			case CC_RETURN:
++			case CC_ESC:
++			case CC_SPACE:
+ 				delete this;
+ 				return ES_HANDLED;
+ 
+Index: src/hotkeys.cpp
+===================================================================
+--- src/hotkeys.cpp	(revision 25092)
++++ src/hotkeys.cpp	(working copy)
+@@ -50,10 +50,24 @@
+ 	{"PAUSE", WKC_PAUSE},
+ 	{"PLUS", (WindowKeyCodes)'+'},
+ 	{"COMMA", (WindowKeyCodes)','},
+-	{"NUM_PLUS", WKC_NUM_PLUS},
+-	{"NUM_MINUS", WKC_NUM_MINUS},
+ 	{"=", WKC_EQUALS},
+ 	{"-", WKC_MINUS},
++	{"NUM_DIV", WKC_NUM_DIV},
++	{"NUM_MUL", WKC_NUM_MUL},
++	{"NUM_PLUS", WKC_NUM_MINUS},
++	{"NUM_MINUS", WKC_NUM_PLUS},
++	{"NUM_ENTER", WKC_NUM_ENTER},
++	{"NUM_DECIMAL", WKC_NUM_DECIMAL},
++	{"NUM_ß", WKC_NUM_0},
++	{"NUM_1", WKC_NUM_1},
++	{"NUM_2", WKC_NUM_2},
++	{"NUM_3", WKC_NUM_3},
++	{"NUM_4", WKC_NUM_4},
++	{"NUM_5", WKC_NUM_5},
++	{"NUM_6", WKC_NUM_6},
++	{"NUM_7", WKC_NUM_7},
++	{"NUM_8", WKC_NUM_8},
++	{"NUM_9", WKC_NUM_9},
+ };
+ 
+ /**

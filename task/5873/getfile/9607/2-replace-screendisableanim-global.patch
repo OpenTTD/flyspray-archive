@@ -1,0 +1,151 @@
+# HG changeset patch
+# User MJP
+# Date 1390492037 -3600
+#      Thu Jan 23 16:47:17 2014 +0100
+# Node ID 614a8a3c27a1efbf6cbe2e5a8c4f5af4b7c74451
+# Parent  976ddba7d5810dad0de6272dbaf66426698bd111
+Replace _screen_disable_anim by the backup/restore of animation buffer
+
+diff -r 976ddba7d581 -r 614a8a3c27a1 src/blitter/32bpp_anim.cpp
+--- a/src/blitter/32bpp_anim.cpp	Thu Jan 23 16:17:10 2014 +0100
++++ b/src/blitter/32bpp_anim.cpp	Thu Jan 23 16:47:17 2014 +0100
+@@ -197,12 +197,6 @@
+ 
+ void Blitter_32bppAnim::Draw(Blitter::BlitterParams *bp, BlitterMode mode, ZoomLevel zoom)
+ {
+-	if (_screen_disable_anim) {
+-		/* This means our output is not to the screen, so we can't be doing any animation stuff, so use our parent Draw() */
+-		Blitter_32bppOptimized::Draw(bp, mode, zoom);
+-		return;
+-	}
+-
+ 	switch (mode) {
+ 		default: NOT_REACHED();
+ 		case BM_NORMAL:       Draw<BM_NORMAL>      (bp, zoom); return;
+@@ -213,12 +207,6 @@
+ 
+ void Blitter_32bppAnim::DrawColourMappingRect(void *dst, int width, int height, PaletteID pal)
+ {
+-	if (_screen_disable_anim) {
+-		/* This means our output is not to the screen, so we can't be doing any animation stuff, so use our parent DrawColourMappingRect() */
+-		Blitter_32bppOptimized::DrawColourMappingRect(dst, width, height, pal);
+-		return;
+-	}
+-
+ 	Colour *udst = (Colour *)dst;
+ 	uint16 *anim;
+ 
+@@ -258,19 +246,12 @@
+ {
+ 	*((Colour *)video + x + y * _screen.pitch) = LookupColourInPalette(colour);
+ 
+-	/* Set the colour in the anim-buffer too, if we are rendering to the screen */
+-	if (_screen_disable_anim) return;
++	/* Set the colour in the anim-buffer too */
+ 	this->anim_buf[((uint32 *)video - (uint32 *)_screen.dst_ptr) + x + y * this->anim_buf_width] = colour | (DEFAULT_BRIGHTNESS << 8);
+ }
+ 
+ void Blitter_32bppAnim::DrawRect(void *video, int width, int height, uint8 colour)
+ {
+-	if (_screen_disable_anim) {
+-		/* This means our output is not to the screen, so we can't be doing any animation stuff, so use our parent DrawRect() */
+-		Blitter_32bppOptimized::DrawRect(video, width, height, colour);
+-		return;
+-	}
+-
+ 	Colour colour32 = LookupColourInPalette(colour);
+ 	uint16 *anim_line;
+ 
+@@ -294,7 +275,6 @@
+ 
+ void Blitter_32bppAnim::CopyFromBuffer(void *video, const void *src, int width, int height)
+ {
+-	assert(!_screen_disable_anim);
+ 	assert(video >= _screen.dst_ptr && video <= (uint32 *)_screen.dst_ptr + _screen.width + _screen.height * _screen.pitch);
+ 	Colour *dst = (Colour *)video;
+ 	const uint32 *usrc = (const uint32 *)src;
+@@ -334,7 +314,6 @@
+ 
+ void Blitter_32bppAnim::CopyToBuffer(const void *video, void *dst, int width, int height)
+ {
+-	assert(!_screen_disable_anim);
+ 	assert(video >= _screen.dst_ptr && video <= (uint32 *)_screen.dst_ptr + _screen.width + _screen.height * _screen.pitch);
+ 	uint32 *udst = (uint32 *)dst;
+ 	const uint32 *src = (const uint32 *)video;
+@@ -357,7 +336,6 @@
+ 
+ void Blitter_32bppAnim::ScrollBuffer(void *video, int &left, int &top, int &width, int &height, int scroll_x, int scroll_y)
+ {
+-	assert(!_screen_disable_anim);
+ 	assert(video >= _screen.dst_ptr && video <= (uint32 *)_screen.dst_ptr + _screen.width + _screen.height * _screen.pitch);
+ 	uint16 *dst, *src;
+ 
+@@ -413,8 +391,6 @@
+ 
+ void Blitter_32bppAnim::PaletteAnimate(const Palette &palette)
+ {
+-	assert(!_screen_disable_anim);
+-
+ 	this->palette = palette;
+ 	/* If first_dirty is 0, it is for 8bpp indication to send the new
+ 	 *  palette. However, only the animation colours might possibly change.
+diff -r 976ddba7d581 -r 614a8a3c27a1 src/gfx.cpp
+--- a/src/gfx.cpp	Thu Jan 23 16:17:10 2014 +0100
++++ b/src/gfx.cpp	Thu Jan 23 16:47:17 2014 +0100
+@@ -37,7 +37,6 @@
+ bool _right_button_down;    ///< Is right mouse button pressed?
+ bool _right_button_clicked; ///< Is right mouse button clicked?
+ DrawPixelInfo _screen;
+-bool _screen_disable_anim = false;   ///< Disable palette animation (important for 32bpp-anim blitter during giant screenshot)
+ bool _exit_game;
+ GameMode _game_mode;
+ SwitchMode _switch_mode;  ///< The next mainloop command.
+diff -r 976ddba7d581 -r 614a8a3c27a1 src/gfx_func.h
+--- a/src/gfx_func.h	Thu Jan 23 16:17:10 2014 +0100
++++ b/src/gfx_func.h	Thu Jan 23 16:47:17 2014 +0100
+@@ -63,7 +63,6 @@
+ extern bool _right_button_clicked;
+ 
+ extern DrawPixelInfo _screen;
+-extern bool _screen_disable_anim;   ///< Disable palette animation (important for 32bpp-anim blitter during giant screenshot)
+ 
+ extern int _num_resolutions;
+ extern Dimension _resolutions[32];
+diff -r 976ddba7d581 -r 614a8a3c27a1 src/screenshot.cpp
+--- a/src/screenshot.cpp	Thu Jan 23 16:17:10 2014 +0100
++++ b/src/screenshot.cpp	Thu Jan 23 16:47:17 2014 +0100
+@@ -655,13 +655,11 @@
+ 
+ 	/* We are no longer rendering to the screen */
+ 	DrawPixelInfo old_screen = _screen;
+-	bool old_disable_anim = _screen_disable_anim;
+ 
+ 	_screen.dst_ptr = buf;
+ 	_screen.width = pitch;
+ 	_screen.height = n;
+ 	_screen.pitch = pitch;
+-	_screen_disable_anim = true;
+ 
+ 	old_dpi = _cur_dpi;
+ 	_cur_dpi = &dpi;
+@@ -692,7 +690,6 @@
+ 
+ 	/* Switch back to rendering to the screen */
+ 	_screen = old_screen;
+-	_screen_disable_anim = old_disable_anim;
+ }
+ 
+ /**
+@@ -795,8 +792,11 @@
+ 	SetupScreenshotViewport(t, &vp);
+ 
+ 	const ScreenshotFormat *sf = _screenshot_formats + _cur_screenshot_format;
+-	return sf->proc(MakeScreenshotName(SCREENSHOT_NAME, sf->extension), LargeWorldCallback, &vp, vp.width, vp.height,
++	if (!BlitterFactory::GetCurrentBlitter()->BackupAnimationBuffer()) return false;
++	bool r = sf->proc(MakeScreenshotName(SCREENSHOT_NAME, sf->extension), LargeWorldCallback, &vp, vp.width, vp.height,
+ 			BlitterFactory::GetCurrentBlitter()->GetScreenDepth(), _cur_palette.palette);
++	BlitterFactory::GetCurrentBlitter()->RestoreAnimationBuffer();
++	return r;
+ }
+ 
+ /**

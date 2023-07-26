@@ -1,0 +1,172 @@
+diff -r 10bd89d5d28f src/misc_gui.cpp
+--- a/src/misc_gui.cpp	Sun Sep 09 15:55:20 2012 +0000
++++ b/src/misc_gui.cpp	Sun Sep 09 20:05:07 2012 +0200
+@@ -744,6 +744,7 @@
+ 			break;
+ 
+ 		case WKC_LEFT: case WKC_RIGHT: case WKC_END: case WKC_HOME:
++		case WKC_CTRL | WKC_LEFT: case WKC_CTRL | WKC_RIGHT:
+ 			if (this->text.MovePos(keycode)) w->SetWidgetDirty(wid);
+ 			break;
+ 
+diff -r 10bd89d5d28f src/textbuf.cpp
+--- a/src/textbuf.cpp	Sun Sep 09 15:55:20 2012 +0000
++++ b/src/textbuf.cpp	Sun Sep 09 20:05:07 2012 +0200
+@@ -152,37 +152,120 @@
+ }
+ 
+ /**
++ * Checks if it is possible to move carret to the left
++ * @return true if the caret can be moved to the left, otherwise false.
++ */
++bool Textbuf::CanMoveCaretLeft()
++{
++	return this->caretpos != 0;
++}
++
++/**
++ * Moves the caret to the left.
++ * @warning You should ensure Textbuf::CanMoveCaretLeft returns true before calling this function.
++ * @return The character under the caret.
++ */
++WChar Textbuf::MoveCaretLeft()
++{
++	assert(this->CanMoveCaretLeft());
++
++	WChar c;
++	const char *s = Utf8PrevChar(this->buf + this->caretpos);
++	Utf8Decode(&c, s);
++	this->caretpos    = s - this->buf; // -= (this->buf + this->caretpos - s)
++	this->caretxoffs -= GetCharacterWidth(FS_NORMAL, c);
++
++	return c;
++}
++
++/**
++ * Checks if it is possible to move carret to the right
++ * @return true if the caret can be moved to the right, otherwise false.
++ */
++bool Textbuf::CanMoveCaretRight()
++{
++	return this->caretpos < this->bytes - 1;
++}
++
++/**
++ * Moves the caret to the right.
++ * @warning You should ensure Textbuf::CanMoveCaretRight returns true before calling this function.
++ * @return The character under the caret.
++ */
++WChar Textbuf::MoveCaretRight()
++{
++	assert(this->CanMoveCaretRight());
++
++	WChar c;
++	this->caretpos   += (uint16)Utf8Decode(&c, this->buf + this->caretpos);
++	this->caretxoffs += GetCharacterWidth(FS_NORMAL, c);
++
++	return c;
++}
++
++/**
+  * Handle text navigation with arrow keys left/right.
+  * This defines where the caret will blink and the next characer interaction will occur
+- * @param navmode Direction in which navigation occurs WKC_LEFT, WKC_RIGHT, WKC_END, WKC_HOME
++ * @param navmode Direction in which navigation occurs (WKC_CTRL |) WKC_LEFT, (WKC_CTRL |) WKC_RIGHT, WKC_END, WKC_HOME
+  * @return Return true on successful change of Textbuf, or false otherwise
+  */
+ bool Textbuf::MovePos(int navmode)
+ {
+ 	switch (navmode) {
+ 		case WKC_LEFT:
+-			if (this->caretpos != 0) {
+-				WChar c;
+-				const char *s = Utf8PrevChar(this->buf + this->caretpos);
+-				Utf8Decode(&c, s);
+-				this->caretpos    = s - this->buf; // -= (this->buf + this->caretpos - s)
+-				this->caretxoffs -= GetCharacterWidth(FS_NORMAL, c);
+-
++			if (this->CanMoveCaretLeft()) {
++				this->MoveCaretLeft();
+ 				return true;
+ 			}
+ 			break;
+ 
++		case WKC_CTRL | WKC_LEFT: {
++			if (!this->CanMoveCaretLeft()) break;
++
++			/* Unconditionally move one char to the left. */
++			WChar c = this->MoveCaretLeft();
++			/* Consume left whitespaces. */
++			while (IsWhitespace(c)) {
++				if (!this->CanMoveCaretLeft()) return true;
++				c = this->MoveCaretLeft();
++			}
++			/* Consume left word. */
++			while (!IsWhitespace(c)) {
++				if (!this->CanMoveCaretLeft()) return true;
++				c = this->MoveCaretLeft();
++			}
++			/* Replace caret at the begining of the left word. */
++			this->MoveCaretRight();
++			return true;
++		}
++
+ 		case WKC_RIGHT:
+-			if (this->caretpos < this->bytes - 1) {
+-				WChar c;
+-
+-				this->caretpos   += (uint16)Utf8Decode(&c, this->buf + this->caretpos);
+-				this->caretxoffs += GetCharacterWidth(FS_NORMAL, c);
+-
++			if (this->CanMoveCaretRight()) {
++				this->MoveCaretRight();
+ 				return true;
+ 			}
+ 			break;
+ 
++		case WKC_CTRL | WKC_RIGHT: {
++			if (!this->CanMoveCaretRight()) break;
++
++			/* Unconditionally move one char to the right. */
++			WChar c = this->MoveCaretRight();
++			/* Continue to consume current word. */
++			while (!IsWhitespace(c)) {
++				if (!this->CanMoveCaretRight()) return true;
++				c = this->MoveCaretRight();
++			}
++			/* Consume right whitespaces. */
++			while (IsWhitespace(c)) {
++				if (!this->CanMoveCaretRight()) return true;
++				c = this->MoveCaretRight();
++			}
++			/* Replace caret at the begining of the right word. */
++			this->MoveCaretLeft();
++			return true;
++		}
++
+ 		case WKC_HOME:
+ 			this->caretpos = 0;
+ 			this->caretxoffs = 0;
+diff -r 10bd89d5d28f src/textbuf_type.h
+--- a/src/textbuf_type.h	Sun Sep 09 15:55:20 2012 +0000
++++ b/src/textbuf_type.h	Sun Sep 09 20:05:07 2012 +0200
+@@ -12,6 +12,8 @@
+ #ifndef TEXTBUF_TYPE_H
+ #define TEXTBUF_TYPE_H
+ 
++#include "string_type.h"
++
+ /** Helper/buffer for input fields. */
+ struct Textbuf {
+ 	char *buf;                ///< buffer in which text is saved
+@@ -38,6 +40,10 @@
+ 
+ private:
+ 	void DelChar(bool backspace);
++	bool CanMoveCaretLeft();
++	WChar MoveCaretLeft();
++	bool CanMoveCaretRight();
++	WChar MoveCaretRight();
+ };
+ 
+ #endif /* TEXTBUF_TYPE_H */

@@ -1,0 +1,539 @@
+ src/aircraft_cmd.cpp         |  61 +++++++++---------
+ src/airport.h                |  12 ++--
+ src/newgrf_engine.cpp        |  20 +++---
+ src/table/airport_movement.h | 144 +++++++++++++++++++++----------------------
+ src/vehicle_cmd.cpp          |   2 +-
+ 5 files changed, 122 insertions(+), 117 deletions(-)
+
+diff --git a/src/aircraft_cmd.cpp b/src/aircraft_cmd.cpp
+index ee89fbf..b1c0d8f 100644
+--- a/src/aircraft_cmd.cpp
++++ b/src/aircraft_cmd.cpp
+@@ -59,8 +59,8 @@ void Aircraft::UpdateDeltaXY(Direction direction)
+ 		case AIR_HELICOPTER:
+ 			switch (this->state) {
+ 				default: break;
+-				case ENDTAKEOFF:
+-				case LANDING:
++				case TAKEOFF:
++				case DESCEND:
+ 				case HELILANDING:
+ 				case FLYING:
+ 					this->x_extent = 24;
+@@ -1388,9 +1388,9 @@ static void AircraftEventHandler_InHangar(Aircraft *v, const AirportFTAClass *ap
+ 		} else {
+ 			if (!AirportFindFreeTerminal(v, apc)) return; // airplane
+ 		}
+-	} else { // Else prepare for launch.
+-		/* airplane goto state takeoff, helicopter to helitakeoff */
+-		v->state = (v->subtype == AIR_HELICOPTER) ? HELITAKEOFF : TAKEOFF;
++	} else { // Else prepare to leave platform.
++		/* airplane goto state DEPART, helicopter to HELITAKEOFF. */
++		v->state = (v->subtype == AIR_HELICOPTER) ? HELITAKEOFF : DEPART;
+ 	}
+ 	const Station *st = Station::GetByTile(v->tile);
+ 	AircraftLeaveHangar(v, st->airport.GetHangarExitDirection(v->tile));
+@@ -1445,8 +1445,8 @@ static void AircraftEventHandler_AtTerminal(Aircraft *v, const AirportFTAClass *
+ 	if (go_to_hangar) {
+ 		v->state = HANGAR;
+ 	} else {
+-		/* airplane goto state takeoff, helicopter to helitakeoff */
+-		v->state = (v->subtype == AIR_HELICOPTER) ? HELITAKEOFF : TAKEOFF;
++		/* airplane goto state DEPART, helicopter to HELITAKEOFF. */
++		v->state = (v->subtype == AIR_HELICOPTER) ? HELITAKEOFF : DEPART;
+ 	}
+ 	AirportMove(v, apc);
+ }
+@@ -1456,19 +1456,22 @@ static void AircraftEventHandler_General(Aircraft *v, const AirportFTAClass *apc
+ 	error("OK, you shouldn't be here, check your Airport Scheme!");
+ }
+ 
+-static void AircraftEventHandler_TakeOff(Aircraft *v, const AirportFTAClass *apc)
++/** Accelerating along the runway towards take-off point at the end. */
++static void AircraftEventHandler_TakeOffRoll(Aircraft *v, const AirportFTAClass *apc)
+ {
+ 	PlayAircraftSound(v); // play takeoffsound for airplanes
+-	v->state = STARTTAKEOFF;
++	v->state = TAKEOFFROLL;
+ }
+ 
+-static void AircraftEventHandler_StartTakeOff(Aircraft *v, const AirportFTAClass *apc)
++/** Left the runway and climbing to cruise altitude. */
++static void AircraftEventHandler_TakeOffClimb(Aircraft *v, const AirportFTAClass *apc)
+ {
+-	v->state = ENDTAKEOFF;
++	v->state = TAKEOFF;
+ 	v->UpdateDeltaXY(INVALID_DIR);
+ }
+ 
+-static void AircraftEventHandler_EndTakeOff(Aircraft *v, const AirportFTAClass *apc)
++/** Reached cruise altitude. */
++static void AircraftEventHandler_TopOfClimb(Aircraft *v, const AirportFTAClass *apc)
+ {
+ 	v->state = FLYING;
+ 	/* get the next position to go to, differs per airport */
+@@ -1491,16 +1494,17 @@ static void AircraftEventHandler_HeliTakeOff(Aircraft *v, const AirportFTAClass
+ 	}
+ }
+ 
+-static void AircraftEventHandler_Flying(Aircraft *v, const AirportFTAClass *apc)
++/** Try entering final descent for touch down and landing. */
++static void AircraftEventHandler_StartDescend(Aircraft *v, const AirportFTAClass *apc)
+ {
+ 	Station *st = Station::Get(v->targetairport);
+ 
+ 	/* Runway busy, not allowed to use this airstation or closed, circle. */
+ 	if (CanVehicleUseStation(v, st) && (st->owner == OWNER_NONE || st->owner == v->owner) && !(st->airport.flags & AIRPORT_CLOSED_block)) {
+-		/* {32,FLYING,NOTHING_block,37}, {32,LANDING,N,33}, {32,HELILANDING,N,41},
+-		 * if it is an airplane, look for LANDING, for helicopter HELILANDING
++		/* {32,FLYING,NOTHING_block,37}, {32,DESCEND,N,33}, {32,HELILANDING,N,41},
++		 * if it is an airplane, look for DESCEND, for helicopter HELILANDING
+ 		 * it is possible to choose from multiple landing runways, so loop until a free one is found */
+-		byte landingtype = (v->subtype == AIR_HELICOPTER) ? HELILANDING : LANDING;
++		byte landingtype = (v->subtype == AIR_HELICOPTER) ? HELILANDING : DESCEND;
+ 		const AirportFTA *current = apc->layout[v->pos].next;
+ 		while (current != NULL) {
+ 			if (current->heading == landingtype) {
+@@ -1510,10 +1514,10 @@ static void AircraftEventHandler_Flying(Aircraft *v, const AirportFTAClass *apc)
+ 				uint16 tcur_speed = v->cur_speed;
+ 				uint16 tsubspeed = v->subspeed;
+ 				if (!AirportHasBlock(v, current, apc)) {
+-					v->state = landingtype; // LANDING / HELILANDING
++					v->state = landingtype; // DESCEND / HELILANDING
+ 					/* it's a bit dirty, but I need to set position to next position, otherwise
+ 					 * if there are multiple runways, plane won't know which one it took (because
+-					 * they all have heading LANDING). And also occupy that block! */
++					 * they all have heading DESCEND). And also occupy that block! */
+ 					v->pos = current->next_position;
+ 					SETBITS(st->airport.flags, apc->layout[v->pos].block);
+ 					return;
+@@ -1528,9 +1532,10 @@ static void AircraftEventHandler_Flying(Aircraft *v, const AirportFTAClass *apc)
+ 	v->pos = apc->layout[v->pos].next_position;
+ }
+ 
++/** Touch down and decelerate airplane. */
+ static void AircraftEventHandler_Landing(Aircraft *v, const AirportFTAClass *apc)
+ {
+-	v->state = ENDLANDING;
++	v->state = LANDING;
+ 	AircraftLandAirplane(v);  // maybe crash airplane
+ 
+ 	/* check if the aircraft needs to be replaced or renewed and send it to a hangar if needed */
+@@ -1547,7 +1552,7 @@ static void AircraftEventHandler_HeliLanding(Aircraft *v, const AirportFTAClass
+ 	v->UpdateDeltaXY(INVALID_DIR);
+ }
+ 
+-static void AircraftEventHandler_EndLanding(Aircraft *v, const AirportFTAClass *apc)
++static void AircraftEventHandler_PlatformArrive(Aircraft *v, const AirportFTAClass *apc)
+ {
+ 	/* next block busy, don't do a thing, just wait */
+ 	if (AirportHasBlock(v, &apc->layout[v->pos], apc)) return;
+@@ -1572,7 +1577,7 @@ static void AircraftEventHandler_HeliEndLanding(Aircraft *v, const AirportFTACla
+ 	 * 1. in case all terminals/helipads are busy (AirportFindFreeHelipad() returns false) or
+ 	 * 2. not going for terminal (but depot, no order),
+ 	 * --> get out of the way to the hangar IF there are terminals on the airport.
+-	 * --> else TAKEOFF
++	 * --> else DEPART
+ 	 * the reason behind this is that if an airport has a terminal, it also has a hangar. Airplanes
+ 	 * must go to a hangar. */
+ 	if (v->current_order.IsType(OT_GOTO_STATION)) {
+@@ -1599,13 +1604,13 @@ static AircraftStateHandler * const _aircraft_state_handlers[] = {
+ 	AircraftEventHandler_AtTerminal,     // TERM6          =  7
+ 	AircraftEventHandler_AtTerminal,     // HELIPAD1       =  8
+ 	AircraftEventHandler_AtTerminal,     // HELIPAD2       =  9
+-	AircraftEventHandler_TakeOff,        // TAKEOFF        = 10
+-	AircraftEventHandler_StartTakeOff,   // STARTTAKEOFF   = 11
+-	AircraftEventHandler_EndTakeOff,     // ENDTAKEOFF     = 12
++	AircraftEventHandler_TakeOffRoll,    // DEPART         = 10
++	AircraftEventHandler_TakeOffClimb,   // TAKEOFFROLL    = 11
++	AircraftEventHandler_TopOfClimb,     // TAKEOFF        = 12
+ 	AircraftEventHandler_HeliTakeOff,    // HELITAKEOFF    = 13
+-	AircraftEventHandler_Flying,         // FLYING         = 14
+-	AircraftEventHandler_Landing,        // LANDING        = 15
+-	AircraftEventHandler_EndLanding,     // ENDLANDING     = 16
++	AircraftEventHandler_StartDescend,   // FLYING         = 14
++	AircraftEventHandler_Landing,        // DESCEND        = 15
++	AircraftEventHandler_PlatformArrive, // LANDING        = 16
+ 	AircraftEventHandler_HeliLanding,    // HELILANDING    = 17
+ 	AircraftEventHandler_HeliEndLanding, // HELIENDLANDING = 18
+ 	AircraftEventHandler_AtTerminal,     // TERM7          = 19
+@@ -1926,7 +1931,7 @@ static bool AircraftEventHandler(Aircraft *v, int loop)
+ 
+ 	if (v->current_order.IsType(OT_LOADING) || v->current_order.IsType(OT_LEAVESTATION)) return true;
+ 
+-	if (v->state >= ENDTAKEOFF && v->state <= HELIENDLANDING) {
++	if (v->state >= TAKEOFF && v->state <= HELIENDLANDING) {
+ 		/* If we are flying, unconditionally clear the 'dest too far' state. */
+ 		AircraftHandleDestTooFar(v, false);
+ 	} else if (v->acache.cached_max_range_sqr != 0) {
+diff --git a/src/airport.h b/src/airport.h
+index 31c68ef..7eee20a 100644
+--- a/src/airport.h
++++ b/src/airport.h
+@@ -70,13 +70,13 @@ enum AirportMovementStates {
+ 	TERM6          =  7, ///< Heading for terminal 6.
+ 	HELIPAD1       =  8, ///< Heading for helipad 1.
+ 	HELIPAD2       =  9, ///< Heading for helipad 2.
+-	TAKEOFF        = 10, ///< Airplane wants to leave the airport.
+-	STARTTAKEOFF   = 11, ///< Airplane has arrived at a runway for take-off.
+-	ENDTAKEOFF     = 12, ///< Airplane has reached end-point of the take-off runway.
++	DEPART         = 10, ///< Airplane wants to taxi to runway and leave the airport.
++	TAKEOFFROLL    = 11, ///< Airplane has arrived at a runway for take-off.
++	TAKEOFF        = 12, ///< Airplane has reached end-point of the take-off runway.
+ 	HELITAKEOFF    = 13, ///< Helicopter wants to leave the airport.
+-	FLYING         = 14, ///< %Vehicle is flying in the air.
+-	LANDING        = 15, ///< Airplane wants to land.
+-	ENDLANDING     = 16, ///< Airplane wants to finish landing.
++	FLYING         = 14, ///< Vehicle is flying in the air.
++	DESCEND        = 15, ///< Airplane wants to land.
++	LANDING        = 16, ///< Airplane wants to touchdown and finish landing.
+ 	HELILANDING    = 17, ///< Helicopter wants to land.
+ 	HELIENDLANDING = 18, ///< Helicopter wants to finish landing.
+ 	TERM7          = 19, ///< Heading for terminal 7.
+diff --git a/src/newgrf_engine.cpp b/src/newgrf_engine.cpp
+index 3119524..5d95e06 100644
+--- a/src/newgrf_engine.cpp
++++ b/src/newgrf_engine.cpp
+@@ -221,13 +221,13 @@ static byte MapAircraftMovementState(const Aircraft *v)
+ 			if (amdflag & AMED_SLOWTURN)   return AMS_TTDP_FLIGHT_TO_TOWER;   // Still hasn't started descent.
+ 			return AMS_TTDP_TO_JUNCTION; // On the ground.
+ 
+-		case TAKEOFF: // Moving to takeoff position.
++		case DEPART: // Moving to takeoff runway.
+ 			return AMS_TTDP_TO_OUTWAY;
+ 
+-		case STARTTAKEOFF: // Accelerating down runway.
++		case TAKEOFFROLL: // Accelerating down runway.
+ 			return AMS_TTDP_TAKEOFF;
+ 
+-		case ENDTAKEOFF: // Ascent
++		case TAKEOFF: // Ascent
+ 			return AMS_TTDP_CLIMBING;
+ 
+ 		case HELITAKEOFF: // Helicopter is moving to take off position.
+@@ -241,10 +241,10 @@ static byte MapAircraftMovementState(const Aircraft *v)
+ 		case FLYING:
+ 			return amdflag & AMED_HOLD ? AMS_TTDP_FLIGHT_APPROACH : AMS_TTDP_FLIGHT_TO_TOWER;
+ 
+-		case LANDING: // Descent
++		case DESCEND: // Descent
+ 			return AMS_TTDP_FLIGHT_DESCENT;
+ 
+-		case ENDLANDING: // On the runway braking
++		case LANDING: // On the runway braking
+ 			if (amdflag & AMED_BRAKE) return AMS_TTDP_BRAKING;
+ 			/* Landed - moving off runway */
+ 			return AMS_TTDP_TO_INWAY;
+@@ -316,9 +316,9 @@ static byte MapAircraftMovementAction(const Aircraft *v)
+ 		case HELIPAD3:
+ 			return (v->current_order.IsType(OT_LOADING)) ? AMA_TTDP_ON_PAD3 : AMA_TTDP_LANDING_TO_PAD3;
+ 
+-		case TAKEOFF:      // Moving to takeoff position
+-		case STARTTAKEOFF: // Accelerating down runway
+-		case ENDTAKEOFF:   // Ascent
++		case DEPART:      // Moving to takeoff position
++		case TAKEOFFROLL: // Accelerating down runway
++		case TAKEOFF:     // Ascent
+ 		case HELITAKEOFF:
+ 			/* @todo Need to find which terminal (or hangar) we've come from. How? */
+ 			return AMA_TTDP_PAD1_TO_TAKEOFF;
+@@ -326,8 +326,8 @@ static byte MapAircraftMovementAction(const Aircraft *v)
+ 		case FLYING:
+ 			return AMA_TTDP_IN_FLIGHT;
+ 
+-		case LANDING:    // Descent
+-		case ENDLANDING: // On the runway braking
++		case DESCEND:     // Descent
++		case LANDING:     // On the runway braking
+ 		case HELILANDING:
+ 		case HELIENDLANDING:
+ 			/* @todo Need to check terminal we're landing to. Is it known yet? */
+diff --git a/src/table/airport_movement.h b/src/table/airport_movement.h
+index d9030f6..d28c9c9 100644
+--- a/src/table/airport_movement.h
++++ b/src/table/airport_movement.h
+@@ -19,7 +19,7 @@
+  */
+ struct AirportFTAbuildup {
+ 	byte position; ///< The position that an airplane is at.
+-	byte heading;  ///< The current orders (eg. TAKEOFF, HANGAR, ENDLANDING, etc.).
++	byte heading;  ///< The current orders (eg. DEPART, HANGAR, LANDING, etc.).
+ 	uint64 block;  ///< The block this position is on on the airport (st->airport.flags).
+ 	byte next;     ///< Next position from this position.
+ };
+@@ -425,18 +425,18 @@ static const AirportFTAbuildup _airport_fta_country[] = {
+ 	{  1, 255, AIRPORT_BUSY_block, 0 }, { 1, HANGAR, 0, 0 }, { 1, TERM1, TERM1_block, 2 }, { 1, TERM2, 0, 4 }, { 1, HELITAKEOFF, 0, 19 }, { 1, 0, 0, 6 },
+ 	{  2, TERM1, TERM1_block, 1 },
+ 	{  3, TERM2, TERM2_block, 5 },
+-	{  4, 255, AIRPORT_BUSY_block, 0 }, { 4, TERM2, 0, 5 }, { 4, HANGAR, 0, 1 }, { 4, TAKEOFF, 0, 6 }, { 4, HELITAKEOFF, 0, 1 },
++	{  4, 255, AIRPORT_BUSY_block, 0 }, { 4, TERM2, 0, 5 }, { 4, HANGAR, 0, 1 }, { 4, DEPART, 0, 6 }, { 4, HELITAKEOFF, 0, 1 },
+ 	{  5, 255, AIRPORT_BUSY_block, 0 }, { 5, TERM2, TERM2_block, 3 }, { 5, 0, 0, 4 },
+ 	{  6, 0, AIRPORT_BUSY_block, 7 },
+ 	/* takeoff */
+-	{  7, TAKEOFF, AIRPORT_BUSY_block, 8 },
+-	{  8, STARTTAKEOFF, NOTHING_block, 9 },
+-	{  9, ENDTAKEOFF, NOTHING_block, 0 },
++	{  7, DEPART, AIRPORT_BUSY_block, 8 },
++	{  8, TAKEOFFROLL, NOTHING_block, 9 },
++	{  9, TAKEOFF, NOTHING_block, 0 },
+ 	/* landing */
+-	{ 10, FLYING, NOTHING_block, 15 }, { 10, LANDING, 0, 11 }, { 10, HELILANDING, 0, 20 },
+-	{ 11, LANDING, AIRPORT_BUSY_block, 12 },
++	{ 10, FLYING, NOTHING_block, 15 }, { 10, DESCEND, 0, 11 }, { 10, HELILANDING, 0, 20 },
++	{ 11, DESCEND, AIRPORT_BUSY_block, 12 },
+ 	{ 12, 0, AIRPORT_BUSY_block, 13 },
+-	{ 13, ENDLANDING, AIRPORT_BUSY_block, 14 }, { 13, TERM2, 0, 5 }, { 13, 0, 0, 14 },
++	{ 13, LANDING, AIRPORT_BUSY_block, 14 }, { 13, TERM2, 0, 5 }, { 13, 0, 0, 14 },
+ 	{ 14, 0, AIRPORT_BUSY_block, 1 },
+ 	/* In air */
+ 	{ 15, 0, NOTHING_block, 16 },
+@@ -454,28 +454,28 @@ static const byte _airport_terminal_commuter[] = { 1, 3 };
+ static const byte _airport_entries_commuter[] = {22, 21, 24, 23};
+ static const AirportFTAbuildup _airport_fta_commuter[] = {
+ 	{  0, HANGAR, NOTHING_block, 1 }, { 0, HELITAKEOFF, HELIPAD2_block, 1 }, { 0, 0, 0, 1 },
+-	{  1, 255, TAXIWAY_BUSY_block, 0 }, { 1, HANGAR, 0, 0 }, { 1, TAKEOFF, 0, 11 }, { 1, TERM1, TAXIWAY_BUSY_block, 10 }, { 1, TERM2, TAXIWAY_BUSY_block, 10 }, { 1, TERM3, TAXIWAY_BUSY_block, 10 }, { 1, HELIPAD1, TAXIWAY_BUSY_block, 10 }, { 1, HELIPAD2, TAXIWAY_BUSY_block, 10 }, { 1, HELITAKEOFF, TAXIWAY_BUSY_block, 10 }, { 1, 0, 0, 0 },
++	{  1, 255, TAXIWAY_BUSY_block, 0 }, { 1, HANGAR, 0, 0 }, { 1, DEPART, 0, 11 }, { 1, TERM1, TAXIWAY_BUSY_block, 10 }, { 1, TERM2, TAXIWAY_BUSY_block, 10 }, { 1, TERM3, TAXIWAY_BUSY_block, 10 }, { 1, HELIPAD1, TAXIWAY_BUSY_block, 10 }, { 1, HELIPAD2, TAXIWAY_BUSY_block, 10 }, { 1, HELITAKEOFF, TAXIWAY_BUSY_block, 10 }, { 1, 0, 0, 0 },
+ 	{  2, 255, AIRPORT_ENTRANCE_block, 2 }, { 2, HANGAR, 0, 8 }, { 2, TERM1, 0, 8 }, { 2, TERM2, 0, 8 }, { 2, TERM3, 0, 8 }, { 2, HELIPAD1, 0, 8 }, { 2, HELIPAD2, 0, 8 }, { 2, HELITAKEOFF, 0, 8 }, { 2, 0, 0, 2 },
+-	{  3, TERM1, TERM1_block, 8 }, { 3, HANGAR, 0, 8 }, { 3, TAKEOFF, 0, 8 }, { 3, 0, 0, 3 },
+-	{  4, TERM2, TERM2_block, 9 }, { 4, HANGAR, 0, 9 }, { 4, TAKEOFF, 0, 9 }, { 4, 0, 0, 4 },
+-	{  5, TERM3, TERM3_block, 10 }, { 5, HANGAR, 0, 10 }, { 5, TAKEOFF, 0, 10 }, { 5, 0, 0, 5 },
++	{  3, TERM1, TERM1_block, 8 }, { 3, HANGAR, 0, 8 }, { 3, DEPART, 0, 8 }, { 3, 0, 0, 3 },
++	{  4, TERM2, TERM2_block, 9 }, { 4, HANGAR, 0, 9 }, { 4, DEPART, 0, 9 }, { 4, 0, 0, 4 },
++	{  5, TERM3, TERM3_block, 10 }, { 5, HANGAR, 0, 10 }, { 5, DEPART, 0, 10 }, { 5, 0, 0, 5 },
+ 	{  6, HELIPAD1, HELIPAD1_block, 6 }, { 6, HANGAR, TAXIWAY_BUSY_block, 9 }, { 6, HELITAKEOFF, 0, 35 },
+ 	{  7, HELIPAD2, HELIPAD2_block, 7 }, { 7, HANGAR, TAXIWAY_BUSY_block, 10 }, { 7, HELITAKEOFF, 0, 36 },
+-	{  8, 255, TAXIWAY_BUSY_block, 8 }, { 8, TAKEOFF, TAXIWAY_BUSY_block, 9 }, { 8, HANGAR, TAXIWAY_BUSY_block, 9 }, { 8, TERM1, TERM1_block, 3 }, { 8, 0, TAXIWAY_BUSY_block, 9 },
+-	{  9, 255, TAXIWAY_BUSY_block, 9 }, { 9, TAKEOFF, TAXIWAY_BUSY_block, 10 }, { 9, HANGAR, TAXIWAY_BUSY_block, 10 }, { 9, TERM2, TERM2_block, 4 }, { 9, HELIPAD1, HELIPAD1_block, 6 }, { 9, HELITAKEOFF, HELIPAD1_block, 6 }, { 9, TERM1, TAXIWAY_BUSY_block, 8 }, { 9, 0, TAXIWAY_BUSY_block, 10 },
+-	{ 10, 255, TAXIWAY_BUSY_block, 10 }, { 10, TERM3, TERM3_block, 5 }, { 10, HELIPAD1, 0, 9 }, { 10, HELIPAD2, HELIPAD2_block, 7 }, { 10, HELITAKEOFF, HELIPAD2_block, 7 }, { 10, TAKEOFF, TAXIWAY_BUSY_block, 1 }, { 10, HANGAR, TAXIWAY_BUSY_block, 1 }, { 10, 0, TAXIWAY_BUSY_block, 9 },
++	{  8, 255, TAXIWAY_BUSY_block, 8 }, { 8, DEPART, TAXIWAY_BUSY_block, 9 }, { 8, HANGAR, TAXIWAY_BUSY_block, 9 }, { 8, TERM1, TERM1_block, 3 }, { 8, 0, TAXIWAY_BUSY_block, 9 },
++	{  9, 255, TAXIWAY_BUSY_block, 9 }, { 9, DEPART, TAXIWAY_BUSY_block, 10 }, { 9, HANGAR, TAXIWAY_BUSY_block, 10 }, { 9, TERM2, TERM2_block, 4 }, { 9, HELIPAD1, HELIPAD1_block, 6 }, { 9, HELITAKEOFF, HELIPAD1_block, 6 }, { 9, TERM1, TAXIWAY_BUSY_block, 8 }, { 9, 0, TAXIWAY_BUSY_block, 10 },
++	{ 10, 255, TAXIWAY_BUSY_block, 10 }, { 10, TERM3, TERM3_block, 5 }, { 10, HELIPAD1, 0, 9 }, { 10, HELIPAD2, HELIPAD2_block, 7 }, { 10, HELITAKEOFF, HELIPAD2_block, 7 }, { 10, DEPART, TAXIWAY_BUSY_block, 1 }, { 10, HANGAR, TAXIWAY_BUSY_block, 1 }, { 10, 0, TAXIWAY_BUSY_block, 9 },
+ 	{ 11, 0, OUT_WAY_block, 12 },
+ 	/* takeoff */
+-	{ 12, TAKEOFF, RUNWAY_IN_OUT_block, 13 },
++	{ 12, DEPART, RUNWAY_IN_OUT_block, 13 },
+ 	{ 13, 0, RUNWAY_IN_OUT_block, 14 },
+-	{ 14, STARTTAKEOFF, RUNWAY_IN_OUT_block, 15 },
+-	{ 15, ENDTAKEOFF, NOTHING_block, 0 },
++	{ 14, TAKEOFFROLL, RUNWAY_IN_OUT_block, 15 },
++	{ 15, TAKEOFF, NOTHING_block, 0 },
+ 	/* landing */
+-	{ 16, FLYING, NOTHING_block, 21 }, { 16, LANDING, IN_WAY_block, 17 }, { 16, HELILANDING, 0, 25 },
+-	{ 17, LANDING, RUNWAY_IN_OUT_block, 18 },
++	{ 16, FLYING, NOTHING_block, 21 }, { 16, DESCEND, IN_WAY_block, 17 }, { 16, HELILANDING, 0, 25 },
++	{ 17, DESCEND, RUNWAY_IN_OUT_block, 18 },
+ 	{ 18, 0, RUNWAY_IN_OUT_block, 19 },
+ 	{ 19, 0, RUNWAY_IN_OUT_block, 20 },
+-	{ 20, ENDLANDING, IN_WAY_block, 2 },
++	{ 20, LANDING, IN_WAY_block, 2 },
+ 	/* In Air */
+ 	{ 21, 0, NOTHING_block, 22 },
+ 	{ 22, 0, NOTHING_block, 23 },
+@@ -503,26 +503,26 @@ static const HangarTileTable _airport_depots_city[] = { {{5, 0}, DIR_SE, 0} };
+ static const byte _airport_terminal_city[] = { 1, 3 };
+ static const byte _airport_entries_city[] = {26, 29, 27, 28};
+ static const AirportFTAbuildup _airport_fta_city[] = {
+-	{  0, HANGAR, NOTHING_block, 1 }, { 0, TAKEOFF, OUT_WAY_block, 1 }, { 0, 0, 0, 1 },
++	{  0, HANGAR, NOTHING_block, 1 }, { 0, DEPART, OUT_WAY_block, 1 }, { 0, 0, 0, 1 },
+ 	{  1, 255, TAXIWAY_BUSY_block, 0 }, { 1, HANGAR, 0, 0 }, { 1, TERM2, 0, 6 }, { 1, TERM3, 0, 6 }, { 1, 0, 0, 7 }, // for all else, go to 7
+-	{  2, TERM1, TERM1_block, 7 }, { 2, TAKEOFF, OUT_WAY_block, 7 }, { 2, 0, 0, 7 },
+-	{  3, TERM2, TERM2_block, 5 }, { 3, TAKEOFF, OUT_WAY_block, 6 }, { 3, 0, 0, 6 },
+-	{  4, TERM3, TERM3_block, 5 }, { 4, TAKEOFF, OUT_WAY_block, 5 }, { 4, 0, 0, 5 },
++	{  2, TERM1, TERM1_block, 7 }, { 2, DEPART, OUT_WAY_block, 7 }, { 2, 0, 0, 7 },
++	{  3, TERM2, TERM2_block, 5 }, { 3, DEPART, OUT_WAY_block, 6 }, { 3, 0, 0, 6 },
++	{  4, TERM3, TERM3_block, 5 }, { 4, DEPART, OUT_WAY_block, 5 }, { 4, 0, 0, 5 },
+ 	{  5, 255, TAXIWAY_BUSY_block, 0 }, { 5, TERM2, TERM2_block, 3 }, { 5, TERM3, TERM3_block, 4 }, { 5, 0, 0, 6 },
+ 	{  6, 255, TAXIWAY_BUSY_block, 0 }, { 6, TERM2, TERM2_block, 3 }, { 6, TERM3, 0, 5 }, { 6, HANGAR, 0, 1 }, { 6, 0, 0, 7 },
+-	{  7, 255, TAXIWAY_BUSY_block, 0 }, { 7, TERM1, TERM1_block, 2 }, { 7, TAKEOFF, OUT_WAY_block, 8 }, { 7, HELITAKEOFF, 0, 22 }, { 7, HANGAR, 0, 1 }, { 7, 0, 0, 6 },
++	{  7, 255, TAXIWAY_BUSY_block, 0 }, { 7, TERM1, TERM1_block, 2 }, { 7, DEPART, OUT_WAY_block, 8 }, { 7, HELITAKEOFF, 0, 22 }, { 7, HANGAR, 0, 1 }, { 7, 0, 0, 6 },
+ 	{  8, 0, OUT_WAY_block, 9 },
+ 	{  9, 0, RUNWAY_IN_OUT_block, 10 },
+ 	/* takeoff */
+-	{ 10, TAKEOFF, RUNWAY_IN_OUT_block, 11 },
+-	{ 11, STARTTAKEOFF, NOTHING_block, 12 },
+-	{ 12, ENDTAKEOFF, NOTHING_block, 0 },
++	{ 10, DEPART, RUNWAY_IN_OUT_block, 11 },
++	{ 11, TAKEOFFROLL, NOTHING_block, 12 },
++	{ 12, TAKEOFF, NOTHING_block, 0 },
+ 	/* landing */
+-	{ 13, FLYING, NOTHING_block, 18 }, { 13, LANDING, 0, 14 }, { 13, HELILANDING, 0, 23 },
+-	{ 14, LANDING, RUNWAY_IN_OUT_block, 15 },
++	{ 13, FLYING, NOTHING_block, 18 }, { 13, DESCEND, 0, 14 }, { 13, HELILANDING, 0, 23 },
++	{ 14, DESCEND, RUNWAY_IN_OUT_block, 15 },
+ 	{ 15, 0, RUNWAY_IN_OUT_block, 17 },
+ 	{ 16, 0, RUNWAY_IN_OUT_block, 17 }, // not used, left for compatibility
+-	{ 17, ENDLANDING, IN_WAY_block, 7 },
++	{ 17, LANDING, IN_WAY_block, 7 },
+ 	/* In Air */
+ 	{ 18, 0, NOTHING_block, 25 },
+ 	{ 19, 0, NOTHING_block, 20 },
+@@ -551,20 +551,20 @@ static const AirportFTAbuildup _airport_fta_metropolitan[] = {
+ 	{  4, TERM3, TERM3_block, 5 },
+ 	{  5, 255, TAXIWAY_BUSY_block, 0 }, { 5, TERM2, TERM2_block, 3 }, { 5, TERM3, TERM3_block, 4 }, { 5, 0, 0, 6 },
+ 	{  6, 255, TAXIWAY_BUSY_block, 0 }, { 6, TERM2, TERM2_block, 3 }, { 6, TERM3, 0, 5 }, { 6, HANGAR, 0, 1 }, { 6, 0, 0, 7 },
+-	{  7, 255, TAXIWAY_BUSY_block, 0 }, { 7, TERM1, TERM1_block, 2 }, { 7, TAKEOFF, 0, 8 }, { 7, HELITAKEOFF, 0, 23 }, { 7, HANGAR, 0, 1 }, { 7, 0, 0, 6 },
++	{  7, 255, TAXIWAY_BUSY_block, 0 }, { 7, TERM1, TERM1_block, 2 }, { 7, DEPART, 0, 8 }, { 7, HELITAKEOFF, 0, 23 }, { 7, HANGAR, 0, 1 }, { 7, 0, 0, 6 },
+ 	{  8, 0, OUT_WAY_block, 9 },
+ 	{  9, 0, RUNWAY_OUT_block, 10 },
+ 	/* takeoff */
+-	{ 10, TAKEOFF, RUNWAY_OUT_block, 11 },
+-	{ 11, STARTTAKEOFF, NOTHING_block, 12 },
+-	{ 12, ENDTAKEOFF, NOTHING_block, 0 },
++	{ 10, DEPART, RUNWAY_OUT_block, 11 },
++	{ 11, TAKEOFFROLL, NOTHING_block, 12 },
++	{ 12, TAKEOFF, NOTHING_block, 0 },
+ 	/* landing */
+-	{ 13, FLYING, NOTHING_block, 19 }, { 13, LANDING, 0, 14 }, { 13, HELILANDING, 0, 25 },
+-	{ 14, LANDING, RUNWAY_IN_block, 15 },
++	{ 13, FLYING, NOTHING_block, 19 }, { 13, DESCEND, 0, 14 }, { 13, HELILANDING, 0, 25 },
++	{ 14, DESCEND, RUNWAY_IN_block, 15 },
+ 	{ 15, 0, RUNWAY_IN_block, 16 },
+-	{ 16, 255, RUNWAY_IN_block, 0 }, { 16, ENDLANDING, IN_WAY_block, 17 },
+-	{ 17, 255, RUNWAY_OUT_block, 0 }, { 17, ENDLANDING, IN_WAY_block, 18 },
+-	{ 18, ENDLANDING, IN_WAY_block, 27 },
++	{ 16, 255, RUNWAY_IN_block, 0 }, { 16, LANDING, IN_WAY_block, 17 },
++	{ 17, 255, RUNWAY_OUT_block, 0 }, { 17, LANDING, IN_WAY_block, 18 },
++	{ 18, LANDING, IN_WAY_block, 27 },
+ 	/* In Air */
+ 	{ 19, 0, NOTHING_block, 20 },
+ 	{ 20, 0, NOTHING_block, 21 },
+@@ -601,27 +601,27 @@ static const AirportFTAbuildup _airport_fta_international[] = {
+ 	{ 15, 0, TERM_GROUP2_ENTER2_block, 16 },
+ 	{ 16, 255, TERM_GROUP2_block, 0 }, { 16, TERM4, TERM4_block, 7 }, { 16, HELIPAD1, HELIPAD1_block, 10 }, { 16, HELITAKEOFF, HELIPAD1_block, 10 }, { 16, 0, 0, 17 },
+ 	{ 17, 255, TERM_GROUP2_block, 0 }, { 17, TERM5, TERM5_block, 8 }, { 17, TERM4, 0, 16 }, { 17, HELIPAD1, 0, 16 }, { 17, HELIPAD2, HELIPAD2_block, 11 }, { 17, HELITAKEOFF, HELIPAD2_block, 11 }, { 17, 0, 0, 18 },
+-	{ 18, 255, TERM_GROUP2_block, 0 }, { 18, TERM6, TERM6_block, 9 }, { 18, TAKEOFF, 0, 19 }, { 18, HANGAR, HANGAR2_AREA_block, 3 }, { 18, 0, 0, 17 },
++	{ 18, 255, TERM_GROUP2_block, 0 }, { 18, TERM6, TERM6_block, 9 }, { 18, DEPART, 0, 19 }, { 18, HANGAR, HANGAR2_AREA_block, 3 }, { 18, 0, 0, 17 },
+ 	{ 19, 0, TERM_GROUP2_EXIT1_block, 20 },
+ 	{ 20, 0, TERM_GROUP2_EXIT1_block, 21 },
+ 	{ 21, 0, TERM_GROUP2_EXIT2_block, 22 },
+ 	{ 22, 0, TERM_GROUP2_EXIT2_block, 26 },
+ 	{ 23, 255, TERM_GROUP1_block, 0 }, { 23, TERM1, TERM1_block, 4 }, { 23, HANGAR, AIRPORT_ENTRANCE_block, 2 }, { 23, 0, 0, 24 },
+ 	{ 24, 255, TERM_GROUP1_block, 0 }, { 24, TERM2, TERM2_block, 5 }, { 24, TERM1, 0, 23 }, { 24, HANGAR, 0, 23 }, { 24, 0, 0, 25 },
+-	{ 25, 255, TERM_GROUP1_block, 0 }, { 25, TERM3, TERM3_block, 6 }, { 25, TAKEOFF, 0, 26 }, { 25, 0, 0, 24 },
+-	{ 26, 255, TAXIWAY_BUSY_block, 0 }, { 26, TAKEOFF, 0, 27 }, { 26, 0, 0, 25 },
++	{ 25, 255, TERM_GROUP1_block, 0 }, { 25, TERM3, TERM3_block, 6 }, { 25, DEPART, 0, 26 }, { 25, 0, 0, 24 },
++	{ 26, 255, TAXIWAY_BUSY_block, 0 }, { 26, DEPART, 0, 27 }, { 26, 0, 0, 25 },
+ 	{ 27, 0, OUT_WAY_block, 28 },
+ 	/* takeoff */
+-	{ 28, TAKEOFF, OUT_WAY_block, 29 },
++	{ 28, DEPART, OUT_WAY_block, 29 },
+ 	{ 29, 0, RUNWAY_OUT_block, 30 },
+-	{ 30, STARTTAKEOFF, NOTHING_block, 31 },
+-	{ 31, ENDTAKEOFF, NOTHING_block, 0 },
++	{ 30, TAKEOFFROLL, NOTHING_block, 31 },
++	{ 31, TAKEOFF, NOTHING_block, 0 },
+ 	/* landing */
+-	{ 32, FLYING, NOTHING_block, 37 }, { 32, LANDING, 0, 33 }, { 32, HELILANDING, 0, 41 },
+-	{ 33, LANDING, RUNWAY_IN_block, 34 },
++	{ 32, FLYING, NOTHING_block, 37 }, { 32, DESCEND, 0, 33 }, { 32, HELILANDING, 0, 41 },
++	{ 33, DESCEND, RUNWAY_IN_block, 34 },
+ 	{ 34, 0, RUNWAY_IN_block, 35 },
+ 	{ 35, 0, RUNWAY_IN_block, 36 },
+-	{ 36, ENDLANDING, IN_WAY_block, 36 }, { 36, 255, TERM_GROUP1_block, 0 }, { 36, 255, TERM_GROUP2_ENTER1_block, 1 }, { 36, TERM4, 0, 12 }, { 36, TERM5, 0, 12 }, { 36, TERM6, 0, 12 }, { 36, 0, 0, 2 },
++	{ 36, LANDING, IN_WAY_block, 36 }, { 36, 255, TERM_GROUP1_block, 0 }, { 36, 255, TERM_GROUP2_ENTER1_block, 1 }, { 36, TERM4, 0, 12 }, { 36, TERM5, 0, 12 }, { 36, TERM6, 0, 12 }, { 36, 0, 0, 2 },
+ 	/* In Air */
+ 	{ 37, 0, NOTHING_block, 38 },
+ 	{ 38, 0, NOTHING_block, 39 },
+@@ -648,10 +648,10 @@ static const HangarTileTable _airport_depots_intercontinental[] = { {{0, 5}, DIR
+ static const byte _airport_terminal_intercontinental[] = { 2, 4, 4 };
+ static const byte _airport_entries_intercontinental[] = { 44, 43, 46, 45 };
+ static const AirportFTAbuildup _airport_fta_intercontinental[] = {
+-	{  0, HANGAR, NOTHING_block, 2 }, { 0, 255, HANGAR1_AREA_block | TERM_GROUP1_block, 0 }, { 0, 255, HANGAR1_AREA_block | TERM_GROUP1_block, 1 }, { 0, TAKEOFF, HANGAR1_AREA_block | TERM_GROUP1_block, 2 }, { 0, 0, 0, 2 },
++	{  0, HANGAR, NOTHING_block, 2 }, { 0, 255, HANGAR1_AREA_block | TERM_GROUP1_block, 0 }, { 0, 255, HANGAR1_AREA_block | TERM_GROUP1_block, 1 }, { 0, DEPART, HANGAR1_AREA_block | TERM_GROUP1_block, 2 }, { 0, 0, 0, 2 },
+ 	{  1, HANGAR, NOTHING_block, 3 }, { 1, 255, HANGAR2_AREA_block, 1 }, { 1, 255, HANGAR2_AREA_block, 0 }, { 1, 0, 0, 3 },
+-	{  2, 255, HANGAR1_AREA_block, 0 }, { 2, 255, TERM_GROUP1_block, 0 }, { 2, 255, TERM_GROUP1_block, 1 }, { 2, HANGAR, 0, 0 }, { 2, TAKEOFF, TERM_GROUP1_block, 27 }, { 2, TERM5, 0, 26 }, { 2, TERM6, 0, 26 }, { 2, TERM7, 0, 26 }, { 2, TERM8, 0, 26 }, { 2, HELIPAD1, 0, 26 }, { 2, HELIPAD2, 0, 26 }, { 2, HELITAKEOFF, 0, 74 }, { 2, 0, 0, 27 },
+-	{  3, 255, HANGAR2_AREA_block, 0 }, { 3, HANGAR, 0, 1 }, { 3, HELITAKEOFF, 0, 75 }, {3, TAKEOFF, 0, 59}, { 3, 0, 0, 20 },
++	{  2, 255, HANGAR1_AREA_block, 0 }, { 2, 255, TERM_GROUP1_block, 0 }, { 2, 255, TERM_GROUP1_block, 1 }, { 2, HANGAR, 0, 0 }, { 2, DEPART, TERM_GROUP1_block, 27 }, { 2, TERM5, 0, 26 }, { 2, TERM6, 0, 26 }, { 2, TERM7, 0, 26 }, { 2, TERM8, 0, 26 }, { 2, HELIPAD1, 0, 26 }, { 2, HELIPAD2, 0, 26 }, { 2, HELITAKEOFF, 0, 74 }, { 2, 0, 0, 27 },
++	{  3, 255, HANGAR2_AREA_block, 0 }, { 3, HANGAR, 0, 1 }, { 3, HELITAKEOFF, 0, 75 }, {3, DEPART, 0, 59}, { 3, 0, 0, 20 },
+ 	{  4, TERM1, TERM1_block, 26 }, { 4, HANGAR, HANGAR1_AREA_block | TERM_GROUP1_block, 26 }, { 4, 0, 0, 26 },
+ 	{  5, TERM2, TERM2_block, 27 }, { 5, HANGAR, HANGAR1_AREA_block | TERM_GROUP1_block, 27 }, { 5, 0, 0, 27 },
+ 	{  6, TERM3, TERM3_block, 28 }, { 6, HANGAR, HANGAR1_AREA_block | TERM_GROUP1_block, 28 }, { 6, 0, 0, 28 },
+@@ -666,38 +666,38 @@ static const AirportFTAbuildup _airport_fta_intercontinental[] = {
+ 	{ 15, 0, TERM_GROUP2_ENTER1_block, 16 },
+ 	{ 16, 0, TERM_GROUP2_ENTER2_block, 17 },
+ 	{ 17, 0, TERM_GROUP2_ENTER2_block, 18 },
+-	{ 18, 255, TERM_GROUP2_block, 0 }, { 18, TERM5, TERM5_block, 8 }, { 18, TAKEOFF, 0, 19 }, { 18, HELITAKEOFF, HELIPAD1_block, 19 }, { 18, 0, TERM_GROUP2_EXIT1_block, 19 },
+-	{ 19, 255, TERM_GROUP2_block, 0 }, { 19, TERM6, TERM6_block, 9 }, { 19, TERM5, 0, 18 }, { 19, TAKEOFF, 0, 57 }, { 19, HELITAKEOFF, HELIPAD1_block, 20 }, { 19, 0, TERM_GROUP2_EXIT1_block, 20 }, // add exit to runway out 2
+-	{ 20, 255, TERM_GROUP2_block, 0 }, { 20, TERM7, TERM7_block, 10 }, { 20, TERM5, 0, 19 }, { 20, TERM6, 0, 19 }, { 20, HANGAR, HANGAR2_AREA_block, 3 }, { 20, TAKEOFF, 0, 19 }, { 20, 0, TERM_GROUP2_EXIT1_block, 21 },
+-	{ 21, 255, TERM_GROUP2_block, 0 }, { 21, TERM8, TERM8_block, 11 }, { 21, HANGAR, HANGAR2_AREA_block, 20 }, { 21, TERM5, 0, 20 }, { 21, TERM6, 0, 20 }, { 21, TERM7, 0, 20 }, { 21, TAKEOFF, 0, 20 }, { 21, 0, TERM_GROUP2_EXIT1_block, 22 },
+-	{ 22, 255, TERM_GROUP2_block, 0 }, { 22, HANGAR, 0, 21 }, { 22, TERM5, 0, 21 }, { 22, TERM6, 0, 21 }, { 22, TERM7, 0, 21 }, { 22, TERM8, 0, 21 }, { 22, TAKEOFF, 0, 21 }, { 22, 0, 0, 23 },
++	{ 18, 255, TERM_GROUP2_block, 0 }, { 18, TERM5, TERM5_block, 8 }, { 18, DEPART, 0, 19 }, { 18, HELITAKEOFF, HELIPAD1_block, 19 }, { 18, 0, TERM_GROUP2_EXIT1_block, 19 },
++	{ 19, 255, TERM_GROUP2_block, 0 }, { 19, TERM6, TERM6_block, 9 }, { 19, TERM5, 0, 18 }, { 19, DEPART, 0, 57 }, { 19, HELITAKEOFF, HELIPAD1_block, 20 }, { 19, 0, TERM_GROUP2_EXIT1_block, 20 }, // add exit to runway out 2
++	{ 20, 255, TERM_GROUP2_block, 0 }, { 20, TERM7, TERM7_block, 10 }, { 20, TERM5, 0, 19 }, { 20, TERM6, 0, 19 }, { 20, HANGAR, HANGAR2_AREA_block, 3 }, { 20, DEPART, 0, 19 }, { 20, 0, TERM_GROUP2_EXIT1_block, 21 },
++	{ 21, 255, TERM_GROUP2_block, 0 }, { 21, TERM8, TERM8_block, 11 }, { 21, HANGAR, HANGAR2_AREA_block, 20 }, { 21, TERM5, 0, 20 }, { 21, TERM6, 0, 20 }, { 21, TERM7, 0, 20 }, { 21, DEPART, 0, 20 }, { 21, 0, TERM_GROUP2_EXIT1_block, 22 },
++	{ 22, 255, TERM_GROUP2_block, 0 }, { 22, HANGAR, 0, 21 }, { 22, TERM5, 0, 21 }, { 22, TERM6, 0, 21 }, { 22, TERM7, 0, 21 }, { 22, TERM8, 0, 21 }, { 22, DEPART, 0, 21 }, { 22, 0, 0, 23 },
+ 	{ 23, 0, TERM_GROUP2_EXIT1_block, 70 },
+ 	{ 24, 0, TERM_GROUP2_EXIT2_block, 25 },
+ 	{ 25, 255, TERM_GROUP2_EXIT2_block, 0 }, { 25, HANGAR, HANGAR1_AREA_block | TERM_GROUP1_block, 29 }, { 25, 0, 0, 29 },
+ 	{ 26, 255, TERM_GROUP1_block, 0 }, { 26, TERM1, TERM1_block, 4 }, { 26, HANGAR, HANGAR1_AREA_block, 27 }, { 26, TERM5, TERM_GROUP2_ENTER1_block, 14 }, { 26, TERM6, TERM_GROUP2_ENTER1_block, 14 }, { 26, TERM7, TERM_GROUP2_ENTER1_block, 14 }, { 26, TERM8, TERM_GROUP2_ENTER1_block, 14 }, { 26, HELIPAD1, TERM_GROUP2_ENTER1_block, 14 }, { 26, HELIPAD2, TERM_GROUP2_ENTER1_block, 14 }, { 26, HELITAKEOFF, TERM_GROUP2_ENTER1_block, 14 }, { 26, 0, 0, 27 },
+ 	{ 27, 255, TERM_GROUP1_block, 0 }, { 27, TERM2, TERM2_block, 5 }, { 27, HANGAR, HANGAR1_AREA_block, 2 }, { 27, TERM1, 0, 26 }, { 27, TERM5, 0, 26 }, { 27, TERM6, 0, 26 }, { 27, TERM7, 0, 26 }, { 27, TERM8, 0, 26 }, { 27, HELIPAD1, 0, 14 }, { 27, HELIPAD2, 0, 14 }, { 27, 0, 0, 28 },
+ 	{ 28, 255, TERM_GROUP1_block, 0 }, { 28, TERM3, TERM3_block, 6 }, { 28, HANGAR, HANGAR1_AREA_block, 27 }, { 28, TERM1, 0, 27 }, { 28, TERM2, 0, 27 }, { 28, TERM4, 0, 29 }, { 28, TERM5, 0, 14 }, { 28, TERM6, 0, 14 }, { 28, TERM7, 0, 14 }, { 28, TERM8, 0, 14 }, { 28, HELIPAD1, 0, 14 }, { 28, HELIPAD2, 0, 14 }, { 28, 0, 0, 29 },
+-	{ 29, 255, TERM_GROUP1_block, 0 }, { 29, TERM4, TERM4_block, 7 }, { 29, HANGAR, HANGAR1_AREA_block, 27 }, { 29, TAKEOFF, 0, 30 }, { 29, 0, 0, 28 },
++	{ 29, 255, TERM_GROUP1_block, 0 }, { 29, TERM4, TERM4_block, 7 }, { 29, HANGAR, HANGAR1_AREA_block, 27 }, { 29, DEPART, 0, 30 }, { 29, 0, 0, 28 },
+ 	{ 30, 0, OUT_WAY_block2, 31 },
+ 	{ 31, 0, OUT_WAY_block, 32 },
+ 	/* takeoff */
+-	{ 32, TAKEOFF, RUNWAY_OUT_block, 33 },
++	{ 32, DEPART, RUNWAY_OUT_block, 33 },
+ 	{ 33, 0, RUNWAY_OUT_block, 34 },
+-	{ 34, STARTTAKEOFF, NOTHING_block, 35 },
+-	{ 35, ENDTAKEOFF, NOTHING_block, 0 },
++	{ 34, TAKEOFFROLL, NOTHING_block, 35 },
++	{ 35, TAKEOFF, NOTHING_block, 0 },
+ 	/* landing */
+ 	{ 36, 0, 0, 0 },
+-	{ 37, LANDING, RUNWAY_IN_block, 38 },
++	{ 37, DESCEND, RUNWAY_IN_block, 38 },
+ 	{ 38, 0, RUNWAY_IN_block, 39 },
+ 	{ 39, 0, RUNWAY_IN_block, 40 },
+-	{ 40, ENDLANDING, RUNWAY_IN_block, 41 },
++	{ 40, LANDING, RUNWAY_IN_block, 41 },
+ 	{ 41, 0, IN_WAY_block, 42 },
+ 	{ 42, 255, IN_WAY_block, 0 }, { 42, 255, TERM_GROUP1_block, 0 }, { 42, 255, TERM_GROUP1_block, 1 }, { 42, HANGAR, 0, 2 }, { 42, 0, 0, 26 },
+ 	/* In Air */
+ 	{ 43, 0, 0, 44 },
+-	{ 44, FLYING, 0, 45 }, { 44, HELILANDING, 0, 47 }, { 44, LANDING, 0, 69 }, { 44, 0, 0, 45 },
++	{ 44, FLYING, 0, 45 }, { 44, HELILANDING, 0, 47 }, { 44, DESCEND, 0, 69 }, { 44, 0, 0, 45 },
+ 	{ 45, 0, 0, 46 },
+-	{ 46, FLYING, 0, 43 }, { 46, LANDING, 0, 76 }, { 46, 0, 0, 43 },
++	{ 46, FLYING, 0, 43 }, { 46, DESCEND, 0, 76 }, { 46, 0, 0, 43 },
+ 	/* Helicopter -- stay in air in special place as a buffer to choose from helipads */
+ 	{ 47, HELILANDING, PRE_HELIPAD_block, 48 },
+ 	{ 48, HELIENDLANDING, PRE_HELIPAD_block, 48 }, { 48, HELIPAD1, 0, 49 }, { 48, HELIPAD2, 0, 50 }, { 48, HANGAR, 0, 55 },
+@@ -712,17 +712,17 @@ static const AirportFTAbuildup _airport_fta_intercontinental[] = {
+ 	{ 55, 0, HANGAR2_AREA_block, 56 }, // need to go to hangar when waiting in air
+ 	{ 56, 0, HANGAR2_AREA_block, 3 },
+ 	/* runway 2 out support */
+-	{ 57, 255, OUT_WAY2_block, 0 }, { 57, TAKEOFF, 0, 58 }, { 57, 0, 0, 58 },
++	{ 57, 255, OUT_WAY2_block, 0 }, { 57, DEPART, 0, 58 }, { 57, 0, 0, 58 },
+ 	{ 58, 0, OUT_WAY2_block, 59 },
+-	{ 59, TAKEOFF, RUNWAY_OUT2_block, 60 }, // takeoff
++	{ 59, DEPART, RUNWAY_OUT2_block, 60 }, // takeoff
+ 	{ 60, 0, RUNWAY_OUT2_block, 61 },
+-	{ 61, STARTTAKEOFF, NOTHING_block, 62 },
+-	{ 62, ENDTAKEOFF, NOTHING_block, 0 },
++	{ 61, TAKEOFFROLL, NOTHING_block, 62 },
++	{ 62, TAKEOFF, NOTHING_block, 0 },
+ 	/* runway 2 in support */
+-	{ 63, LANDING, RUNWAY_IN2_block, 64 },
++	{ 63, DESCEND, RUNWAY_IN2_block, 64 },
+ 	{ 64, 0, RUNWAY_IN2_block, 65 },
+ 	{ 65, 0, RUNWAY_IN2_block, 66 },
+-	{ 66, ENDLANDING, RUNWAY_IN2_block, 0 }, { 66, 255, 0, 1 }, { 66, 255, 0, 0 }, { 66, 0, 0, 67 },
++	{ 66, LANDING, RUNWAY_IN2_block, 0 }, { 66, 255, 0, 1 }, { 66, 255, 0, 0 }, { 66, 0, 0, 67 },
+ 	{ 67, 0, IN_WAY2_block, 68 },
+ 	{ 68, 255, IN_WAY2_block, 0 }, { 68, 255, TERM_GROUP2_block, 1 }, { 68, 255, TERM_GROUP1_block, 0 }, { 68, HANGAR, HANGAR2_AREA_block, 22 }, { 68, 0, 0, 22 },
+ 	{ 69, 255, RUNWAY_IN2_block, 0 }, { 69, 0, RUNWAY_IN2_block, 63 },
+diff --git a/src/vehicle_cmd.cpp b/src/vehicle_cmd.cpp
+index f45bd4b..da5f9d5 100644
+--- a/src/vehicle_cmd.cpp
++++ b/src/vehicle_cmd.cpp
+@@ -531,7 +531,7 @@ CommandCost CmdStartStopVehicle(TileIndex tile, DoCommandFlag flags, uint32 p1,
+ 		case VEH_AIRCRAFT: {
+ 			Aircraft *a = Aircraft::From(v);
+ 			/* cannot stop airplane when in flight, or when taking off / landing */
+-			if (!(v->vehstatus & VS_CRASHED) && a->state >= STARTTAKEOFF && a->state < TERM7) return_cmd_error(STR_ERROR_AIRCRAFT_IS_IN_FLIGHT);
++			if (!(v->vehstatus & VS_CRASHED) && a->state >= TAKEOFFROLL && a->state < TERM7) return_cmd_error(STR_ERROR_AIRCRAFT_IS_IN_FLIGHT);
+ 			break;
+ 		}
+ 

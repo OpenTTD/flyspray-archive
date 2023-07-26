@@ -1,0 +1,247 @@
+# HG changeset patch
+# Parent 526c3fb2ea52d78b0deb86d4789743b58e036dab
+Codechange: Deduplicate code for creating a new station instance.
+
+diff -r 526c3fb2ea52 src/station_cmd.cpp
+--- a/src/station_cmd.cpp	Tue Jun 19 17:45:14 2012 +0000
++++ b/src/station_cmd.cpp	Thu Jun 21 22:07:50 2012 +0200
+@@ -630,6 +630,45 @@
+ }
+ 
+ /**
++ * Find a station struct to use for the new part, or allocate a new one if needed
++ * @param st Pointer to the station
++ * @param flags Command flags
++ * @param reuse Whether to reuse a deleted station (gray sign) if possible
++ * @param area Area occupied by the new station
++ * @param name_class Station naming class to use to generate the new station's name
++ * @return Command error that occured, if any
++ */
++static CommandCost FindStationInstance(Station **st, DoCommandFlag flags, bool reuse, TileArea area, StationNaming name_class)
++{
++	/* Find a deleted station close to us */
++	if (*st == NULL && reuse) *st = GetClosestDeletedStation(area.tile);
++
++	if (*st != NULL) {
++		if ((*st)->owner != _current_company) {
++			return_cmd_error(STR_ERROR_TOO_CLOSE_TO_ANOTHER_STATION);
++		}
++
++		CommandCost ret = (*st)->rect.BeforeAddRect(area.tile, area.w, area.h, StationRect::ADD_TEST);
++		if (ret.Failed()) return ret;
++	} else {
++		/* allocate and initialize new station */
++		if (!Station::CanAllocateItem()) return_cmd_error(STR_ERROR_TOO_MANY_STATIONS_LOADING);
++
++		if (flags & DC_EXEC) {
++			*st = new Station(area.tile);
++
++			(*st)->town = ClosestTownFromTile(area.tile, UINT_MAX);
++			(*st)->string_id = GenerateStationName(*st, area.tile, name_class);
++
++			if (Company::IsValidID(_current_company)) {
++				SetBit((*st)->town->have_ratings, _current_company);
++			}
++		}
++	}
++	return CommandCost();
++}
++
++/**
+  * This is called right after a station was deleted.
+  * It checks if the whole station is free of substations, and if so, the station will be
+  * deleted after a little while.
+@@ -1143,35 +1182,12 @@
+ 	ret = FindJoiningStation(est, station_to_join, adjacent, new_location, &st);
+ 	if (ret.Failed()) return ret;
+ 
+-	/* See if there is a deleted station close to us. */
+-	if (st == NULL && reuse) st = GetClosestDeletedStation(tile_org);
+-
+-	if (st != NULL) {
+-		/* Reuse an existing station. */
+-		if (st->owner != _current_company) return_cmd_error(STR_ERROR_TOO_CLOSE_TO_ANOTHER_STATION);
+-
+-		if (st->train_station.tile != INVALID_TILE) {
+-			CommandCost ret = CanExpandRailStation(st, new_location, axis);
+-			if (ret.Failed()) return ret;
+-		}
+-
+-		/* XXX can't we pack this in the "else" part of the if above? */
+-		CommandCost ret = st->rect.BeforeAddRect(tile_org, w_org, h_org, StationRect::ADD_TEST);
++	ret = FindStationInstance(&st, flags, reuse, new_location, STATIONNAMING_RAIL);
++	if (ret.Failed()) return ret;
++
++	if (st != NULL && st->train_station.tile != INVALID_TILE) {
++		CommandCost ret = CanExpandRailStation(st, new_location, axis);
+ 		if (ret.Failed()) return ret;
+-	} else {
+-		/* allocate and initialize new station */
+-		if (!Station::CanAllocateItem()) return_cmd_error(STR_ERROR_TOO_MANY_STATIONS_LOADING);
+-
+-		if (flags & DC_EXEC) {
+-			st = new Station(tile_org);
+-
+-			st->town = ClosestTownFromTile(tile_org, UINT_MAX);
+-			st->string_id = GenerateStationName(st, tile_org, STATIONNAMING_RAIL);
+-
+-			if (Company::IsValidID(_current_company)) {
+-				SetBit(st->town->have_ratings, _current_company);
+-			}
+-		}
+ 	}
+ 
+ 	/* Check if we can allocate a custom stationspec to this station */
+@@ -1739,34 +1755,11 @@
+ 	ret = FindJoiningRoadStop(est, station_to_join, HasBit(p2, 5), roadstop_area, &st);
+ 	if (ret.Failed()) return ret;
+ 
+-	/* Find a deleted station close to us */
+-	if (st == NULL && reuse) st = GetClosestDeletedStation(tile);
+-
+ 	/* Check if this number of road stops can be allocated. */
+ 	if (!RoadStop::CanAllocateItem(roadstop_area.w * roadstop_area.h)) return_cmd_error(type ? STR_ERROR_TOO_MANY_TRUCK_STOPS : STR_ERROR_TOO_MANY_BUS_STOPS);
+ 
+-	if (st != NULL) {
+-		if (st->owner != _current_company) {
+-			return_cmd_error(STR_ERROR_TOO_CLOSE_TO_ANOTHER_STATION);
+-		}
+-
+-		CommandCost ret = st->rect.BeforeAddRect(roadstop_area.tile, roadstop_area.w, roadstop_area.h, StationRect::ADD_TEST);
+-		if (ret.Failed()) return ret;
+-	} else {
+-		/* allocate and initialize new station */
+-		if (!Station::CanAllocateItem()) return_cmd_error(STR_ERROR_TOO_MANY_STATIONS_LOADING);
+-
+-		if (flags & DC_EXEC) {
+-			st = new Station(tile);
+-
+-			st->town = ClosestTownFromTile(tile, UINT_MAX);
+-			st->string_id = GenerateStationName(st, tile, STATIONNAMING_ROAD);
+-
+-			if (Company::IsValidID(_current_company)) {
+-				SetBit(st->town->have_ratings, _current_company);
+-			}
+-		}
+-	}
++	ret = FindStationInstance(&st, flags, reuse, roadstop_area, STATIONNAMING_ROAD);
++	if (ret.Failed()) return ret;
+ 
+ 	if (flags & DC_EXEC) {
+ 		/* Check every tile in the area. */
+@@ -2150,12 +2143,13 @@
+ 	int w = as->size_x;
+ 	int h = as->size_y;
+ 	if (rotation == DIR_E || rotation == DIR_W) Swap(w, h);
++	TileArea airport_area = TileArea(tile, w, h);
+ 
+ 	if (w > _settings_game.station.station_spread || h > _settings_game.station.station_spread) {
+ 		return_cmd_error(STR_ERROR_STATION_TOO_SPREAD_OUT);
+ 	}
+ 
+-	CommandCost cost = CheckFlatLand(TileArea(tile, w, h), flags);
++	CommandCost cost = CheckFlatLand(airport_area, flags);
+ 	if (cost.Failed()) return cost;
+ 
+ 	/* The noise level is the noise from the airport and reduce it to account for the distance to the town center. */
+@@ -2188,40 +2182,17 @@
+ 	}
+ 
+ 	Station *st = NULL;
+-	ret = FindJoiningStation(INVALID_STATION, station_to_join, HasBit(p2, 0), TileArea(tile, w, h), &st);
++	ret = FindJoiningStation(INVALID_STATION, station_to_join, HasBit(p2, 0), airport_area, &st);
+ 	if (ret.Failed()) return ret;
+ 
+ 	/* Distant join */
+ 	if (st == NULL && distant_join) st = Station::GetIfValid(station_to_join);
+ 
+-	/* Find a deleted station close to us */
+-	if (st == NULL && reuse) st = GetClosestDeletedStation(tile);
+-
+-	if (st != NULL) {
+-		if (st->owner != _current_company) {
+-			return_cmd_error(STR_ERROR_TOO_CLOSE_TO_ANOTHER_STATION);
+-		}
+-
+-		CommandCost ret = st->rect.BeforeAddRect(tile, w, h, StationRect::ADD_TEST);
+-		if (ret.Failed()) return ret;
+-
+-		if (st->airport.tile != INVALID_TILE) {
+-			return_cmd_error(STR_ERROR_TOO_CLOSE_TO_ANOTHER_AIRPORT);
+-		}
+-	} else {
+-		/* allocate and initialize new station */
+-		if (!Station::CanAllocateItem()) return_cmd_error(STR_ERROR_TOO_MANY_STATIONS_LOADING);
+-
+-		if (flags & DC_EXEC) {
+-			st = new Station(tile);
+-
+-			st->town = t;
+-			st->string_id = GenerateStationName(st, tile, !(GetAirport(airport_type)->flags & AirportFTAClass::AIRPLANES) ? STATIONNAMING_HELIPORT : STATIONNAMING_AIRPORT);
+-
+-			if (Company::IsValidID(_current_company)) {
+-				SetBit(st->town->have_ratings, _current_company);
+-			}
+-		}
++	ret = FindStationInstance(&st, flags, reuse, airport_area, !(GetAirport(airport_type)->flags & AirportFTAClass::AIRPLANES) ? STATIONNAMING_HELIPORT : STATIONNAMING_AIRPORT);
++	if (ret.Failed()) return ret;
++
++	if (st != NULL && st->airport.tile != INVALID_TILE) {
++		return_cmd_error(STR_ERROR_TOO_CLOSE_TO_ANOTHER_AIRPORT);
+ 	}
+ 
+ 	for (AirportTileTableIterator iter(as->table[layout], tile); iter != INVALID_TILE; ++iter) {
+@@ -2466,45 +2437,21 @@
+ 		return_cmd_error(STR_ERROR_SITE_UNSUITABLE);
+ 	}
+ 
++	TileArea dock_area = TileArea(tile + ToTileIndexDiff(_dock_tileoffs_chkaround[direction]), 
++			_dock_w_chk[direction], _dock_h_chk[direction]);
++
+ 	/* middle */
+ 	Station *st = NULL;
+-	ret = FindJoiningStation(INVALID_STATION, station_to_join, HasBit(p1, 0),
+-			TileArea(tile + ToTileIndexDiff(_dock_tileoffs_chkaround[direction]),
+-					_dock_w_chk[direction], _dock_h_chk[direction]), &st);
++	ret = FindJoiningStation(INVALID_STATION, station_to_join, HasBit(p1, 0), dock_area, &st);
+ 	if (ret.Failed()) return ret;
+ 
+ 	/* Distant join */
+ 	if (st == NULL && distant_join) st = Station::GetIfValid(station_to_join);
+ 
+-	/* Find a deleted station close to us */
+-	if (st == NULL && reuse) st = GetClosestDeletedStation(tile);
+-
+-	if (st != NULL) {
+-		if (st->owner != _current_company) {
+-			return_cmd_error(STR_ERROR_TOO_CLOSE_TO_ANOTHER_STATION);
+-		}
+-
+-		CommandCost ret = st->rect.BeforeAddRect(
+-				tile + ToTileIndexDiff(_dock_tileoffs_chkaround[direction]),
+-				_dock_w_chk[direction], _dock_h_chk[direction], StationRect::ADD_TEST);
+-		if (ret.Failed()) return ret;
+-
+-		if (st->dock_tile != INVALID_TILE) return_cmd_error(STR_ERROR_TOO_CLOSE_TO_ANOTHER_DOCK);
+-	} else {
+-		/* allocate and initialize new station */
+-		if (!Station::CanAllocateItem()) return_cmd_error(STR_ERROR_TOO_MANY_STATIONS_LOADING);
+-
+-		if (flags & DC_EXEC) {
+-			st = new Station(tile);
+-
+-			st->town = ClosestTownFromTile(tile, UINT_MAX);
+-			st->string_id = GenerateStationName(st, tile, STATIONNAMING_DOCK);
+-
+-			if (Company::IsValidID(_current_company)) {
+-				SetBit(st->town->have_ratings, _current_company);
+-			}
+-		}
+-	}
++	ret = FindStationInstance(&st, flags, reuse, dock_area, STATIONNAMING_RAIL);
++	if (ret.Failed()) return ret;
++
++	if (st != NULL && st->dock_tile != INVALID_TILE) return_cmd_error(STR_ERROR_TOO_CLOSE_TO_ANOTHER_DOCK);
+ 
+ 	if (flags & DC_EXEC) {
+ 		st->dock_tile = tile;

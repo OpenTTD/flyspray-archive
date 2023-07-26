@@ -1,0 +1,134 @@
+# HG changeset patch
+# Parent 8ca43a80721694b424b39bd5743de87e62a790ce
+
+diff -r 8ca43a807216 src/goal.cpp
+--- a/src/goal.cpp	Thu Nov 14 23:04:04 2013 +0000
++++ b/src/goal.cpp	Sat Nov 16 13:54:24 2013 +0100
+@@ -19,6 +19,7 @@
+ #include "game/game.hpp"
+ #include "command_func.h"
+ #include "company_base.h"
++#include "story_base.h"
+ #include "string_func.h"
+ #include "gui.h"
+ #include "network/network.h"
+@@ -72,6 +73,11 @@
+ 			if (!Company::IsValidID(p2)) return CMD_ERROR;
+ 			break;
+ 
++		case GT_STORY_PAGE:
++			if (!StoryPage::IsValidID(p2)) return CMD_ERROR;
++			if (StoryPage::Get(p2)->company != company) return CMD_ERROR;
++			break;
++
+ 		default: return CMD_ERROR;
+ 	}
+ 
+diff -r 8ca43a807216 src/goal_gui.cpp
+--- a/src/goal_gui.cpp	Thu Nov 14 23:04:04 2013 +0000
++++ b/src/goal_gui.cpp	Sat Nov 16 13:54:24 2013 +0100
+@@ -21,6 +21,7 @@
+ #include "core/geometry_func.hpp"
+ #include "company_func.h"
+ #include "company_base.h"
++#include "story_base.h"
+ #include "command_func.h"
+ 
+ #include "widgets/goal_widget.h"
+@@ -122,6 +123,12 @@
+ 				xy = Town::Get(s->dst)->xy;
+ 				break;
+ 
++			case GT_STORY_PAGE:
++				if (!StoryPage::IsValidID(s->dst)) return;
++				if (StoryPage::Get(s->dst)->company != this->window_number) return;
++				ShowStoryBook((CompanyID)this->window_number, s->dst); 
++				return;
++
+ 			default: NOT_REACHED();
+ 		}
+ 
+diff -r 8ca43a807216 src/goal_type.h
+--- a/src/goal_type.h	Thu Nov 14 23:04:04 2013 +0000
++++ b/src/goal_type.h	Sat Nov 16 13:54:24 2013 +0100
+@@ -24,6 +24,7 @@
+ 	GT_INDUSTRY,     ///< Destination is an industry
+ 	GT_TOWN,         ///< Destination is a town
+ 	GT_COMPANY,      ///< Destination is a company
++	GT_STORY_PAGE,   ///< Destination is a story page
+ };
+ typedef SimpleTinyEnumT<GoalType, byte> GoalTypeByte; ///< The GoalType packed into a byte for savegame purposes.
+ 
+diff -r 8ca43a807216 src/script/api/game/game_goal.hpp.sq
+--- a/src/script/api/game/game_goal.hpp.sq	Thu Nov 14 23:04:04 2013 +0000
++++ b/src/script/api/game/game_goal.hpp.sq	Sat Nov 16 13:54:24 2013 +0100
+@@ -27,6 +27,7 @@
+ 	SQGSGoal.DefSQConst(engine, ScriptGoal::GT_INDUSTRY,      "GT_INDUSTRY");
+ 	SQGSGoal.DefSQConst(engine, ScriptGoal::GT_TOWN,          "GT_TOWN");
+ 	SQGSGoal.DefSQConst(engine, ScriptGoal::GT_COMPANY,       "GT_COMPANY");
++	SQGSGoal.DefSQConst(engine, ScriptGoal::GT_STORY_PAGE,    "GT_STORY_PAGE");
+ 	SQGSGoal.DefSQConst(engine, ScriptGoal::QT_QUESTION,      "QT_QUESTION");
+ 	SQGSGoal.DefSQConst(engine, ScriptGoal::QT_INFORMATION,   "QT_INFORMATION");
+ 	SQGSGoal.DefSQConst(engine, ScriptGoal::QT_WARNING,       "QT_WARNING");
+diff -r 8ca43a807216 src/script/api/game_changelog.hpp
+--- a/src/script/api/game_changelog.hpp	Thu Nov 14 23:04:04 2013 +0000
++++ b/src/script/api/game_changelog.hpp	Sat Nov 16 13:54:24 2013 +0100
+@@ -21,6 +21,7 @@
+  *
+  * API additions:
+  * \li GSCompany::ChangeBankBalance
++ * \li GSGoal::GT_STORY_PAGE
+  * \li GSGoal::IsCompleted
+  * \li GSGoal::SetCompleted
+  * \li GSGoal::SetProgress
+diff -r 8ca43a807216 src/script/api/script_goal.cpp
+--- a/src/script/api/script_goal.cpp	Thu Nov 14 23:04:04 2013 +0000
++++ b/src/script/api/script_goal.cpp	Sat Nov 16 13:54:24 2013 +0100
+@@ -15,6 +15,7 @@
+ #include "script_industry.hpp"
+ #include "script_map.hpp"
+ #include "script_town.hpp"
++#include "script_story_page.hpp"
+ #include "../script_instance.hpp"
+ #include "../../goal_base.h"
+ #include "../../string_func.h"
+@@ -33,10 +34,18 @@
+ 	const char *text = goal->GetEncodedText();
+ 	EnforcePreconditionEncodedText(GOAL_INVALID, text);
+ 	EnforcePrecondition(GOAL_INVALID, company == ScriptCompany::COMPANY_INVALID || ScriptCompany::ResolveCompanyID(company) != ScriptCompany::COMPANY_INVALID);
+-	EnforcePrecondition(GOAL_INVALID, (type == GT_NONE && destination == 0) || (type == GT_TILE && ScriptMap::IsValidTile(destination)) || (type == GT_INDUSTRY && ScriptIndustry::IsValidIndustry(destination)) || (type == GT_TOWN && ScriptTown::IsValidTown(destination)) || (type == GT_COMPANY && ScriptCompany::ResolveCompanyID((ScriptCompany::CompanyID)destination) != ScriptCompany::COMPANY_INVALID));
+ 
+ 	uint8 c = company;
+ 	if (company == ScriptCompany::COMPANY_INVALID) c = INVALID_COMPANY;
++	StoryPage *story_page = NULL;	
++	if (type == GT_STORY_PAGE && ScriptStoryPage::IsValidStoryPage((ScriptStoryPage::StoryPageID)destination)) story_page = ::StoryPage::Get((ScriptStoryPage::StoryPageID)destination);
++
++	EnforcePrecondition(GOAL_INVALID, (type == GT_NONE && destination == 0) ||
++			(type == GT_TILE && ScriptMap::IsValidTile(destination)) ||
++			(type == GT_INDUSTRY && ScriptIndustry::IsValidIndustry(destination)) ||
++			(type == GT_TOWN && ScriptTown::IsValidTown(destination)) ||
++			(type == GT_COMPANY && ScriptCompany::ResolveCompanyID((ScriptCompany::CompanyID)destination) != ScriptCompany::COMPANY_INVALID) ||
++			(type == GT_STORY_PAGE && story_page != NULL && story_page->company == INVALID_COMPANY ? c == INVALID_COMPANY : (c == INVALID_COMPANY || c == story_page->company)));
+ 
+ 	if (!ScriptObject::DoCommand(0, type | (c << 8), destination, CMD_CREATE_GOAL, text, &ScriptInstance::DoCommandReturnGoalID)) return GOAL_INVALID;
+ 
+diff -r 8ca43a807216 src/script/api/script_goal.hpp
+--- a/src/script/api/script_goal.hpp	Thu Nov 14 23:04:04 2013 +0000
++++ b/src/script/api/script_goal.hpp	Sat Nov 16 13:54:24 2013 +0100
+@@ -44,6 +44,7 @@
+ 		GT_INDUSTRY = ::GT_INDUSTRY, ///< Destination is an industry.
+ 		GT_TOWN     = ::GT_TOWN,     ///< Destination is a town.
+ 		GT_COMPANY  = ::GT_COMPANY,  ///< Destination is a company.
++		GT_STORY_PAGE = ::GT_STORY_PAGE ///< Destination is a story page.
+ 	};
+ 
+ 	/**
+@@ -99,6 +100,8 @@
+ 	 * @pre No ScriptCompanyMode may be in scope.
+ 	 * @pre goal != NULL && len(goal) != 0.
+ 	 * @pre company == COMPANY_INVALID || ResolveCompanyID(company) != COMPANY_INVALID.
++	 * @pre if type == GT_STORY_PAGE, then goal company must be the same company as the story page, or both global.
++	 * @pre if type is GT_STORY_PAGE and company is COMPANY_INVALID, then referenced story page must be global, otherwise either global or same company is accepted. 
+ 	 */
+ 	static GoalID New(ScriptCompany::CompanyID company, Text *goal, GoalType type, uint32 destination);
+ 

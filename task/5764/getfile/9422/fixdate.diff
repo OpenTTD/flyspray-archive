@@ -1,0 +1,122 @@
+commit 3288e17dc1edde3af87ddaead1e3f2df80c48b5e
+Author: Ulf Hermann <ulf_hermann@gmx.net>
+Date:   Tue Oct 15 18:48:30 2013 +0200
+
+    -Fix: shift dates on link graphs when using scenario editor date tool
+
+diff --git a/src/cheat_gui.cpp b/src/cheat_gui.cpp
+index 8728827..206b493 100644
+--- a/src/cheat_gui.cpp
++++ b/src/cheat_gui.cpp
+@@ -24,8 +24,7 @@
+ #include "rail_gui.h"
+ #include "settings_gui.h"
+ #include "company_gui.h"
+-#include "linkgraph/linkgraph.h"
+-#include "linkgraph/linkgraphjob.h"
++#include "linkgraph/linkgraphschedule.h"
+ 
+ #include "widgets/cheat_widget.h"
+ 
+@@ -103,10 +102,7 @@ static int32 ClickChangeDateCheat(int32 p1, int32 p2)
+ 	if (p1 == _cur_year) return _cur_year;
+ 
+ 	Date new_date = ConvertYMDToDate(p1, ymd.month, ymd.day);
+-	LinkGraph *lg;
+-	FOR_ALL_LINK_GRAPHS(lg) lg->ShiftDates(new_date - _date);
+-	LinkGraphJob *lgj;
+-	FOR_ALL_LINK_GRAPH_JOBS(lgj) lgj->ShiftJoinDate(new_date - _date);
++	LinkGraphSchedule::Instance()->ShiftDates(new_date);
+ 	SetDate(new_date, _date_fract);
+ 	EnginesMonthlyLoop();
+ 	SetWindowDirty(WC_STATUS_BAR, 0);
+diff --git a/src/linkgraph/linkgraphschedule.cpp b/src/linkgraph/linkgraphschedule.cpp
+index 7e2c66f..59562ff 100644
+--- a/src/linkgraph/linkgraphschedule.cpp
++++ b/src/linkgraph/linkgraphschedule.cpp
+@@ -126,6 +126,19 @@ void LinkGraphSchedule::SpawnAll()
+ }
+ 
+ /**
++ * Shift all dates (join dates and edge annotations) of link graphs and link
++ * graph jobs by the difference between current and given date.
++ * @param new_date New date to be set shortly as global _date.
++ */
++void LinkGraphSchedule::ShiftDates(Date new_date)
++{
++	LinkGraph *lg;
++	FOR_ALL_LINK_GRAPHS(lg) lg->ShiftDates(new_date - _date);
++	LinkGraphJob *lgj;
++	FOR_ALL_LINK_GRAPH_JOBS(lgj) lgj->ShiftJoinDate(new_date - _date);
++}
++
++/**
+  * Create a link graph schedule and initialize its handlers.
+  */
+ LinkGraphSchedule::LinkGraphSchedule()
+diff --git a/src/linkgraph/linkgraphschedule.h b/src/linkgraph/linkgraphschedule.h
+index 911fa38..6e5f1db 100644
+--- a/src/linkgraph/linkgraphschedule.h
++++ b/src/linkgraph/linkgraphschedule.h
+@@ -62,6 +62,7 @@ public:
+ 	void SpawnNext();
+ 	void JoinNext();
+ 	void SpawnAll();
++	void ShiftDates(Date new_date);
+ 
+ 	/**
+ 	 * Queue a link graph for execution.
+diff --git a/src/toolbar_gui.cpp b/src/toolbar_gui.cpp
+index b5eb7ef..ee1307e 100644
+--- a/src/toolbar_gui.cpp
++++ b/src/toolbar_gui.cpp
+@@ -1111,6 +1111,19 @@ void ToggleDirtyBlocks()
+ }
+ 
+ /**
++ * Set the starting year for a scenario.
++ * @param year New starting year.
++ */
++void SetStartingYear(Year year)
++{
++	_settings_game.game_creation.starting_year = Clamp(year, MIN_YEAR, MAX_YEAR);
++	Date new_date = ConvertYMDToDate(_settings_game.game_creation.starting_year, 0, 1);
++	/* If you open a savegame as scenario there may already be link graphs.*/
++	LinkGraphSchedule::Instance()->ShiftDates(new_date);
++	SetDate(new_date, 0);
++}
++
++/**
+  * Choose the proper callback function for the main toolbar's help menu.
+  * @param index The menu index which was selected.
+  * @return CBF_NONE
+@@ -1169,8 +1182,7 @@ static CallBackFunction ToolbarScenDateBackward(Window *w)
+ 		w->HandleButtonClick(WID_TE_DATE_BACKWARD);
+ 		w->SetDirty();
+ 
+-		_settings_game.game_creation.starting_year = Clamp(_settings_game.game_creation.starting_year - 1, MIN_YEAR, MAX_YEAR);
+-		SetDate(ConvertYMDToDate(_settings_game.game_creation.starting_year, 0, 1), 0);
++		SetStartingYear(_settings_game.game_creation.starting_year - 1);
+ 	}
+ 	_left_button_clicked = false;
+ 	return CBF_NONE;
+@@ -1183,8 +1195,7 @@ static CallBackFunction ToolbarScenDateForward(Window *w)
+ 		w->HandleButtonClick(WID_TE_DATE_FORWARD);
+ 		w->SetDirty();
+ 
+-		_settings_game.game_creation.starting_year = Clamp(_settings_game.game_creation.starting_year + 1, MIN_YEAR, MAX_YEAR);
+-		SetDate(ConvertYMDToDate(_settings_game.game_creation.starting_year, 0, 1), 0);
++		SetStartingYear(_settings_game.game_creation.starting_year + 1);
+ 	}
+ 	_left_button_clicked = false;
+ 	return CBF_NONE;
+@@ -2119,8 +2130,7 @@ struct ScenarioEditorToolbarWindow : Window {
+ 			/* An empty string means revert to the default */
+ 			value = DEF_START_YEAR;
+ 		}
+-		_settings_game.game_creation.starting_year = Clamp(value, MIN_YEAR, MAX_YEAR);
+-		SetDate(ConvertYMDToDate(_settings_game.game_creation.starting_year, 0, 1), 0);
++		SetStartingYear(value);
+ 
+ 		this->SetDirty();
+ 	}

@@ -1,0 +1,131 @@
+# HG changeset patch
+# Parent 0b91d3d1097449812489975d689a2ad0216b5123
+# User sbr
+# Date 1346577585 -7200
+
+Add a 'sort by rating' capability to the town directory. (r24510)
+
+diff -r 0b91d3d10974 src/script/api/script_window.hpp
+--- a/src/script/api/script_window.hpp	Mon Sep 03 17:45:12 2012 +0000
++++ b/src/script/api/script_window.hpp	Tue Sep 04 13:18:00 2012 +0200
+@@ -2224,6 +2224,7 @@
+ 
+ 	/** Widgets of the #TownDirectoryWindow class. */
+ 	enum TownDirectoryWidgets {
++		WID_TD_SORT_RATING                   = ::WID_TD_SORT_RATING,                   ///< Sort by town rating.
+ 		WID_TD_SORT_NAME                     = ::WID_TD_SORT_NAME,                     ///< Sort by town name.
+ 		WID_TD_SORT_POPULATION               = ::WID_TD_SORT_POPULATION,               ///< Sort by town population.
+ 		WID_TD_LIST                          = ::WID_TD_LIST,                          ///< List of towns.
+diff -r 0b91d3d10974 src/town_gui.cpp
+--- a/src/town_gui.cpp	Mon Sep 03 17:45:12 2012 +0000
++++ b/src/town_gui.cpp	Tue Sep 04 13:18:00 2012 +0200
+@@ -606,8 +606,9 @@
+ 	NWidget(NWID_HORIZONTAL),
+ 		NWidget(NWID_VERTICAL),
+ 			NWidget(NWID_HORIZONTAL),
++				NWidget(WWT_PUSHTXTBTN, COLOUR_BROWN, WID_TD_SORT_RATING), SetMinimalSize(12, 12), SetDataTip(STR_EMPTY, STR_TOOLTIP_SORT_ORDER), SetFill(1, 0),
+ 				NWidget(WWT_PUSHTXTBTN, COLOUR_BROWN, WID_TD_SORT_NAME), SetMinimalSize(99, 12), SetDataTip(STR_SORT_BY_CAPTION_NAME, STR_TOOLTIP_SORT_ORDER), SetFill(1, 0),
+-				NWidget(WWT_PUSHTXTBTN, COLOUR_BROWN, WID_TD_SORT_POPULATION), SetMinimalSize(97, 12), SetDataTip(STR_SORT_BY_CAPTION_POPULATION, STR_TOOLTIP_SORT_ORDER), SetFill(1, 0),
++				NWidget(WWT_PUSHTXTBTN, COLOUR_BROWN, WID_TD_SORT_POPULATION), SetMinimalSize(85, 12), SetDataTip(STR_SORT_BY_CAPTION_POPULATION, STR_TOOLTIP_SORT_ORDER), SetFill(1, 0),
+ 			EndContainer(),
+ 			NWidget(WWT_PANEL, COLOUR_BROWN, WID_TD_LIST), SetMinimalSize(196, 0), SetDataTip(0x0, STR_TOWN_DIRECTORY_LIST_TOOLTIP),
+ 							SetFill(1, 0), SetResize(0, 10), SetScrollbar(WID_TD_SCROLLBAR), EndContainer(),
+@@ -655,6 +656,16 @@
+ 		this->towns.Sort();
+ 	}
+ 
++	/** Sort by town rating */
++	static int CDECL TownRatingSorter(const Town * const *a, const Town * const *b)
++	{
++		/* Setting RATING_MINIMUM to towns without rating sort them after towns which are rated. */
++		int16 a_rating = !HasBit((*a)->have_ratings, _local_company) ? (int16) RATING_MINIMUM - 1 : (*a)->ratings[_local_company];
++		int16 b_rating = !HasBit((*b)->have_ratings, _local_company) ? (int16) RATING_MINIMUM - 1 : (*b)->ratings[_local_company];
++
++		return a_rating - b_rating;
++	}
++
+ 	/** Sort by town name */
+ 	static int CDECL TownNameSorter(const Town * const *a, const Town * const *b)
+ 	{
+@@ -712,12 +723,16 @@
+ 	virtual void DrawWidget(const Rect &r, int widget) const
+ 	{
+ 		switch (widget) {
++			case WID_TD_SORT_RATING:
++				if (this->towns.SortType() == 2) this->DrawSortButtonState(widget, this->towns.IsDescSortOrder() ? SBS_DOWN : SBS_UP);
++				break;
++
+ 			case WID_TD_SORT_NAME:
+ 				if (this->towns.SortType() == 0) this->DrawSortButtonState(widget, this->towns.IsDescSortOrder() ? SBS_DOWN : SBS_UP);
+ 				break;
+ 
+ 			case WID_TD_SORT_POPULATION:
+-				if (this->towns.SortType() != 0) this->DrawSortButtonState(widget, this->towns.IsDescSortOrder() ? SBS_DOWN : SBS_UP);
++				if (this->towns.SortType() == 1) this->DrawSortButtonState(widget, this->towns.IsDescSortOrder() ? SBS_DOWN : SBS_UP);
+ 				break;
+ 
+ 			case WID_TD_LIST: {
+@@ -731,9 +746,10 @@
+ 				/* At least one town available. */
+ 				bool rtl = _current_text_dir == TD_RTL;
+ 				Dimension icon_size = GetSpriteSize(SPR_TOWN_RATING_GOOD);
+-				int text_left  = r.left + WD_FRAMERECT_LEFT + (rtl ? 0 : icon_size.width + 2);
+-				int text_right = r.right - WD_FRAMERECT_RIGHT - (rtl ? icon_size.width + 2 : 0);
+-				int icon_x = rtl ? r.right - WD_FRAMERECT_RIGHT - icon_size.width : r.left + WD_FRAMERECT_LEFT;
++				int icon_cell_width = this->GetWidget<NWidgetBase>(WID_TD_SORT_RATING)->current_x;
++				int text_left  = r.left + (rtl ? WD_FRAMERECT_LEFT : icon_cell_width);
++				int text_right = r.right - (rtl ? icon_cell_width : WD_FRAMERECT_RIGHT);
++				int icon_x = rtl ? r.right - icon_cell_width / 2 - icon_size.width / 2 : r.left  + icon_cell_width / 2 - icon_size.width / 2;
+ 
+ 				for (uint i = this->vscroll->GetPosition(); i < this->towns.Length(); i++) {
+ 					const Town *t = this->towns[i];
+@@ -764,6 +780,13 @@
+ 	virtual void UpdateWidgetSize(int widget, Dimension *size, const Dimension &padding, Dimension *fill, Dimension *resize)
+ 	{
+ 		switch (widget) {
++			case WID_TD_SORT_RATING: {
++				Dimension d = GetSpriteSize(SPR_TOWN_RATING_GOOD);
++				d.width += padding.width;
++				d.height += padding.height;
++				*size = maxdim(*size, d);
++				break;
++			}
+ 			case WID_TD_SORT_NAME:
+ 			case WID_TD_SORT_POPULATION: {
+ 				Dimension d = GetStringBoundingBox(this->GetWidget<NWidgetCore>(widget)->widget_data);
+@@ -807,6 +830,16 @@
+ 	virtual void OnClick(Point pt, int widget, int click_count)
+ 	{
+ 		switch (widget) {
++			case WID_TD_SORT_RATING: // Sort by Rating ascending/descending
++				if (this->towns.SortType() == 2) {
++					this->towns.ToggleSortOrder();
++				} else {
++					this->towns.SetSortType(2);
++				}
++				this->BuildSortTownList();
++				this->SetDirty();
++				break;
++
+ 			case WID_TD_SORT_NAME: // Sort by Name ascending/descending
+ 				if (this->towns.SortType() == 0) {
+ 					this->towns.ToggleSortOrder();
+@@ -883,6 +916,7 @@
+ GUITownList::SortFunction * const TownDirectoryWindow::sorter_funcs[] = {
+ 	&TownNameSorter,
+ 	&TownPopulationSorter,
++	&TownRatingSorter,
+ };
+ 
+ static const WindowDesc _town_directory_desc(
+diff -r 0b91d3d10974 src/widgets/town_widget.h
+--- a/src/widgets/town_widget.h	Mon Sep 03 17:45:12 2012 +0000
++++ b/src/widgets/town_widget.h	Tue Sep 04 13:18:00 2012 +0200
+@@ -14,6 +14,7 @@
+ 
+ /** Widgets of the #TownDirectoryWindow class. */
+ enum TownDirectoryWidgets {
++	WID_TD_SORT_RATING,      ///< Sort by town rating.
+ 	WID_TD_SORT_NAME,        ///< Sort by town name.
+ 	WID_TD_SORT_POPULATION,  ///< Sort by town population.
+ 	WID_TD_LIST,             ///< List of towns.

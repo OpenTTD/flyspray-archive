@@ -1,0 +1,219 @@
+Index: company_base.h
+===================================================================
+--- company_base.h	(revision 26228)
++++ company_base.h	(working copy)
+@@ -74,7 +74,7 @@
+ 	TileIndex location_of_HQ;        ///< Northern tile of HQ; #INVALID_TILE when there is none.
+ 	TileIndex last_build_coordinate; ///< Coordinate of the last build thing by this company.
+ 
+-	OwnerByte share_owners[4];       ///< Owners of the 4 shares of the company. #INVALID_OWNER if nobody has bought them yet.
++	OwnerByte share_owners[20];       ///< Owners of the 20 shares of the company. #INVALID_OWNER if nobody has bought them yet.
+ 
+ 	Year inaugurated_year;           ///< Year of starting the company.
+ 
+Index: company_cmd.cpp
+===================================================================
+--- company_cmd.cpp	(revision 26228)
++++ company_cmd.cpp	(working copy)
+@@ -63,7 +63,7 @@
+ 	this->clear_limit     = _settings_game.construction.clear_frame_burst << 16;
+ 	this->tree_limit      = _settings_game.construction.tree_frame_burst << 16;
+ 
+-	for (uint j = 0; j < 4; j++) this->share_owners[j] = COMPANY_SPECTATOR;
++	for (uint j = 0; j < 20; j++) this->share_owners[j] = COMPANY_SPECTATOR;
+ 	InvalidateWindowData(WC_PERFORMANCE_DETAIL, 0, INVALID_COMPANY);
+ }
+ 
+@@ -548,7 +548,11 @@
+ 
+ 	c->money = c->current_loan = (100000ll * _economy.inflation_prices >> 16) / 50000 * 50000;
+ 
+-	c->share_owners[0] = c->share_owners[1] = c->share_owners[2] = c->share_owners[3] = INVALID_OWNER;
++	for(int i = 0; c->share_owners[i] != NULL; i++)
++	{
++		c->share_owners[i] = INVALID_OWNER;
++	}
++	//c->share_owners[0] = c->share_owners[1] = c->share_owners[2] = c->share_owners[3] = INVALID_OWNER;
+ 
+ 	c->avail_railtypes = GetCompanyRailtypes(c->index);
+ 	c->avail_roadtypes = GetCompanyRoadtypes(c->index);
+Index: company_gui.cpp
+===================================================================
+--- company_gui.cpp	(revision 26228)
++++ company_gui.cpp	(working copy)
+@@ -1956,10 +1956,20 @@
+ 
+ int GetAmountOwnedBy(const Company *c, Owner owner)
+ {
++	int total = 0;
++	for(int i = 0; i < lengthof(c->share_owners);)
++	{
++		if(c->share_owners[i++] == owner)
++			total++;
++	}
++	return total;
++
++	/*
+ 	return (c->share_owners[0] == owner) +
+ 				 (c->share_owners[1] == owner) +
+ 				 (c->share_owners[2] == owner) +
+ 				 (c->share_owners[3] == owner);
++				 */
+ }
+ 
+ /** Strings for the company vehicle counts */
+@@ -2107,12 +2117,13 @@
+ 				const Company *c2;
+ 
+ 				FOR_ALL_COMPANIES(c2) {
+-					SetDParamMaxValue(0, 75);
++					SetDParamMaxValue(0, 95);
+ 					SetDParam(1, c2->index);
+ 
+ 					size->width = max(size->width, GetStringBoundingBox(STR_COMPANY_VIEW_SHARES_OWNED_BY).width);
+ 				}
+-				break;
++				break;			
++
+ 			}
+ 
+ #ifdef ENABLE_NETWORK
+@@ -2216,7 +2227,7 @@
+ 				FOR_ALL_COMPANIES(c2) {
+ 					uint amt = GetAmountOwnedBy(c, c2->index);
+ 					if (amt != 0) {
+-						SetDParam(0, amt * 25);
++						SetDParam(0, amt * 5);
+ 						SetDParam(1, c2->index);
+ 
+ 						DrawString(r.left, r.right, y, STR_COMPANY_VIEW_SHARES_OWNED_BY);
+@@ -2316,11 +2327,11 @@
+ 				break;
+ 
+ 			case WID_C_BUY_SHARE:
+-				DoCommandP(0, this->window_number, 0, CMD_BUY_SHARE_IN_COMPANY | CMD_MSG(STR_ERROR_CAN_T_BUY_25_SHARE_IN_THIS));
++				DoCommandP(0, this->window_number, _ctrl_pressed ? 5 : 1, CMD_BUY_SHARE_IN_COMPANY | CMD_MSG(STR_ERROR_CAN_T_BUY_5_SHARE_IN_THIS));
+ 				break;
+ 
+ 			case WID_C_SELL_SHARE:
+-				DoCommandP(0, this->window_number, 0, CMD_SELL_SHARE_IN_COMPANY | CMD_MSG(STR_ERROR_CAN_T_SELL_25_SHARE_IN));
++				DoCommandP(0, this->window_number, _ctrl_pressed ? 5 : 1, CMD_SELL_SHARE_IN_COMPANY | CMD_MSG(STR_ERROR_CAN_T_SELL_5_SHARE_IN));
+ 				break;
+ 
+ #ifdef ENABLE_NETWORK
+@@ -2401,7 +2412,7 @@
+ 
+ 		if (_settings_game.economy.allow_shares) { // Shares are allowed
+ 			const Company *c = Company::Get(this->window_number);
+-
++			
+ 			/* If all shares are owned by someone (none by nobody), disable buy button */
+ 			this->SetWidgetDisabledState(WID_C_BUY_SHARE, GetAmountOwnedBy(c, INVALID_OWNER) == 0 ||
+ 					/* Only 25% left to buy. If the company is human, disable buying it up.. TODO issues! */
+Index: economy.cpp
+===================================================================
+--- economy.cpp	(revision 26228)
++++ economy.cpp	(working copy)
+@@ -1842,7 +1842,7 @@
+  * @param tile unused
+  * @param flags type of operation
+  * @param p1 company to buy the shares from
+- * @param p2 unused
++ * @param p2 number of shares to buy from
+  * @param text unused
+  * @return the cost of this operation or an error
+  */
+@@ -1865,19 +1865,25 @@
+ 	if (GetAmountOwnedBy(c, COMPANY_SPECTATOR) == 1) {
+ 		if (!c->is_ai) return cost; //  We can not buy out a real company (temporarily). TODO: well, enable it obviously.
+ 
+-		if (GetAmountOwnedBy(c, _current_company) == 3 && !MayCompanyTakeOver(_current_company, target_company)) return_cmd_error(STR_ERROR_TOO_MANY_VEHICLES_IN_GAME);
++		if (GetAmountOwnedBy(c, _current_company) == 19 && !MayCompanyTakeOver(_current_company, target_company)) return_cmd_error(STR_ERROR_TOO_MANY_VEHICLES_IN_GAME);
+ 	}
+ 
++	int availShares = GetAmountOwnedBy(c, COMPANY_SPECTATOR) - 1;
+ 
+-	cost.AddCost(CalculateCompanyValue(c) >> 2);
++	if(availShares < p2)
++		p2 = availShares;
++
++	cost.AddCost(CalculateCompanyValue(c) / 20 * p2);
+ 	if (flags & DC_EXEC) {
+ 		OwnerByte *b = c->share_owners;
+ 
++		for(int i = 0; i < p2; i++)
++		{
+ 		while (*b != COMPANY_SPECTATOR) b++; // share owners is guaranteed to contain at least one COMPANY_SPECTATOR
+-		*b = _current_company;
+-
++			*b = _current_company;
++		}
+ 		for (int i = 0; c->share_owners[i] == _current_company;) {
+-			if (++i == 4) {
++			if (++i == 20) {
+ 				c->bankrupt_value = 0;
+ 				DoAcquireCompany(c);
+ 				break;
+@@ -1894,7 +1900,7 @@
+  * @param tile unused
+  * @param flags type of operation
+  * @param p1 company to sell the shares from
+- * @param p2 unused
++ * @param p2 shares to sell
+  * @param text unused
+  * @return the cost of this operation or an error
+  */
+@@ -1913,14 +1919,20 @@
+ 	/* Those lines are here for network-protection (clients can be slow) */
+ 	if (GetAmountOwnedBy(c, _current_company) == 0) return CommandCost();
+ 
++	p2 = (GetAmountOwnedBy(c, _current_company) < p2) ? GetAmountOwnedBy(c, _current_company) : p2;
++
+ 	/* adjust it a little to make it less profitable to sell and buy */
+-	Money cost = CalculateCompanyValue(c) >> 2;
++	Money cost = CalculateCompanyValue(c) / 20 * p2;
+ 	cost = -(cost - (cost >> 7));
+-
++	
+ 	if (flags & DC_EXEC) {
+ 		OwnerByte *b = c->share_owners;
++		for(int i = 0; i < p2; i++)
++		{
+ 		while (*b != _current_company) b++; // share owners is guaranteed to contain company
+-		*b = COMPANY_SPECTATOR;
++			*b = COMPANY_SPECTATOR;
++		b++;
++		}
+ 		InvalidateWindowData(WC_COMPANY, target_company);
+ 		CompanyAdminUpdate(c);
+ 	}
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 26228)
++++ lang/english.txt	(working copy)
+@@ -3188,10 +3188,10 @@
+ STR_COMPANY_VIEW_PRESIDENT_NAME_BUTTON                          :{BLACK}Manager Name
+ STR_COMPANY_VIEW_PRESIDENT_NAME_TOOLTIP                         :{BLACK}Change the manager's name
+ 
+-STR_COMPANY_VIEW_BUY_SHARE_BUTTON                               :{BLACK}Buy 25% share in company
+-STR_COMPANY_VIEW_SELL_SHARE_BUTTON                              :{BLACK}Sell 25% share in company
+-STR_COMPANY_VIEW_BUY_SHARE_TOOLTIP                              :{BLACK}Buy 25% share in this company. Shift+Click shows estimated cost without purchasing any share
+-STR_COMPANY_VIEW_SELL_SHARE_TOOLTIP                             :{BLACK}Sell 25% share in this company. Shift+Click shows estimated income without selling any share
++STR_COMPANY_VIEW_BUY_SHARE_BUTTON                               :{BLACK}Buy 5% share in company
++STR_COMPANY_VIEW_SELL_SHARE_BUTTON                              :{BLACK}Sell 5% share in company
++STR_COMPANY_VIEW_BUY_SHARE_TOOLTIP                              :{BLACK}Buy 5% share in this company. Shift+Click shows estimated cost without purchasing any share
++STR_COMPANY_VIEW_SELL_SHARE_TOOLTIP                             :{BLACK}Sell 5% share in this company. Shift+Click shows estimated income without selling any share
+ 
+ STR_COMPANY_VIEW_COMPANY_NAME_QUERY_CAPTION                     :Company Name
+ STR_COMPANY_VIEW_PRESIDENT_S_NAME_QUERY_CAPTION                 :Manager's Name
+@@ -4069,8 +4069,8 @@
+ STR_ERROR_INSUFFICIENT_FUNDS                                    :{WHITE}Can't give away money that is loaned from the bank...
+ STR_ERROR_CAN_T_BUY_COMPANY                                     :{WHITE}Can't buy company...
+ STR_ERROR_CAN_T_BUILD_COMPANY_HEADQUARTERS                      :{WHITE}Can't build company headquarters...
+-STR_ERROR_CAN_T_BUY_25_SHARE_IN_THIS                            :{WHITE}Can't buy 25% share in this company...
+-STR_ERROR_CAN_T_SELL_25_SHARE_IN                                :{WHITE}Can't sell 25% share in this company...
++STR_ERROR_CAN_T_BUY_5_SHARE_IN_THIS								:{WHITE}Can't buy 5% share in this company...
++STR_ERROR_CAN_T_SELL_5_SHARE_IN									:{WHITE}Can't sell 5% share in this company...
+ STR_ERROR_PROTECTED                                             :{WHITE}This company is not old enough to trade shares yet...
+ 
+ # Town related errors

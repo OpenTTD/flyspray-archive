@@ -1,0 +1,146 @@
+# HG changeset patch
+# Parent 9d8d36154c9ddbcf0250f58a331b16e8574d3530
+# User sbr
+# Date 1347529636 -7200
+
+Add: Support for cargo type orders when loading/unloading vehicles at stations.
+
+diff -r 9d8d36154c9d src/economy.cpp
+--- a/src/economy.cpp	Thu Sep 13 10:54:22 2012 +0200
++++ b/src/economy.cpp	Sun Sep 16 11:46:31 2012 +0200
+@@ -1202,6 +1202,35 @@
+ }
+ 
+ /**
++ * Returns the load type of a vehicle.
++ * In case of cargo type order, the load type returned depends of the cargo carriable by the vehicle.
++ * @pre v != NULL
++ * @param v A pointer to a vehicle.
++ * @return the load type of this vehicle.
++ */
++static OrderLoadFlags GetLoadType(const Vehicle *v)
++{
++	const Vehicle *front = v->First();
++	OrderLoadFlags olf = front->current_order.GetLoadType();
++	if (olf == OLFB_CARGO_TYPE_LOAD) olf = front->current_order.GetLoadType(v->cargo_type);
++	return olf;
++}
++
++/**
++ * Returns the unload type of a vehicle.
++ * In case of cargo type order, the unload type returned depends of the cargo carriable be the vehicle.
++ * @param v A pointer to a vehicle.
++ * @return The unload type of this vehicle.
++ */
++static OrderUnloadFlags GetUnloadType(const Vehicle *v)
++{
++	const Vehicle *front = v->First();
++	OrderUnloadFlags ouf = front->current_order.GetUnloadType();
++	if (ouf == OUFB_CARGO_TYPE_UNLOAD) ouf = front->current_order.GetUnloadType(v->cargo_type);
++	return ouf;
++}
++
++/**
+  * Loads/unload the vehicle if possible.
+  * @param front the vehicle to be (un)loaded
+  * @param cargo_left the amount of each cargo type that is
+@@ -1215,9 +1244,13 @@
+ 
+ 	/* We have not waited enough time till the next round of loading/unloading */
+ 	if (front->load_unload_ticks != 0) {
+-		if (_settings_game.order.improved_load && (front->current_order.GetLoadType() & OLFB_FULL_LOAD)) {
++		OrderLoadFlags load_type = front->current_order.GetLoadType();
++		if (_settings_game.order.improved_load && ((load_type & OLFB_FULL_LOAD) || (load_type == OLFB_CARGO_TYPE_LOAD))) {
+ 			/* 'Reserve' this cargo for this vehicle, because we were first. */
+ 			for (Vehicle *v = front; v != NULL; v = v->Next()) {
++				/* If current order is a cargo type order, ensure the current vehicle has a full load order. */
++				if (load_type == OLFB_CARGO_TYPE_LOAD && !(front->current_order.GetLoadType(v->cargo_type) & OLFB_FULL_LOAD)) continue;
++
+ 				int cap_left = v->cargo_cap - v->cargo.Count();
+ 				if (cap_left > 0) cargo_left[v->cargo_type] -= cap_left;
+ 			}
+@@ -1294,7 +1327,7 @@
+ 
+ 		GoodsEntry *ge = &st->goods[v->cargo_type];
+ 
+-		if (HasBit(v->vehicle_flags, VF_CARGO_UNLOADING) && (front->current_order.GetUnloadType() & OUFB_NO_UNLOAD) == 0) {
++		if (HasBit(v->vehicle_flags, VF_CARGO_UNLOADING) && (GetUnloadType(v) & OUFB_NO_UNLOAD) == 0) {
+ 			uint cargo_count = v->cargo.Count();
+ 			uint amount_unloaded = _settings_game.order.gradual_loading ? min(cargo_count, load_amount) : cargo_count;
+ 			bool remaining = false; // Are there cargo entities in this vehicle that can still be unloaded here?
+@@ -1302,7 +1335,7 @@
+ 
+ 			payment->SetCargo(v->cargo_type);
+ 
+-			if (HasBit(ge->acceptance_pickup, GoodsEntry::GES_ACCEPTANCE) && !(front->current_order.GetUnloadType() & OUFB_TRANSFER)) {
++			if (HasBit(ge->acceptance_pickup, GoodsEntry::GES_ACCEPTANCE) && !(GetUnloadType(v) & OUFB_TRANSFER)) {
+ 				/* The cargo has reached its final destination, the packets may now be destroyed */
+ 				remaining = v->cargo.MoveTo<StationCargoList>(NULL, amount_unloaded, VehicleCargoList::MTA_FINAL_DELIVERY, payment, last_visited);
+ 
+@@ -1315,8 +1348,8 @@
+ 			 * they were loaded, but to not force unload the vehicle when the
+ 			 * station is still accepting the cargo in the vehicle. It doesn't
+ 			 * accept cargo that was loaded at the same station. */
+-			if ((front->current_order.GetUnloadType() & (OUFB_UNLOAD | OUFB_TRANSFER)) && (!accepted || v->cargo.Count() == cargo_count)) {
+-				remaining = v->cargo.MoveTo(&ge->cargo, amount_unloaded, front->current_order.GetUnloadType() & OUFB_TRANSFER ? VehicleCargoList::MTA_TRANSFER : VehicleCargoList::MTA_UNLOAD, payment);
++			if ((GetUnloadType(v) & (OUFB_UNLOAD | OUFB_TRANSFER)) && (!accepted || v->cargo.Count() == cargo_count)) {
++				remaining = v->cargo.MoveTo(&ge->cargo, amount_unloaded, GetUnloadType(v) & OUFB_TRANSFER ? VehicleCargoList::MTA_TRANSFER : VehicleCargoList::MTA_UNLOAD, payment);
+ 				if (!HasBit(ge->acceptance_pickup, GoodsEntry::GES_PICKUP)) {
+ 					InvalidateWindowData(WC_STATION_LIST, last_visited);
+ 					SetBit(ge->acceptance_pickup, GoodsEntry::GES_PICKUP);
+@@ -1353,7 +1386,7 @@
+ 		}
+ 
+ 		/* Do not pick up goods when we have no-load set or loading is stopped. */
+-		if (front->current_order.GetLoadType() & OLFB_NO_LOAD || HasBit(front->vehicle_flags, VF_STOP_LOADING)) continue;
++		if (GetLoadType(v) & OLFB_NO_LOAD || HasBit(front->vehicle_flags, VF_STOP_LOADING)) continue;
+ 
+ 		/* This order has a refit, if this is the first vehicle part carrying cargo and the whole vehicle is empty, try refitting. */
+ 		if (front->current_order.IsRefit() && artic_part == 1 && IsArticulatedVehicleEmpty(v) &&
+@@ -1531,9 +1564,12 @@
+ 	 * If we use autorefit otoh, we only want to load/refit a vehicle if the other wagons cannot already hold the cargo,
+ 	 * to keep the option to still refit the vehicle when new cargo of different type shows up.
+ 	 */
+-	if (_settings_game.order.improved_load && (front->current_order.GetLoadType() & OLFB_FULL_LOAD) && !use_autorefit) {
++	if (_settings_game.order.improved_load && ((front->current_order.GetLoadType() & OLFB_FULL_LOAD) || (front->current_order.GetLoadType() == OLFB_CARGO_TYPE_LOAD)) && !use_autorefit) {
++		bool cargo_type_loading = (front->current_order.GetLoadType() == OLFB_CARGO_TYPE_LOAD);
+ 		/* Update left cargo */
+ 		for (Vehicle *v = front; v != NULL; v = v->Next()) {
++			if (cargo_type_loading && !(front->current_order.GetLoadType(v->cargo_type) & OLFB_FULL_LOAD)) continue;
++
+ 			int cap_left = v->cargo_cap - v->cargo.Count();
+ 			if (cap_left > 0) cargo_left[v->cargo_type] -= cap_left;
+ 		}
+@@ -1542,6 +1578,16 @@
+ 	if (!anything_unloaded) delete payment;
+ 
+ 	ClrBit(front->vehicle_flags, VF_STOP_LOADING);
++
++	bool has_full_load_order = front->current_order.GetLoadType() & OLFB_FULL_LOAD;
++	if (front->current_order.GetLoadType() == OLFB_CARGO_TYPE_LOAD) {
++		for (Vehicle *v = front; v != NULL; v = v->Next()) {
++			if (front->current_order.GetLoadType(v->cargo_type) & OLFB_FULL_LOAD) {
++				has_full_load_order = true;
++				break;
++			}
++		}
++	}
+ 	if (anything_loaded || anything_unloaded) {
+ 		if (_settings_game.order.gradual_loading) {
+ 			/* The time it takes to load one 'slice' of cargo or passengers depends
+@@ -1552,13 +1598,13 @@
+ 		}
+ 		/* We loaded less cargo than possible for all cargo types and it's not full
+ 		 * load and we're not supposed to wait any longer: stop loading. */
+-		if (!anything_unloaded && full_load_amount == 0 && !(front->current_order.GetLoadType() & OLFB_FULL_LOAD) &&
++		if (!anything_unloaded && full_load_amount == 0 && !has_full_load_order &&
+ 				front->current_order_time >= (uint)max(front->current_order.wait_time - front->lateness_counter, 0)) {
+ 			SetBit(front->vehicle_flags, VF_STOP_LOADING);
+ 		}
+ 	} else {
+ 		bool finished_loading = true;
+-		if (front->current_order.GetLoadType() & OLFB_FULL_LOAD) {
++		if (has_full_load_order) {
+ 			if (front->current_order.GetLoadType() == OLF_FULL_LOAD_ANY) {
+ 				/* if the aircraft carries passengers and is NOT full, then
+ 				 * continue loading, no matter how much mail is in */

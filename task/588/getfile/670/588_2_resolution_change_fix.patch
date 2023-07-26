@@ -1,0 +1,241 @@
+Index: src/gfx.cpp
+===================================================================
+--- src/gfx.cpp	(revision 8739)
++++ src/gfx.cpp	(working copy)
+@@ -38,6 +38,7 @@
+ byte _pause;
+ int _pal_first_dirty;
+ int _pal_last_dirty;
++bool _supports_seperate_fullscreen_res = false;
+ 
+ Colour _cur_palette[256];
+ byte _stringwidth_table[FS_END][224];
+Index: src/gfx.h
+===================================================================
+--- src/gfx.h	(revision 8739)
++++ src/gfx.h	(working copy)
+@@ -156,6 +156,8 @@
+ extern uint16 _cur_resolution[2];
+ extern Colour _cur_palette[256];
+ 
++extern bool _supports_seperate_fullscreen_res;
++
+ void HandleKeypress(uint32 key);
+ void HandleMouseEvents(void);
+ void CSleep(int milliseconds);
+Index: src/main_gui.cpp
+===================================================================
+--- src/main_gui.cpp	(revision 8739)
++++ src/main_gui.cpp	(working copy)
+@@ -2459,6 +2459,13 @@
+ 
+ void GameSizeChanged(void)
+ {
++	if (!_supports_seperate_fullscreen_res) {
++		//maintain compatibility since these are the values that are now
++		//persisted instead of _cur_resolution.
++		_windowed_size[0] = _fullscreen_resolution[0] = _screen.width;
++		_windowed_size[1] = _fullscreen_resolution[1] = _screen.height;
++	}
++
+ 	_cur_resolution[0] = _screen.width;
+ 	_cur_resolution[1] = _screen.height;
+ 	RelocateAllWindows(_screen.width, _screen.height);
+@@ -2474,3 +2481,4 @@
+ 
+ 
+ 
++
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 8739)
++++ src/openttd.cpp	(working copy)
+@@ -445,7 +445,10 @@
+ 	if (!StrEmpty(musicdriver)) ttd_strlcpy(_ini_musicdriver, musicdriver, sizeof(_ini_musicdriver));
+ 	if (!StrEmpty(sounddriver)) ttd_strlcpy(_ini_sounddriver, sounddriver, sizeof(_ini_sounddriver));
+ 	if (!StrEmpty(videodriver)) ttd_strlcpy(_ini_videodriver, videodriver, sizeof(_ini_videodriver));
+-	if (resolution[0] != 0) { _cur_resolution[0] = resolution[0]; _cur_resolution[1] = resolution[1]; }
++	if (resolution[0] != 0) { 
++		_cur_resolution[0] = _windowed_size[0] = _fullscreen_resolution[0] = resolution[0];
++		_cur_resolution[1] = _windowed_size[1] = _fullscreen_resolution[1] = resolution[1];
++	}
+ 	if (startyear != INVALID_YEAR) _patches_newgame.starting_year = startyear;
+ 	if (generation_seed != GENERATE_NEW_SEED) _patches_newgame.generation_seed = generation_seed;
+ 
+@@ -1813,3 +1816,4 @@
+ HalSoundDriver *_sound_driver;
+ HalVideoDriver *_video_driver;
+ 
++
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 8739)
++++ src/settings.cpp	(working copy)
+@@ -1190,7 +1190,8 @@
+ 	  SDTG_STR("musicdriver",      SLE_STRB,C|S,0, _ini_musicdriver,       NULL,    STR_NULL, NULL),
+ 	  SDTG_STR("sounddriver",      SLE_STRB,C|S,0, _ini_sounddriver,       NULL,    STR_NULL, NULL),
+ 	  SDTG_STR("language",         SLE_STRB, S, 0, _dynlang.curr_file,     NULL,    STR_NULL, NULL),
+-	 SDTG_LIST("resolution",     SLE_UINT16, S, 0, _cur_resolution,   "640,480",    STR_NULL, NULL),
++	 SDTG_LIST("window_size",    SLE_UINT16, S, 0, _windowed_size,        "0,0",    STR_NULL, NULL), //if the first element is 0, then it will be set from _fullscreen_resolution
++	 SDTG_LIST("resolution",     SLE_UINT16, S, 0, _fullscreen_resolution,"640,480",STR_NULL, NULL),
+ 	  SDTG_STR("screenshot_format",SLE_STRB, S, 0, _screenshot_format_name,NULL,    STR_NULL, NULL),
+ 	  SDTG_STR("savegame_format",  SLE_STRB, S, 0, _savegame_format,       NULL,    STR_NULL, NULL),
+ 	 SDTG_BOOL("rightclick_emulate",         S, 0, _rightclick_emulate,   false,    STR_NULL, NULL),
+@@ -1840,6 +1841,22 @@
+ 		_patches_newgame.pf_maxdepth = 48;
+ 		_patches_newgame.pf_maxlength = 4096;
+ 	}
++
++	//Set window size from fullscreen size if windowed size isn't specified (older config)
++	if (_windowed_size[0] == 0) {
++		_windowed_size[0] = _fullscreen_resolution[0];
++		_windowed_size[1] = _fullscreen_resolution[1];	
++	}
++
++	//restore the correct resolution to _cur_resolution. This is where everything else will
++	//be expecting to find these values when loading.
++	if (_fullscreen) {
++		_cur_resolution[0] = _fullscreen_resolution[0];
++		_cur_resolution[1] = _fullscreen_resolution[1];
++	} else {
++		_cur_resolution[0] = _windowed_size[0];
++		_cur_resolution[1] = _windowed_size[1];
++	}
+ }
+ 
+ void UpdatePatches(void)
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 8739)
++++ src/settings_gui.cpp	(working copy)
+@@ -67,10 +67,9 @@
+ static int GetCurRes(void)
+ {
+ 	int i;
+-
+ 	for (i = 0; i != _num_resolutions; i++) {
+-		if (_resolutions[i][0] == _screen.width &&
+-				_resolutions[i][1] == _screen.height) {
++		if (_resolutions[i][0] == _fullscreen_resolution[0]
++			&& _resolutions[i][1] == _fullscreen_resolution[1]) {
+ 			break;
+ 		}
+ 	}
+Index: src/variables.h
+===================================================================
+--- src/variables.h	(revision 8739)
++++ src/variables.h	(working copy)
+@@ -331,6 +331,9 @@
+ VARDEF uint16 _resolutions[32][2];
+ VARDEF uint16 _cur_resolution[2];
+ 
++VARDEF uint16 _windowed_size[2];
++VARDEF uint16 _fullscreen_resolution[2];
++
+ VARDEF char _savegame_format[8];
+ 
+ VARDEF char *_config_file;
+Index: src/video/win32_v.cpp
+===================================================================
+--- src/video/win32_v.cpp	(revision 8739)
++++ src/video/win32_v.cpp	(working copy)
+@@ -22,8 +22,6 @@
+ 	HPALETTE gdi_palette;
+ 	int width;
+ 	int height;
+-	int width_org;
+-	int height_org;
+ 	bool fullscreen;
+ 	bool double_size;
+ 	bool has_focus;
+@@ -133,6 +131,13 @@
+ 
+ static void ClientSizeChanged(int w, int h)
+ {
++	//store the physical window size before pixel doubling, etc.
++	//don't update the window size when maximising, maximized is stored seperatly
++	if (!_fullscreen && !_window_maximize) {
++		_windowed_size[0] = w;
++		_windowed_size[1] = h;
++	}
++
+ 	if (_wnd.double_size) {
+ 		w /= 2;
+ 		h /= 2;
+@@ -537,10 +542,20 @@
+ 
+ static void MakeWindow(bool full_screen)
+ {
++	int target_width;
++	int target_height;
++
+ 	_fullscreen = full_screen;
+-
+ 	_wnd.double_size = _double_size && !full_screen;
+ 
++	if (full_screen) {
++		target_width = _fullscreen_resolution[0];
++		target_height = _fullscreen_resolution[1];
++	} else {
++		target_width = _windowed_size[0];
++		target_height = _windowed_size[1];
++	}
++
+ 	// recreate window?
+ 	if ((full_screen || _wnd.fullscreen) && _wnd.main_wnd) {
+ 		DestroyWindow(_wnd.main_wnd);
+@@ -561,8 +576,8 @@
+ 			DM_PELSHEIGHT |
+ 			(_display_hz != 0 ? DM_DISPLAYFREQUENCY : 0);
+ 		settings.dmBitsPerPel = _fullscreen_bpp;
+-		settings.dmPelsWidth  = _wnd.width_org;
+-		settings.dmPelsHeight = _wnd.height_org;
++		settings.dmPelsWidth  = target_width;
++		settings.dmPelsHeight = target_height;
+ 		settings.dmDisplayFrequency = _display_hz;
+ 
+ 		if (ChangeDisplaySettings(&settings, CDS_FULLSCREEN) != DISP_CHANGE_SUCCESSFUL) {
+@@ -584,12 +599,12 @@
+ 		_wnd.fullscreen = full_screen;
+ 		if (_wnd.fullscreen) {
+ 			style = WS_POPUP;
+-			SetRect(&r, 0, 0, _wnd.width_org, _wnd.height_org);
++			SetRect(&r, 0, 0, target_width, target_height);
+ 		} else {
+ 			style = WS_OVERLAPPEDWINDOW;
+ 			/* On window creation, check if we were in maximize mode before */
+ 			if (_window_maximize) showstyle = SW_SHOWMAXIMIZED;
+-			SetRect(&r, 0, 0, _wnd.width, _wnd.height);
++			SetRect(&r, 0, 0, target_width, target_height);
+ 		}
+ 
+ #if !defined(WINCE)
+@@ -737,9 +752,7 @@
+ 
+ 	FindResolutions();
+ 
+-	// fullscreen uses those
+-	_wnd.width_org = _cur_resolution[0];
+-	_wnd.height_org = _cur_resolution[1];
++	_supports_seperate_fullscreen_res = true;
+ 
+ 	AllocateDibSection(_cur_resolution[0], _cur_resolution[1]);
+ 	MarkWholeScreenDirty();
+@@ -879,11 +892,13 @@
+ 
+ static bool Win32GdiChangeRes(int w, int h)
+ {
+-	_wnd.width = _wnd.width_org = w;
+-	_wnd.height = _wnd.height_org = h;
++	_fullscreen_resolution[0] = w;
++	_fullscreen_resolution[1] = h;
++	
++	if (_fullscreen) {
++		MakeWindow(true); // _wnd.fullscreen screws up ingame resolution switching
++	}
+ 
+-	MakeWindow(_fullscreen); // _wnd.fullscreen screws up ingame resolution switching
+-
+ 	return true;
+ }
+ 

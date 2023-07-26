@@ -1,0 +1,83 @@
+# HG changeset patch
+# User MJP
+# Date 1389660528 -3600
+#      Tue Jan 14 01:48:48 2014 +0100
+# Node ID 857a5636f9463d3def8e861cbdb08a8c156e2860
+# Parent  6e8b68a21cc6957e8e850f838fd2b2a8084b4f37
+Use a fallback source for town names
+
+diff -r 6e8b68a21cc6 -r 857a5636f946 src/settings_type.h
+--- a/src/settings_type.h	Mon Jan 13 18:20:23 2014 +0000
++++ b/src/settings_type.h	Tue Jan 14 01:48:48 2014 +0100
+@@ -284,6 +284,7 @@
+ 	byte   heightmap_rotation;               ///< rotation director for the heightmap
+ 	byte   se_flat_world_height;             ///< land height a flat world gets in SE
+ 	byte   town_name;                        ///< the town name generator used for town names
++	byte   town_name_fallback;               ///< alternative generator used in case of name starvation
+ 	byte   landscape;                        ///< the landscape we're currently in
+ 	byte   water_borders;                    ///< bitset of the borders that are water
+ 	uint16 custom_town_number;               ///< manually entered number of towns
+diff -r 6e8b68a21cc6 -r 857a5636f946 src/table/settings.ini
+--- a/src/table/settings.ini	Mon Jan 13 18:20:23 2014 +0000
++++ b/src/table/settings.ini	Tue Jan 14 01:48:48 2014 +0100
+@@ -336,6 +336,19 @@
+ full     = _town_names
+ cat      = SC_BASIC
+ 
++; There are only 21 predefined town_name values (0-20), but you can have more with newgrf action F so allow
++; these bigger values (21-255). Invalid values will fallback to english on use and (undefined string) in GUI.
++[SDT_OMANY]
++base     = GameSettings
++var      = game_creation.town_name_fallback
++type     = SLE_UINT8
++from     = 97
++guiflags = SGF_NO_NETWORK
++def      = 0
++max      = 255
++full     = _town_names
++cat      = SC_BASIC
++
+ [SDT_OMANY]
+ base     = GameSettings
+ var      = game_creation.landscape
+diff -r 6e8b68a21cc6 -r 857a5636f946 src/town_cmd.cpp
+--- a/src/town_cmd.cpp	Mon Jan 13 18:20:23 2014 +0000
++++ b/src/town_cmd.cpp	Tue Jan 14 01:48:48 2014 +0100
+@@ -1881,12 +1881,16 @@
+ 	uint difficulty = (_game_mode != GM_EDITOR) ? _settings_game.difficulty.number_towns : 0;
+ 	uint total = (difficulty == (uint)CUSTOM_TOWN_NUMBER_DIFFICULTY) ? _settings_game.game_creation.custom_town_number : ScaleByMapSize(_num_initial_towns[difficulty] + (Random() & 7));
+ 	uint32 townnameparts;
++	uint total_wanted = total;
++	bool fill_with_fallback = false;
++	byte town_name_orig = _settings_game.game_creation.town_name;
+ 
+ 	SetGeneratingWorldProgress(GWP_TOWN, total);
+ 
+ 	/* First attempt will be made at creating the suggested number of towns.
+ 	 * Note that this is really a suggested value, not a required one.
+ 	 * We would not like the system to lock up just because the user wanted 100 cities on a 64*64 map, would we? */
++begin_generation:
+ 	do {
+ 		bool city = (_settings_game.economy.larger_towns != 0 && Chance16(1, _settings_game.economy.larger_towns));
+ 		IncreaseGeneratingWorldProgress(GWP_TOWN);
+@@ -1896,6 +1900,20 @@
+ 		if (CreateRandomTown(20, townnameparts, TSZ_RANDOM, city, layout) != NULL) current_number++; // If creation was successful, raise a flag.
+ 	} while (--total);
+ 
++	/* If there is too few towns, use alternative names to create the rest. */
++	if (!fill_with_fallback && current_number < total_wanted / 2) {
++		/* New counter, new progress. */
++		total = total_wanted - current_number;
++		SetGeneratingWorldProgress(GWP_TOWN, total);
++
++		/* Override the settings temporarilly. */
++		_settings_game.game_creation.town_name = _settings_game.game_creation.town_name_fallback;
++		fill_with_fallback = true;
++
++		goto begin_generation;
++	}
++	_settings_game.game_creation.town_name = town_name_orig;
++
+ 	if (current_number != 0) return true;
+ 
+ 	/* If current_number is still zero at this point, it means that not a single town has been created.

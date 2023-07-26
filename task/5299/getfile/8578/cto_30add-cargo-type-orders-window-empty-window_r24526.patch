@@ -1,0 +1,230 @@
+# HG changeset patch
+# Parent a24dfd993a8d7e58b7b77ba7ec79162121dbc2ce
+# User sbr
+# Date 1347698742 -7200
+
+Add: Empty CargoTypeOrdersWindow.
+
+diff -r a24dfd993a8d src/lang/english.txt
+--- a/src/lang/english.txt	Thu Sep 13 18:45:39 2012 +0200
++++ b/src/lang/english.txt	Sun Sep 16 11:46:41 2012 +0200
+@@ -3684,6 +3684,12 @@
+ STR_DATE_MONTH_TOOLTIP                                          :{BLACK}Select month
+ STR_DATE_YEAR_TOOLTIP                                           :{BLACK}Select year
+ 
++# Cargo type orders Window
++STR_CARGO_TYPE_ORDERS_LOAD_CAPTION                              :{WHITE}{VEHICLE} ({NUM}: Load at {STATION})
++STR_CARGO_TYPE_ORDERS_UNLOAD_CAPTION                            :{WHITE}{VEHICLE} ({NUM}: Unload at {STATION})
++STR_CARGO_TYPE_ORDERS_LOAD_TITLE                                :{GOLD}Select load order per cargo type:
++STR_CARGO_TYPE_ORDERS_UNLOAD_TITLE                              :{GOLD}Select unload order per cargo type:
++STR_CARGO_TYPE_ORDERS_CLOSE_BUTTON                              :{BLACK}Close
+ 
+ # AI debug window
+ STR_AI_DEBUG                                                    :{WHITE}AI/Game Script Debug
+diff -r a24dfd993a8d src/order_gui.cpp
+--- a/src/order_gui.cpp	Thu Sep 13 18:45:39 2012 +0200
++++ b/src/order_gui.cpp	Sun Sep 16 11:46:41 2012 +0200
+@@ -31,6 +31,112 @@
+ 
+ #include "widgets/order_widget.h"
+ 
++enum CargoTypeOrdersWindowVariant {
++	CTOWV_LOAD   = 0,
++	CTOWV_UNLOAD = 1,
++};
++
++struct CargoTypeOrdersWindow : public Window {
++private:
++	CargoTypeOrdersWindowVariant variant;
++
++	const Vehicle *vehicle;  ///< Vehicle owning the orders being displayed and manipulated.
++	VehicleOrderID order_id; ///< Index of the order concerned by this window.
++public:
++	/**
++	 * Instantiate a new CargoTypeOrdersWindow.
++	 * @param desc The window description.
++	 * @param v The vehicle the order belongs to.
++	 * @param order_id Which order to display/edit.
++	 * @param variant Which aspect of the order to display/edit: load or unload.
++	 * @pre \c v != NULL
++	 */
++	CargoTypeOrdersWindow(const WindowDesc *desc, const Vehicle *v, VehicleOrderID order_id, CargoTypeOrdersWindowVariant variant) : Window()
++	{
++		this->variant = variant;
++
++		this->vehicle = v;
++		this->order_id = order_id;
++
++		this->CreateNestedTree(desc);
++		this->GetWidget<NWidgetCore>(WID_CTO_CAPTION)->SetDataTip(STR_CARGO_TYPE_ORDERS_LOAD_CAPTION + this->variant, STR_TOOLTIP_WINDOW_TITLE_DRAG_THIS);
++		this->GetWidget<NWidgetCore>(WID_CTO_HEADER)->SetDataTip(STR_CARGO_TYPE_ORDERS_LOAD_TITLE + this->variant, STR_NULL);
++		this->FinishInitNested(desc, v->index);
++
++		this->owner = v->owner;
++	}
++
++	virtual void UpdateWidgetSize(int widget, Dimension *size, const Dimension &padding, Dimension *fill, Dimension *resize)
++	{
++		if (widget == WID_CTO_HEADER) {
++			(*size).height = max((*size).height, (uint) WD_FRAMERECT_TOP + FONT_HEIGHT_NORMAL + WD_FRAMERECT_BOTTOM);
++		}
++	}
++
++	virtual void OnClick(Point pt, int widget, int click_count)
++	{
++		if (widget == WID_CTO_CLOSEBTN) {
++			delete this;
++		}
++	}
++
++	virtual void SetStringParameters(int widget) const
++	{
++		if (widget == WID_CTO_CAPTION) {
++			SetDParam(0, this->vehicle->index);
++			SetDParam(1, this->order_id + 1);
++			SetDParam(2, this->vehicle->GetOrder(this->order_id)->GetDestination());
++		}
++	}
++};
++
++/** Widgets definition of CargoTypeOrdersWindow. */
++static const NWidgetPart _nested_cargo_type_orders_widgets[] = {
++	NWidget(NWID_HORIZONTAL),
++		NWidget(WWT_CLOSEBOX, COLOUR_GREY),
++		NWidget(WWT_CAPTION, COLOUR_GREY, WID_CTO_CAPTION), SetDataTip(STR_NULL, STR_TOOLTIP_WINDOW_TITLE_DRAG_THIS),
++	EndContainer(),
++	NWidget(WWT_PANEL, COLOUR_GREY),
++		NWidget(WWT_LABEL, COLOUR_GREY, WID_CTO_HEADER), SetFill(1, 0), SetResize(1, 0), SetDataTip(STR_NULL, STR_NULL),
++	EndContainer(),
++	NWidget(NWID_HORIZONTAL),
++		NWidget(WWT_TEXTBTN, COLOUR_GREY, WID_CTO_CLOSEBTN), SetFill(1, 0), SetResize(1, 0), SetDataTip(STR_CARGO_TYPE_ORDERS_CLOSE_BUTTON, STR_TOOLTIP_CLOSE_WINDOW),
++		NWidget(WWT_RESIZEBOX, COLOUR_GREY),
++	EndContainer(),
++};
++
++/** Window description for the 'load' variant of CargoTypeOrdersWindow. */
++static const WindowDesc _cargo_type_load_orders_widgets (
++	WDP_AUTO, 195, 186,
++	WC_VEHICLE_CARGO_TYPE_LOAD_ORDERS, WC_VEHICLE_ORDERS,
++	WDF_CONSTRUCTION,
++	_nested_cargo_type_orders_widgets, lengthof(_nested_cargo_type_orders_widgets)
++);
++
++/** Window description for the 'unload' variant of CargoTypeOrdersWindow. */
++static const WindowDesc _cargo_type_unload_orders_widgets (
++	WDP_AUTO, 195, 186,
++	WC_VEHICLE_CARGO_TYPE_UNLOAD_ORDERS, WC_VEHICLE_ORDERS,
++	WDF_CONSTRUCTION,
++	_nested_cargo_type_orders_widgets, lengthof(_nested_cargo_type_orders_widgets)
++);
++
++/**
++ * Show the CargoTypeOrdersWindow for an order.
++ * @param v The vehicle the order belongs to.
++ * @param parent The parent window.
++ * @param order_id Which order to display/edit.
++ * @param variant Which aspect of the order to display/edit: load or unload.
++ * @pre \c v != NULL
++ */
++void ShowCargoTypeOrdersWindow(const Vehicle *v, Window *parent, VehicleOrderID order_id, CargoTypeOrdersWindowVariant variant)
++{
++	WindowDesc desc = (variant == CTOWV_LOAD) ? _cargo_type_load_orders_widgets : _cargo_type_unload_orders_widgets;
++	DeleteWindowById(desc.cls, v->index);
++	CargoTypeOrdersWindow *w = new CargoTypeOrdersWindow(&desc, v, order_id, variant);
++	w->parent = parent;
++}
++
+ 
+ /** Order load types that could be given to station orders. */
+ static const StringID _station_load_types[][9][9] = {
+@@ -667,7 +773,7 @@
+ 			DoCommandP(this->vehicle->tile, this->vehicle->index + (sel_ord << 20), MOF_LOAD | (load_type << 4), CMD_MODIFY_ORDER | CMD_MSG(STR_ERROR_CAN_T_MODIFY_THIS_ORDER));
+ 		}
+ 
+-		if (load_type == OLFB_CARGO_TYPE_LOAD) { ; } // ShowCargoTypeOrdersWindow
++		if (load_type == OLFB_CARGO_TYPE_LOAD) ShowCargoTypeOrdersWindow(this->vehicle, this, sel_ord, CTOWV_LOAD);
+ 	}
+ 
+ 	/**
+@@ -756,7 +862,7 @@
+ 			DoCommandP(this->vehicle->tile, this->vehicle->index + (sel_ord << 20), MOF_LOAD | (OLFB_NO_LOAD << 4), CMD_MODIFY_ORDER);
+ 			this->SetWidgetDirty(WID_O_FULL_LOAD);
+ 		} else if(unload_type == OUFB_CARGO_TYPE_UNLOAD) {
+-			; // ShowCargoTypeOrdersWindow
++			ShowCargoTypeOrdersWindow(this->vehicle, this, sel_ord, CTOWV_UNLOAD);
+ 		}
+ 	}
+ 
+diff -r a24dfd993a8d src/script/api/script_window.hpp
+--- a/src/script/api/script_window.hpp	Thu Sep 13 18:45:39 2012 +0200
++++ b/src/script/api/script_window.hpp	Sun Sep 16 11:46:41 2012 +0200
+@@ -278,6 +278,18 @@
+ 		WC_VEHICLE_ORDERS = ::WC_VEHICLE_ORDERS,
+ 
+ 		/**
++		 * Vehicle cargo type load orders; %Window numbers:
++		 *   - #VehicleID = #CargoTypeOrdersWidgets
++		 */
++		WC_VEHICLE_CARGO_TYPE_LOAD_ORDERS = ::WC_VEHICLE_CARGO_TYPE_LOAD_ORDERS,
++
++		/**
++		 * Vehicle cargo type unload orders; %Window numbers:
++		 *   - #VehicleID = #CargoTypeOrdersWidgets
++		 */
++		WC_VEHICLE_CARGO_TYPE_UNLOAD_ORDERS = ::WC_VEHICLE_CARGO_TYPE_UNLOAD_ORDERS,
++
++		/**
+ 		 * Replace vehicle window; Window numbers:
+ 		 *   - #VehicleType = #ReplaceVehicleWidgets
+ 		 */
+@@ -1800,6 +1812,13 @@
+ 		WID_O_SHARED_ORDER_LIST              = ::WID_O_SHARED_ORDER_LIST,              ///< Open list of shared vehicles.
+ 	};
+ 
++	/** Widgets of the #CargoTypeOrdersWindow class. */
++	enum CargoTypeOrdersWidgets {
++		WID_CTO_CAPTION                      = ::WID_CTO_CAPTION,                      ///< Caption of the window.
++		WID_CTO_HEADER                       = ::WID_CTO_HEADER,                       ///< Window header.
++		WID_CTO_CLOSEBTN                     = ::WID_CTO_CLOSEBTN,                     ///< Close button.
++	};
++
+ 	/** Widgets of the #OskWindow class. */
+ 	enum OnScreenKeyboardWidgets {
+ 		WID_OSK_CAPTION                      = ::WID_OSK_CAPTION,                      ///< Caption of window.
+diff -r a24dfd993a8d src/widgets/order_widget.h
+--- a/src/widgets/order_widget.h	Thu Sep 13 18:45:39 2012 +0200
++++ b/src/widgets/order_widget.h	Sun Sep 16 11:46:41 2012 +0200
+@@ -41,4 +41,11 @@
+ 	WID_O_SHARED_ORDER_LIST,         ///< Open list of shared vehicles.
+ };
+ 
++/** Widgets of the #CargoTypeOrdersWindow class. */
++enum CargoTypeOrdersWidgets {
++	WID_CTO_CAPTION,                                                            ///< Caption of the window.
++	WID_CTO_HEADER,                                                             ///< Window header.
++	WID_CTO_CLOSEBTN,                                                           ///< Close button.
++};
++
+ #endif /* WIDGETS_ORDER_WIDGET_H */
+diff -r a24dfd993a8d src/window_type.h
+--- a/src/window_type.h	Thu Sep 13 18:45:39 2012 +0200
++++ b/src/window_type.h	Sun Sep 16 11:46:41 2012 +0200
+@@ -209,6 +209,18 @@
+ 	WC_VEHICLE_ORDERS,
+ 
+ 	/**
++	 * Vehicle cargo type load orders; %Window numbers:
++	 *   - #VehicleID = #CargoTypeOrdersWidgets
++	 */
++	WC_VEHICLE_CARGO_TYPE_LOAD_ORDERS,
++
++	/**
++	 * Vehicle cargo type unload orders; %Window numbers:
++	 *   - #VehicleID = #CargoTypeOrdersWidgets
++	 */
++	WC_VEHICLE_CARGO_TYPE_UNLOAD_ORDERS,
++
++	/**
+ 	 * Replace vehicle window; %Window numbers:
+ 	 *   - #VehicleType = #ReplaceVehicleWidgets
+ 	 */

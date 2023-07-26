@@ -1,0 +1,578 @@
+diff --git a/src/aircraft_gui.cpp b/src/aircraft_gui.cpp
+index faefaa9..fe94b0f 100644
+--- a/src/aircraft_gui.cpp
++++ b/src/aircraft_gui.cpp
+@@ -50,7 +50,7 @@ void DrawAircraftDetails(const Aircraft *v, int left, int right, int y)
+ 		}
+ 
+ 		if (u->cargo_cap != 0) {
+-			uint cargo_count = u->cargo.Count();
++			uint cargo_count = u->cargo.StoredCount();
+ 
+ 			y_offset += FONT_HEIGHT_NORMAL + 1;
+ 			if (cargo_count != 0) {
+diff --git a/src/autoreplace_cmd.cpp b/src/autoreplace_cmd.cpp
+index e8d2921..04f9f3b 100644
+--- a/src/autoreplace_cmd.cpp
++++ b/src/autoreplace_cmd.cpp
+@@ -91,27 +91,32 @@ bool CheckAutoreplaceValidity(EngineID from, EngineID to, CompanyID company)
+ /**
+  * Check the capacity of all vehicles in a chain and spread cargo if needed.
+  * @param v The vehicle to check.
++ * @pre You can only do this if the consist is not loading or unloading. It
++ *      must not carry reserved cargo, nor cargo to be unloaded or transferred.
+  */
+ void CheckCargoCapacity(Vehicle *v)
+ {
+ 	assert(v == NULL || v->First() == v);
+ 
+ 	for (Vehicle *src = v; src != NULL; src = src->Next()) {
++		assert(src->cargo.TotalCount() == src->cargo.ActionCount(VehicleCargoList::MTA_KEEP));
++
+ 		/* Do we need to more cargo away? */
+-		if (src->cargo.Count() <= src->cargo_cap) continue;
++		if (src->cargo.TotalCount() <= src->cargo_cap) continue;
+ 
+ 		/* We need to move a particular amount. Try that on the other vehicles. */
+-		uint to_spread = src->cargo.Count() - src->cargo_cap;
++		uint to_spread = src->cargo.TotalCount() - src->cargo_cap;
+ 		for (Vehicle *dest = v; dest != NULL && to_spread != 0; dest = dest->Next()) {
+-			if (dest->cargo.Count() >= dest->cargo_cap || dest->cargo_type != src->cargo_type) continue;
++			assert(dest->cargo.TotalCount() == dest->cargo.ActionCount(VehicleCargoList::MTA_KEEP));
++			if (dest->cargo.TotalCount() >= dest->cargo_cap || dest->cargo_type != src->cargo_type) continue;
+ 
+-			uint amount = min(to_spread, dest->cargo_cap - dest->cargo.Count());
++			uint amount = min(to_spread, dest->cargo_cap - dest->cargo.TotalCount());
+ 			src->cargo.Shift(amount, &dest->cargo);
+ 			to_spread -= amount;
+ 		}
+ 
+ 		/* Any left-overs will be thrown away, but not their feeder share. */
+-		if (src->cargo_cap < src->cargo.Count()) src->cargo.Truncate(src->cargo.Count() - src->cargo_cap);
++		if (src->cargo_cap < src->cargo.TotalCount()) src->cargo.Truncate(src->cargo.TotalCount() - src->cargo_cap);
+ 	}
+ }
+ 
+@@ -120,21 +125,26 @@ void CheckCargoCapacity(Vehicle *v)
+  * @param old_veh Old vehicle that will be sold
+  * @param new_head Head of the completely constructed new vehicle chain
+  * @param part_of_chain The vehicle is part of a train
++ * @pre You can only do this if the both consists are not loading or unloading.
++ *      They must not carry reserved cargo, nor cargo to be unloaded or
++ *      transferred.
+  */
+ static void TransferCargo(Vehicle *old_veh, Vehicle *new_head, bool part_of_chain)
+ {
+ 	assert(!part_of_chain || new_head->IsPrimaryVehicle());
+ 	/* Loop through source parts */
+ 	for (Vehicle *src = old_veh; src != NULL; src = src->Next()) {
++		assert(src->cargo.TotalCount() == src->cargo.ActionCount(VehicleCargoList::MTA_KEEP));
+ 		if (!part_of_chain && src->type == VEH_TRAIN && src != old_veh && src != Train::From(old_veh)->other_multiheaded_part && !src->IsArticulatedPart()) {
+ 			/* Skip vehicles, which do not belong to old_veh */
+ 			src = src->GetLastEnginePart();
+ 			continue;
+ 		}
+-		if (src->cargo_type >= NUM_CARGO || src->cargo.Count() == 0) continue;
++		if (src->cargo_type >= NUM_CARGO || src->cargo.TotalCount() == 0) continue;
+ 
+ 		/* Find free space in the new chain */
+-		for (Vehicle *dest = new_head; dest != NULL && src->cargo.Count() > 0; dest = dest->Next()) {
++		for (Vehicle *dest = new_head; dest != NULL && src->cargo.TotalCount() > 0; dest = dest->Next()) {
++			assert(dest->cargo.TotalCount() == dest->cargo.ActionCount(VehicleCargoList::MTA_KEEP));
+ 			if (!part_of_chain && dest->type == VEH_TRAIN && dest != new_head && dest != Train::From(new_head)->other_multiheaded_part && !dest->IsArticulatedPart()) {
+ 				/* Skip vehicles, which do not belong to new_head */
+ 				dest = dest->GetLastEnginePart();
+@@ -142,7 +152,7 @@ static void TransferCargo(Vehicle *old_veh, Vehicle *new_head, bool part_of_chai
+ 			}
+ 			if (dest->cargo_type != src->cargo_type) continue;
+ 
+-			uint amount = min(src->cargo.Count(), dest->cargo_cap - dest->cargo.Count());
++			uint amount = min(src->cargo.TotalCount(), dest->cargo_cap - dest->cargo.TotalCount());
+ 			if (amount <= 0) continue;
+ 
+ 			src->cargo.Shift(amount, &dest->cargo);
+diff --git a/src/cargopacket.h b/src/cargopacket.h
+index bffc845..6e20c4c 100644
+--- a/src/cargopacket.h
++++ b/src/cargopacket.h
+@@ -219,6 +219,15 @@ protected:
+ 
+ 	List packets;               ///< The cargo packets in this list.
+ 
++	/**
++	 * Returns the number of cargo entities in this list.
++	 * @return The before mentioned number.
++	 */
++	inline uint Count() const
++	{
++		return this->count;
++	}
++
+ 	void AddToCache(const CargoPacket *cp);
+ 
+ 	void RemoveFromCache(const CargoPacket *cp, uint count);
+@@ -258,15 +267,6 @@ public:
+ 	}
+ 
+ 	/**
+-	 * Returns the number of cargo entities in this list.
+-	 * @return The before mentioned number.
+-	 */
+-	inline uint Count() const
+-	{
+-		return this->count;
+-	}
+-
+-	/**
+ 	 * Returns source of the first cargo packet in this list.
+ 	 * @return The before mentioned source.
+ 	 */
+@@ -354,12 +354,30 @@ public:
+ 	 * reserved).
+ 	 * @return Cargo on board the vehicle.
+ 	 */
+-	inline uint OnboardCount() const
++	inline uint StoredCount() const
+ 	{
+ 		return this->count - this->action_counts[MTA_LOAD];
+ 	}
+ 
+ 	/**
++	 * Returns sum of cargo, including reserved cargo.
++	 * @return Sum of cargo.
++	 */
++	inline uint TotalCount() const
++	{
++		return this->count;
++	}
++
++	/**
++	 * Returns sum of reserved cargo.
++	 * @return Sum of reserved cargo.
++	 */
++	inline uint ReservedCount() const
++	{
++		return this->action_counts[MTA_LOAD];
++	}
++
++	/**
+ 	 * Returns sum of cargo to be moved out of the vehicle at the current station.
+ 	 * @return Cargo to be moved.
+ 	 */
+@@ -446,6 +464,16 @@ public:
+ 	friend class CargoReturn;
+ 
+ 	/**
++	 * Returns sum of cargo on board the vehicle (ie not only
++	 * reserved).
++	 * @return Cargo on board the vehicle.
++	 */
++	inline uint StoredCount() const
++	{
++		return this->count;
++	}
++
++	/**
+ 	 * Returns sum of cargo reserved for loading onto vehicles.
+ 	 * @return Cargo reserved for loading.
+ 	 */
+diff --git a/src/depot_gui.cpp b/src/depot_gui.cpp
+index b16e40a..cc7ef0c 100644
+--- a/src/depot_gui.cpp
++++ b/src/depot_gui.cpp
+@@ -802,7 +802,7 @@ struct DepotWindow : Window {
+ 		for (const Vehicle *w = v; w != NULL; w = w->Next()) {
+ 			if (w->cargo_cap > 0 && w->cargo_type < NUM_CARGO) {
+ 				capacity[w->cargo_type] += w->cargo_cap;
+-				loaded  [w->cargo_type] += w->cargo.Count();
++				loaded  [w->cargo_type] += w->cargo.TotalCount();
+ 			}
+ 
+ 			if (w->type == VEH_TRAIN && !w->HasArticulatedPart()) {
+diff --git a/src/economy.cpp b/src/economy.cpp
+index 8a4e535..34356ee 100644
+--- a/src/economy.cpp
++++ b/src/economy.cpp
+@@ -1323,7 +1323,7 @@ static bool IsArticulatedVehicleEmpty(Vehicle *v)
+ 	v = v->GetFirstEnginePart();
+ 
+ 	for (; v != NULL; v = v->HasArticulatedPart() ? v->GetNextArticulatedPart() : NULL) {
+-		if (v->cargo.Count() != 0) return false;
++		if (v->cargo.TotalCount() != 0) return false;
+ 	}
+ 
+ 	return true;
+@@ -1438,7 +1438,7 @@ static void LoadUnloadVehicle(Vehicle *front)
+ 
+ 		/* This order has a refit, if this is the first vehicle part carrying cargo and the whole vehicle is empty, try refitting. */
+ 		if (front->current_order.IsRefit() && artic_part == 1 && IsArticulatedVehicleEmpty(v) &&
+-				(v->type != VEH_AIRCRAFT || (Aircraft::From(v)->IsNormalAircraft() && v->Next()->cargo.Count() == 0))) {
++				(v->type != VEH_AIRCRAFT || (Aircraft::From(v)->IsNormalAircraft() && v->Next()->cargo.TotalCount() == 0))) {
+ 			Vehicle *v_start = v->GetFirstEnginePart();
+ 			CargoID new_cid = front->current_order.GetRefitCargo();
+ 
+@@ -1456,7 +1456,7 @@ static void LoadUnloadVehicle(Vehicle *front)
+ 			Vehicle *w = v_start;
+ 			while (w->HasArticulatedPart()) {
+ 				w = w->GetNextArticulatedPart();
+-				if (w->cargo.Count() > 0) new_cid = CT_NO_REFIT;
++				if (w->cargo.TotalCount() > 0) new_cid = CT_NO_REFIT;
+ 				refit_mask |= EngInfo(w->engine_type)->refit_mask;
+ 			}
+ 
+@@ -1467,12 +1467,12 @@ static void LoadUnloadVehicle(Vehicle *front)
+ 				FOR_EACH_SET_CARGO_ID(cid, refit_mask) {
+ 					/* Consider refitting to this cargo, if other vehicles of the consist cannot
+ 					 * already take the cargo without refitting */
+-					if ((int)st->goods[cid].cargo.Count() > (int)consist_capleft[cid] + amount) {
++					if ((int)st->goods[cid].cargo.StoredCount() > (int)consist_capleft[cid] + amount) {
+ 						/* Try to find out if auto-refitting would succeed. In case the refit is allowed,
+ 						 * the returned refit capacity will be greater than zero. */
+ 						DoCommand(v_start->tile, v_start->index, cid | 1U << 6 | 0xFF << 8 | 1U << 16, DC_QUERY_COST, GetCmdRefitVeh(v_start)); // Auto-refit and only this vehicle including artic parts.
+ 						if (_returned_refit_capacity > 0) {
+-							amount = st->goods[cid].cargo.Count() - consist_capleft[cid];
++							amount = st->goods[cid].cargo.StoredCount() - consist_capleft[cid];
+ 							new_cid = cid;
+ 						}
+ 					}
+@@ -1490,7 +1490,7 @@ static void LoadUnloadVehicle(Vehicle *front)
+ 			w = v_start;
+ 			do {
+ 				st->goods[w->cargo_type].cargo.Reserve(w->cargo_cap, &w->cargo, st->xy);
+-				consist_capleft[w->cargo_type] += w->cargo_cap - w->cargo.Count();
++				consist_capleft[w->cargo_type] += w->cargo_cap - w->cargo.RemainingCount();
+ 				w = w->HasArticulatedPart() ? w->GetNextArticulatedPart() : NULL;
+ 			} while (w != NULL);
+ 
+@@ -1523,10 +1523,10 @@ static void LoadUnloadVehicle(Vehicle *front)
+ 
+ 		/* If there's goods waiting at the station, and the vehicle
+ 		 * has capacity for it, load it on the vehicle. */
+-		int cap_left = v->cargo_cap - v->cargo.OnboardCount();
++		int cap_left = v->cargo_cap - v->cargo.StoredCount();
+ 		if (cap_left > 0 && (v->cargo.ActionCount(VehicleCargoList::MTA_LOAD) > 0 || !ge->cargo.Empty())) {
+ 			if (_settings_game.order.gradual_loading) cap_left = min(cap_left, load_amount);
+-			if (v->cargo.OnboardCount() == 0) TriggerVehicle(v, VEHICLE_TRIGGER_NEW_CARGO);
++			if (v->cargo.StoredCount() == 0) TriggerVehicle(v, VEHICLE_TRIGGER_NEW_CARGO);
+ 
+ 			uint loaded = ge->cargo.Load(cap_left, &v->cargo, st->xy);
+ 			if (v->cargo.ActionCount(VehicleCargoList::MTA_LOAD) > 0) {
+@@ -1568,7 +1568,7 @@ static void LoadUnloadVehicle(Vehicle *front)
+ 			}
+ 		}
+ 
+-		if (v->cargo.OnboardCount() >= v->cargo_cap) {
++		if (v->cargo.StoredCount() >= v->cargo_cap) {
+ 			SetBit(cargo_full, v->cargo_type);
+ 		} else {
+ 			SetBit(cargo_not_full, v->cargo_type);
+@@ -1608,7 +1608,7 @@ static void LoadUnloadVehicle(Vehicle *front)
+ 			if (front->current_order.GetLoadType() == OLF_FULL_LOAD_ANY) {
+ 				/* if the aircraft carries passengers and is NOT full, then
+ 				 * continue loading, no matter how much mail is in */
+-				if ((front->type == VEH_AIRCRAFT && IsCargoInClass(front->cargo_type, CC_PASSENGERS) && front->cargo_cap > front->cargo.OnboardCount()) ||
++				if ((front->type == VEH_AIRCRAFT && IsCargoInClass(front->cargo_type, CC_PASSENGERS) && front->cargo_cap > front->cargo.StoredCount()) ||
+ 						(cargo_not_full && (cargo_full & ~cargo_not_full) == 0)) { // There are still non-full cargoes
+ 					finished_loading = false;
+ 				}
+diff --git a/src/newgrf_engine.cpp b/src/newgrf_engine.cpp
+index 556958e..0c2e190 100644
+--- a/src/newgrf_engine.cpp
++++ b/src/newgrf_engine.cpp
+@@ -768,8 +768,8 @@ static uint32 VehicleGetVariable(Vehicle *v, const VehicleScopeResolver *object,
+ 		case 0x39: return v->cargo_type;
+ 		case 0x3A: return v->cargo_cap;
+ 		case 0x3B: return GB(v->cargo_cap, 8, 8);
+-		case 0x3C: return ClampToU16(v->cargo.Count());
+-		case 0x3D: return GB(ClampToU16(v->cargo.Count()), 8, 8);
++		case 0x3C: return ClampToU16(v->cargo.StoredCount());
++		case 0x3D: return GB(ClampToU16(v->cargo.StoredCount()), 8, 8);
+ 		case 0x3E: return v->cargo.Source();
+ 		case 0x3F: return ClampU(v->cargo.DaysInTransit(), 0, 0xFF);
+ 		case 0x40: return ClampToU16(v->age);
+@@ -922,7 +922,7 @@ static uint32 VehicleGetVariable(Vehicle *v, const VehicleScopeResolver *object,
+ 
+ 	if (totalsets == 0) return NULL;
+ 
+-	uint set = (v->cargo.Count() * totalsets) / max((uint16)1, v->cargo_cap);
++	uint set = (v->cargo.StoredCount() * totalsets) / max((uint16)1, v->cargo_cap);
+ 	set = min(set, totalsets - 1);
+ 
+ 	return in_motion ? group->loaded[set] : group->loading[set];
+diff --git a/src/newgrf_station.cpp b/src/newgrf_station.cpp
+index d7dfe38..d20da6a 100644
+--- a/src/newgrf_station.cpp
++++ b/src/newgrf_station.cpp
+@@ -421,7 +421,7 @@ uint32 Station::GetNewGRFVariable(const ResolverObject *object, byte variable, b
+ 		const GoodsEntry *ge = &this->goods[c];
+ 
+ 		switch (variable) {
+-			case 0x60: return min(ge->cargo.Count(), 4095);
++			case 0x60: return min(ge->cargo.TotalCount(), 4095);
+ 			case 0x61: return ge->HasVehicleEverTriedLoading() ? ge->time_since_pickup : 0;
+ 			case 0x62: return ge->HasRating() ? ge->rating : 0xFFFFFFFF;
+ 			case 0x63: return ge->cargo.DaysInTransit();
+@@ -440,8 +440,8 @@ uint32 Station::GetNewGRFVariable(const ResolverObject *object, byte variable, b
+ 	if (variable >= 0x8C && variable <= 0xEC) {
+ 		const GoodsEntry *g = &this->goods[GB(variable - 0x8C, 3, 4)];
+ 		switch (GB(variable - 0x8C, 0, 3)) {
+-			case 0: return g->cargo.Count();
+-			case 1: return GB(min(g->cargo.Count(), 4095), 0, 4) | (GB(g->acceptance_pickup, GoodsEntry::GES_ACCEPTANCE, 1) << 7);
++			case 0: return g->cargo.TotalCount();
++			case 1: return GB(min(g->cargo.TotalCount(), 4095), 0, 4) | (GB(g->acceptance_pickup, GoodsEntry::GES_ACCEPTANCE, 1) << 7);
+ 			case 2: return g->time_since_pickup;
+ 			case 3: return g->rating;
+ 			case 4: return g->cargo.Source();
+@@ -507,12 +507,12 @@ uint32 Waypoint::GetNewGRFVariable(const ResolverObject *object, byte variable,
+ 
+ 		case CT_DEFAULT:
+ 			for (CargoID cargo_type = 0; cargo_type < NUM_CARGO; cargo_type++) {
+-				cargo += st->goods[cargo_type].cargo.Count();
++				cargo += st->goods[cargo_type].cargo.TotalCount();
+ 			}
+ 			break;
+ 
+ 		default:
+-			cargo = st->goods[this->station_scope.cargo_type].cargo.Count();
++			cargo = st->goods[this->station_scope.cargo_type].cargo.TotalCount();
+ 			break;
+ 	}
+ 
+diff --git a/src/roadveh.h b/src/roadveh.h
+index 7dd4da1..5b265f0 100644
+--- a/src/roadveh.h
++++ b/src/roadveh.h
+@@ -157,7 +157,7 @@ protected: // These functions should not be called outside acceleration code.
+ 	 */
+ 	inline uint16 GetWeight() const
+ 	{
+-		uint16 weight = (CargoSpec::Get(this->cargo_type)->weight * this->cargo.Count()) / 16;
++		uint16 weight = (CargoSpec::Get(this->cargo_type)->weight * this->cargo.StoredCount()) / 16;
+ 
+ 		/* Vehicle weight is not added for articulated parts. */
+ 		if (!this->IsArticulatedPart()) {
+diff --git a/src/roadveh_cmd.cpp b/src/roadveh_cmd.cpp
+index bba108d..32e180d 100644
+--- a/src/roadveh_cmd.cpp
++++ b/src/roadveh_cmd.cpp
+@@ -133,7 +133,7 @@ SpriteID RoadVehicle::GetImage(Direction direction, EngineImageType image_type)
+ 
+ 	sprite = direction + _roadveh_images[spritenum];
+ 
+-	if (this->cargo.Count() >= this->cargo_cap / 2U) sprite += _roadveh_full_adder[spritenum];
++	if (this->cargo.StoredCount() >= this->cargo_cap / 2U) sprite += _roadveh_full_adder[spritenum];
+ 
+ 	return sprite;
+ }
+diff --git a/src/roadveh_gui.cpp b/src/roadveh_gui.cpp
+index 03e2830..eea4166 100644
+--- a/src/roadveh_gui.cpp
++++ b/src/roadveh_gui.cpp
+@@ -81,9 +81,9 @@ void DrawRoadVehDetails(const Vehicle *v, int left, int right, int y)
+ 			if (u->cargo_cap == 0) continue;
+ 
+ 			str = STR_VEHICLE_DETAILS_CARGO_EMPTY;
+-			if (!u->cargo.Empty()) {
++			if (u->cargo.StoredCount() > 0) {
+ 				SetDParam(0, u->cargo_type);
+-				SetDParam(1, u->cargo.Count());
++				SetDParam(1, u->cargo.StoredCount());
+ 				SetDParam(2, u->cargo.Source());
+ 				str = STR_VEHICLE_DETAILS_CARGO_FROM;
+ 				feeder_share += u->cargo.FeederShare();
+@@ -101,9 +101,9 @@ void DrawRoadVehDetails(const Vehicle *v, int left, int right, int y)
+ 		DrawString(left, right, y + FONT_HEIGHT_NORMAL + y_offset, STR_VEHICLE_INFO_CAPACITY);
+ 
+ 		str = STR_VEHICLE_DETAILS_CARGO_EMPTY;
+-		if (!v->cargo.Empty()) {
++		if (v->cargo.StoredCount() > 0) {
+ 			SetDParam(0, v->cargo_type);
+-			SetDParam(1, v->cargo.Count());
++			SetDParam(1, v->cargo.StoredCount());
+ 			SetDParam(2, v->cargo.Source());
+ 			str = STR_VEHICLE_DETAILS_CARGO_FROM;
+ 			feeder_share += v->cargo.FeederShare();
+diff --git a/src/saveload/afterload.cpp b/src/saveload/afterload.cpp
+index 91ba3a5..f6b0e0c 100644
+--- a/src/saveload/afterload.cpp
++++ b/src/saveload/afterload.cpp
+@@ -1539,7 +1539,7 @@ bool AfterLoadGame()
+ 		FOR_ALL_STATIONS(st) {
+ 			for (CargoID c = 0; c < NUM_CARGO; c++) {
+ 				st->goods[c].last_speed = 0;
+-				if (st->goods[c].cargo.Count() != 0) SetBit(st->goods[c].acceptance_pickup, GoodsEntry::GES_PICKUP);
++				if (st->goods[c].cargo.StoredCount() != 0) SetBit(st->goods[c].acceptance_pickup, GoodsEntry::GES_PICKUP);
+ 			}
+ 		}
+ 	}
+diff --git a/src/script/api/script_station.cpp b/src/script/api/script_station.cpp
+index a7b8459..bcf5e08 100644
+--- a/src/script/api/script_station.cpp
++++ b/src/script/api/script_station.cpp
+@@ -41,7 +41,7 @@
+ 	if (!IsValidStation(station_id)) return -1;
+ 	if (!ScriptCargo::IsValidCargo(cargo_id)) return -1;
+ 
+-	return ::Station::Get(station_id)->goods[cargo_id].cargo.Count();
++	return ::Station::Get(station_id)->goods[cargo_id].cargo.TotalCount();
+ }
+ 
+ /* static */ bool ScriptStation::HasCargoRating(StationID station_id, CargoID cargo_id)
+diff --git a/src/script/api/script_vehicle.cpp b/src/script/api/script_vehicle.cpp
+index 5bbcd54..84cfc99 100644
+--- a/src/script/api/script_vehicle.cpp
++++ b/src/script/api/script_vehicle.cpp
+@@ -399,7 +399,7 @@
+ 
+ 	uint32 amount = 0;
+ 	for (const Vehicle *v = ::Vehicle::Get(vehicle_id); v != NULL; v = v->Next()) {
+-		if (v->cargo_type == cargo) amount += v->cargo.Count();
++		if (v->cargo_type == cargo) amount += v->cargo.StoredCount();
+ 	}
+ 
+ 	return amount;
+diff --git a/src/ship_gui.cpp b/src/ship_gui.cpp
+index d036cef..6a55c81 100644
+--- a/src/ship_gui.cpp
++++ b/src/ship_gui.cpp
+@@ -70,9 +70,9 @@ void DrawShipDetails(const Vehicle *v, int left, int right, int y)
+ 	DrawString(left, right, y + FONT_HEIGHT_NORMAL, STR_VEHICLE_INFO_CAPACITY);
+ 
+ 	StringID str = STR_VEHICLE_DETAILS_CARGO_EMPTY;
+-	if (!v->cargo.Empty()) {
++	if (v->cargo.StoredCount() > 0) {
+ 		SetDParam(0, v->cargo_type);
+-		SetDParam(1, v->cargo.Count());
++		SetDParam(1, v->cargo.StoredCount());
+ 		SetDParam(2, v->cargo.Source());
+ 		str = STR_VEHICLE_DETAILS_CARGO_FROM;
+ 	}
+diff --git a/src/station_cmd.cpp b/src/station_cmd.cpp
+index 6793316..702afda 100644
+--- a/src/station_cmd.cpp
++++ b/src/station_cmd.cpp
+@@ -3225,7 +3225,7 @@ static void UpdateStationRating(Station *st)
+ 
+ 			bool skip = false;
+ 			int rating = 0;
+-			uint waiting = ge->cargo.Count();
++			uint waiting = ge->cargo.TotalCount();
+ 
+ 			if (HasBit(cs->callback_mask, CBM_CARGO_STATION_RATING_CALC)) {
+ 				/* Perform custom station rating. If it succeeds the speed, days in transit and
+@@ -3315,8 +3315,10 @@ static void UpdateStationRating(Station *st)
+ 					waiting_changed = true;
+ 				}
+ 
+-				if (waiting_changed && waiting < ge->cargo.Count()) {
+-					ge->cargo.Truncate(ge->cargo.Count() - waiting);
++				/* We can't truncate cargo that's already reserved for loading.
++				 * Thus StoredCount() here. */
++				if (waiting_changed && waiting < ge->cargo.StoredCount()) {
++					ge->cargo.Truncate(ge->cargo.StoredCount() - waiting);
+ 				}
+ 			}
+ 		}
+diff --git a/src/station_gui.cpp b/src/station_gui.cpp
+index 98c5b3d..486abb8 100644
+--- a/src/station_gui.cpp
++++ b/src/station_gui.cpp
+@@ -231,8 +231,8 @@ protected:
+ 
+ 		CargoID j;
+ 		FOR_EACH_SET_CARGO_ID(j, cargo_filter) {
+-			if (!(*a)->goods[j].cargo.Empty()) diff += GetTransportedGoodsIncome((*a)->goods[j].cargo.Count(), 20, 50, j);
+-			if (!(*b)->goods[j].cargo.Empty()) diff -= GetTransportedGoodsIncome((*b)->goods[j].cargo.Count(), 20, 50, j);
++			if ((*a)->goods[j].cargo.TotalCount() > 0) diff += GetTransportedGoodsIncome((*a)->goods[j].cargo.TotalCount(), 20, 50, j);
++			if ((*b)->goods[j].cargo.TotalCount() > 0) diff -= GetTransportedGoodsIncome((*b)->goods[j].cargo.TotalCount(), 20, 50, j);
+ 		}
+ 
+ 		return ClampToI32(diff);
+@@ -416,7 +416,7 @@ public:
+ 								x -= 20;
+ 								if (x < r.left + WD_FRAMERECT_LEFT) break;
+ 							}
+-							StationsWndShowStationRating(x, x + 16, y, cid, st->goods[cid].cargo.Count(), st->goods[cid].rating);
++							StationsWndShowStationRating(x, x + 16, y, cid, st->goods[cid].cargo.TotalCount(), st->goods[cid].rating);
+ 							if (!rtl) {
+ 								x += 20;
+ 								if (x > r.right - WD_FRAMERECT_RIGHT) break;
+diff --git a/src/train.h b/src/train.h
+index 2e11888..8f4bc2a 100644
+--- a/src/train.h
++++ b/src/train.h
+@@ -199,7 +199,7 @@ protected: // These functions should not be called outside acceleration code.
+ 	 */
+ 	inline uint16 GetWeight() const
+ 	{
+-		uint16 weight = (CargoSpec::Get(this->cargo_type)->weight * this->cargo.Count() * FreightWagonMult(this->cargo_type)) / 16;
++		uint16 weight = (CargoSpec::Get(this->cargo_type)->weight * this->cargo.StoredCount() * FreightWagonMult(this->cargo_type)) / 16;
+ 
+ 		/* Vehicle weight is not added for articulated parts. */
+ 		if (!this->IsArticulatedPart()) {
+diff --git a/src/train_cmd.cpp b/src/train_cmd.cpp
+index f1fb503..0d12fe8 100644
+--- a/src/train_cmd.cpp
++++ b/src/train_cmd.cpp
+@@ -477,7 +477,7 @@ SpriteID Train::GetImage(Direction direction, EngineImageType image_type) const
+ 
+ 	sprite = GetDefaultTrainSprite(spritenum, direction);
+ 
+-	if (this->cargo.Count() >= this->cargo_cap / 2U) sprite += _wagon_full_adder[spritenum];
++	if (this->cargo.StoredCount() >= this->cargo_cap / 2U) sprite += _wagon_full_adder[spritenum];
+ 
+ 	return sprite;
+ }
+diff --git a/src/train_gui.cpp b/src/train_gui.cpp
+index f302d75..866eab7 100644
+--- a/src/train_gui.cpp
++++ b/src/train_gui.cpp
+@@ -276,7 +276,7 @@ static void GetCargoSummaryOfArticulatedVehicle(const Train *v, CargoSummary *su
+ 		}
+ 
+ 		item->capacity += v->cargo_cap;
+-		item->amount += v->cargo.Count();
++		item->amount += v->cargo.StoredCount();
+ 		if (item->source == INVALID_STATION) item->source = v->cargo.Source();
+ 	} while ((v = v->Next()) != NULL && v->IsArticulatedPart());
+ }
+@@ -311,7 +311,7 @@ int GetTrainDetailsWndVScroll(VehicleID veh_id, TrainDetailsWindowTabs det_tab)
+ 		CargoArray act_cargo;
+ 		CargoArray max_cargo;
+ 		for (const Vehicle *v = Vehicle::Get(veh_id); v != NULL; v = v->Next()) {
+-			act_cargo[v->cargo_type] += v->cargo.Count();
++			act_cargo[v->cargo_type] += v->cargo.StoredCount();
+ 			max_cargo[v->cargo_type] += v->cargo_cap;
+ 		}
+ 
+@@ -424,7 +424,7 @@ void DrawTrainDetails(const Train *v, int left, int right, int y, int vscroll_po
+ 		Money feeder_share = 0;
+ 
+ 		for (const Vehicle *u = v; u != NULL; u = u->Next()) {
+-			act_cargo[u->cargo_type] += u->cargo.Count();
++			act_cargo[u->cargo_type] += u->cargo.StoredCount();
+ 			max_cargo[u->cargo_type] += u->cargo_cap;
+ 			feeder_share             += u->cargo.FeederShare();
+ 		}
+diff --git a/src/vehicle.cpp b/src/vehicle.cpp
+index caadbf4..7d49944 100644
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -189,7 +189,7 @@ uint Vehicle::Crash(bool flooded)
+ 	if (this->IsPrimaryVehicle()) this->vehstatus |= VS_STOPPED;
+ 	/* crash all wagons, and count passengers */
+ 	for (Vehicle *v = this; v != NULL; v = v->Next()) {
+-		if (IsCargoInClass(v->cargo_type, CC_PASSENGERS)) pass += v->cargo.Count();
++		if (IsCargoInClass(v->cargo_type, CC_PASSENGERS)) pass += v->cargo.TotalCount();
+ 		v->vehstatus |= VS_CRASHED;
+ 		MarkSingleVehicleDirty(v);
+ 	}
+@@ -1256,7 +1256,7 @@ uint8 CalcPercentVehicleFilled(const Vehicle *front, StringID *colour)
+ 
+ 	/* Count up max and used */
+ 	for (const Vehicle *v = front; v != NULL; v = v->Next()) {
+-		count += v->cargo.OnboardCount();
++		count += v->cargo.StoredCount();
+ 		max += v->cargo_cap;
+ 		if (v->cargo_cap != 0 && colour != NULL) {
+ 			unloading += HasBit(v->vehicle_flags, VF_CARGO_UNLOADING) ? 1 : 0;

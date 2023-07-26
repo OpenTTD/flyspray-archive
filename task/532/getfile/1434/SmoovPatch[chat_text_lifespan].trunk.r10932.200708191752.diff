@@ -1,0 +1,461 @@
+Index: src/date.cpp
+===================================================================
+--- src/date.cpp	(revision 10932)
++++ src/date.cpp	(working copy)
+@@ -182,7 +182,6 @@
+ };
+ 
+ extern void WaypointsDailyLoop();
+-extern void ChatMessageDailyLoop();
+ extern void EnginesDailyLoop();
+ extern void DisasterDailyLoop();
+ 
+@@ -245,8 +244,6 @@
+ 	/* yeah, increase day counter and call various daily loops */
+ 	_date++;
+ 
+-	ChatMessageDailyLoop();
+-
+ 	DisasterDailyLoop();
+ 	WaypointsDailyLoop();
+ 
+@@ -306,10 +303,6 @@
+ 		days_this_year = IsLeapYear(_cur_year) ? 366 : 365;
+ 		_date -= days_this_year;
+ 		FOR_ALL_VEHICLES(v) v->date_of_last_service -= days_this_year;
+-
+-		/* Because the _date wraps here, and text-messages expire by game-days, we have to clean out
+-		 *  all of them if the date is set back, else those messages will hang for ever */
+-		InitChatMessage();
+ 	}
+ 
+ 	if (_patches.auto_euro) CheckSwitchToEuro();
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 10932)
++++ src/lang/english.txt	(working copy)
+@@ -1098,6 +1098,12 @@
+ STR_CONFIG_PATCHES_LIVERIES_OWN                                 :Own company
+ STR_CONFIG_PATCHES_LIVERIES_ALL                                 :All companies
+ STR_CONFIG_PATCHES_PREFER_TEAMCHAT                              :{LTBLUE}Prefer team chat with <ENTER>: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_CHAT_TEXT_LIFESPAN                           :{LTBLUE}Chat text stays on screen at least {ORANGE}{STRING1}{LTBLUE} seconds
++STR_CONFIG_PATCHES_CHAT_TEXT_SHADOW                             :{LTBLUE}Chat text shadowing: {ORANGE}{STRING1}{LTBLUE}
++STR_CONFIG_PATCHES_CHAT_TEXT_SHADOW_NONE                        :none
++STR_CONFIG_PATCHES_CHAT_TEXT_SHADOW_LINE                        :line
++STR_CONFIG_PATCHES_CHAT_TEXT_SHADOW_BOX                         :box (default)
++
+ STR_CONFIG_PATCHES_SCROLLWHEEL_SCROLLING                        :{LTBLUE}Function of scrollwheel: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_SCROLLWHEEL_ZOOM                             :Zoom map
+ STR_CONFIG_PATCHES_SCROLLWHEEL_SCROLL                           :Scroll map
+Index: src/network/network.cpp
+===================================================================
+--- src/network/network.cpp	(revision 10932)
++++ src/network/network.cpp	(working copy)
+@@ -137,7 +137,6 @@
+ {
+ 	char buf[1024];
+ 	va_list va;
+-	const int duration = 10; // Game days the messages stay visible
+ 	char message[1024];
+ 	char temp[1024];
+ 
+@@ -200,7 +199,7 @@
+ 	debug_dump_commands("ddc:cmsg:%d;%d;%s\n", _date, _date_fract, message);
+ #endif /* DUMP_COMMANDS */
+ 	IConsolePrintF(color, "%s", message);
+-	AddChatMessage(color, duration, "%s", message);
++	AddChatMessage(color, "%s", message);
+ }
+ 
+ // Calculate the frame-lag of a client
+@@ -216,7 +215,6 @@
+ 	return lag;
+ }
+ 
+-
+ // There was a non-recoverable error, drop back to the main menu with a nice
+ //  error
+ static void NetworkError(StringID error_string)
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 10932)
++++ src/openttd.cpp	(working copy)
+@@ -67,6 +67,7 @@
+ #include "sound/sound_driver.hpp"
+ #include "music/music_driver.hpp"
+ #include "video/video_driver.hpp"
++#include "texteff.hpp"
+ 
+ #include "bridge_map.h"
+ #include "clear_map.h"
+@@ -88,6 +89,7 @@
+ extern Player* DoStartupNewPlayer(bool is_ai);
+ extern void ShowOSErrorBox(const char *buf);
+ extern void SetDefaultRailGui();
++extern void ChatMessageLoop();
+ 
+ const char *_default_blitter = "8bpp-optimized";
+ 
+@@ -1119,6 +1121,7 @@
+ 	if (_networking && !IsGeneratingWorld()) {
+ 		/* Multiplayer */
+ 		NetworkGameLoop();
++		ChatMessageLoop();
+ 	} else {
+ 		if (_network_reconnect > 0 && --_network_reconnect == 0) {
+ 			/* This means that we want to reconnect to the last host
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 10932)
++++ src/settings.cpp	(working copy)
+@@ -1346,6 +1346,8 @@
+ 	SDT_BOOL(Patches, link_terraform_toolbar,        S, 0, false,        STR_CONFIG_PATCHES_LINK_TERRAFORM_TOOLBAR,NULL),
+ 	 SDT_VAR(Patches, liveries,           SLE_UINT8, S,MS,  2, 0,  2, 0, STR_CONFIG_PATCHES_LIVERIES,              RedrawScreen),
+ 	SDT_BOOL(Patches, prefer_teamchat,               S, 0, false,        STR_CONFIG_PATCHES_PREFER_TEAMCHAT,       NULL),
++	 SDT_VAR(Patches, chat_text_lifespan, SLE_UINT16,S,NC, 60,10,900,10, STR_CONFIG_PATCHES_CHAT_TEXT_LIFESPAN,    NULL),
++	 SDT_VAR(Patches, chat_text_shadow,   SLE_UINT8, S,MS,  2, 0,  2, 1, STR_CONFIG_PATCHES_CHAT_TEXT_SHADOW,      NULL),
+ 	SDT_VAR(Patches, scrollwheel_scrolling,SLE_UINT8,S,MS, 0,  0,  2, 0, STR_CONFIG_PATCHES_SCROLLWHEEL_SCROLLING, NULL),
+ 	SDT_VAR(Patches,scrollwheel_multiplier,SLE_UINT8,S, 0, 5,  1, 15, 1, STR_CONFIG_PATCHES_SCROLLWHEEL_MULTIPLIER,NULL),
+ 	SDT_BOOL(Patches, pause_on_newgame,              S, 0, false,        STR_CONFIG_PATCHES_PAUSE_ON_NEW_GAME,     NULL),
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 10932)
++++ src/settings_gui.cpp	(working copy)
+@@ -645,6 +645,9 @@
+ 	"link_terraform_toolbar",
+ 	"liveries",
+ 	"prefer_teamchat",
++	/* chat_text_* are used by the same routines and must stay together */
++	"chat_text_lifespan",
++	"chat_text_shadow",
+ 	/* While the horizontal scrollwheel scrolling is written as general code, only
+ 	 *  the cocoa (OSX) driver generates input for it.
+ 	 *  Since it's also able to completely disable the scrollwheel will we display it on all platforms anyway */
+Index: src/texteff.cpp
+===================================================================
+--- src/texteff.cpp	(revision 10932)
++++ src/texteff.cpp	(working copy)
+@@ -22,10 +22,11 @@
+ #include "video/video_driver.hpp"
+ 
+ enum {
+-	MAX_TEXTMESSAGE_LENGTH = 200,
+-	INIT_NUM_TEXT_MESSAGES =  20,
+-	MAX_CHAT_MESSAGES      =  10,
+-	MAX_ANIMATED_TILES     = 256,
++	MAX_CHAT_MESSAGE_LENGTH = 255, ///< max chat message length
++	MAX_CHAT_MESSAGES       =  32, ///< max # chat messages to display
++	MAX_CHAT_MESSAGE_HEIGHT =  13, ///< height between lines of text for the chat window, including padding
++	INIT_NUM_TEXT_EFFECTS   =  20,
++	MAX_ANIMATED_TILES      = 256,
+ };
+ 
+ struct TextEffect {
+@@ -40,28 +41,31 @@
+ 	TextEffectMode mode;
+ };
+ 
+-
++/* Storage for the chat window. */
+ struct ChatMessage {
+-	char message[MAX_TEXTMESSAGE_LENGTH];
+-	uint16 color;
+-	Date end_date;
++	char message[MAX_CHAT_MESSAGE_LENGTH]; ///< message to be displayed
++	uint16 color;                          ///< text color
++	int64  time_stamp;                     ///< timestamp of when message was created, from _realtime_tick
+ };
+ 
+-/* used for text effects */
++/* Used for text effects */
+ static TextEffect *_text_effect_list = NULL;
+-static uint16 _num_text_effects = INIT_NUM_TEXT_MESSAGES;
++static uint16 _num_text_effects = INIT_NUM_TEXT_EFFECTS;
+ TileIndex _animated_tile_list[MAX_ANIMATED_TILES];
+ 
+-/* used for chat window */
++/* Used for chat window */
+ static ChatMessage _chatmsg_list[MAX_CHAT_MESSAGES];
+ static bool _chatmessage_dirty = false;
+ static bool _chatmessage_visible = false;
+ 
+ /* The chatbox grows from the bottom so the coordinates are pixels from
+- * the left and pixels from the bottom. The height is the maximum height */
+-static const Oblong _chatmsg_box = {10, 30, 500, 150};
+-static uint8 _chatmessage_backup[150 * 500 * 6]; // (height * width)
++ * bottom-left. The height is the maximum height.
++ * @todo What was the "* 6" added for in the unpatched code?
++ */
++static const Oblong _chatmsg_box = {10, 30, 512, (MAX_CHAT_MESSAGES * MAX_CHAT_MESSAGE_HEIGHT)}; ///< height now set near top of file
++static uint8 _chatmessage_backup[((MAX_CHAT_MESSAGES * MAX_CHAT_MESSAGE_HEIGHT) * 512) * 6];     ///< ((height) * width) * 6)
+ 
++/** Chat window section */
+ static inline uint GetChatMessageCount()
+ {
+ 	uint i;
+@@ -73,13 +77,13 @@
+ 	return i;
+ }
+ 
+-/* Add a text message to the 'chat window' to be shown
+- * @param color The colour this message is to be shown in
+- * @param duration The duration of the chat message in game-days
+- * @param message message itself in printf() style */
+-void CDECL AddChatMessage(uint16 color, uint8 duration, const char *message, ...)
++/* Add a chat message to the chat window
++ * @param color The color this message is to be shown in
++ * @param message message in printf() style
++ */
++void CDECL AddChatMessage(uint16 color, const char *message, ...)
+ {
+-	char buf[MAX_TEXTMESSAGE_LENGTH];
++	char buf[MAX_CHAT_MESSAGE_LENGTH];
+ 	const char *bufp;
+ 	va_list va;
+ 	uint msg_count;
+@@ -89,9 +93,8 @@
+ 	vsnprintf(buf, lengthof(buf), message, va);
+ 	va_end(va);
+ 
++	Utf8TrimString(buf, MAX_CHAT_MESSAGE_LENGTH);
+ 
+-	Utf8TrimString(buf, MAX_TEXTMESSAGE_LENGTH);
+-
+ 	/* Force linebreaks for strings that are too long */
+ 	lines = GB(FormatStringLinebreaks(buf, _chatmsg_box.width - 8), 0, 16) + 1;
+ 	if (lines >= MAX_CHAT_MESSAGES) return;
+@@ -109,11 +112,11 @@
+ 		ttd_strlcpy(cmsg->message, bufp, sizeof(cmsg->message));
+ 
+ 		/* The default colour for a message is player colour. Replace this with
+-		 * white for any additional lines */
++		 * white for any additional lines
++		 */
+ 		cmsg->color = (bufp == buf && color & IS_PALETTE_COLOR) ? color : (0x1D - 15) | IS_PALETTE_COLOR;
+-		cmsg->end_date = _date + duration;
+-
+-		bufp += strlen(bufp) + 1; // jump to 'next line' in the formatted string
++		cmsg->time_stamp = _realtime_tick; ///< time-stamp in milliseconds.
++		bufp += strlen(bufp) + 1; ///< jump to 'next line' in the formatted string
+ 	}
+ 
+ 	_chatmessage_dirty = true;
+@@ -128,7 +131,7 @@
+ 	}
+ }
+ 
+-/** Hide the chatbox */
++/* Hide the textbox */
+ void UndrawChatMessage()
+ {
+ 	if (_chatmessage_visible) {
+@@ -143,7 +146,6 @@
+ 		 *   looks nicely ;)
+ 		 * (and now hope this story above makes sense to you ;))
+ 		 */
+-
+ 		if (_cursor.visible) {
+ 			if (_cursor.draw_pos.x + _cursor.draw_size.x >= _chatmsg_box.x &&
+ 				_cursor.draw_pos.x <= _chatmsg_box.x + _chatmsg_box.width &&
+@@ -176,31 +178,33 @@
+ 	}
+ }
+ 
+-/** Check if a message is expired every day */
+-void ChatMessageDailyLoop()
++/* Check if a chat message is expired */
++void ChatMessageLoop()
+ {
+-	uint i;
++	uint32 tstamp;
++	tstamp = _realtime_tick; // current tstamp for comparing against tmsg->time_stamp
++	uint count = GetChatMessageCount();
+ 
+-	for (i = 0; i < MAX_CHAT_MESSAGES; i++) {
+-		ChatMessage *cmsg = &_chatmsg_list[i];
+-		if (cmsg->message[0] == '\0') continue;
++	if ((count != 0) && (tstamp < _chatmessage_last_tstamp)) { ///< fix time_stamp in case of _realtime_tick byte rollover
++		for (uint y = 1; count-- != 0; y++) {
++			ChatMessage *cmsg = &_chatmsg_list[count];
++			cmsg->time_stamp = cmsg->time_stamp - 4294967296; ///< int64 time_stamp becomes negative to compensate for uint32 _realtime_tick byte rollover point of 4294967296
++		}
++	}
++	_chatmessage_last_tstamp = tstamp; ///< make ..._last_tstamp current
++	ChatMessage *cmsg = &_chatmsg_list[0];
++	while ((cmsg->message[0] != '\0') && (tstamp > cmsg->time_stamp + (_patches.chat_text_lifespan * 1000))) { ///< if message exists, and tstamp is older than time_stamp + patch setting, expire it
+ 
+-		/* Message has expired, remove from the list */
+-		if (cmsg->end_date < _date) {
+-			/* Move the remaining messages over the current message */
+-			if (i != MAX_CHAT_MESSAGES - 1) memmove(cmsg, cmsg + 1, sizeof(*cmsg) * (MAX_CHAT_MESSAGES - i - 1));
++		/* Move the remaining messages over the current message */
++		memmove(cmsg, cmsg + 1, sizeof(*cmsg) * (MAX_CHAT_MESSAGES - 1));
+ 
+-			/* Mark the last item as empty */
+-			_chatmsg_list[MAX_CHAT_MESSAGES - 1].message[0] = '\0';
+-			_chatmessage_dirty = true;
+-
+-			/* Go one item back, because we moved the array 1 to the left */
+-			i--;
+-		}
++		/* Mark the last item as empty */
++		_chatmsg_list[MAX_CHAT_MESSAGES - 1].message[0] = '\0';
++		_chatmessage_dirty = true;
+ 	}
+ }
+ 
+-/** Draw the chat message-box */
++/* Draw the chat message-box */
+ void DrawChatMessage()
+ {
+ 	Blitter *blitter = BlitterFactoryBase::GetCurrentBlitter();
+@@ -208,7 +212,6 @@
+ 
+ 	/* First undraw if needed */
+ 	UndrawChatMessage();
+-
+ 	if (_iconsole_mode == ICONSOLE_FULL) return;
+ 
+ 	/* Check if we have anything to draw at all */
+@@ -235,28 +238,43 @@
+ 
+ 	_cur_dpi = &_screen; // switch to _screen painting
+ 
+-	/* Paint a half-transparent box behind the chat messages */
+-	GfxFillRect(
+-			_chatmsg_box.x,
+-			_screen.height - _chatmsg_box.y - count * 13 - 2,
+-			_chatmsg_box.x + _chatmsg_box.width - 1,
+-			_screen.height - _chatmsg_box.y - 2,
+-			PALETTE_TO_TRANSPARENT | (1 << USE_COLORTABLE) // black, but with some alpha for background
++	/* Paint the messages from bottom to top.
++	 * Lowest numbered 'count' is the oldest, and prints at the top.
++	 * Highest numbered 'count' is the newest, and prints at the bottom.
++	 * Since 'count' is not consistent enough between cycles to use for line position, we print the lines
++	 * based on line position, reducing 'count' for each line until 'count' is 0
++	 * We could make it cleaner here, but that would mean making it messier for the other functions that
++	 * manipulate the strings.
++	 */
++	for (uint y = 1; count-- != 0; y++) {
++		int16 length = GetStringBoundingBox(_chatmsg_list[count].message).width; ///< length is the pixel-length of the current line of text being dealt with
++
++		/* Paint a half-transparent box behind the individual text messages */
++		if (_patches.chat_text_shadow != CS_NONE) { ///< if shadow is set to none, no need to run this function
++			GfxFillRect(
++				_chatmsg_box.x,
++				_screen.height - _chatmsg_box.y - (y * MAX_CHAT_MESSAGE_HEIGHT),
++				_chatmsg_box.x + (_patches.chat_text_shadow != CS_LINE ? _chatmsg_box.width - 1 : length + 4), ///< if shadow is not set to line, then default behavior
++				_screen.height - _chatmsg_box.y - (y * MAX_CHAT_MESSAGE_HEIGHT) + (MAX_CHAT_MESSAGE_HEIGHT - 1),
++				PALETTE_TO_TRANSPARENT | (1 << USE_COLORTABLE) ///< black, but with some alpha for background
++			);
++		}
++		/* Output the line of text to the chat window area */
++		DoDrawString(
++			_chatmsg_list[count].message,
++			_chatmsg_box.x + 3,                                                  ///< 3 is enough offset to center the text in the shaded box
++			_screen.height - _chatmsg_box.y - (y * MAX_CHAT_MESSAGE_HEIGHT) + 2, ///< 2 is enough offset to center the text in the shaded box
++			_chatmsg_list[count].color
+ 		);
+-
+-	/* Paint the chat messages starting with the lowest at the bottom */
+-	for (uint y = 13; count-- != 0; y += 13) {
+-		DoDrawString(_chatmsg_list[count].message, _chatmsg_box.x + 3, _screen.height - _chatmsg_box.y - y + 1, _chatmsg_list[count].color);
+ 	}
+ 
+ 	/* Make sure the data is updated next flush */
+ 	_video_driver->MakeDirty(x, y, width, height);
+-
+ 	_chatmessage_visible = true;
+ 	_chatmessage_dirty = false;
+ }
+ 
+-/** Text Effects */
++/** Text effects section */
+ static void MarkTextEffectAreaDirty(TextEffect *te)
+ {
+ 	MarkAllViewportsDirty(
+@@ -380,7 +398,6 @@
+ 				}
+ 			}
+ 			break;
+-
+ 		case ZOOM_LVL_OUT_2X:
+ 			for (TextEffectID i = 0; i < _num_text_effects; i++) {
+ 				TextEffect *te = &_text_effect_list[i];
+@@ -431,7 +448,6 @@
+ 			return true;
+ 		}
+ 	}
+-
+ 	return false;
+ }
+ 
+@@ -459,7 +475,6 @@
+ 	}
+ }
+ 
+-
+ extern const ChunkHandler _animated_tile_chunk_handlers[] = {
+ 	{ 'ANIT', SaveLoad_ANIT, SaveLoad_ANIT, CH_RIFF | CH_LAST},
+ };
+Index: src/texteff.hpp
+===================================================================
+--- src/texteff.hpp	(revision 10932)
++++ src/texteff.hpp	(working copy)
+@@ -3,9 +3,7 @@
+ #ifndef TEXTEFF_HPP
+ #define TEXTEFF_HPP
+ 
+-/**
+- * Text effect modes.
+- */
++/** Text effect modes. */
+ enum TextEffectMode {
+ 	TE_RISING, ///< Make the text effect slowly go upwards
+ 	TE_STATIC, ///< Keep the text effect static
+@@ -13,6 +11,14 @@
+ 	INVALID_TE_ID = 0xFFFF,
+ };
+ 
++/** Chat shading modes. */
++enum {       ///< chat text shadowing style
++	CS_NONE, ///< 0 = none
++	CS_LINE, ///< 1 = individual lines
++	CS_BOX,  ///< 2 = whole box (default)
++};
++
++
+ typedef uint16 TextEffectID;
+ 
+ void MoveAllTextEffects();
+@@ -24,7 +30,7 @@
+ 
+ void InitChatMessage();
+ void DrawChatMessage();
+-void CDECL AddChatMessage(uint16 color, uint8 duration, const char *message, ...);
++void CDECL AddChatMessage(uint16 color, const char *message, ...);
+ void UndrawChatMessage();
+ 
+ /* misc_gui.cpp */
+Index: src/variables.h
+===================================================================
+--- src/variables.h	(revision 10932)
++++ src/variables.h	(working copy)
+@@ -133,6 +133,9 @@
+ 	bool loading_indicators;            // Show loading indicators
+ 	uint8 default_rail_type;            ///< The default rail type for the rail GUI
+ 
++	uint16 chat_text_lifespan;          ///< Chat text min lifespan (in real-time seconds)
++	uint8 chat_text_shadow;             ///< Chat text shadowing style (0=none, 1=line, 2=box)
++
+ 	uint8 toolbar_pos;                  // position of toolbars, 0=left, 1=center, 2=right
+ 	uint8 window_snap_radius;           // Windows snap at each other if closer than this
+ 
+@@ -336,6 +339,7 @@
+ /* misc */
+ VARDEF char _screenshot_name[128];
+ VARDEF byte _vehicle_design_names;
++VARDEF uint32 _chatmessage_last_tstamp;
+ 
+ /* Forking stuff */
+ VARDEF bool _dedicated_forks;

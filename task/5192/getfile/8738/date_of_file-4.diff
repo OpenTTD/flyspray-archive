@@ -1,0 +1,137 @@
+diff --git a/src/fileio.cpp b/src/fileio.cpp
+index 7e4d21f..3ccd157 100644
+--- a/src/fileio.cpp
++++ b/src/fileio.cpp
+@@ -309,6 +309,55 @@ bool FioCheckFileExists(const char *filename, Subdirectory subdir)
+ }
+ 
+ /**
++ * Returns the time of given file's last modification.
++ * @param filename the file to check
++ * @return a timestamp or 0 in case of errors
++ */
++time_t FileMTime(const char *filename)
++{
++#ifdef WIN32
++	struct _stat sb;
++	if (_tstat(OTTD2FS(filename), &sb) == 0) {
++#else
++	struct stat sb;
++	if (stat(filename, &sb) == 0) {
++#endif
++		return sb.st_mtime;
++	} else {
++		return 0;
++	}
++}
++
++/**
++ * Stores a printable version of the given timestamp in the buffer provided.
++ * In keeping with the FileMTime function, a timestamp of 0 is an error.
++ * @param buf the output buffer
++ * @param buflen the length of the output buffer
++ * @param mtime the timestamp to be formatted
++ * @return the number of characters written to buf, or 0 in case of error.
++ */
++size_t FileFormatMTime(char *buf, size_t buflen, time_t mtime)
++{
++	if (buf == 0 || mtime == 0)
++		return 0;
++	
++	struct tm *local_mtime = 0;
++#if defined(__MINGW32__)
++    /* MinGW is based on MSVC 6 and does not support localtime_r.
++	 * However, localtime uses thread-local storage and is safe. */
++	local_mtime = localtime(&mtime);
++	if (local_mtime == 0)
++		return 0;
++#else
++	struct tm temp_storage;
++	local_mtime = &temp_storage;
++	if (localtime_r(&mtime, local_mtime) == 0)
++		return 0;
++#endif
++	return strftime(buf, buflen, "%x %X", local_mtime);
++}
++
++/**
+  * Test whether the given filename exists.
+  * @param filename the file to test.
+  * @return true if and only if the file exists.
+diff --git a/src/fileio_func.h b/src/fileio_func.h
+index 25d961b..602e486 100644
+--- a/src/fileio_func.h
++++ b/src/fileio_func.h
+@@ -14,6 +14,7 @@
+ 
+ #include "core/enum_type.hpp"
+ #include "fileio_type.h"
++#include <time.h>
+ 
+ void FioSeekTo(size_t pos, int mode);
+ void FioSeekToFile(uint8 slot, size_t pos);
+@@ -64,6 +65,8 @@ bool FileExists(const char *filename);
+ const char *FioTarFirstDir(const char *tarname, Subdirectory subdir);
+ void FioTarAddLink(const char *src, const char *dest, Subdirectory subdir);
+ bool ExtractTar(const char *tar_filename, Subdirectory subdir);
++time_t FileMTime(const char *filename);
++size_t FileFormatMTime(char *buf, size_t buflen, time_t mtime);
+ 
+ extern char *_personal_dir; ///< custom directory for personal settings, saves, newgrf, etc.
+ 
+diff --git a/src/fios.cpp b/src/fios.cpp
+index e948b56..d0345a1 100644
+--- a/src/fios.cpp
++++ b/src/fios.cpp
+@@ -257,18 +257,7 @@ bool FiosFileScanner::AddFile(const char *filename, size_t basepath_length, cons
+ 	}
+ 
+ 	FiosItem *fios = _fios_items.Append();
+-#ifdef WIN32
+-	struct _stat sb;
+-	if (_tstat(OTTD2FS(filename), &sb) == 0) {
+-#else
+-	struct stat sb;
+-	if (stat(filename, &sb) == 0) {
+-#endif
+-		fios->mtime = sb.st_mtime;
+-	} else {
+-		fios->mtime = 0;
+-	}
+-
++	fios->mtime = FileMTime(filename);
+ 	fios->type = type;
+ 	strecpy(fios->name, filename, lastof(fios->name));
+ 
+diff --git a/src/fios_gui.cpp b/src/fios_gui.cpp
+index 5bc542c..cdc0e0b 100644
+--- a/src/fios_gui.cpp
++++ b/src/fios_gui.cpp
+@@ -34,6 +34,8 @@
+ #include "table/sprites.h"
+ #include "table/strings.h"
+ 
++#include <time.h>
++
+ SaveLoadDialogMode _saveload_mode;
+ LoadCheckData _load_check_data;    ///< Data loaded from save during SL_LOAD_CHECK.
+ 
+@@ -360,7 +362,17 @@ public:
+ 					if (item == this->selected) {
+ 						GfxFillRect(r.left + 1, y, r.right, y + this->resize.step_height, PC_DARK_BLUE);
+ 					}
+-					DrawString(r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, y, item->title, _fios_colours[item->type]);
++					
++					char timebuf[18];
++					time_t mtime = (time_t)item->mtime;
++					if (FileFormatMTime(timebuf, sizeof(timebuf), mtime) > 0) {
++						int midpoint = r.left + WD_FRAMERECT_LEFT + (r.right - WD_FRAMERECT_RIGHT - r.left + WD_FRAMERECT_LEFT) / 2;
++						DrawString(r.left + WD_FRAMERECT_LEFT, midpoint, y, item->title, _fios_colours[item->type]);
++						DrawString(midpoint, r.right - WD_FRAMERECT_RIGHT, y, timebuf, _fios_colours[item->type], SA_RIGHT);
++					} else {
++						DrawString(r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, y, item->title, _fios_colours[item->type]);
++					}
++
+ 					y += this->resize.step_height;
+ 					if (y >= this->vscroll->GetCapacity() * this->resize.step_height + r.top + WD_FRAMERECT_TOP) break;
+ 				}

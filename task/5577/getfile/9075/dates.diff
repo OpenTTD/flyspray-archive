@@ -1,0 +1,87 @@
+diff --git a/src/cheat_gui.cpp b/src/cheat_gui.cpp
+index 47c3456..c49eb42 100644
+--- a/src/cheat_gui.cpp
++++ b/src/cheat_gui.cpp
+@@ -24,6 +24,7 @@
+ #include "rail_gui.h"
+ #include "settings_gui.h"
+ #include "company_gui.h"
++#include "linkgraph/linkgraph.h"
+ 
+ #include "widgets/cheat_widget.h"
+ 
+@@ -100,7 +101,10 @@ static int32 ClickChangeDateCheat(int32 p1, int32 p2)
+ 	p1 = Clamp(p1, MIN_YEAR, MAX_YEAR);
+ 	if (p1 == _cur_year) return _cur_year;
+ 
+-	SetDate(ConvertYMDToDate(p1, ymd.month, ymd.day), _date_fract);
++	Date new_date = ConvertYMDToDate(p1, ymd.month, ymd.day);
++	LinkGraph *lg;
++	FOR_ALL_LINK_GRAPHS(lg) lg->ShiftDates(new_date - _date);
++	SetDate(new_date, _date_fract);
+ 	EnginesMonthlyLoop();
+ 	SetWindowDirty(WC_STATUS_BAR, 0);
+ 	InvalidateWindowClassesData(WC_BUILD_STATION, 0);
+diff --git a/src/date.cpp b/src/date.cpp
+index 9df6483..5ac94e4 100644
+--- a/src/date.cpp
++++ b/src/date.cpp
+@@ -18,6 +18,7 @@
+ #include "date_func.h"
+ #include "vehicle_base.h"
+ #include "rail_gui.h"
++#include "linkgraph/linkgraph.h"
+ #include "saveload/saveload.h"
+ 
+ Year      _cur_year;   ///< Current year, starting at 0
+@@ -211,6 +212,9 @@ static void OnNewYear()
+ 		_date -= days_this_year;
+ 		FOR_ALL_VEHICLES(v) v->date_of_last_service -= days_this_year;
+ 
++		LinkGraph *lg;
++		FOR_ALL_LINK_GRAPHS(lg) lg->ShiftDates(-days_this_year);
++
+ #ifdef ENABLE_NETWORK
+ 		/* Because the _date wraps here, and text-messages expire by game-days, we have to clean out
+ 		 *  all of them if the date is set back, else those messages will hang for ever */
+diff --git a/src/linkgraph/linkgraph.cpp b/src/linkgraph/linkgraph.cpp
+index dbaa02b..87a95ad 100644
+--- a/src/linkgraph/linkgraph.cpp
++++ b/src/linkgraph/linkgraph.cpp
+@@ -43,6 +43,24 @@ inline void LinkGraph::BaseEdge::Init(uint distance)
+ 	this->next_edge = INVALID_NODE;
+ }
+ 
++/**
++ * Shift all dates by given interval.
++ * This is useful if the date has been modified with the cheat menu.
++ * @param interval Number of days to be added or subtracted.
++ */
++void LinkGraph::ShiftDates(int interval)
++{
++	this->last_compression += interval;
++	for (NodeID node1 = 0; node1 < this->Size(); ++node1) {
++		BaseNode &source = this->nodes[node1];
++		if (source.last_update != INVALID_DATE) source.last_update += interval;
++		for (NodeID node2 = 0; node2 < this->Size(); ++node2) {
++			BaseEdge &edge = this->edges[node1][node2];
++			if (edge.last_update != INVALID_DATE) edge.last_update += interval;
++		}
++	}
++}
++
+ void LinkGraph::Compress()
+ {
+ 	this->last_compression = (_date + this->last_compression) / 2;
+diff --git a/src/linkgraph/linkgraph.h b/src/linkgraph/linkgraph.h
+index 8dfe3f8..07a6bed 100644
+--- a/src/linkgraph/linkgraph.h
++++ b/src/linkgraph/linkgraph.h
+@@ -442,6 +442,7 @@ public:
+ 	LinkGraph(CargoID cargo) : cargo(cargo), last_compression(_date) {}
+ 
+ 	void Init(uint size);
++	void ShiftDates(int interval);
+ 	void Compress();
+ 	void Merge(LinkGraph *other);
+ 

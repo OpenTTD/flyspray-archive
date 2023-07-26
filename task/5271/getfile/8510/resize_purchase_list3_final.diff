@@ -1,0 +1,255 @@
+Index: src/train.h
+===================================================================
+--- src/train.h	(Revision 24460)
++++ src/train.h	(Arbeitskopie)
+@@ -19,6 +19,7 @@
+ #include "rail_map.h"
+ #include "ground_vehicle.hpp"
+ 
++void GetTrainSpriteSize(EngineID engine, uint &width, uint &height, EngineImageType image_type);
+ struct Train;
+ 
+ /** Rail vehicle flags. */
+Index: src/build_vehicle_gui.cpp
+===================================================================
+--- src/build_vehicle_gui.cpp	(Revision 24460)
++++ src/build_vehicle_gui.cpp	(Arbeitskopie)
+@@ -36,6 +36,8 @@
+ 
+ #include "table/strings.h"
+ 
++extern Dimension _base_block_sizes_purchase[4];
++
+ /**
+  * Get the height of a single 'entry' in the engine lists.
+  * @param type the vehicle type to get the height of
+@@ -43,7 +45,7 @@
+  */
+ uint GetEngineListHeight(VehicleType type)
+ {
+-	return max<uint>(FONT_HEIGHT_NORMAL + WD_MATRIX_TOP + WD_MATRIX_BOTTOM, GetVehicleHeight(type));
++	return max<uint>(FONT_HEIGHT_NORMAL + WD_MATRIX_TOP + WD_MATRIX_BOTTOM, _base_block_sizes_purchase[type].height);
+ }
+ 
+ static const NWidgetPart _nested_build_vehicle_widgets[] = {
+@@ -871,17 +873,14 @@
+  */
+ void DrawEngineList(VehicleType type, int l, int r, int y, const GUIEngineList *eng_list, uint16 min, uint16 max, EngineID selected_id, bool show_count, GroupID selected_group)
+ {
+-	static const int sprite_widths[]  = { 60, 60, 76, 67 };
+ 	static const int sprite_y_offsets[] = { -1, -1, -2, -2 };
+ 
+ 	/* Obligatory sanity checks! */
+-	assert((uint)type < lengthof(sprite_widths));
+-	assert_compile(lengthof(sprite_y_offsets) == lengthof(sprite_widths));
+ 	assert(max <= eng_list->Length());
+ 
+ 	bool rtl = _current_text_dir == TD_RTL;
+ 	int step_size = GetEngineListHeight(type);
+-	int sprite_width = sprite_widths[type];
++	int sprite_width =  _base_block_sizes_purchase[type].width;
+ 
+ 	int sprite_x        = (rtl ? r - sprite_width / 2 : l + sprite_width / 2) - 1;
+ 	int sprite_y_offset = sprite_y_offsets[type] + step_size / 2;
+@@ -894,8 +893,8 @@
+ 		count_width = GetStringBoundingBox(STR_TINY_BLACK_COMA).width;
+ 	}
+ 
+-	int text_left  = l + (rtl ? WD_FRAMERECT_LEFT + replace_icon.width + 8 + count_width : sprite_width);
+-	int text_right = r - (rtl ? sprite_width : WD_FRAMERECT_RIGHT + replace_icon.width + 8 + count_width);
++	int text_left  = l + (rtl ? WD_FRAMERECT_LEFT + replace_icon.width + 8 + count_width : sprite_width + 2);
++	int text_right = r - (rtl ? sprite_width + 2 : WD_FRAMERECT_RIGHT + replace_icon.width + 8 + count_width);
+ 	int replace_icon_left = rtl ? l + WD_FRAMERECT_LEFT : r - WD_FRAMERECT_RIGHT - replace_icon.width;
+ 	int count_left = l;
+ 	int count_right = rtl ? text_left : r - WD_FRAMERECT_RIGHT - replace_icon.width - 8;
+Index: src/roadveh.h
+===================================================================
+--- src/roadveh.h	(Revision 24460)
++++ src/roadveh.h	(Arbeitskopie)
+@@ -19,6 +19,7 @@
+ #include "road_type.h"
+ #include "newgrf_engine.h"
+ 
++void GetRoadVehSpriteSize(EngineID engine, uint &width, uint &height, EngineImageType image_type);
+ struct RoadVehicle;
+ 
+ /** Road vehicle states */
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(Revision 24460)
++++ src/train_cmd.cpp	(Arbeitskopie)
+@@ -523,6 +523,33 @@
+ }
+ 
+ /**
++ * Get the size of the sprite of a train sprite heading west, or both heads (used for lists)
++ * @param engine The engine to get the sprite from
++ * @param width The width of the sprite
++ * @param height The height of the sprite
++ */
++void GetTrainSpriteSize(EngineID engine, uint &width, uint &height, EngineImageType image_type)
++{
++	int y = 0;
++	
++	if (RailVehInfo(engine)->railveh_type == RAILVEH_MULTIHEAD) {
++		SpriteID spritef = GetRailIcon(engine, false, y, image_type);
++		SpriteID spriter = GetRailIcon(engine, true, y, image_type);
++		const Sprite *real_spritef = GetSprite(spritef, ST_NORMAL);
++		const Sprite *real_spriter = GetSprite(spriter, ST_NORMAL);
++
++		width  = UnScaleByZoom(real_spritef->width, ZOOM_LVL_GUI) + UnScaleByZoom(real_spriter->width, ZOOM_LVL_GUI);
++		height = max(UnScaleByZoom(real_spritef->height, ZOOM_LVL_GUI), UnScaleByZoom(real_spriter->height, ZOOM_LVL_GUI));
++	} else {
++		SpriteID sprite = GetRailIcon(engine, false, y, image_type);
++		const Sprite *real_sprite = GetSprite(sprite, ST_NORMAL);
++
++		width  = UnScaleByZoom(real_sprite->width, ZOOM_LVL_GUI);
++		height = UnScaleByZoom(real_sprite->height, ZOOM_LVL_GUI);
++	}
++}
++
++/**
+  * Build a railroad wagon.
+  * @param tile     tile of the depot where rail-vehicle is built.
+  * @param flags    type of operation.
+Index: src/depot_gui.cpp
+===================================================================
+--- src/depot_gui.cpp	(Revision 24460)
++++ src/depot_gui.cpp	(Arbeitskopie)
+@@ -11,6 +11,7 @@
+ 
+ #include "stdafx.h"
+ #include "train.h"
++#include "roadveh.h"
+ #include "ship.h"
+ #include "aircraft.h"
+ #include "gui.h"
+@@ -27,6 +28,7 @@
+ #include "vehiclelist.h"
+ #include "order_backup.h"
+ #include "zoom_func.h"
++#include "debug.h"
+ 
+ #include "widgets/depot_widget.h"
+ 
+@@ -145,12 +147,14 @@
+  * Array containing the cell size in pixels of the #WID_D_MATRIX widget for each vehicle type.
+  * @note The train vehicle type uses the entire row for each train.
+  */
+-static Dimension _base_block_sizes[4];
++Dimension _base_block_sizes_depot[4];
++Dimension _base_block_sizes_purchase[4];
+ 
+-static void InitBlocksizeForShipAircraft(VehicleType type)
++static void InitBlocksizeForVehicles(VehicleType type, EngineImageType image_type)
+ {
+ 	uint max_width  = 0;
+ 	uint max_height = 0;
++	char buffer[256];
+ 
+ 	const Engine *e;
+ 	FOR_ALL_ENGINES_OF_TYPE(e, type) {
+@@ -159,23 +163,30 @@
+ 
+ 		switch (type) {
+ 			default: NOT_REACHED();
+-			case VEH_SHIP:     GetShipSpriteSize(    eid, x, y, EIT_IN_DEPOT); break;
+-			case VEH_AIRCRAFT: GetAircraftSpriteSize(eid, x, y, EIT_IN_DEPOT); break;
++			case VEH_TRAIN:    GetTrainSpriteSize(   eid, x, y, image_type); break;
++			case VEH_ROAD:     GetRoadVehSpriteSize( eid, x, y, image_type); break;
++			case VEH_SHIP:     GetShipSpriteSize(    eid, x, y, image_type); break;
++			case VEH_AIRCRAFT: GetAircraftSpriteSize(eid, x, y, image_type); break;
+ 		}
++		SetDParam(0, eid);
++		GetString(buffer, STR_ENGINE_NAME, lastof(buffer));
++		DEBUG(misc, 5, "image_type=%d, eid=%d, type=%d: x=%d, y=%d, name=%s\n", image_type, eid, type, x, y, buffer);
+ 		if (x > max_width)  max_width  = x;
+ 		if (y > max_height) max_height = y;
+ 	}
+ 
+-	switch (type) {
+-		default: NOT_REACHED();
+-		case VEH_SHIP:
+-			_base_block_sizes[VEH_SHIP].width = max(76U, max_width);
++	DEBUG(misc, 3, "image_type=%d, type=%d: width=%d, height=%d\n", image_type, type, max_width, max_height);
++	switch (image_type) {
++		case EIT_IN_DEPOT:
++			_base_block_sizes_depot[type].width  = Clamp(max_width, 32U, 196U);
++			_base_block_sizes_depot[type].height = max(GetVehicleHeight(type), max_height);
+ 			break;
+-		case VEH_AIRCRAFT:
+-			_base_block_sizes[VEH_AIRCRAFT].width = max(67U, max_width);
++		case EIT_PURCHASE:
++			_base_block_sizes_purchase[type].width  = Clamp(max_width, 60U, 196U);
++			_base_block_sizes_purchase[type].height = max(GetVehicleHeight(type), max_height);
+ 			break;
++		default: NOT_REACHED();
+ 	}
+-	_base_block_sizes[type].height = max(GetVehicleHeight(type), max_height);
+ }
+ 
+ /**
+@@ -184,14 +195,14 @@
+  */
+ void InitDepotWindowBlockSizes()
+ {
+-	_base_block_sizes[VEH_TRAIN].width = 0;
+-	_base_block_sizes[VEH_TRAIN].height = GetVehicleHeight(VEH_TRAIN);
+-
+-	_base_block_sizes[VEH_ROAD].width = 32;
+-	_base_block_sizes[VEH_ROAD].height = GetVehicleHeight(VEH_ROAD);
+-
+-	InitBlocksizeForShipAircraft(VEH_SHIP);
+-	InitBlocksizeForShipAircraft(VEH_AIRCRAFT);
++	InitBlocksizeForVehicles(VEH_TRAIN, EIT_IN_DEPOT);
++	InitBlocksizeForVehicles(VEH_TRAIN, EIT_PURCHASE);
++	InitBlocksizeForVehicles(VEH_ROAD, EIT_IN_DEPOT);
++	InitBlocksizeForVehicles(VEH_ROAD, EIT_PURCHASE);
++	InitBlocksizeForVehicles(VEH_SHIP, EIT_IN_DEPOT);
++	InitBlocksizeForVehicles(VEH_SHIP, EIT_PURCHASE);
++	InitBlocksizeForVehicles(VEH_AIRCRAFT, EIT_IN_DEPOT);
++	InitBlocksizeForVehicles(VEH_AIRCRAFT, EIT_PURCHASE);
+ }
+ 
+ static void DepotSellAllConfirmationCallback(Window *w, bool confirmed);
+@@ -600,13 +611,13 @@
+ 				}
+ 				int base_width = this->count_width + this->header_width;
+ 
+-				resize->height = max(_base_block_sizes[this->type].height, min_height);
++				resize->height = max(_base_block_sizes_depot[this->type].height, min_height);
+ 				if (this->type == VEH_TRAIN) {
+ 					resize->width = 1;
+ 					size->width = base_width + 2 * 29; // about 2 parts
+ 					size->height = resize->height * 6;
+ 				} else {
+-					resize->width = base_width + _base_block_sizes[this->type].width;
++					resize->width = base_width + _base_block_sizes_depot[this->type].width;
+ 					size->width = resize->width * (this->type == VEH_ROAD ? 5 : 3);
+ 					size->height = resize->height * (this->type == VEH_ROAD ? 5 : 3);
+ 				}
+Index: src/roadveh_cmd.cpp
+===================================================================
+--- src/roadveh_cmd.cpp	(Revision 24460)
++++ src/roadveh_cmd.cpp	(Arbeitskopie)
+@@ -156,6 +156,20 @@
+ }
+ 
+ /**
++ * Get the size of the sprite of a road vehicle sprite heading west (used for lists)
++ * @param engine The engine to get the sprite from
++ * @param width The width of the sprite
++ * @param height The height of the sprite
++ */
++void GetRoadVehSpriteSize(EngineID engine, uint &width, uint &height, EngineImageType image_type)
++{
++	const Sprite *spr = GetSprite(GetRoadVehIcon(engine, image_type), ST_NORMAL);
++
++	width  = UnScaleByZoom(spr->width, ZOOM_LVL_GUI);
++	height = UnScaleByZoom(spr->height, ZOOM_LVL_GUI);
++}
++
++/**
+  * Get length of a road vehicle.
+  * @param v Road vehicle to query length.
+  * @return Length of the given road vehicle.

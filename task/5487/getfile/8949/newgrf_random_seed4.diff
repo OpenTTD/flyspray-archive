@@ -1,0 +1,76 @@
+Index: src/newgrf_config.cpp
+===================================================================
+--- src/newgrf_config.cpp	(Revision 25050)
++++ src/newgrf_config.cpp	(Arbeitskopie)
+@@ -21,6 +21,7 @@
+ #include "video/video_driver.hpp"
+ #include "strings_func.h"
+ #include "textfile_gui.h"
++#include "core/random_func.hpp"
+ 
+ #include "fileio_func.h"
+ #include "fios.h"
+@@ -144,7 +145,17 @@
+ 
+ 	for (uint i = 0; i < this->param_info.Length(); i++) {
+ 		if (this->param_info[i] == NULL) continue;
+-		this->param_info[i]->SetValue(this, this->param_info[i]->def_value);
++		if (this->param_info[i]->type == PTYPE_RANDOM) {
++			const uint32 start = this->param_info[i]->min_value;
++			const uint32 range = this->param_info[i]->max_value - this->param_info[i]->min_value + 1;
++			if (range != 0) {
++				this->param_info[i]->SetValue(this, _interactive_random.Next() % range + start);
++			} else {
++				this->param_info[i]->SetValue(this, _interactive_random.Next());
++			}
++		} else {
++			this->param_info[i]->SetValue(this, this->param_info[i]->def_value);
++		}
+ 	}
+ }
+ 
+Index: src/newgrf.cpp
+===================================================================
+--- src/newgrf.cpp	(Revision 25050)
++++ src/newgrf.cpp	(Arbeitskopie)
+@@ -7290,6 +7290,7 @@
+ 		GRFParameterType type = (GRFParameterType)buf->ReadByte();
+ 		if (type < PTYPE_END) {
+ 			_cur_parameter->type = type;
++			if (type == PTYPE_RANDOM) _cur.grfconfig->has_param_defaults = true;
+ 		} else {
+ 			grfmsg(3, "StaticGRFInfo: unknown parameter type %d, ignoring this field", type);
+ 		}
+@@ -7300,8 +7301,8 @@
+ /** Callback function for 'INFO'->'PARAM'->param_num->'LIMI' to set the min/max value of a parameter. */
+ static bool ChangeGRFParamLimits(size_t len, ByteReader *buf)
+ {
+-	if (_cur_parameter->type != PTYPE_UINT_ENUM) {
+-		grfmsg(2, "StaticGRFInfo: 'INFO'->'PARA'->'LIMI' is only valid for parameters with type uint/enum, ignoring this field");
++	if (_cur_parameter->type != PTYPE_UINT_ENUM || _cur_parameter->type != PTYPE_RANDOM) {
++		grfmsg(2, "StaticGRFInfo: 'INFO'->'PARA'->'LIMI' is only valid for parameters with type uint/enum or random, ignoring this field");
+ 		buf->Skip(len);
+ 	} else if (len != 8) {
+ 		grfmsg(2, "StaticGRFInfo: expected 8 bytes for 'INFO'->'PARA'->'LIMI' but got " PRINTF_SIZE ", ignoring this field", len);
+@@ -7340,6 +7341,9 @@
+ 	if (len != 4) {
+ 		grfmsg(2, "StaticGRFInfo: expected 4 bytes for 'INFO'->'PARA'->'DEFA' but got " PRINTF_SIZE ", ignoring this field", len);
+ 		buf->Skip(len);
++	} else if (_cur_parameter->type == PTYPE_RANDOM) {
++		grfmsg(2, "StaticGRFInfo: 'INFO'->'PARA'->'DEFA' is not valid for parameters with type random, ignoring this field");
++		buf->Skip(len);
+ 	} else {
+ 		_cur_parameter->def_value = buf->ReadDWord();
+ 	}
+Index: src/newgrf_config.h
+===================================================================
+--- src/newgrf_config.h	(Revision 25050)
++++ src/newgrf_config.h	(Arbeitskopie)
+@@ -115,6 +115,7 @@
+ enum GRFParameterType {
+ 	PTYPE_UINT_ENUM, ///< The parameter allows a range of numbers, each of which can have a special name
+ 	PTYPE_BOOL,      ///< The parameter is either 0 or 1
++	PTYPE_RANDOM,    ///< The parameter is filled with random bits instead of set by the player
+ 	PTYPE_END,       ///< Invalid parameter type
+ };
+ 

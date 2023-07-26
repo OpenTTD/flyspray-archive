@@ -1,0 +1,969 @@
+Index: src/gfx_func.h
+===================================================================
+--- src/gfx_func.h	(revision 26400)
++++ src/gfx_func.h	(working copy)
+@@ -74,6 +74,7 @@
+ void HandleTextInput(const char *str, bool marked = false, const char *caret = NULL, const char *insert_location = NULL, const char *replacement_end = NULL);
+ void HandleCtrlChanged();
+ void HandleMouseEvents();
++bool HandleTouchPan(int startX, int startY, int deltaX, int deltaY);
+ void CSleep(int milliseconds);
+ void UpdateWindows();
+ 
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 26400)
++++ src/lang/english.txt	(working copy)
+@@ -1107,6 +1107,10 @@
+ STR_CONFIG_SETTING_HORIZONTAL_POS_CENTER                        :Centre
+ STR_CONFIG_SETTING_HORIZONTAL_POS_RIGHT                         :Right
+ 
++STR_CONFIG_SETTING_TOUCH										:Touch
++STR_CONFIG_SETTING_TOUCH_TOOLBAR_LONG_TAP_ENABLED				:Open toolbar menu on long tap
++STR_CONFIG_SETTING_TOUCH_TOOLBAR_LONG_TAP_ENABLED_HELPTEXT		:Long tap on a toolbar button will open its dropdown menu.
++
+ STR_CONFIG_SETTING_MAXIMUM_INITIAL_LOAN                         :Maximum initial loan: {STRING2}
+ STR_CONFIG_SETTING_MAXIMUM_INITIAL_LOAN_HELPTEXT                :Maximum amount a company can loan (without taking inflation into account)
+ STR_CONFIG_SETTING_INTEREST_RATE                                :Interest rate: {STRING2}
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 26400)
++++ src/settings_gui.cpp	(working copy)
+@@ -1437,7 +1437,7 @@
+ 	 *  Since it's also able to completely disable the scrollwheel will we display it on all platforms anyway */
+ 	SettingEntry("gui.scrollwheel_scrolling"),
+ 	SettingEntry("gui.scrollwheel_multiplier"),
+-	SettingEntry("gui.osk_activation"),
++	SettingEntry("gui.osk_activation")
+ #ifdef __APPLE__
+ 	/* We might need to emulate a right mouse button on mac */
+ 	SettingEntry("gui.right_mouse_btn_emulation"),
+@@ -1480,6 +1480,12 @@
+ /** News sub-page */
+ static SettingsPage _settings_ui_news_page = {_settings_ui_news, lengthof(_settings_ui_news)};
+ 
++static SettingEntry _settings_ui_touch[] = { 
++	SettingEntry("gui.touch_toolbar_long_tap_enabled"),
++};
++/** Touch sub-page */
++static SettingsPage _settings_ui_touch_page = { _settings_ui_touch, lengthof(_settings_ui_touch) };
++
+ static SettingEntry _settings_ui[] = {
+ 	SettingEntry(&_settings_ui_localisation_page, STR_CONFIG_SETTING_LOCALISATION),
+ 	SettingEntry(&_settings_ui_display_page, STR_CONFIG_SETTING_DISPLAY_OPTIONS),
+@@ -1486,6 +1492,7 @@
+ 	SettingEntry(&_settings_ui_interaction_page, STR_CONFIG_SETTING_INTERACTION),
+ 	SettingEntry(&_settings_ui_sound_page, STR_CONFIG_SETTING_SOUND),
+ 	SettingEntry(&_settings_ui_news_page, STR_CONFIG_SETTING_NEWS),
++	SettingEntry(&_settings_ui_touch_page, STR_CONFIG_SETTING_TOUCH),
+ 	SettingEntry("gui.show_finances"),
+ 	SettingEntry("gui.errmsg_duration"),
+ 	SettingEntry("gui.hover_delay"),
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 26400)
++++ src/settings_type.h	(working copy)
+@@ -143,6 +143,9 @@
+ 	uint8  station_gui_group_order;          ///< the order of grouping cargo entries in the station gui
+ 	uint8  station_gui_sort_by;              ///< sort cargo entries in the station gui by station name or amount
+ 	uint8  station_gui_sort_order;           ///< the sort order of entries in the station gui - ascending or descending
++
++	bool touch_toolbar_long_tap_enabled;	 ///< touch mode of toolbar buttons
++	bool touch_pan_intertia_enabled;		 ///< Two finger pan has inertia
+ #ifdef ENABLE_NETWORK
+ 	uint16 network_chat_box_width;           ///< width of the chat box in pixels
+ 	uint8  network_chat_box_height;          ///< height of the chat box in lines
+Index: src/stdafx.h
+===================================================================
+--- src/stdafx.h	(revision 26400)
++++ src/stdafx.h	(working copy)
+@@ -182,7 +182,7 @@
+ 		#define NTDDI_VERSION NTDDI_WINXP // Windows XP
+ 		#define _WIN32_WINNT 0x501        // Windows XP
+ 		#define _WIN32_WINDOWS 0x501      // Windows XP
+-		#define WINVER 0x0501             // Windows XP
++		#define WINVER 0x06010000         // Windows 7
+ 		#define _WIN32_IE_ 0x0600         // 6.0 (XP+)
+ 	#else
+ 		/* Define a win32 target platform, to override defaults of the SDK
+@@ -191,7 +191,7 @@
+ 		#define _WIN32_WINNT 0x0500       // Windows 2000
+ 		#define _WIN32_WINDOWS 0x400      // Windows 95
+ 		#if !defined(WINCE)
+-			#define WINVER 0x0400     // Windows NT 4.0 / Windows 95
++			#define WINVER 0x06010000     // Windows NT 4.0 / Windows 95
+ 		#endif
+ 		#define _WIN32_IE_ 0x0401         // 4.01 (win98 and NT4SP5+)
+ 	#endif
+Index: src/table/settings.ini
+===================================================================
+--- src/table/settings.ini	(revision 26400)
++++ src/table/settings.ini	(working copy)
+@@ -2929,6 +2929,15 @@
+ cat      = SC_BASIC
+ 
+ [SDTC_BOOL]
++var      = gui.touch_toolbar_long_tap_enabled
++flags    = SLF_NOT_IN_SAVE | SLF_NO_NETWORK_SYNC
++def      = false
++str      = STR_CONFIG_SETTING_TOUCH_TOOLBAR_LONG_TAP_ENABLED
++strhelp  = STR_CONFIG_SETTING_TOUCH_TOOLBAR_LONG_TAP_ENABLED_HELPTEXT
++cat      = SC_BASIC
++
++
++[SDTC_BOOL]
+ var      = gui.keep_all_autosave
+ flags    = SLF_NOT_IN_SAVE | SLF_NO_NETWORK_SYNC
+ def      = false
+Index: src/toolbar_gui.cpp
+===================================================================
+--- src/toolbar_gui.cpp	(revision 26400)
++++ src/toolbar_gui.cpp	(working copy)
+@@ -168,9 +168,9 @@
+  * @param list List of items
+  * @param def Default item
+  */
+-static void PopupMainToolbMenu(Window *w, int widget, DropDownList *list, int def)
++static void PopupMainToolbMenu(Window *w, int widget, DropDownList *list, int def, bool instant_close)
+ {
+-	ShowDropDownList(w, list, def, widget, 0, true, true);
++	ShowDropDownList(w, list, def, widget, 0, true, instant_close);
+ 	if (_settings_client.sound.click_beep) SndPlayFx(SND_15_BEEP);
+ }
+ 
+@@ -181,13 +181,13 @@
+  * @param string String for the first item in the menu
+  * @param count Number of items in the menu
+  */
+-static void PopupMainToolbMenu(Window *w, int widget, StringID string, int count)
++static void PopupMainToolbMenu(Window *w, int widget, StringID string, int count, bool instant_close)
+ {
+ 	DropDownList *list = new DropDownList();
+ 	for (int i = 0; i < count; i++) {
+ 		*list->Append() = new DropDownListStringItem(string + i, i, false);
+ 	}
+-	PopupMainToolbMenu(w, widget, list, 0);
++	PopupMainToolbMenu(w, widget, list, 0, instant_close);
+ }
+ 
+ /** Enum for the Company Toolbar's network related buttons */
+@@ -203,7 +203,7 @@
+  * @param grey A bitbask of which items to mark as disabled.
+  * @param include_spectator If true, a spectator option is included in the list.
+  */
+-static void PopupMainCompanyToolbMenu(Window *w, int widget, int grey = 0, bool include_spectator = false)
++static void PopupMainCompanyToolbMenu(Window *w, int widget, bool instant_close, int grey = 0, bool include_spectator = false)
+ {
+ 	DropDownList *list = new DropDownList();
+ 
+@@ -233,7 +233,7 @@
+ 		*list->Append() = new DropDownListCompanyItem(c, false, HasBit(grey, c));
+ 	}
+ 
+-	PopupMainToolbMenu(w, widget, list, _local_company == COMPANY_SPECTATOR ? CTMN_CLIENT_LIST : (int)_local_company);
++	PopupMainToolbMenu(w, widget, list, _local_company == COMPANY_SPECTATOR ? CTMN_CLIENT_LIST : (int)_local_company, instant_close);
+ }
+ 
+ 
+@@ -252,7 +252,7 @@
+ 
+ /* --- Pausing --- */
+ 
+-static CallBackFunction ToolbarPauseClick(Window *w)
++static CallBackFunction ToolbarPauseClick(Window *w, bool instant_close)
+ {
+ 	if (_networking && !_network_server) return CBF_NONE; // only server can pause the game
+ 
+@@ -268,7 +268,7 @@
+  * @param w Unused.
+  * @return #CBF_NONE
+  */
+-static CallBackFunction ToolbarFastForwardClick(Window *w)
++static CallBackFunction ToolbarFastForwardClick(Window *w, bool instant_close)
+ {
+ 	_fast_forward ^= true;
+ 	if (_settings_client.sound.click_beep) SndPlayFx(SND_15_BEEP);
+@@ -301,7 +301,7 @@
+  * @param w parent window the shown Drop down list is attached to.
+  * @return #CBF_NONE
+  */
+-static CallBackFunction ToolbarOptionsClick(Window *w)
++static CallBackFunction ToolbarOptionsClick(Window *w, bool instant_close)
+ {
+ 	DropDownList *list = new DropDownList();
+ 	*list->Append() = new DropDownListStringItem(STR_SETTINGS_MENU_GAME_OPTIONS,             OME_GAMEOPTIONS, false);
+@@ -323,7 +323,7 @@
+ 	*list->Append() = new DropDownListCheckedItem(STR_SETTINGS_MENU_TRANSPARENT_BUILDINGS,   OME_TRANSPARENTBUILDINGS, false, IsTransparencySet(TO_HOUSES));
+ 	*list->Append() = new DropDownListCheckedItem(STR_SETTINGS_MENU_TRANSPARENT_SIGNS,       OME_SHOW_STATIONSIGNS, false, IsTransparencySet(TO_SIGNS));
+ 
+-	ShowDropDownList(w, list, 0, WID_TN_SETTINGS, 140, true, true);
++	ShowDropDownList(w, list, 0, WID_TN_SETTINGS, 140, true, instant_close);
+ 	if (_settings_client.sound.click_beep) SndPlayFx(SND_15_BEEP);
+ 	return CBF_NONE;
+ }
+@@ -390,9 +390,9 @@
+  * @param w parent window the shown save dialogue is attached to.
+  * @return #CBF_NONE
+  */
+-static CallBackFunction ToolbarSaveClick(Window *w)
++static CallBackFunction ToolbarSaveClick(Window *w, bool instant_close)
+ {
+-	PopupMainToolbMenu(w, WID_TN_SAVE, STR_FILE_MENU_SAVE_GAME, SLNME_MENUCOUNT);
++	PopupMainToolbMenu(w, WID_TN_SAVE, STR_FILE_MENU_SAVE_GAME, SLNME_MENUCOUNT, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -402,9 +402,9 @@
+  * @param w parent window the shown save dialogue is attached to.
+  * @return #CBF_NONE
+  */
+-static CallBackFunction ToolbarScenSaveOrLoad(Window *w)
++static CallBackFunction ToolbarScenSaveOrLoad(Window *w, bool instant_close)
+ {
+-	PopupMainToolbMenu(w, WID_TE_SAVE, STR_SCENEDIT_FILE_MENU_SAVE_SCENARIO, SLEME_MENUCOUNT);
++	PopupMainToolbMenu(w, WID_TE_SAVE, STR_SCENEDIT_FILE_MENU_SAVE_SCENARIO, SLEME_MENUCOUNT, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -447,7 +447,7 @@
+ 	MME_SHOW_INDUSTRYDIRECTORY,
+ };
+ 
+-static CallBackFunction ToolbarMapClick(Window *w)
++static CallBackFunction ToolbarMapClick(Window *w, bool instant_close)
+ {
+ 	DropDownList *list = new DropDownList();
+ 	*list->Append() = new DropDownListStringItem(STR_MAP_MENU_MAP_OF_WORLD,            MME_SHOW_SMALLMAP,          false);
+@@ -454,11 +454,11 @@
+ 	*list->Append() = new DropDownListStringItem(STR_MAP_MENU_EXTRA_VIEW_PORT,         MME_SHOW_EXTRAVIEWPORTS,    false);
+ 	*list->Append() = new DropDownListStringItem(STR_MAP_MENU_LINGRAPH_LEGEND,         MME_SHOW_LINKGRAPH,         false);
+ 	*list->Append() = new DropDownListStringItem(STR_MAP_MENU_SIGN_LIST,               MME_SHOW_SIGNLISTS,         false);
+-	PopupMainToolbMenu(w, WID_TN_SMALL_MAP, list, 0);
++	PopupMainToolbMenu(w, WID_TN_SMALL_MAP, list, 0, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+-static CallBackFunction ToolbarScenMapTownDir(Window *w)
++static CallBackFunction ToolbarScenMapTownDir(Window *w, bool instant_close)
+ {
+ 	DropDownList *list = new DropDownList();
+ 	*list->Append() = new DropDownListStringItem(STR_MAP_MENU_MAP_OF_WORLD,            MME_SHOW_SMALLMAP,          false);
+@@ -466,7 +466,7 @@
+ 	*list->Append() = new DropDownListStringItem(STR_MAP_MENU_SIGN_LIST,               MME_SHOW_SIGNLISTS,         false);
+ 	*list->Append() = new DropDownListStringItem(STR_TOWN_MENU_TOWN_DIRECTORY,         MME_SHOW_TOWNDIRECTORY,     false);
+ 	*list->Append() = new DropDownListStringItem(STR_INDUSTRY_MENU_INDUSTRY_DIRECTORY, MME_SHOW_INDUSTRYDIRECTORY, false);
+-	PopupMainToolbMenu(w, WID_TE_SMALL_MAP, list, 0);
++	PopupMainToolbMenu(w, WID_TE_SMALL_MAP, list, 0, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -491,9 +491,9 @@
+ 
+ /* --- Town button menu --- */
+ 
+-static CallBackFunction ToolbarTownClick(Window *w)
++static CallBackFunction ToolbarTownClick(Window *w, bool instant_close)
+ {
+-	PopupMainToolbMenu(w, WID_TN_TOWNS, STR_TOWN_MENU_TOWN_DIRECTORY, (_settings_game.economy.found_town == TF_FORBIDDEN) ? 1 : 2);
++	PopupMainToolbMenu(w, WID_TN_TOWNS, STR_TOWN_MENU_TOWN_DIRECTORY, (_settings_game.economy.found_town == TF_FORBIDDEN) ? 1 : 2, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -516,9 +516,9 @@
+ 
+ /* --- Subidies button menu --- */
+ 
+-static CallBackFunction ToolbarSubsidiesClick(Window *w)
++static CallBackFunction ToolbarSubsidiesClick(Window *w, bool instant_close)
+ {
+-	PopupMainToolbMenu(w, WID_TN_SUBSIDIES, STR_SUBSIDIES_MENU_SUBSIDIES, 1);
++	PopupMainToolbMenu(w, WID_TN_SUBSIDIES, STR_SUBSIDIES_MENU_SUBSIDIES, 1, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -538,9 +538,9 @@
+ 
+ /* --- Stations button menu --- */
+ 
+-static CallBackFunction ToolbarStationsClick(Window *w)
++static CallBackFunction ToolbarStationsClick(Window *w, bool instant_close)
+ {
+-	PopupMainCompanyToolbMenu(w, WID_TN_STATIONS);
++	PopupMainCompanyToolbMenu(w, WID_TN_STATIONS, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -558,9 +558,9 @@
+ 
+ /* --- Finances button menu --- */
+ 
+-static CallBackFunction ToolbarFinancesClick(Window *w)
++static CallBackFunction ToolbarFinancesClick(Window *w, bool instant_close)
+ {
+-	PopupMainCompanyToolbMenu(w, WID_TN_FINANCES);
++	PopupMainCompanyToolbMenu(w, WID_TN_FINANCES, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -578,9 +578,9 @@
+ 
+ /* --- Company's button menu --- */
+ 
+-static CallBackFunction ToolbarCompaniesClick(Window *w)
++static CallBackFunction ToolbarCompaniesClick(Window *w, bool instant_close)
+ {
+-	PopupMainCompanyToolbMenu(w, WID_TN_COMPANIES, 0, true);
++	PopupMainCompanyToolbMenu(w, WID_TN_COMPANIES, instant_close, 0, true);
+ 	return CBF_NONE;
+ }
+ 
+@@ -624,9 +624,9 @@
+ 
+ /* --- Story button menu --- */
+ 
+-static CallBackFunction ToolbarStoryClick(Window *w)
++static CallBackFunction ToolbarStoryClick(Window *w, bool instant_close)
+ {
+-	PopupMainCompanyToolbMenu(w, WID_TN_STORY, 0, true);
++	PopupMainCompanyToolbMenu(w, WID_TN_STORY, instant_close, 0, true);
+ 	return CBF_NONE;
+ }
+ 
+@@ -644,9 +644,9 @@
+ 
+ /* --- Goal button menu --- */
+ 
+-static CallBackFunction ToolbarGoalClick(Window *w)
++static CallBackFunction ToolbarGoalClick(Window *w, bool instant_close)
+ {
+-	PopupMainCompanyToolbMenu(w, WID_TN_GOAL, 0, true);
++	PopupMainCompanyToolbMenu(w, WID_TN_GOAL, instant_close, true);
+ 	return CBF_NONE;
+ }
+ 
+@@ -664,9 +664,9 @@
+ 
+ /* --- Graphs button menu --- */
+ 
+-static CallBackFunction ToolbarGraphsClick(Window *w)
++static CallBackFunction ToolbarGraphsClick(Window *w, bool instant_close)
+ {
+-	PopupMainToolbMenu(w, WID_TN_GRAPHS, STR_GRAPH_MENU_OPERATING_PROFIT_GRAPH, (_toolbar_mode == TB_NORMAL) ? 6 : 8);
++	PopupMainToolbMenu(w, WID_TN_GRAPHS, STR_GRAPH_MENU_OPERATING_PROFIT_GRAPH, (_toolbar_mode == TB_NORMAL) ? 6 : 8, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -694,9 +694,9 @@
+ 
+ /* --- League button menu --- */
+ 
+-static CallBackFunction ToolbarLeagueClick(Window *w)
++static CallBackFunction ToolbarLeagueClick(Window *w, bool instant_close)
+ {
+-	PopupMainToolbMenu(w, WID_TN_LEAGUE, STR_GRAPH_MENU_COMPANY_LEAGUE_TABLE, _networking ? 2 : 3);
++	PopupMainToolbMenu(w, WID_TN_LEAGUE, STR_GRAPH_MENU_COMPANY_LEAGUE_TABLE, _networking ? 2 : 3, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -718,10 +718,10 @@
+ 
+ /* --- Industries button menu --- */
+ 
+-static CallBackFunction ToolbarIndustryClick(Window *w)
++static CallBackFunction ToolbarIndustryClick(Window *w, bool instant_close)
+ {
+ 	/* Disable build-industry menu if we are a spectator */
+-	PopupMainToolbMenu(w, WID_TN_INDUSTRIES, STR_INDUSTRY_MENU_INDUSTRY_DIRECTORY, (_local_company == COMPANY_SPECTATOR) ? 2 : 3);
++	PopupMainToolbMenu(w, WID_TN_INDUSTRIES, STR_INDUSTRY_MENU_INDUSTRY_DIRECTORY, (_local_company == COMPANY_SPECTATOR) ? 2 : 3, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -743,7 +743,7 @@
+ 
+ /* --- Trains button menu + 1 helper function for all vehicles. --- */
+ 
+-static void ToolbarVehicleClick(Window *w, VehicleType veh)
++static void ToolbarVehicleClick(Window *w, VehicleType veh, bool instant_close)
+ {
+ 	const Vehicle *v;
+ 	int dis = ~0;
+@@ -755,9 +755,9 @@
+ }
+ 
+ 
+-static CallBackFunction ToolbarTrainClick(Window *w)
++static CallBackFunction ToolbarTrainClick(Window *w, bool instant_close)
+ {
+-	ToolbarVehicleClick(w, VEH_TRAIN);
++	ToolbarVehicleClick(w, VEH_TRAIN, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -775,9 +775,9 @@
+ 
+ /* --- Road vehicle button menu --- */
+ 
+-static CallBackFunction ToolbarRoadClick(Window *w)
++static CallBackFunction ToolbarRoadClick(Window *w, bool instant_close)
+ {
+-	ToolbarVehicleClick(w, VEH_ROAD);
++	ToolbarVehicleClick(w, VEH_ROAD, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -795,9 +795,9 @@
+ 
+ /* --- Ship button menu --- */
+ 
+-static CallBackFunction ToolbarShipClick(Window *w)
++static CallBackFunction ToolbarShipClick(Window *w, bool instant_close)
+ {
+-	ToolbarVehicleClick(w, VEH_SHIP);
++	ToolbarVehicleClick(w, VEH_SHIP, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -815,9 +815,9 @@
+ 
+ /* --- Aircraft button menu --- */
+ 
+-static CallBackFunction ToolbarAirClick(Window *w)
++static CallBackFunction ToolbarAirClick(Window *w, bool instant_close)
+ {
+-	ToolbarVehicleClick(w, VEH_AIRCRAFT);
++	ToolbarVehicleClick(w, VEH_AIRCRAFT, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -835,7 +835,7 @@
+ 
+ /* --- Zoom in button --- */
+ 
+-static CallBackFunction ToolbarZoomInClick(Window *w)
++static CallBackFunction ToolbarZoomInClick(Window *w, bool instant_close)
+ {
+ 	if (DoZoomInOutWindow(ZOOM_IN, FindWindowById(WC_MAIN_WINDOW, 0))) {
+ 		w->HandleButtonClick((_game_mode == GM_EDITOR) ? (byte)WID_TE_ZOOM_IN : (byte)WID_TN_ZOOM_IN);
+@@ -846,7 +846,7 @@
+ 
+ /* --- Zoom out button --- */
+ 
+-static CallBackFunction ToolbarZoomOutClick(Window *w)
++static CallBackFunction ToolbarZoomOutClick(Window *w, bool instant_close)
+ {
+ 	if (DoZoomInOutWindow(ZOOM_OUT, FindWindowById(WC_MAIN_WINDOW, 0))) {
+ 		w->HandleButtonClick((_game_mode == GM_EDITOR) ? (byte)WID_TE_ZOOM_OUT : (byte)WID_TN_ZOOM_OUT);
+@@ -857,9 +857,9 @@
+ 
+ /* --- Rail button menu --- */
+ 
+-static CallBackFunction ToolbarBuildRailClick(Window *w)
++static CallBackFunction ToolbarBuildRailClick(Window *w, bool instant_close)
+ {
+-	ShowDropDownList(w, GetRailTypeDropDownList(), _last_built_railtype, WID_TN_RAILS, 140, true, true);
++	ShowDropDownList(w, GetRailTypeDropDownList(), _last_built_railtype, WID_TN_RAILS, 140, true, instant_close);
+ 	if (_settings_client.sound.click_beep) SndPlayFx(SND_15_BEEP);
+ 	return CBF_NONE;
+ }
+@@ -879,7 +879,7 @@
+ 
+ /* --- Road button menu --- */
+ 
+-static CallBackFunction ToolbarBuildRoadClick(Window *w)
++static CallBackFunction ToolbarBuildRoadClick(Window *w, bool instant_close)
+ {
+ 	const Company *c = Company::Get(_local_company);
+ 	DropDownList *list = new DropDownList();
+@@ -896,7 +896,7 @@
+ 		*list->Append() = new DropDownListStringItem(STR_ROAD_MENU_TRAM_CONSTRUCTION, ROADTYPE_TRAM, !HasBit(c->avail_roadtypes, ROADTYPE_TRAM));
+ 		break;
+ 	}
+-	ShowDropDownList(w, list, _last_built_roadtype, WID_TN_ROADS, 140, true, true);
++	ShowDropDownList(w, list, _last_built_roadtype, WID_TN_ROADS, 140, true, instant_close);
+ 	if (_settings_client.sound.click_beep) SndPlayFx(SND_15_BEEP);
+ 	return CBF_NONE;
+ }
+@@ -916,9 +916,9 @@
+ 
+ /* --- Water button menu --- */
+ 
+-static CallBackFunction ToolbarBuildWaterClick(Window *w)
++static CallBackFunction ToolbarBuildWaterClick(Window *w, bool instant_close)
+ {
+-	PopupMainToolbMenu(w, WID_TN_WATER, STR_WATERWAYS_MENU_WATERWAYS_CONSTRUCTION, 1);
++	PopupMainToolbMenu(w, WID_TN_WATER, STR_WATERWAYS_MENU_WATERWAYS_CONSTRUCTION, 1, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -936,9 +936,9 @@
+ 
+ /* --- Airport button menu --- */
+ 
+-static CallBackFunction ToolbarBuildAirClick(Window *w)
++static CallBackFunction ToolbarBuildAirClick(Window *w, bool instant_close)
+ {
+-	PopupMainToolbMenu(w, WID_TN_AIR, STR_AIRCRAFT_MENU_AIRPORT_CONSTRUCTION, 1);
++	PopupMainToolbMenu(w, WID_TN_AIR, STR_AIRCRAFT_MENU_AIRPORT_CONSTRUCTION, 1, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -956,9 +956,9 @@
+ 
+ /* --- Forest button menu --- */
+ 
+-static CallBackFunction ToolbarForestClick(Window *w)
++static CallBackFunction ToolbarForestClick(Window *w, bool instant_close)
+ {
+-	PopupMainToolbMenu(w, WID_TN_LANDSCAPE, STR_LANDSCAPING_MENU_LANDSCAPING, 3);
++	PopupMainToolbMenu(w, WID_TN_LANDSCAPE, STR_LANDSCAPING_MENU_LANDSCAPING, 3, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -980,9 +980,9 @@
+ 
+ /* --- Music button menu --- */
+ 
+-static CallBackFunction ToolbarMusicClick(Window *w)
++static CallBackFunction ToolbarMusicClick(Window *w, bool instant_close)
+ {
+-	PopupMainToolbMenu(w, WID_TN_MUSIC_SOUND, STR_TOOLBAR_SOUND_MUSIC, 1);
++	PopupMainToolbMenu(w, WID_TN_MUSIC_SOUND, STR_TOOLBAR_SOUND_MUSIC, 1, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -1000,9 +1000,9 @@
+ 
+ /* --- Newspaper button menu --- */
+ 
+-static CallBackFunction ToolbarNewspaperClick(Window *w)
++static CallBackFunction ToolbarNewspaperClick(Window *w, bool instant_close)
+ {
+-	PopupMainToolbMenu(w, WID_TN_MESSAGES, STR_NEWS_MENU_LAST_MESSAGE_NEWS_REPORT, 2);
++	PopupMainToolbMenu(w, WID_TN_MESSAGES, STR_NEWS_MENU_LAST_MESSAGE_NEWS_REPORT, 2, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -1034,9 +1034,9 @@
+ 	}
+ }
+ 
+-static CallBackFunction ToolbarHelpClick(Window *w)
++static CallBackFunction ToolbarHelpClick(Window *w, bool instant_close)
+ {
+-	PopupMainToolbMenu(w, WID_TN_HELP, STR_ABOUT_MENU_LAND_BLOCK_INFO, _settings_client.gui.newgrf_developer_tools ? 12 : 9);
++	PopupMainToolbMenu(w, WID_TN_HELP, STR_ABOUT_MENU_LAND_BLOCK_INFO, _settings_client.gui.newgrf_developer_tools ? 12 : 9, instant_close);
+ 	return CBF_NONE;
+ }
+ 
+@@ -1148,7 +1148,7 @@
+ 
+ /* --- Switch toolbar button --- */
+ 
+-static CallBackFunction ToolbarSwitchClick(Window *w)
++static CallBackFunction ToolbarSwitchClick(Window *w, bool instant_close)
+ {
+ 	if (_toolbar_mode != TB_LOWER) {
+ 		_toolbar_mode = TB_LOWER;
+@@ -1167,7 +1167,7 @@
+ /**
+  * Called when clicking at the date panel of the scenario editor toolbar.
+  */
+-static CallBackFunction ToolbarScenDatePanel(Window *w)
++static CallBackFunction ToolbarScenDatePanel(Window *w, bool instant_close)
+ {
+ 	SetDParam(0, _settings_game.game_creation.starting_year);
+ 	ShowQueryString(STR_JUST_INT, STR_MAPGEN_START_DATE_QUERY_CAPT, 8, w, CS_NUMERAL, QSF_ENABLE_DEFAULT);
+@@ -1175,7 +1175,7 @@
+ 	return CBF_NONE;
+ }
+ 
+-static CallBackFunction ToolbarScenDateBackward(Window *w)
++static CallBackFunction ToolbarScenDateBackward(Window *w, bool instant_close)
+ {
+ 	/* don't allow too fast scrolling */
+ 	if (!(w->flags & WF_TIMEOUT) || w->timeout_timer <= 1) {
+@@ -1188,7 +1188,7 @@
+ 	return CBF_NONE;
+ }
+ 
+-static CallBackFunction ToolbarScenDateForward(Window *w)
++static CallBackFunction ToolbarScenDateForward(Window *w, bool instant_close)
+ {
+ 	/* don't allow too fast scrolling */
+ 	if (!(w->flags & WF_TIMEOUT) || w->timeout_timer <= 1) {
+@@ -1201,7 +1201,7 @@
+ 	return CBF_NONE;
+ }
+ 
+-static CallBackFunction ToolbarScenGenLand(Window *w)
++static CallBackFunction ToolbarScenGenLand(Window *w, bool instant_close)
+ {
+ 	w->HandleButtonClick(WID_TE_LAND_GENERATE);
+ 	if (_settings_client.sound.click_beep) SndPlayFx(SND_15_BEEP);
+@@ -1211,7 +1211,7 @@
+ }
+ 
+ 
+-static CallBackFunction ToolbarScenGenTown(Window *w)
++static CallBackFunction ToolbarScenGenTown(Window *w, bool instant_close)
+ {
+ 	w->HandleButtonClick(WID_TE_TOWN_GENERATE);
+ 	if (_settings_client.sound.click_beep) SndPlayFx(SND_15_BEEP);
+@@ -1219,7 +1219,7 @@
+ 	return CBF_NONE;
+ }
+ 
+-static CallBackFunction ToolbarScenGenIndustry(Window *w)
++static CallBackFunction ToolbarScenGenIndustry(Window *w, bool instant_close)
+ {
+ 	w->HandleButtonClick(WID_TE_INDUSTRY);
+ 	if (_settings_client.sound.click_beep) SndPlayFx(SND_15_BEEP);
+@@ -1227,7 +1227,7 @@
+ 	return CBF_NONE;
+ }
+ 
+-static CallBackFunction ToolbarScenBuildRoad(Window *w)
++static CallBackFunction ToolbarScenBuildRoad(Window *w, bool instant_close)
+ {
+ 	w->HandleButtonClick(WID_TE_ROADS);
+ 	if (_settings_client.sound.click_beep) SndPlayFx(SND_15_BEEP);
+@@ -1235,7 +1235,7 @@
+ 	return CBF_NONE;
+ }
+ 
+-static CallBackFunction ToolbarScenBuildDocks(Window *w)
++static CallBackFunction ToolbarScenBuildDocks(Window *w, bool instant_close)
+ {
+ 	w->HandleButtonClick(WID_TE_WATER);
+ 	if (_settings_client.sound.click_beep) SndPlayFx(SND_15_BEEP);
+@@ -1243,7 +1243,7 @@
+ 	return CBF_NONE;
+ }
+ 
+-static CallBackFunction ToolbarScenPlantTrees(Window *w)
++static CallBackFunction ToolbarScenPlantTrees(Window *w, bool instant_close)
+ {
+ 	w->HandleButtonClick(WID_TE_TREES);
+ 	if (_settings_client.sound.click_beep) SndPlayFx(SND_15_BEEP);
+@@ -1251,7 +1251,7 @@
+ 	return CBF_NONE;
+ }
+ 
+-static CallBackFunction ToolbarScenPlaceSign(Window *w)
++static CallBackFunction ToolbarScenPlaceSign(Window *w, bool instant_close)
+ {
+ 	w->HandleButtonClick(WID_TE_SIGNS);
+ 	if (_settings_client.sound.click_beep) SndPlayFx(SND_15_BEEP);
+@@ -1258,7 +1258,7 @@
+ 	return SelectSignTool();
+ }
+ 
+-static CallBackFunction ToolbarBtn_NULL(Window *w)
++static CallBackFunction ToolbarBtn_NULL(Window *w, bool instant_close)
+ {
+ 	return CBF_NONE;
+ }
+@@ -1572,7 +1572,7 @@
+ 
+ /* --- Toolbar handling for the 'normal' case */
+ 
+-typedef CallBackFunction ToolbarButtonProc(Window *w);
++typedef CallBackFunction ToolbarButtonProc(Window *w, bool instant_close);
+ 
+ static ToolbarButtonProc * const _toolbar_button_procs[] = {
+ 	ToolbarPauseClick,
+@@ -1682,9 +1682,20 @@
+ 		this->DrawWidgets();
+ 	}
+ 
++	virtual bool OnRightClick(Point pt, int widget)
++	{
++		if (_settings_client.gui.touch_toolbar_long_tap_enabled && _game_mode != GM_MENU && !this->IsWidgetDisabled(widget))
++		{
++			_toolbar_button_procs[widget](this, false);
++			return true;
++		}
++		 
++		return false;
++	}
++
+ 	virtual void OnClick(Point pt, int widget, int click_count)
+ 	{
+-		if (_game_mode != GM_MENU && !this->IsWidgetDisabled(widget)) _toolbar_button_procs[widget](this);
++		if (_game_mode != GM_MENU && !this->IsWidgetDisabled(widget)) _toolbar_button_procs[widget](this, true);
+ 	}
+ 
+ 	virtual void OnDropdownSelect(int widget, int index)
+@@ -1696,8 +1707,8 @@
+ 	virtual EventState OnHotkey(int hotkey)
+ 	{
+ 		switch (hotkey) {
+-			case MTHK_PAUSE: ToolbarPauseClick(this); break;
+-			case MTHK_FASTFORWARD: ToolbarFastForwardClick(this); break;
++			case MTHK_PAUSE: ToolbarPauseClick(this, true); break;
++			case MTHK_FASTFORWARD: ToolbarFastForwardClick(this, true); break;
+ 			case MTHK_SETTINGS: ShowGameOptions(); break;
+ 			case MTHK_SAVEGAME: MenuClickSaveLoad(); break;
+ 			case MTHK_LOADGAME: ShowSaveLoadDialog(SLD_LOAD_GAME); break;
+@@ -1716,8 +1727,8 @@
+ 			case MTHK_ROADVEH_LIST: ShowVehicleListWindow(_local_company, VEH_ROAD); break;
+ 			case MTHK_SHIP_LIST: ShowVehicleListWindow(_local_company, VEH_SHIP); break;
+ 			case MTHK_AIRCRAFT_LIST: ShowVehicleListWindow(_local_company, VEH_AIRCRAFT); break;
+-			case MTHK_ZOOM_IN: ToolbarZoomInClick(this); break;
+-			case MTHK_ZOOM_OUT: ToolbarZoomOutClick(this); break;
++			case MTHK_ZOOM_IN: ToolbarZoomInClick(this, true); break;
++			case MTHK_ZOOM_OUT: ToolbarZoomOutClick(this, true); break;
+ 			case MTHK_BUILD_RAIL: if (CanBuildVehicleInfrastructure(VEH_TRAIN)) ShowBuildRailToolbar(_last_built_railtype); break;
+ 			case MTHK_BUILD_ROAD: ShowBuildRoadToolbar(_last_built_roadtype); break;
+ 			case MTHK_BUILD_DOCKS: ShowBuildDocksToolbar(); break;
+@@ -2023,10 +2034,24 @@
+ 		}
+ 	}
+ 
++	virtual bool OnRightClick(Point pt, int widget)
++	{
++		if (_game_mode == GM_MENU) return false;
++	
++		if (_settings_client.gui.touch_toolbar_long_tap_enabled)
++		{
++			CallBackFunction cbf = _scen_toolbar_button_procs[widget](this, false);
++			if (cbf != CBF_NONE) this->last_started_action = cbf;
++			return true;
++		}
++		
++		return false;
++	}
++
+ 	virtual void OnClick(Point pt, int widget, int click_count)
+ 	{
+ 		if (_game_mode == GM_MENU) return;
+-		CallBackFunction cbf = _scen_toolbar_button_procs[widget](this);
++		CallBackFunction cbf = _scen_toolbar_button_procs[widget](this, true);
+ 		if (cbf != CBF_NONE) this->last_started_action = cbf;
+ 	}
+ 
+@@ -2044,17 +2069,17 @@
+ 	{
+ 		CallBackFunction cbf = CBF_NONE;
+ 		switch (hotkey) {
+-			case MTEHK_PAUSE:                  ToolbarPauseClick(this); break;
+-			case MTEHK_FASTFORWARD:            ToolbarFastForwardClick(this); break;
++			case MTEHK_PAUSE:                  ToolbarPauseClick(this, true); break;
++			case MTEHK_FASTFORWARD:            ToolbarFastForwardClick(this, true); break;
+ 			case MTEHK_SETTINGS:               ShowGameOptions(); break;
+ 			case MTEHK_SAVEGAME:               MenuClickSaveLoad(); break;
+-			case MTEHK_GENLAND:                ToolbarScenGenLand(this); break;
+-			case MTEHK_GENTOWN:                ToolbarScenGenTown(this); break;
+-			case MTEHK_GENINDUSTRY:            ToolbarScenGenIndustry(this); break;
+-			case MTEHK_BUILD_ROAD:             ToolbarScenBuildRoad(this); break;
+-			case MTEHK_BUILD_DOCKS:            ToolbarScenBuildDocks(this); break;
+-			case MTEHK_BUILD_TREES:            ToolbarScenPlantTrees(this); break;
+-			case MTEHK_SIGN:                   cbf = ToolbarScenPlaceSign(this); break;
++			case MTEHK_GENLAND:                ToolbarScenGenLand(this, true); break;
++			case MTEHK_GENTOWN:                ToolbarScenGenTown(this, true); break;
++			case MTEHK_GENINDUSTRY:            ToolbarScenGenIndustry(this, true); break;
++			case MTEHK_BUILD_ROAD:             ToolbarScenBuildRoad(this, true); break;
++			case MTEHK_BUILD_DOCKS:            ToolbarScenBuildDocks(this, true); break;
++			case MTEHK_BUILD_TREES:            ToolbarScenPlantTrees(this, true); break;
++			case MTEHK_SIGN:                   cbf = ToolbarScenPlaceSign(this, true); break;
+ 			case MTEHK_MUSIC:                  ShowMusicWindow(); break;
+ 			case MTEHK_LANDINFO:               cbf = PlaceLandBlockInfo(); break;
+ 			case MTEHK_SMALL_SCREENSHOT:       MenuClickSmallScreenshot(); break;
+@@ -2061,8 +2086,8 @@
+ 			case MTEHK_ZOOMEDIN_SCREENSHOT:    MenuClickLargeWorldScreenshot(SC_ZOOMEDIN); break;
+ 			case MTEHK_DEFAULTZOOM_SCREENSHOT: MenuClickLargeWorldScreenshot(SC_DEFAULTZOOM); break;
+ 			case MTEHK_GIANT_SCREENSHOT:       MenuClickLargeWorldScreenshot(SC_WORLD); break;
+-			case MTEHK_ZOOM_IN:                ToolbarZoomInClick(this); break;
+-			case MTEHK_ZOOM_OUT:               ToolbarZoomOutClick(this); break;
++			case MTEHK_ZOOM_IN:                ToolbarZoomInClick(this, true); break;
++			case MTEHK_ZOOM_OUT:               ToolbarZoomOutClick(this, true); break;
+ 			case MTEHK_TERRAFORM:              ShowEditorTerraformToolbar(); break;
+ 			case MTEHK_SMALLMAP:               ShowSmallMap(); break;
+ 			case MTEHK_EXTRA_VIEWPORT:         ShowExtraViewPortWindowForTileUnderCursor(); break;
+Index: src/video/win32_v.cpp
+===================================================================
+--- src/video/win32_v.cpp	(revision 26400)
++++ src/video/win32_v.cpp	(working copy)
+@@ -352,6 +352,22 @@
+ 		}
+ 	}
+ 
++#if defined(NTDDI_WIN7)
++	/* disable horizontal and vertical pan gestures (our panning is always in both dimensions, gutter panning 
++	 * will result in counterintuitive behavior with panning being locked to 1 dimension until the gutter is broken). */
++	DWORD dwPanWant = GC_PAN | GC_PAN_WITH_INERTIA;
++	DWORD dwPanBlock = GC_PAN_WITH_GUTTER;
++
++	GESTURECONFIG gc[] = { 
++		{ GID_ZOOM, GC_ZOOM, 0 },
++		{ GID_ROTATE, GC_ROTATE, 0 },
++		{ GID_PAN, dwPanWant, dwPanBlock }
++	};
++
++	UINT uiGcs = 3;
++	SetGestureConfig(_wnd.main_wnd, 0, uiGcs, gc, sizeof(GESTURECONFIG));
++#endif
++
+ 	BlitterFactory::GetCurrentBlitter()->PostResize();
+ 
+ 	GameSizeChanged(); // invalidate all windows, force redraw
+@@ -637,6 +653,7 @@
+ 
+ #endif /* !defined(WINCE) || _WIN32_WCE >= 0x400 */
+ 
++static POINT panStart, panPrev;
+ static LRESULT CALLBACK WndProcGdi(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+ {
+ 	static uint32 keycode = 0;
+@@ -902,7 +919,95 @@
+ 				ClientSizeChanged(LOWORD(lParam), HIWORD(lParam));
+ 			}
+ 			return 0;
++#if defined(NTDDI_WIN7)
++		case WM_GESTURE:
++		{
++			GESTUREINFO gi;
+ 
++			ZeroMemory(&gi, sizeof(gi));
++
++			// For some reason, sizeof(gi) is 40 in release mode, causing GetGestureInfo to fail
++			gi.cbSize = 48;// sizeof(gi);
++
++			/*LPWSTR a = new WCHAR[8];
++			_itow(gi.cbSize, a, 10);
++			MessageBoxW(hwnd, a, L"CBSize.", MB_OK);*/
++
++			BOOL bResult = GetGestureInfo((HGESTUREINFO)lParam, &gi);
++			BOOL bHandled = FALSE;
++
++			if (bResult){
++				// now interpret the gesture
++				switch (gi.dwID){
++				case GID_ZOOM:
++					DEBUG(console, 0, "Zoom");
++					
++					// Let the default zoom handler do its work (= translate the pinch gesture to mouse wheen event).
++					bHandled = FALSE;
++					break;
++				case GID_PAN:
++					// Code for panning goes here
++					if (gi.dwFlags == GF_BEGIN)
++					{
++						panStart.x = panPrev.x = gi.ptsLocation.x;
++						panStart.y = panPrev.y = gi.ptsLocation.y;
++
++						ScreenToClient(hwnd, &panStart);
++						ScreenToClient(hwnd, &panPrev);
++
++						DEBUG(console, 0, "Pan START %d %d", panPrev.x, panPrev.y);
++					}
++					else {						
++						POINT current;
++						current.x = gi.ptsLocation.x;
++						current.y = gi.ptsLocation.y;
++
++						ScreenToClient(hwnd, &current);
++
++						DEBUG(console, 0, "Pan step %d %d -> %d %d", panStart.x, panStart.y, current.x - panPrev.x, current.y - panPrev.y);
++
++						HandleTouchPan(panStart.x, panStart.y, current.x - panPrev.x, current.y - panPrev.y);
++
++						panPrev = current;
++					}
++					bHandled = TRUE;
++					break;
++				/*case GID_ROTATE:
++					// Code for rotation goes here
++					bHandled = TRUE;
++					break;
++				case GID_TWOFINGERTAP:
++					// Code for two-finger tap goes here
++					bHandled = TRUE;
++					break;
++				case GID_PRESSANDTAP:
++					// Code for roll over goes here
++					bHandled = TRUE;
++					break;*/
++				default:
++					// A gesture was not recognized
++					break;
++				}
++			}
++			else{
++				DWORD dwErr = GetLastError();
++				if (dwErr > 0){
++					LPWSTR a = new WCHAR[8];
++					_itow(dwErr, a, 10);
++					MessageBoxW(hwnd, a, L"Could not retrieve a GESTUREINFO structure.", MB_OK);
++				}
++			}
++			
++			if (bHandled){
++				CloseGestureInfoHandle((HGESTUREINFO)lParam);
++
++				return 0;
++			}
++			else{
++				return DefWindowProc(hwnd, msg, wParam, lParam);
++			}
++		}
++#endif
+ #if !defined(WINCE)
+ 		case WM_SIZING: {
+ 			RECT *r = (RECT*)lParam;
+Index: src/window.cpp
+===================================================================
+--- src/window.cpp	(revision 26400)
++++ src/window.cpp	(working copy)
+@@ -1906,7 +1906,7 @@
+ 		pt.x = _cursor.pos.x - w->left;
+ 		pt.y = _cursor.pos.y - w->top;
+ 		if (_left_button_down) {
+-			w->OnMouseDrag(pt, GetWidgetFromPos(w, pt.x, pt.y));
++			w->OnMouseDrag(pt, GetWidgetFromPos(w, pt.x, pt.y), false);
+ 		} else {
+ 			w->OnDragDrop(pt, GetWidgetFromPos(w, pt.x, pt.y));
+ 		}
+@@ -1916,6 +1916,29 @@
+ 	return ES_HANDLED;
+ }
+ 
++bool HandleTouchPan(int startX, int startY, int deltaX, int deltaY)
++{
++	Window* w = FindWindowFromPt(startX, startY);
++	if (w == NULL)
++	{
++		return false;
++	}
++	
++	//ViewPort *vp = IsPtInWindowViewport(w, absX, absY);
++
++	/* Don't allow any action in a viewport if either in menu or when having a modal progress window */
++	//if (vp != NULL && (_game_mode == GM_MENU || HasModalProgress())) return;
++
++	Point delta;
++	delta.x = -deltaX;
++	delta.y = -deltaY;
++
++	/* Create a scroll-event and send it to the window */
++	if (delta.x != 0 || delta.y != 0) w->OnScroll(delta);
++	
++	return true;
++}
++
+ /** Report position of the mouse to the underlying window. */
+ static void HandleMouseOver()
+ {
+Index: src/window_gui.h
+===================================================================
+--- src/window_gui.h	(revision 26400)
++++ src/window_gui.h	(working copy)
+@@ -640,7 +640,7 @@
+ 	 * @param pt     The point inside the window that the mouse hovers over.
+ 	 * @param widget The widget the mouse hovers over.
+ 	 */
+-	virtual void OnMouseDrag(Point pt, int widget) {}
++	virtual void OnMouseDrag(Point pt, int widget, bool isTouchDrag) {}
+ 
+ 	/**
+ 	 * A dragged 'object' has been released.

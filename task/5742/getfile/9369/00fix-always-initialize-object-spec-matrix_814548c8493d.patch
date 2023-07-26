@@ -1,0 +1,67 @@
+# HG changeset patch
+# User sbr <sebastien@brissaud.name>
+# Date 1379408216 -7200
+#      Tue Sep 17 10:56:56 2013 +0200
+# Branch fs5742_00
+# Node ID 420d26312b6dcf662c8b30927eaf6e431d65e905
+# Parent  c6084924f121a608422a95b56b3ad4134d6bda31
+-Fix [FS#5742] (r25540): In BuildObjectWindow, ensure the object spec matrix is always initialized.
+
+When opening the BuildObjectWindow for the first time, SelectFirstAvailableObject() is called.
+To find the first available object it first try to find an available object spec in the currently selected class [1].
+In that case, _selected_object_class is uninitialized, that is equals to 0.
+The object class with id 0 is the LTHS class [2] which only contains the lighthouse object that isn't available in BuildObjectWindow.
+As no available object spec could be found in this class, SelectFirstAvailableObject() will search for the first available object spec in all defined object classes [3].
+The second object class (with id 1) is the TRNS class which as LTHS only contains the unavailable transmitter object.
+The first available object spec could be found in the object class with id 2.
+SelectOtherClass() is then called, store the class id in _selected_object_class and setup the WID_BO_SELECT_MATRIX matrix child count with the object spec count.
+NWidgetMatrix::SetCount() compute a pixel size from its child count and set it as the scrollbar count [4].
+
+OBJECT_CLASS_MAX [5] defines the maximum number of object classes allowed to 32 [6].
+The LTHS and TRNS object classes are always defined, which leaves room for up to 30 custom object classes.
+If NewGRFs defines more than 30 object classes, the exceeding object specs overflow in the object class with id 0 [7].
+In that case, when opening for the first time the BuildObjectWindow, SelectFirstAvailableObject() can find an available object spec in the first object class.
+SelectOtherClass() isn't called as the object class doesn't change. The WID_BO_SELECT_MATRIX child count then isn't set and remains to -1 wich is its default value [8].
+When re-initializing the window [9] in SelectOtherObject(), NWidgetMatrix::AssignSizePosition() call NWidgetMatrix::SetCount() with the matrix child count [10].
+As this child count is negative, the computed pixel size used to set the scrollbar count is also negative and that trigger an assert [11] in Scrollbar::SetCount().
+
+The BuildObjectWindow constructor should call SelectOtherClass() before SelectFirstAvailableObject().
+That way the WID_BO_SELECT_MATRIX child count is always set even if the first object class contains some available object spec.
+
+
+This patch also fix a typo I made in the patch that was committed as r25540.
+SelectOtherClass() was called when CanRestoreSelectedObject() returned true.
+But that line should have ended with a semi-colon, not with a coma [12].
+
+ [1]: https://secure.openttd.org/vcs/hg/openttd/trunk.hg/file/dd5395efe404/src/object_gui.cpp#l393
+ [2]: https://secure.openttd.org/vcs/hg/openttd/trunk.hg/file/814548c8493d/src/newgrf_object.cpp#l97
+ [3]: https://secure.openttd.org/vcs/hg/openttd/trunk.hg/file/dd5395efe404/src/object_gui.cpp#l403
+ [4]: https://secure.openttd.org/vcs/hg/openttd/trunk.hg/file/dd5395efe404/src/widget.cpp#l1502
+ [5]: https://secure.openttd.org/vcs/hg/openttd/trunk.hg/file/dd5395efe404/src/newgrf_object.h#l49
+ [6]: https://secure.openttd.org/vcs/hg/openttd/trunk.hg/file/dd5395efe404/src/newgrf_object.h#l137
+ [7]: https://secure.openttd.org/vcs/hg/openttd/trunk.hg/file/dd5395efe404/src/newgrf_class_func.h#l71
+ [8]: https://secure.openttd.org/vcs/hg/openttd/trunk.hg/file/dd5395efe404/src/widget.cpp#l1452
+ [9]: https://secure.openttd.org/vcs/hg/openttd/trunk.hg/file/dd5395efe404/src/object_gui.cpp#l328
+[10]: https://secure.openttd.org/vcs/hg/openttd/trunk.hg/file/dd5395efe404/src/widget.cpp#l1566
+[11]: https://secure.openttd.org/vcs/hg/openttd/trunk.hg/file/dd5395efe404/src/widget_type.h#l672
+[12]: https://secure.openttd.org/vcs/hg/openttd/trunk.hg/file/dd5395efe404/src/object_gui.cpp#l86
+
+diff --git a/src/object_gui.cpp b/src/object_gui.cpp
+--- a/src/object_gui.cpp
++++ b/src/object_gui.cpp
+@@ -79,14 +79,14 @@ public:
+ 		this->vscroll->SetPosition(0);
+ 		this->vscroll->SetCount(ObjectClass::GetUIClassCount());
+ 
+ 		NWidgetMatrix *matrix = this->GetWidget<NWidgetMatrix>(WID_BO_SELECT_MATRIX);
+ 		matrix->SetScrollbar(this->GetScrollbar(WID_BO_SELECT_SCROLL));
+ 
++		this->SelectOtherClass(_selected_object_class);
+ 		if (this->CanRestoreSelectedObject()) {
+-			this->SelectOtherClass(_selected_object_class),
+ 			this->SelectOtherObject(_selected_object_index);
+ 		} else {
+ 			this->SelectFirstAvailableObject(true);
+ 		}
+ 		assert(ObjectClass::Get(_selected_object_class)->GetUISpecCount() > 0); // object GUI should be disables elsewise
+ 		this->EnsureSelectedObjectClassIsVisible();

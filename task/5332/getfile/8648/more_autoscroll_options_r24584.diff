@@ -1,0 +1,127 @@
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(wersja 24584)
++++ src/settings_type.h	(kopia robocza)
+@@ -63,7 +63,7 @@
+ 	bool   sg_new_nonstop;                   ///< ttdpatch compatible nonstop handling read from pre v93 savegames
+ 	bool   new_nonstop;                      ///< ttdpatch compatible nonstop handling
+ 	uint8  stop_location;                    ///< what is the default stop location of trains?
+-	bool   autoscroll;                       ///< scroll when moving mouse to the edge
++	uint8  autoscroll;                       ///< scroll when moving mouse to the edge
+ 	byte   errmsg_duration;                  ///< duration of error message
+ 	byte   hover_delay;                      ///< time required to activate a hover event, in seconds
+ 	bool   link_terraform_toolbar;           ///< display terraform toolbar when displaying rail, road, water and airport toolbars
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(wersja 24584)
++++ src/lang/english.txt	(kopia robocza)
+@@ -1192,7 +1192,11 @@
+ STR_CONFIG_SETTING_ROAD_VEHICLE_QUEUEING                        :Road vehicle queueing (with quantum effects): {STRING2}
+ STR_CONFIG_SETTING_ROAD_VEHICLE_QUEUEING_HELPTEXT               :Make road vehicle wait in front of occupied road stops until they are cleared
+ STR_CONFIG_SETTING_AUTOSCROLL                                   :Pan window when mouse is at the edge: {STRING2}
+-STR_CONFIG_SETTING_AUTOSCROLL_HELPTEXT                          :When enabled, the main display will start to scroll when the mouse is near the edge of the screen
++STR_CONFIG_SETTING_AUTOSCROLL_HELPTEXT                          :When enabled, the display will start to scroll when the mouse is near the edge of the screen
++STR_CONFIG_SETTING_AUTOSCROLL_DISABLED                          :disabled
++STR_CONFIG_SETTING_AUTOSCROLL_EVERY_VIEWPORT                    :every viewport
++STR_CONFIG_SETTING_AUTOSCROLL_MAIN_VIEWPORT                     :main viewport
++STR_CONFIG_SETTING_AUTOSCROLL_MAIN_VIEWPORT_FULLSCREEN          :main viewport, full-screen only
+ STR_CONFIG_SETTING_BRIBE                                        :Allow bribing of the local authority: {STRING2}
+ STR_CONFIG_SETTING_BRIBE_HELPTEXT                               :Allow companies to try bribing the local town authority. If the bribe is noticed by an inspector, the company will not be able to act in the town for six months
+ STR_CONFIG_SETTING_ALLOW_EXCLUSIVE                              :Allow buying exclusive transport rights: {STRING2}
+Index: src/window.cpp
+===================================================================
+--- src/window.cpp	(wersja 24584)
++++ src/window.cpp	(kopia robocza)
+@@ -34,6 +34,12 @@
+ #include "error.h"
+ #include "game/game.hpp"
+ 
++enum ViewportAutoscrolling {
++	VA_DISABLED,
++	VA_EVERY_VIEWPORT,
++	VA_MAIN_VIEWPORT,
++	VA_MAIN_VIEWPORT_FULLSCREEN,
++};
+ 
+ static Point _drag_delta; ///< delta between mouse cursor and upper left corner of dragged window
+ static Window *_mouseover_last_w = NULL; ///< Window of the last #MOUSEOVER event.
+@@ -2290,30 +2296,34 @@
+  */
+ static void HandleAutoscroll()
+ {
+-	if (_settings_client.gui.autoscroll && _game_mode != GM_MENU && !HasModalProgress()) {
+-		int x = _cursor.pos.x;
+-		int y = _cursor.pos.y;
+-		Window *w = FindWindowFromPt(x, y);
+-		if (w == NULL || w->flags & WF_DISABLE_VP_SCROLL) return;
+-		ViewPort *vp = IsPtInWindowViewport(w, x, y);
+-		if (vp != NULL) {
+-			x -= vp->left;
+-			y -= vp->top;
++	if (_settings_client.gui.autoscroll == VA_DISABLED) return;
++	if (_settings_client.gui.autoscroll == VA_MAIN_VIEWPORT_FULLSCREEN && !_fullscreen) return;
++	if (_game_mode == GM_MENU || HasModalProgress()) return;
+ 
+-			/* here allows scrolling in both x and y axis */
++	int x = _cursor.pos.x;
++	int y = _cursor.pos.y;
++	Window *w = FindWindowFromPt(x, y);
++	if (w == NULL || w->flags & WF_DISABLE_VP_SCROLL) return;
++	if (_settings_client.gui.autoscroll != VA_EVERY_VIEWPORT && w->window_class != WC_MAIN_WINDOW) return;
++
++	ViewPort *vp = IsPtInWindowViewport(w, x, y);
++	if (vp != NULL) {
++		x -= vp->left;
++		y -= vp->top;
++
++		/* here allows scrolling in both x and y axis */
+ #define scrollspeed 3
+-			if (x - 15 < 0) {
+-				w->viewport->dest_scrollpos_x += ScaleByZoom((x - 15) * scrollspeed, vp->zoom);
+-			} else if (15 - (vp->width - x) > 0) {
+-				w->viewport->dest_scrollpos_x += ScaleByZoom((15 - (vp->width - x)) * scrollspeed, vp->zoom);
+-			}
+-			if (y - 15 < 0) {
+-				w->viewport->dest_scrollpos_y += ScaleByZoom((y - 15) * scrollspeed, vp->zoom);
+-			} else if (15 - (vp->height - y) > 0) {
+-				w->viewport->dest_scrollpos_y += ScaleByZoom((15 - (vp->height - y)) * scrollspeed, vp->zoom);
+-			}
++		if (x - 15 < 0) {
++			w->viewport->dest_scrollpos_x += ScaleByZoom((x - 15) * scrollspeed, vp->zoom);
++		} else if (15 - (vp->width - x) > 0) {
++			w->viewport->dest_scrollpos_x += ScaleByZoom((15 - (vp->width - x)) * scrollspeed, vp->zoom);
++		}
++		if (y - 15 < 0) {
++			w->viewport->dest_scrollpos_y += ScaleByZoom((y - 15) * scrollspeed, vp->zoom);
++		} else if (15 - (vp->height - y) > 0) {
++			w->viewport->dest_scrollpos_y += ScaleByZoom((15 - (vp->height - y)) * scrollspeed, vp->zoom);
++		}
+ #undef scrollspeed
+-		}
+ 	}
+ }
+ 
+Index: src/table/settings.ini
+===================================================================
+--- src/table/settings.ini	(wersja 24584)
++++ src/table/settings.ini	(kopia robocza)
+@@ -2105,12 +2105,17 @@
+ str      = STR_CONFIG_SETTING_SHOWFINANCES
+ strhelp  = STR_CONFIG_SETTING_SHOWFINANCES_HELPTEXT
+ 
+-[SDTC_BOOL]
++[SDTC_VAR]
+ var      = gui.autoscroll
++type     = SLE_UINT8
+ flags    = SLF_NOT_IN_SAVE | SLF_NO_NETWORK_SYNC
+-def      = false
++guiflags = SGF_MULTISTRING
++def      = 0
++min      = 0
++max      = 3
+ str      = STR_CONFIG_SETTING_AUTOSCROLL
+ strhelp  = STR_CONFIG_SETTING_AUTOSCROLL_HELPTEXT
++strval   = STR_CONFIG_SETTING_AUTOSCROLL_DISABLED
+ 
+ [SDTC_BOOL]
+ var      = gui.reverse_scroll

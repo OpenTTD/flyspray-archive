@@ -1,0 +1,379 @@
+Index: src/console_cmds.cpp
+===================================================================
+--- src/console_cmds.cpp	(revision 27153)
++++ src/console_cmds.cpp	(working copy)
+@@ -317,13 +317,16 @@
+ 
+ /**
+  * Get savegame file informations.
+- * @param file The savegame filename to return information about. Can be the actual name
++ * @param file The filename to return information about. Can be the actual name
+  *             or a numbered entry into the filename list.
++ * @param mode The mode to use for building the filelist to find the item in.
++ *             #SLD_LOAD_GAME for save games, #SLD_LOAD_SCENARIO for scenarios.
++ *             #SLD_LOAD_GAME_SCENARIO for both.
+  * @return FiosItem The information on the file.
+  */
+-static const FiosItem *GetFiosItem(const char *file)
++static const FiosItem *GetFiosItem(const char *file, SaveLoadDialogMode mode)
+ {
+-	_saveload_mode = SLD_LOAD_GAME;
++	_saveload_mode = mode;
+ 	BuildFileList();
+ 
+ 	for (const FiosItem *item = _fios_items.Begin(); item != _fios_items.End(); item++) {
+@@ -338,7 +341,7 @@
+ 
+ 	if (IsInsideMM(i, 0, _fios_items.Length())) return _fios_items.Get(i);
+ 
+-	/* As a last effort assume it is an OpenTTD savegame and
++	/* Check if it is an OpenTTD savegame and
+ 	 * that the ".sav" part was not given. */
+ 	char long_file[MAX_PATH];
+ 	seprintf(long_file, lastof(long_file), "%s.sav", file);
+@@ -347,10 +350,20 @@
+ 		if (strcmp(long_file, item->title) == 0) return item;
+ 	}
+ 
++	memset(long_file, 0, sizeof long_file);
++
++	/* Check if it is an OpenTTD scenario and
++	 * that the ".scn" part was not given. */
++	seprintf(long_file, lastof(long_file), "%s.scn", file);
++	for (const FiosItem *item = _fios_items.Begin(); item != _fios_items.End(); item++) {
++		if (strcmp(long_file, item->name) == 0) return item;
++		if (strcmp(long_file, item->title) == 0) return item;
++	}
++
+ 	return NULL;
+ }
+ 
+-
++/* Load a saved game to play. */
+ DEF_CONSOLE_CMD(ConLoad)
+ {
+ 	if (argc == 0) {
+@@ -361,10 +374,13 @@
+ 	if (argc != 2) return false;
+ 
+ 	const char *file = argv[1];
+-	const FiosItem *item = GetFiosItem(file);
++	const FiosItem *item = GetFiosItem(file, SLD_LOAD_GAME_SCENARIO);
+ 	if (item != NULL) {
+ 		switch (item->type) {
+-			case FIOS_TYPE_FILE: case FIOS_TYPE_OLDFILE: {
++			case FIOS_TYPE_FILE:
++			case FIOS_TYPE_OLDFILE:
++			case FIOS_TYPE_SCENARIO:
++			case FIOS_TYPE_OLD_SCENARIO: {
+ 				_switch_mode = SM_LOAD_GAME;
+ 				SetFiosType(item->type);
+ 
+@@ -372,7 +388,8 @@
+ 				strecpy(_file_to_saveload.title, item->title, lastof(_file_to_saveload.title));
+ 				break;
+ 			}
+-			default: IConsolePrintF(CC_ERROR, "%s: Not a savegame.", file);
++			default:
++				IConsolePrintF(CC_ERROR, "%s: Not a savegame or scenario.", file);
+ 		}
+ 	} else {
+ 		IConsolePrintF(CC_ERROR, "%s: No such file or directory.", file);
+@@ -382,7 +399,41 @@
+ 	return true;
+ }
+ 
++/* Load a scenario into the scenario editor to edit. */
++DEF_CONSOLE_CMD(ConEditScn)
++{
++	if (argc == 0) {
++		IConsoleHelp("Edit a scenario in the scenario editor by name or index. Usage: 'edit_scn <file | number>'");
++		return true;
++	}
+ 
++	if (argc != 2) return false;
++
++	const char *file = argv[1];
++	const FiosItem *item = GetFiosItem(file, SLD_LOAD_GAME_SCENARIO);
++	if (item != NULL) {
++		switch (item->type) {
++			case FIOS_TYPE_SCENARIO:
++			case FIOS_TYPE_OLD_SCENARIO: {
++				_switch_mode = SM_LOAD_SCENARIO;
++				SetFiosType(item->type);
++
++				strecpy(_file_to_saveload.name, FiosBrowseTo(item), lastof(_file_to_saveload.name));
++				strecpy(_file_to_saveload.title, item->title, lastof(_file_to_saveload.title));
++				break;
++			}
++			default:
++				IConsolePrintF(CC_ERROR, "%s: Not a scenario.", file);
++		}
++	} else {
++		IConsolePrintF(CC_ERROR, "%s: No such file or directory.", file);
++	}
++
++	FiosFreeSavegameList();
++	return true;
++}
++
++/* Remove a savegame. */
+ DEF_CONSOLE_CMD(ConRemove)
+ {
+ 	if (argc == 0) {
+@@ -393,10 +444,17 @@
+ 	if (argc != 2) return false;
+ 
+ 	const char *file = argv[1];
+-	const FiosItem *item = GetFiosItem(file);
++	const FiosItem *item = GetFiosItem(file, SLD_LOAD_GAME_SCENARIO);
+ 	if (item != NULL) {
+-		if (!FiosDelete(item->name)) {
+-			IConsolePrintF(CC_ERROR, "%s: Failed to delete file", file);
++		switch (item->type) {
++			case FIOS_TYPE_FILE:
++			case FIOS_TYPE_OLDFILE:
++				if (!FiosDelete(item->title)) {
++					IConsolePrintF(CC_ERROR, "%s: Failed to delete file", file);
++				}
++				break;
++			default:
++				IConsolePrintF(CC_ERROR, "%s: Not a savegame.", file);
+ 		}
+ 	} else {
+ 		IConsolePrintF(CC_ERROR, "%s: No such file or directory.", file);
+@@ -406,15 +464,15 @@
+ 	return true;
+ }
+ 
+-
+-/* List all the files in the current dir via console */
++/* List all the save game and scenario files in the current dir via console */
+ DEF_CONSOLE_CMD(ConListFiles)
+ {
+ 	if (argc == 0) {
+-		IConsoleHelp("List all loadable savegames and directories in the current dir via console. Usage: 'ls | dir'");
++		IConsoleHelp("List all loadable savegames, scenarios, and directories in the current dir via console. Usage: 'ls | dir'");
+ 		return true;
+ 	}
+ 
++	_saveload_mode = SLD_LOAD_GAME_SCENARIO;
+ 	BuildFileList();
+ 
+ 	for (uint i = 0; i < _fios_items.Length(); i++) {
+@@ -422,9 +480,11 @@
+ 	}
+ 
+ 	FiosFreeSavegameList();
++	
+ 	return true;
+ }
+ 
++
+ /* Change the dir via console */
+ DEF_CONSOLE_CMD(ConChangeDirectory)
+ {
+@@ -436,7 +496,7 @@
+ 	if (argc != 2) return false;
+ 
+ 	const char *file = argv[1];
+-	const FiosItem *item = GetFiosItem(file);
++	const FiosItem *item = GetFiosItem(file, SLD_LOAD_GAME);
+ 	if (item != NULL) {
+ 		switch (item->type) {
+ 			case FIOS_TYPE_DIR: case FIOS_TYPE_DRIVE: case FIOS_TYPE_PARENT:
+@@ -1924,6 +1984,7 @@
+ 	IConsoleCmdRegister("scrollto",     ConScrollToTile);
+ 	IConsoleCmdRegister("alias",        ConAlias);
+ 	IConsoleCmdRegister("load",         ConLoad);
++	IConsoleCmdRegister("edit_scn",     ConEditScn);
+ 	IConsoleCmdRegister("rm",           ConRemove);
+ 	IConsoleCmdRegister("save",         ConSave);
+ 	IConsoleCmdRegister("saveconfig",   ConSaveConfig);
+Index: src/fios.cpp
+===================================================================
+--- src/fios.cpp	(revision 27153)
++++ src/fios.cpp	(working copy)
+@@ -346,10 +346,17 @@
+ 
+ 	/* Show files */
+ 	FiosFileScanner scanner(mode, callback_proc);
+-	if (subdir == NO_DIRECTORY) {
++
++	/* If we're looking for both saves and scenarios, we have two directories to search. */
++	if(mode == SLD_LOAD_GAME_SCENARIO) {
+ 		scanner.Scan(NULL, _fios_path, false);
++		scanner.Scan(NULL, subdir, true, true);
+ 	} else {
+-		scanner.Scan(NULL, subdir, true, true);
++		if (subdir == NO_DIRECTORY) {
++			scanner.Scan(NULL, _fios_path, false);
++		} else {
++			scanner.Scan(NULL, subdir, true, true);
++		}
+ 	}
+ 
+ 	QSortT(_fios_items.Get(sort_start), _fios_items.Length() - sort_start, CompareFiosItems);
+@@ -388,10 +395,10 @@
+  * Callback for FiosGetFileList. It tells if a file is a savegame or not.
+  * @param mode Save/load mode.
+  * @param file Name of the file to check.
+- * @param ext A pointer to the extension identifier inside file
+- * @param title Buffer if a callback wants to lookup the title of the file; NULL to skip the lookup
+- * @param last Last available byte in buffer (to prevent buffer overflows); not used when title == NULL
+- * @return a FIOS_TYPE_* type of the found file, FIOS_TYPE_INVALID if not a savegame
++ * @param ext The extension identifier inside file.
++ * @param [out] title Buffer if a callback wants to lookup the title of the file; NULL to skip the lookup.
++ * @param last Last available byte in buffer; not used when title == NULL.
++ * @return a FIOS_TYPE_* type of the found file, #FIOS_TYPE_INVALID if not a savegame.
+  * @see FiosGetFileList
+  * @see FiosGetSavegameList
+  */
+@@ -448,10 +455,10 @@
+  * Callback for FiosGetFileList. It tells if a file is a scenario or not.
+  * @param mode Save/load mode.
+  * @param file Name of the file to check.
+- * @param ext A pointer to the extension identifier inside file
+- * @param title Buffer if a callback wants to lookup the title of the file
+- * @param last Last available byte in buffer (to prevent buffer overflows)
+- * @return a FIOS_TYPE_* type of the found file, FIOS_TYPE_INVALID if not a scenario
++ * @param ext The extension identifier inside file.
++ * @param [out] title Buffer if a callback wants to lookup the title of the file; NULL to skip the lookup.
++ * @param last Last available byte in buffer
++ * @return a FIOS_TYPE_* type of the found file, #FIOS_TYPE_INVALID if not a scenario.
+  * @see FiosGetFileList
+  * @see FiosGetScenarioList
+  */
+@@ -502,6 +509,78 @@
+ 	FiosGetFileList(mode, &FiosGetScenarioListCallback, (mode == SLD_LOAD_SCENARIO && strcmp(base_path, _fios_path) == 0) ? SCENARIO_DIR : NO_DIRECTORY);
+ }
+ 
++/**
++ * Callback for FiosGetFileList. It tells if a file is a scenario, save game or neither.
++ * @param mode Save/load mode.
++ * @param file Name of the file to check.
++ * @param ext The extension identifier inside file.
++ * @param [out] title Buffer if a callback wants to lookup the title of the file; NULL to skip the lookup.
++ * @param last Last available byte in buffer
++ * @return a FIOS_TYPE_* type of the found file, #FIOS_TYPE_INVALID if not a scenario.
++ * @see FiosGetFileList
++ * @see FiosGetSaveScenarioList
++ */
++static FiosType FiosGetSaveScenarioListCallback(SaveLoadDialogMode mode, const char *file, const char *ext, char *title, const char *last)
++{
++	/* Show scenario files
++	 * .SCN OpenTTD style scenario file
++	 * .SV0 Transport Tycoon Deluxe (Patch) scenario
++	 * .SS0 Transport Tycoon Deluxe preset scenario */
++	if (strcasecmp(ext, ".scn") == 0) {
++		GetFileTitle(file, title, last, SCENARIO_DIR);
++		return FIOS_TYPE_SCENARIO;
++	}
++
++	if (mode == SLD_LOAD_GAME || mode == SLD_LOAD_SCENARIO || mode == SLD_LOAD_GAME_SCENARIO) {
++		if (strcasecmp(ext, ".sv0") == 0 || strcasecmp(ext, ".ss0") == 0 ) {
++			GetOldSaveGameName(file, title, last);
++			return FIOS_TYPE_OLD_SCENARIO;
++		}
++	}
++
++	/* Show savegame files
++	 * .SAV OpenTTD saved game
++	 * .SS1 Transport Tycoon Deluxe preset game
++	 * .SV1 Transport Tycoon Deluxe (Patch) saved game
++	 * .SV2 Transport Tycoon Deluxe (Patch) saved 2-player game */
++	if (strcasecmp(ext, ".sav") == 0) {
++		GetFileTitle(file, title, last, SAVE_DIR);
++		return FIOS_TYPE_FILE;
++	}
++
++	if (mode == SLD_LOAD_GAME || mode == SLD_LOAD_SCENARIO || mode == SLD_LOAD_GAME_SCENARIO) {
++		if (strcasecmp(ext, ".ss1") == 0 || strcasecmp(ext, ".sv1") == 0 || strcasecmp(ext, ".sv2") == 0) {
++			if (title != NULL) GetOldSaveGameName(file, title, last);
++			return FIOS_TYPE_OLDFILE;
++		}
++	}
++
++	return FIOS_TYPE_INVALID;
++}
++
++/**
++ * Get a list of save games and scenarios.
++ * @param mode Save/load mode.
++ * @see FiosGetFileList
++ */
++void FiosGetSaveScenarioList(SaveLoadDialogMode mode)
++{
++	static char *fios_save_path = NULL;
++	static char *fios_save_path_last = NULL;
++
++	/* Copy the default path on first run or on 'New Game' */
++	if (fios_save_path == NULL) {
++		fios_save_path = MallocT<char>(MAX_PATH);
++		fios_save_path_last = fios_save_path + MAX_PATH - 1;
++		FioGetDirectory(fios_save_path, fios_save_path_last, SAVE_DIR);
++	}
++
++	_fios_path = fios_save_path;
++	_fios_path_last = fios_save_path_last;
++
++	FiosGetFileList(mode, &FiosGetSaveScenarioListCallback, SCENARIO_DIR);
++}
++
+ static FiosType FiosGetHeightmapListCallback(SaveLoadDialogMode mode, const char *file, const char *ext, char *title, const char *last)
+ {
+ 	/* Show heightmap files
+Index: src/fios.h
+===================================================================
+--- src/fios.h	(revision 27153)
++++ src/fios.h	(working copy)
+@@ -99,12 +99,13 @@
+ 
+ /** Mode of the file dialogue window. */
+ enum SaveLoadDialogMode {
+-	SLD_LOAD_GAME,      ///< Load a game.
+-	SLD_LOAD_SCENARIO,  ///< Load a scenario.
+-	SLD_SAVE_GAME,      ///< Save a game.
+-	SLD_SAVE_SCENARIO,  ///< Save a scenario.
+-	SLD_LOAD_HEIGHTMAP, ///< Load a heightmap.
+-	SLD_SAVE_HEIGHTMAP, ///< Save a heightmap.
++	SLD_LOAD_GAME,          ///< Load a game.
++	SLD_LOAD_SCENARIO,      ///< Load a scenario.
++	SLD_SAVE_GAME,          ///< Save a game.
++	SLD_SAVE_SCENARIO,      ///< Save a scenario.
++	SLD_LOAD_HEIGHTMAP,     ///< Load a heightmap.
++	SLD_SAVE_HEIGHTMAP,     ///< Save a heightmap.
++	SLD_LOAD_GAME_SCENARIO, ///< Load a game or scenario.
+ };
+ 
+ /** The different types of files that the system knows about. */
+@@ -163,6 +164,7 @@
+ 
+ void FiosGetSavegameList(SaveLoadDialogMode mode);
+ void FiosGetScenarioList(SaveLoadDialogMode mode);
++void FiosGetSaveScenarioList(SaveLoadDialogMode mode);
+ void FiosGetHeightmapList(SaveLoadDialogMode mode);
+ 
+ void FiosFreeSavegameList();
+Index: src/fios_gui.cpp
+===================================================================
+--- src/fios_gui.cpp	(revision 27153)
++++ src/fios_gui.cpp	(working copy)
+@@ -202,11 +202,16 @@
+ 		case SLD_LOAD_SCENARIO:
+ 		case SLD_SAVE_SCENARIO:
+ 			FiosGetScenarioList(_saveload_mode); break;
++
+ 		case SLD_SAVE_HEIGHTMAP:
+ 		case SLD_LOAD_HEIGHTMAP:
+ 			FiosGetHeightmapList(_saveload_mode); break;
+ 
+-		default: FiosGetSavegameList(_saveload_mode); break;
++		case SLD_LOAD_GAME_SCENARIO:
++			FiosGetSaveScenarioList(_saveload_mode); break;
++
++		default: 
++			FiosGetSavegameList(_saveload_mode); break;
+ 	}
+ 
+ 	/* Invalidate saveload window */

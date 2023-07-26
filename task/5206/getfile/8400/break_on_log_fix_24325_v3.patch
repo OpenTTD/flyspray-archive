@@ -1,0 +1,408 @@
+diff -r 923f96d560c6 src/ai/ai.hpp
+--- a/src/ai/ai.hpp	Mon Jun 04 17:45:37 2012 +0000
++++ b/src/ai/ai.hpp	Tue Jun 05 23:27:38 2012 +0200
+@@ -65,17 +65,34 @@
+ 	 * @pre Company::IsValidAiID(company)
+ 	 */
+ 	static void Stop(CompanyID company);
+ 
+ 	/**
+-	 * Suspend an AI for the reminder of the current tick. If the AI is
+-	 * in a state when it cannot be suspended, it will continue to run
+-	 * until it can be suspended.
+-	 * @param company The company for which the AI should be suspended.
++	 * Suspends the AI and then pause the execution of the script. The
++	 * script will not be resumed from its suspended state until the script
++	 * has been unpaused.
++	 * @param company The company for which the AI should be paused.
+ 	 * @pre Company::IsValidAiID(company)
+ 	 */
+-	static void Suspend(CompanyID company);
++	static void Pause(CompanyID company);
++
++	/**
++	 * Resume execution of the AI. This function will not actually execute
++	 * the script, but set a flag so that the script is executed my the usual
++	 * mechanism that executes the script.
++	 * @param company The company for which the AI should be unpaused.
++	 * @pre Company::IsValidAiID(company)
++	 */
++	static void Unpause(CompanyID company);
++
++	/**
++	 * Checks if the AI is paused
++	 * @param company The company for which to check if the AI is paused.
++	 * @pre Company::IsValidAiID(company)
++	 * @return true if the AI is paused, otherwise false
++	 */
++	static bool IsPaused(CompanyID company);
+ 
+ 	/**
+ 	 * Kill any and all AIs we manage.
+ 	 */
+ 	static void KillAll();
+diff -r 923f96d560c6 src/ai/ai_core.cpp
+--- a/src/ai/ai_core.cpp	Mon Jun 04 17:45:37 2012 +0000
++++ b/src/ai/ai_core.cpp	Tue Jun 05 23:27:38 2012 +0200
+@@ -110,20 +110,42 @@
+ 
+ 	InvalidateWindowData(WC_AI_DEBUG, 0, -1);
+ 	DeleteWindowById(WC_AI_SETTINGS, company);
+ }
+ 
+-/* static */ void AI::Suspend(CompanyID company)
++/* static */ void AI::Pause(CompanyID company)
+ {
+ 	if (_networking && !_network_server) return;
+ 
+ 	Backup<CompanyByte> cur_company(_current_company, company, FILE_LINE);
+-	Company::Get(company)->ai_instance->Suspend();
++	Company::Get(company)->ai_instance->Pause();
+ 
+ 	cur_company.Restore();
+ }
+ 
++/* static */ void AI::Unpause(CompanyID company)
++{
++	if (_networking && !_network_server) return;
++
++	Backup<CompanyByte> cur_company(_current_company, company, FILE_LINE);
++	Company::Get(company)->ai_instance->Unpause();
++
++	cur_company.Restore();
++}
++
++/* static */ bool AI::IsPaused(CompanyID company)
++{
++	if (_networking && !_network_server) return false;
++
++	Backup<CompanyByte> cur_company(_current_company, company, FILE_LINE);
++	bool paused = Company::Get(company)->ai_instance->IsPaused();
++
++	cur_company.Restore();
++
++	return paused;
++}
++
+ /* static */ void AI::KillAll()
+ {
+ 	/* It might happen there are no companies .. than we have nothing to loop */
+ 	if (Company::GetPoolSize() == 0) return;
+ 
+diff -r 923f96d560c6 src/ai/ai_gui.cpp
+--- a/src/ai/ai_gui.cpp	Mon Jun 04 17:45:37 2012 +0000
++++ b/src/ai/ai_gui.cpp	Tue Jun 05 23:27:38 2012 +0200
+@@ -1016,12 +1016,14 @@
+ 		this->text.UpdateSize();
+ 
+ 		/* Restore button state from static class variables */
+ 		if (ai_debug_company == OWNER_DEITY) {
+ 			this->LowerWidget(WID_AID_SCRIPT_GAME);
++			this->SetWidgetDisabledState(WID_AID_CONTINUE_BTN, !Game::IsPaused());
+ 		} else if (ai_debug_company != INVALID_COMPANY) {
+ 			this->LowerWidget(ai_debug_company + WID_AID_COMPANY_BUTTON_START);
++			this->SetWidgetDisabledState(WID_AID_CONTINUE_BTN, !AI::IsPaused(ai_debug_company));
+ 		}
+ 		this->SetWidgetLoweredState(WID_AID_BREAK_STR_ON_OFF_BTN, this->break_check_enabled);
+ 		this->SetWidgetLoweredState(WID_AID_MATCH_CASE_BTN, this->case_sensitive_break_check);
+ 
+ 	}
+@@ -1209,14 +1211,17 @@
+ 		ScriptLog::LogData *log = this->GetLogPointer();
+ 		this->vscroll->SetCount((log == NULL) ? 0 : log->used);
+ 
+ 		if (ai_debug_company == OWNER_DEITY) {
+ 			this->LowerWidget(WID_AID_SCRIPT_GAME);
++			this->SetWidgetDisabledState(WID_AID_CONTINUE_BTN, !Game::IsPaused());
+ 		} else {
+ 			this->LowerWidget(ai_debug_company + WID_AID_COMPANY_BUTTON_START);
++			this->SetWidgetDisabledState(WID_AID_CONTINUE_BTN, !AI::IsPaused(ai_debug_company));
+ 		}
+ 
++		this->highlight_row = -1; // the highlight of one AI make little sense for another AI
+ 		this->autoscroll = true;
+ 		this->last_vscroll_pos = this->vscroll->GetPosition();
+ 		this->SetDirty();
+ 		/* Close AI settings window to prevent confusion */
+ 		DeleteWindowByClass(WC_AI_SETTINGS);
+@@ -1258,12 +1263,37 @@
+ 				this->case_sensitive_break_check = !this->case_sensitive_break_check;
+ 				this->SetWidgetLoweredState(WID_AID_MATCH_CASE_BTN, this->case_sensitive_break_check);
+ 				break;
+ 
+ 			case WID_AID_CONTINUE_BTN:
+-				/* Unpause */
+-				DoCommandP(0, PM_PAUSED_NORMAL, 0, CMD_PAUSE);
++				/* Unpause current AI / game script */
++				if (ai_debug_company == OWNER_DEITY) {
++					Game::Unpause();
++				} else {
++					AI::Unpause(ai_debug_company);
++				}
++
++				/* If the last AI/Game Script is unpaused, unpause the game too */
++				if ((_pause_mode & PM_PAUSED_NORMAL) == PM_PAUSED_NORMAL) {
++					bool all_unpaused = !Game::IsPaused();
++					if (all_unpaused) {
++						Company *c;
++						FOR_ALL_COMPANIES(c) {
++							if (c->is_ai && AI::IsPaused(c->index)) {
++								all_unpaused = false;
++								break;
++							}
++						}
++					}
++					if (all_unpaused) {
++						/* all scripts have been unpaused => unpause the game */
++						DoCommandP(0, PM_PAUSED_NORMAL, 0, CMD_PAUSE);
++					}
++				}
++
++				this->highlight_row = -1;
++				this->SetWidgetDirty(WID_AID_LOG_PANEL);
+ 				this->DisableWidget(WID_AID_CONTINUE_BTN);
+ 				this->RaiseWidget(WID_AID_CONTINUE_BTN); // Disabled widgets don't raise themself
+ 				break;
+ 		}
+ 	}
+@@ -1297,33 +1327,28 @@
+ 	 */
+ 	virtual void OnInvalidateData(int data = 0, bool gui_scope = true)
+ 	{
+ 		if (data == -1 || ai_debug_company == data) this->SetDirty();
+ 
+-		if (gui_scope && data == -2) {
+-			/* The continue button should be disabled when the game is unpaused and
+-			 * it was previously paused by the break string ( = a line in the log
+-			 * was highlighted )*/
+-			if ((_pause_mode & PM_PAUSED_NORMAL) == PM_UNPAUSED && this->highlight_row != -1) {
+-				this->DisableWidget(WID_AID_CONTINUE_BTN);
+-				this->SetWidgetDirty(WID_AID_CONTINUE_BTN);
+-				this->SetWidgetDirty(WID_AID_LOG_PANEL);
+-				this->highlight_row = -1;
+-			}
+-		}
+-
+ 		/* If the log message is related to the active company tab, check the break string.
+ 		 * This needs to be done in gameloop-scope, so the AI is suspended immediately. */
+-		if (ai_debug_company != OWNER_DEITY && !gui_scope && data == ai_debug_company && this->break_check_enabled && !StrEmpty(this->edit_str_buf)) {
++		if (/*ai_debug_company != OWNER_DEITY &&*/ !gui_scope && data == ai_debug_company && this->break_check_enabled && !StrEmpty(this->edit_str_buf)) {
+ 			/* Get the log instance of the active company */
+ 			ScriptLog::LogData *log = this->GetLogPointer();
+ 
+ 			if (log != NULL && case_sensitive_break_check?
+ 					strstr(log->lines[log->pos], this->edit_str_buf) != 0 :
+ 					strcasestr(log->lines[log->pos], this->edit_str_buf) != 0) {
+ 
+-				AI::Suspend(ai_debug_company);
++				/* Pause execution of script */
++				if (ai_debug_company == OWNER_DEITY) {
++					Game::Pause();
++				} else {
++					AI::Pause(ai_debug_company);
++				}
++
++				/* Pause the game */
+ 				if ((_pause_mode & PM_PAUSED_NORMAL) == PM_UNPAUSED) {
+ 					DoCommandP(0, PM_PAUSED_NORMAL, 1, CMD_PAUSE);
+ 				}
+ 
+ 				/* Make it possible to click on the continue button */
+diff -r 923f96d560c6 src/game/game.hpp
+--- a/src/game/game.hpp	Mon Jun 04 17:45:37 2012 +0000
++++ b/src/game/game.hpp	Tue Jun 05 23:27:38 2012 +0200
+@@ -44,10 +44,30 @@
+ 	 * Uninitialize the Game system.
+ 	 */
+ 	static void Uninitialize(bool keepConfig);
+ 
+ 	/**
++	 * Suspends the Game Script and then pause the execution of the script. The
++	 * script will not be resumed from its suspended state until the script
++	 * has been unpaused.
++	 */
++	static void Pause();
++
++	/**
++	 * Resume execution of the Game Script. This function will not actually execute
++	 * the script, but set a flag so that the script is executed my the usual
++	 * mechanism that executes the script.
++	 */
++	static void Unpause();
++
++	/**
++	 * Checks if the Game Script is paused
++	 * @return true if the Game Script is paused, otherwise false
++	 */
++	static bool IsPaused();
++
++	/**
+ 	 * Queue a new event for a Game Script.
+ 	 */
+ 	static void NewEvent(class ScriptEvent *event);
+ 
+ 	/**
+diff -r 923f96d560c6 src/game/game_core.cpp
+--- a/src/game/game_core.cpp	Mon Jun 04 17:45:37 2012 +0000
++++ b/src/game/game_core.cpp	Tue Jun 05 23:27:38 2012 +0200
+@@ -115,10 +115,25 @@
+ 			_settings_newgame.game_config = NULL;
+ 		}
+ 	}
+ }
+ 
++/* static */ void Game::Pause()
++{
++	if (Game::instance != NULL) Game::instance->Pause();
++}
++
++/* static */ void Game::Unpause()
++{
++	if (Game::instance != NULL) Game::instance->Unpause();
++}
++
++/* static */ bool Game::IsPaused()
++{
++	return Game::instance != NULL? Game::instance->IsPaused() : false;
++}
++
+ /* static */ void Game::NewEvent(ScriptEvent *event)
+ {
+ 	/* AddRef() and Release() need to be called at least once, so do it here */
+ 	event->AddRef();
+ 
+diff -r 923f96d560c6 src/misc_cmd.cpp
+--- a/src/misc_cmd.cpp	Mon Jun 04 17:45:37 2012 +0000
++++ b/src/misc_cmd.cpp	Tue Jun 05 23:27:38 2012 +0200
+@@ -176,11 +176,10 @@
+ 			if (p2 == 0) {
+ 				_pause_mode = _pause_mode & ~p1;
+ 			} else {
+ 				_pause_mode = _pause_mode | p1;
+ 			}
+-			InvalidateWindowClassesData(WC_AI_DEBUG, -2);
+ 
+ #ifdef ENABLE_NETWORK
+ 			NetworkHandlePauseChange(prev_mode, (PauseMode)p1);
+ #endif /* ENABLE_NETWORK */
+ 		}
+diff -r 923f96d560c6 src/script/script_instance.cpp
+--- a/src/script/script_instance.cpp	Mon Jun 04 17:45:37 2012 +0000
++++ b/src/script/script_instance.cpp	Tue Jun 05 23:27:38 2012 +0200
+@@ -51,10 +51,11 @@
+ 	controller(NULL),
+ 	storage(NULL),
+ 	instance(NULL),
+ 	is_started(false),
+ 	is_dead(false),
++	is_paused(false),
+ 	is_save_data_on_stack(false),
+ 	suspend(0),
+ 	callback(NULL)
+ {
+ 	this->storage = new ScriptStorage();
+@@ -135,10 +136,11 @@
+ void ScriptInstance::GameLoop()
+ {
+ 	ScriptObject::ActiveInstance active(this);
+ 
+ 	if (this->IsDead()) return;
++	if (this->is_paused) return;
+ 	if (this->engine->HasScriptCrashed()) {
+ 		/* The script crashed during saving, kill it here. */
+ 		this->Died();
+ 		return;
+ 	}
+@@ -495,14 +497,28 @@
+ 		_script_sl_byte = 0;
+ 		SlObject(NULL, _script_byte);
+ 	}
+ }
+ 
+-void ScriptInstance::Suspend()
++void ScriptInstance::Pause()
+ {
++	// Suspend script
+ 	HSQUIRRELVM vm = this->engine->GetVM();
+ 	Squirrel::DecreaseOps(vm, _settings_game.script.script_max_opcode_till_suspend);
++
++	// Set the paused flag
++	this->is_paused = true;
++}
++
++void ScriptInstance::Unpause()
++{
++	this->is_paused = false;
++}
++
++bool ScriptInstance::IsPaused()
++{
++	return this->is_paused;
+ }
+ 
+ /* static */ bool ScriptInstance::LoadObjects(HSQUIRRELVM vm)
+ {
+ 	SlObject(NULL, _script_byte);
+diff -r 923f96d560c6 src/script/script_instance.hpp
+--- a/src/script/script_instance.hpp	Mon Jun 04 17:45:37 2012 +0000
++++ b/src/script/script_instance.hpp	Tue Jun 05 23:27:38 2012 +0200
+@@ -137,16 +137,28 @@
+ 	 * Load and discard data from a savegame.
+ 	 */
+ 	static void LoadEmpty();
+ 
+ 	/**
+-	 * Reduces the number of opcodes the script have left to zero. Unless
+-	 * the script is in a state where it cannot suspend it will be suspended
+-	 * for the reminder of the current tick. This function is safe to
+-	 * call from within a function called by the script.
++	 * Suspends the script for the current tick and then pause the execution
++	 * of script. The script will not be resumed from its suspended state
++	 * until the script has been unpaused.
+ 	 */
+-	void Suspend();
++	void Pause();
++
++	/**
++	 * Checks if the script is paused.
++	 * @return true if the script is paused, otherwise false
++	 */
++	bool IsPaused();
++
++	/**
++	 * Resume execution of the script. This function will not actually execute
++	 * the script, but set a flag so that the script is executed my the usual
++	 * mechanism that executes the script.
++	 */
++	void Unpause();
+ 
+ 	/**
+ 	 * Get the number of operations the script can execute before being suspended.
+ 	 * This function is safe to call from within a function called by the script.
+ 	 * @return The number of operations to execute.
+@@ -168,11 +180,12 @@
+ 	 */
+ 	void InsertEvent(class ScriptEvent *event);
+ 
+ 	/**
+ 	 * Check if the instance is sleeping, which either happened because the
+-	 *  script executed a DoCommand, or executed this.Sleep().
++	 *  script executed a DoCommand, executed this.Sleep() or it has been
++	 *  paused.
+ 	 */
+ 	bool IsSleeping() { return this->suspend != 0; }
+ 
+ protected:
+ 	class Squirrel *engine;               ///< A wrapper around the squirrel vm.
+@@ -204,10 +217,11 @@
+ 
+ 	bool is_started;                      ///< Is the scripts constructor executed?
+ 	bool is_dead;                         ///< True if the script has been stopped.
+ 	bool is_save_data_on_stack;           ///< Is the save data still on the squirrel stack?
+ 	int suspend;                          ///< The amount of ticks to suspend this script before it's allowed to continue.
++	bool is_paused;                       ///< Is the script paused? (a paused script will not be executed until unpaused)
+ 	Script_SuspendCallbackProc *callback; ///< Callback that should be called in the next tick the script runs.
+ 
+ 	/**
+ 	 * Call the script Load function if it exists and data was loaded
+ 	 *  from a savegame.

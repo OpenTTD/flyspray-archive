@@ -1,0 +1,188 @@
+# HG changeset patch
+# Parent 07f31f69d9789c5b74cf7f8398d5a16e15cd6888
+Add: API compatibility scripts for Goal scripts.
+
+diff -r 07f31f69d978 bin/game/compat_1.2.nut
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/bin/game/compat_1.2.nut	Sun Jun 24 22:17:30 2012 +0200
+@@ -0,0 +1,10 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++GSLog.Info("1.2 API compatability in effect.");
+diff -r 07f31f69d978 bin/game/compat_1.3.nut
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/bin/game/compat_1.3.nut	Sun Jun 24 22:17:30 2012 +0200
+@@ -0,0 +1,8 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
+diff -r 07f31f69d978 src/ai/ai_instance.cpp
+--- a/src/ai/ai_instance.cpp	Sat Jun 23 15:56:17 2012 +0000
++++ b/src/ai/ai_instance.cpp	Sun Jun 24 22:17:30 2012 +0200
+@@ -81,7 +81,6 @@
+ 
+ #include "../company_base.h"
+ #include "../company_func.h"
+-#include "../fileio_func.h"
+ 
+ AIInstance::AIInstance() :
+ 	ScriptInstance("AI")
+@@ -194,29 +193,7 @@
+ 	SQAIWaypointList_Register(this->engine);
+ 	SQAIWaypointList_Vehicle_Register(this->engine);
+ 
+-	if (!this->LoadCompatibilityScripts(this->versionAPI)) this->Died();
+-}
+-
+-bool AIInstance::LoadCompatibilityScripts(const char *api_version)
+-{
+-	char script_name[32];
+-	seprintf(script_name, lastof(script_name), "compat_%s.nut", api_version);
+-	char buf[MAX_PATH];
+-	Searchpath sp;
+-	FOR_ALL_SEARCHPATHS(sp) {
+-		FioAppendDirectory(buf, MAX_PATH, sp, AI_DIR);
+-		ttd_strlcat(buf, script_name, MAX_PATH);
+-		if (!FileExists(buf)) continue;
+-
+-		if (this->engine->LoadScript(buf)) return true;
+-
+-		ScriptLog::Error("Failed to load API compatibility script");
+-		DEBUG(script, 0, "Error compiling / running API compatibility script: %s", buf);
+-		return false;
+-	}
+-
+-	ScriptLog::Warning("API compatibility script not found");
+-	return true;
++	if (!this->LoadCompatibilityScripts(this->versionAPI, AI_DIR)) this->Died();
+ }
+ 
+ void AIInstance::Died()
+diff -r 07f31f69d978 src/ai/ai_instance.hpp
+--- a/src/ai/ai_instance.hpp	Sat Jun 23 15:56:17 2012 +0000
++++ b/src/ai/ai_instance.hpp	Sun Jun 24 22:17:30 2012 +0200
+@@ -29,17 +29,10 @@
+ 	/* virtual */ ScriptInfo *FindLibrary(const char *library, int version);
+ 
+ private:
+-	const char *versionAPI; ///< Current API used by this script.
+-
+ 	/* virtual */ void RegisterAPI();
+ 	/* virtual */ void Died();
+ 	/* virtual */ CommandCallback *GetDoCommandCallback();
+ 	/* virtual */ void LoadDummyScript();
+-
+-	/**
+-	 * Load squirrel scripts to emulate an older API.
+-	 */
+-	bool LoadCompatibilityScripts(const char *api_version);
+ };
+ 
+ #endif /* AI_INSTANCE_HPP */
+diff -r 07f31f69d978 src/game/game_instance.cpp
+--- a/src/game/game_instance.cpp	Sat Jun 23 15:56:17 2012 +0000
++++ b/src/game/game_instance.cpp	Sun Jun 24 22:17:30 2012 +0200
+@@ -88,6 +88,8 @@
+ 
+ void GameInstance::Initialize(GameInfo *info)
+ {
++	this->versionAPI = info->GetAPIVersion();
++
+ 	/* Register the GameController */
+ 	SQGSController_Register(this->engine);
+ 
+@@ -190,6 +192,8 @@
+ 	SQGSWindow_Register(this->engine);
+ 
+ 	RegisterGameTranslation(this->engine);
++
++	if (!this->LoadCompatibilityScripts(this->versionAPI, GAME_DIR)) this->Died();
+ }
+ 
+ int GameInstance::GetSetting(const char *name)
+diff -r 07f31f69d978 src/script/script_instance.cpp
+--- a/src/script/script_instance.cpp	Sat Jun 23 15:56:17 2012 +0000
++++ b/src/script/script_instance.cpp	Sun Jun 24 22:17:30 2012 +0200
+@@ -27,6 +27,7 @@
+ 
+ #include "../company_base.h"
+ #include "../company_func.h"
++#include "../fileio_func.h"
+ 
+ ScriptStorage::~ScriptStorage()
+ {
+@@ -104,6 +105,28 @@
+ 	squirrel_register_std(this->engine);
+ }
+ 
++bool ScriptInstance::LoadCompatibilityScripts(const char *api_version, Subdirectory dir)
++{
++	char script_name[32];
++	seprintf(script_name, lastof(script_name), "compat_%s.nut", api_version);
++	char buf[MAX_PATH];
++	Searchpath sp;
++	FOR_ALL_SEARCHPATHS(sp) {
++		FioAppendDirectory(buf, MAX_PATH, sp, dir);
++		ttd_strlcat(buf, script_name, MAX_PATH);
++		if (!FileExists(buf)) continue;
++
++		if (this->engine->LoadScript(buf)) return true;
++
++		ScriptLog::Error("Failed to load API compatibility script");
++		DEBUG(script, 0, "Error compiling / running API compatibility script: %s", buf);
++		return false;
++	}
++
++	ScriptLog::Warning("API compatibility script not found");
++	return true;
++}
++
+ ScriptInstance::~ScriptInstance()
+ {
+ 	ScriptObject::ActiveInstance active(this);
+diff -r 07f31f69d978 src/script/script_instance.hpp
+--- a/src/script/script_instance.hpp	Sat Jun 23 15:56:17 2012 +0000
++++ b/src/script/script_instance.hpp	Sun Jun 24 22:17:30 2012 +0200
+@@ -17,6 +17,7 @@
+ 
+ #include "../command_type.h"
+ #include "../company_type.h"
++#include "../fileio_type.h"
+ 
+ static const uint SQUIRREL_MAX_DEPTH = 25; ///< The maximum recursive depth for items stored in the savegame.
+ 
+@@ -176,6 +177,7 @@
+ 
+ protected:
+ 	class Squirrel *engine;               ///< A wrapper around the squirrel vm.
++	const char *versionAPI;               ///< Current API used by this script.
+ 
+ 	/**
+ 	 * Register all API functions to the VM.
+@@ -183,6 +185,14 @@
+ 	virtual void RegisterAPI();
+ 
+ 	/**
++	 * Load squirrel scripts to emulate an older API.
++	 * @param api_version: API version to load scripts for
++	 * @param dir Subdirectory to find the scripts in
++	 * @return true iff script loading should proceed
++	 */
++	bool LoadCompatibilityScripts(const char *api_version, Subdirectory dir);
++
++	/**
+ 	 * Tell the script it died.
+ 	 */
+ 	virtual void Died();

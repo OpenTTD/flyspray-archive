@@ -1,0 +1,491 @@
+Index: src/company_gui.cpp
+===================================================================
+--- src/company_gui.cpp	(revision 25937)
++++ src/company_gui.cpp	(working copy)
+@@ -38,7 +38,6 @@
+ 
+ #include "widgets/company_widget.h"
+ 
+-
+ /** Company GUI constants. */
+ static const uint EXP_LINESPACE  = 2;      ///< Amount of vertical space for a horizontal (sub-)total line.
+ static const uint EXP_BLOCKSPACE = 10;     ///< Amount of vertical space between two blocks of numbers.
+@@ -2336,7 +2335,7 @@
+ 					MarkWholeScreenDirty();
+ 				} else if (NetworkCompanyIsPassworded(company)) {
+ 					/* ask for the password */
+-					ShowQueryString(STR_EMPTY, STR_NETWORK_NEED_COMPANY_PASSWORD_CAPTION, NETWORK_PASSWORD_LENGTH, this, CS_ALPHANUMERAL, QSF_NONE);
++					ShowNetworkNeedPasswordWindow(NETWORK_MOVE_PASSWORD, this);
+ 				} else {
+ 					/* just send the join command */
+ 					NetworkClientRequestMove(company);
+@@ -2438,6 +2437,9 @@
+ 	AllocateWindowDescFront<CompanyWindow>(&_company_desc, company);
+ }
+ 
++
++
++
+ /**
+  * Redraw all windows with company infrastructure counts.
+  * @param company The company to redraw the windows of.
+Index: src/window_type.h
+===================================================================
+--- src/window_type.h	(revision 25937)
++++ src/window_type.h	(working copy)
+@@ -33,6 +33,7 @@
+ 
+ 	WN_NETWORK_STATUS_WINDOW_JOIN = 0,         ///< Network join status.
+ 	WN_NETWORK_STATUS_WINDOW_CONTENT_DOWNLOAD, ///< Network content download status.
++	WN_NETWORK_STATUS_NEED_PASSWORD,			///< Network need password.
+ };
+ 
+ /** %Window classes. */
+@@ -487,6 +488,12 @@
+ 	WC_NETWORK_STATUS_WINDOW,
+ 
+ 	/**
++	 * Network password window; %Window numbers:
++	 * 	 - 0 = #NetworkNeedPasswordWidgets
++	 */
++	WC_NETWORK_NEED_PASSWORD_WINDOW,
++
++	/**
+ 	 * Chatbox; %Window numbers:
+ 	 *   - #DestType = #NetWorkChatWidgets
+ 	 */
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 25937)
++++ src/lang/english.txt	(working copy)
+@@ -2021,9 +2021,6 @@
+ 
+ STR_NETWORK_CONNECTION_DISCONNECT                               :{BLACK}Disconnect
+ 
+-STR_NETWORK_NEED_GAME_PASSWORD_CAPTION                          :{WHITE}Server is protected. Enter password
+-STR_NETWORK_NEED_COMPANY_PASSWORD_CAPTION                       :{WHITE}Company is protected. Enter password
+-
+ # Network company list added strings
+ STR_NETWORK_COMPANY_LIST_CLIENT_LIST                            :{WHITE}Client list
+ STR_NETWORK_COMPANY_LIST_SPECTATE                               :{WHITE}Spectate
+@@ -2044,7 +2041,22 @@
+ STR_NETWORK_GIVE_MONEY_CAPTION                                  :{WHITE}Enter the amount of money you want to give
+ STR_NETWORK_TOOLBAR_LIST_SPECTATOR                              :{BLACK}Spectator
+ 
+-# Network set password
++# Network password
++STR_NETWORK_NEED_PASSWORD_OK                                    :{BLACK}Connect with input password
++STR_NETWORK_NEED_PASSWORD_CANCEL                                :{BLACK}Cancel input password
++STR_NETWORK_NEED_GAME_PASSWORD                                  :{BLACK}Server password
++STR_NETWORK_NEED_COMPANY_PASSWORD                               :{BLACK}Company password
++STR_NETWORK_NEED_COMPANY_PASSWORD_CAPTION                       :{WHITE}Company is protected. Enter password
++STR_NETWORK_NEED_GAME_PASSWORD_CAPTION                          :{WHITE}Server is protected. Enter password
++STR_NETWORK_NEED_SET_GAME_PASSWORD                              :{BLACK}Input server password
++STR_NETWORK_NEED_SET_COMPANY_PASSWORD                           :{BLACK}Input company password
++STR_NETWORK_NEED_GAME_PASSWORD_DEFAULT                          :{BLACK}Default server password
++STR_NETWORK_NEED_COMPANY_PASSWORD_DEFAULT                       :{BLACK}Default company password
++STR_NETWORK_NEED_GAME_PASSWORD_DEFAULT_TOOLTIP                  :{WHITE}Connect with default game password
++STR_NETWORK_NEED_COMPANY_PASSWORD_DEFAULT_TOOLTIP               :{WHITE}Connect with default company password
++STR_NETWORK_NEED_MOVE_PASSWORD_DEFAULT_TOOLTIP                  :{WHITE}Move with default company password
++
++# Network set company password
+ STR_COMPANY_PASSWORD_CANCEL                                     :{BLACK}Do not save the entered password
+ STR_COMPANY_PASSWORD_OK                                         :{BLACK}Give the company the new password
+ STR_COMPANY_PASSWORD_CAPTION                                    :{WHITE}Company password
+Index: src/network/network_type.h
+===================================================================
+--- src/network/network_type.h	(revision 25937)
++++ src/network/network_type.h	(working copy)
+@@ -76,6 +76,7 @@
+ enum NetworkPasswordType {
+ 	NETWORK_GAME_PASSWORD,    ///< The password of the game.
+ 	NETWORK_COMPANY_PASSWORD, ///< The password of the company.
++	NETWORK_MOVE_PASSWORD,		///< The password of the move company
+ };
+ 
+ /** Destination of our chat messages. */
+Index: src/network/network_gui.h
+===================================================================
+--- src/network/network_gui.h	(revision 25937)
++++ src/network/network_gui.h	(working copy)
+@@ -25,9 +25,9 @@
+ void ShowJoinStatusWindow();
+ void ShowNetworkGameWindow();
+ void ShowClientList();
++void ShowNetworkNeedPasswordWindow(NetworkPasswordType npt, Window *parent = NULL);
+ void ShowNetworkCompanyPasswordWindow(Window *parent);
+ 
+-
+ /** Company information stored at the client side */
+ struct NetworkCompanyInfo : NetworkCompanyStats {
+ 	char company_name[NETWORK_COMPANY_NAME_LENGTH]; ///< Company name
+Index: src/network/network_client.cpp
+===================================================================
+--- src/network/network_client.cpp	(revision 25937)
++++ src/network/network_client.cpp	(working copy)
+@@ -716,7 +716,7 @@
+ 		return SendGamePassword(password);
+ 	}
+ 
+-	ShowNetworkNeedPassword(NETWORK_GAME_PASSWORD);
++	ShowNetworkNeedPasswordWindow(NETWORK_GAME_PASSWORD);
+ 
+ 	return NETWORK_RECV_STATUS_OKAY;
+ }
+@@ -735,7 +735,7 @@
+ 		return SendCompanyPassword(password);
+ 	}
+ 
+-	ShowNetworkNeedPassword(NETWORK_COMPANY_PASSWORD);
++	ShowNetworkNeedPasswordWindow(NETWORK_COMPANY_PASSWORD);
+ 
+ 	return NETWORK_RECV_STATUS_OKAY;
+ }
+Index: src/network/network_gui.cpp
+===================================================================
+--- src/network/network_gui.cpp	(revision 25937)
++++ src/network/network_gui.cpp	(working copy)
+@@ -39,7 +39,6 @@
+ 
+ #include "../stringfilter_type.h"
+ 
+-
+ static void ShowNetworkStartServerWindow();
+ static void ShowNetworkLobbyWindow(NetworkGameList *ngl);
+ 
+@@ -2088,10 +2087,12 @@
+ 			ShowNetworkGameWindow();
+ 			return;
+ 		}
++		
++		switch (this->password_type) {
++			case NETWORK_GAME_PASSWORD:		MyClient::SendGamePassword(str); break;
+ 
+-		switch (this->password_type) {
+-			case NETWORK_GAME_PASSWORD:    MyClient::SendGamePassword   (str); break;
+-			case NETWORK_COMPANY_PASSWORD: MyClient::SendCompanyPassword(str); break;
++			case NETWORK_COMPANY_PASSWORD:	MyClient::SendCompanyPassword(str);	break;
++
+ 			default: NOT_REACHED();
+ 		}
+ 	}
+@@ -2128,16 +2129,294 @@
+ 	NetworkJoinStatusWindow *w = (NetworkJoinStatusWindow *)FindWindowById(WC_NETWORK_STATUS_WINDOW, WN_NETWORK_STATUS_WINDOW_JOIN);
+ 	if (w == NULL) return;
+ 	w->password_type = npt;
+-
++	
+ 	StringID caption;
+ 	switch (npt) {
+-		default: NOT_REACHED();
+-		case NETWORK_GAME_PASSWORD:    caption = STR_NETWORK_NEED_GAME_PASSWORD_CAPTION; break;
+-		case NETWORK_COMPANY_PASSWORD: caption = STR_NETWORK_NEED_COMPANY_PASSWORD_CAPTION; break;
++		default:
++			NOT_REACHED();
++
++		case NETWORK_GAME_PASSWORD: 	caption = STR_NETWORK_NEED_GAME_PASSWORD_CAPTION; break;
++
++		case NETWORK_COMPANY_PASSWORD:	caption = STR_NETWORK_NEED_COMPANY_PASSWORD_CAPTION; break;
+ 	}
++
+ 	ShowQueryString(STR_EMPTY, caption, NETWORK_PASSWORD_LENGTH, w, CS_ALPHANUMERAL, QSF_NONE);
+ }
+ 
++struct NetworkNeedGamePasswordWindow : public Window {
++	QueryString password_editbox; ///< Password editbox
++
++	NetworkNeedGamePasswordWindow(WindowDesc *desc, Window *parent) : Window(desc), password_editbox(NETWORK_PASSWORD_LENGTH)
++	{
++		this->parent = FindWindowById(WC_NETWORK_STATUS_WINDOW, WN_NETWORK_STATUS_WINDOW_JOIN);
++		this->InitNested(WN_NETWORK_STATUS_NEED_PASSWORD);
++		this->querystrings[WID_NNP_PASSWORD] = &this->password_editbox;
++		this->password_editbox.cancel_button = WID_NNP_CANCEL;
++		this->password_editbox.ok_button = WID_NNP_OK;
++		this->SetFocusedWidget(WID_NNP_PASSWORD);
++	}
++
++	void OnOk()
++	{
++		char *petext = this->password_editbox.text.buf;
++
++		MyClient::SendGamePassword(petext);
++	}
++	
++	void OnCancel()
++	{
++		NetworkDisconnect();
++		ShowNetworkGameWindow();
++		return;
++	}
++
++	void OnDefault()
++	{
++		char *petext = _settings_client.network.server_password;
++
++		MyClient::SendGamePassword(petext);
++	}
++
++	virtual void OnClick(Point pt, int widget, int click_count)
++	{
++		switch (widget) {
++			case WID_NNP_OK:
++				this->OnOk();
++				break;
++
++			case WID_NNP_CANCEL:
++				this->OnCancel();
++				break;
++
++			case WID_NNP_DEFAULT_PASSWORD:
++				this->OnDefault();
++				break;
++		}
++	}			
++};
++
++static const NWidgetPart _nested_network_need_game_password_window_widgets[] = {
++	NWidget(NWID_HORIZONTAL),
++		NWidget(WWT_CAPTION, COLOUR_GREY), SetDataTip(STR_NETWORK_NEED_GAME_PASSWORD_CAPTION, STR_TOOLTIP_WINDOW_TITLE_DRAG_THIS),
++	EndContainer(),
++	NWidget(WWT_PANEL, COLOUR_GREY, WID_NNP_BACKGROUND),
++		NWidget(NWID_VERTICAL), SetPIP(5, 5, 5),
++			NWidget(NWID_HORIZONTAL), SetPIP(5, 5, 5),
++				NWidget(WWT_TEXT, COLOUR_GREY, WID_NNP_LABEL), SetDataTip(STR_NETWORK_NEED_GAME_PASSWORD, STR_NULL),
++				NWidget(WWT_EDITBOX, COLOUR_GREY, WID_NNP_PASSWORD), SetMinimalSize(194, 12), SetDataTip(STR_NETWORK_NEED_SET_GAME_PASSWORD, STR_NULL),
++			EndContainer(),
++			NWidget(NWID_HORIZONTAL), SetPIP(5, 0, 5),
++				NWidget(NWID_SPACER), SetFill(1, 0),
++				NWidget(WWT_TEXTBTN, COLOUR_GREY, WID_NNP_DEFAULT_PASSWORD), SetMinimalSize(194, 12), SetDataTip(STR_NETWORK_NEED_GAME_PASSWORD_DEFAULT, STR_NETWORK_NEED_GAME_PASSWORD_DEFAULT_TOOLTIP),
++			EndContainer(),
++		EndContainer(),
++	EndContainer(),
++	NWidget(NWID_HORIZONTAL, NC_EQUALSIZE),
++		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_NNP_CANCEL), SetFill(1, 0), SetDataTip(STR_BUTTON_CANCEL, STR_NETWORK_NEED_PASSWORD_CANCEL),
++		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_NNP_OK), SetFill(1, 0), SetDataTip(STR_BUTTON_OK, STR_NETWORK_NEED_PASSWORD_OK),
++	EndContainer(),
++};	
++
++static WindowDesc _network_need_game_password_window_desc(
++	WDP_CENTER, NULL, 0, 0,
++	WC_NETWORK_STATUS_WINDOW, WC_NONE,
++	0,
++	_nested_network_need_game_password_window_widgets, lengthof(_nested_network_need_game_password_window_widgets)
++);
++
++struct NetworkNeedCompanyPasswordWindow : public Window {
++	QueryString password_editbox; ///< Password editbox
++
++	NetworkNeedCompanyPasswordWindow(WindowDesc *desc, Window *parent) : Window(desc), password_editbox(NETWORK_PASSWORD_LENGTH)
++	{
++		this->parent = FindWindowById(WC_NETWORK_STATUS_WINDOW, WN_NETWORK_STATUS_WINDOW_JOIN);
++		this->InitNested(WN_NETWORK_STATUS_NEED_PASSWORD);
++		this->querystrings[WID_NNP_PASSWORD] = &this->password_editbox;
++		this->password_editbox.cancel_button = WID_NNP_CANCEL;
++		this->password_editbox.ok_button = WID_NNP_OK;
++		this->SetFocusedWidget(WID_NNP_PASSWORD);
++	}
++
++	void OnOk()
++	{
++		char *petext = this->password_editbox.text.buf;
++
++		MyClient::SendCompanyPassword(petext);
++	}
++	
++	void OnCancel()
++	{
++		NetworkDisconnect();
++		ShowNetworkGameWindow();
++		return;
++	}
++
++	void OnDefault()
++	{
++		char *petext = _settings_client.network.default_company_pass;
++
++		MyClient::SendCompanyPassword(petext);
++	}
++
++	virtual void OnClick(Point pt, int widget, int click_count)
++	{
++		switch (widget) {
++			case WID_NNP_OK:
++				this->OnOk();
++				break;
++
++			case WID_NNP_CANCEL:
++				this->OnCancel();
++				break;
++
++			case WID_NNP_DEFAULT_PASSWORD:
++				this->OnDefault();
++				break;
++		}
++	}			
++};
++
++static const NWidgetPart _nested_network_need_company_password_window_widgets[] = {
++	NWidget(NWID_HORIZONTAL),
++		NWidget(WWT_CAPTION, COLOUR_GREY), SetDataTip(STR_NETWORK_NEED_COMPANY_PASSWORD_CAPTION, STR_TOOLTIP_WINDOW_TITLE_DRAG_THIS),
++	EndContainer(),
++	NWidget(WWT_PANEL, COLOUR_GREY, WID_NNP_BACKGROUND),
++		NWidget(NWID_VERTICAL), SetPIP(5, 5, 5),
++			NWidget(NWID_HORIZONTAL), SetPIP(5, 5, 5),
++				NWidget(WWT_TEXT, COLOUR_GREY, WID_NNP_LABEL), SetDataTip(STR_NETWORK_NEED_COMPANY_PASSWORD, STR_NULL),
++				NWidget(WWT_EDITBOX, COLOUR_GREY, WID_NNP_PASSWORD), SetMinimalSize(194, 12), SetDataTip(STR_NETWORK_NEED_SET_COMPANY_PASSWORD, STR_NULL),
++			EndContainer(),
++			NWidget(NWID_HORIZONTAL), SetPIP(5, 0, 5),
++				NWidget(NWID_SPACER), SetFill(1, 0),
++				NWidget(WWT_TEXTBTN, COLOUR_GREY, WID_NNP_DEFAULT_PASSWORD), SetMinimalSize(194, 12), SetDataTip(STR_NETWORK_NEED_COMPANY_PASSWORD_DEFAULT, STR_NETWORK_NEED_COMPANY_PASSWORD_DEFAULT_TOOLTIP),
++			EndContainer(),
++		EndContainer(),
++	EndContainer(),
++	NWidget(NWID_HORIZONTAL, NC_EQUALSIZE),
++		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_NNP_CANCEL), SetFill(1, 0), SetDataTip(STR_BUTTON_CANCEL, STR_NETWORK_NEED_PASSWORD_CANCEL),
++		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_NNP_OK), SetFill(1, 0), SetDataTip(STR_BUTTON_OK, STR_NETWORK_NEED_PASSWORD_OK),
++	EndContainer(),
++};	
++
++static WindowDesc _network_need_company_password_window_desc(
++	WDP_CENTER, NULL, 0, 0,
++	WC_NETWORK_STATUS_WINDOW, WC_NONE,
++	0,
++	_nested_network_need_company_password_window_widgets, lengthof(_nested_network_need_company_password_window_widgets)
++);
++
++struct NetworkNeedMovePasswordWindow : public Window {
++	QueryString password_editbox; ///< Password editbox
++
++	NetworkNeedMovePasswordWindow(WindowDesc *desc, Window *parent) : Window(desc), password_editbox(NETWORK_PASSWORD_LENGTH)
++	{
++		this->parent = parent;
++		this->InitNested(WN_NETWORK_STATUS_NEED_PASSWORD);
++		this->querystrings[WID_NNP_PASSWORD] = &this->password_editbox;
++		this->password_editbox.cancel_button = WID_NNP_CANCEL;
++		this->password_editbox.ok_button = WID_NNP_OK;
++		this->SetFocusedWidget(WID_NNP_PASSWORD);
++	}
++
++	void OnOk()
++	{
++		char *petext = this->password_editbox.text.buf;
++		
++		NetworkClientRequestMove((CompanyID)parent->window_number, petext);
++
++		delete this;
++	}
++	
++	void OnCancel()
++	{
++		delete this;
++	}
++
++	void OnDefault()
++	{
++		char *petext = _settings_client.network.default_company_pass;
++
++		NetworkClientRequestMove((CompanyID)parent->window_number, petext);
++
++		delete this;
++	}
++
++	virtual void OnClick(Point pt, int widget, int click_count)
++	{
++		switch (widget) {
++			case WID_NNP_OK:
++				this->OnOk();
++				break;
++
++			case WID_NNP_CANCEL:
++				this->OnCancel();
++				break;
++
++			case WID_NNP_DEFAULT_PASSWORD:
++				this->OnDefault();
++				break;
++		}
++	}			
++};
++
++static const NWidgetPart _nested_network_need_move_password_window_widgets[] = {
++	NWidget(NWID_HORIZONTAL),
++		NWidget(WWT_CLOSEBOX, COLOUR_GREY),
++		NWidget(WWT_CAPTION, COLOUR_GREY), SetDataTip(STR_NETWORK_NEED_COMPANY_PASSWORD_CAPTION, STR_TOOLTIP_WINDOW_TITLE_DRAG_THIS),
++	EndContainer(),
++	NWidget(WWT_PANEL, COLOUR_GREY, WID_NNP_BACKGROUND),
++		NWidget(NWID_VERTICAL), SetPIP(5, 5, 5),
++			NWidget(NWID_HORIZONTAL), SetPIP(5, 5, 5),
++				NWidget(WWT_TEXT, COLOUR_GREY, WID_NNP_LABEL), SetDataTip(STR_NETWORK_NEED_COMPANY_PASSWORD, STR_NULL),
++				NWidget(WWT_EDITBOX, COLOUR_GREY, WID_NNP_PASSWORD), SetMinimalSize(194, 12), SetDataTip(STR_NETWORK_NEED_SET_COMPANY_PASSWORD, STR_NULL),
++			EndContainer(),
++			NWidget(NWID_HORIZONTAL), SetPIP(5, 0, 5),
++				NWidget(NWID_SPACER), SetFill(1, 0),
++				NWidget(WWT_TEXTBTN, COLOUR_GREY, WID_NNP_DEFAULT_PASSWORD), SetMinimalSize(194, 12), SetDataTip(STR_NETWORK_NEED_COMPANY_PASSWORD_DEFAULT, STR_NETWORK_NEED_MOVE_PASSWORD_DEFAULT_TOOLTIP),
++			EndContainer(),
++		EndContainer(),
++	EndContainer(),
++	NWidget(NWID_HORIZONTAL, NC_EQUALSIZE),
++		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_NNP_CANCEL), SetFill(1, 0), SetDataTip(STR_BUTTON_CANCEL, STR_NETWORK_NEED_PASSWORD_CANCEL),
++		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_NNP_OK), SetFill(1, 0), SetDataTip(STR_BUTTON_OK, STR_NETWORK_NEED_PASSWORD_OK),
++	EndContainer(),
++};	
++
++static WindowDesc _network_need_move_password_window_desc(
++	WDP_CENTER, NULL, 0, 0,
++	WC_NETWORK_NEED_PASSWORD_WINDOW, WC_NONE,
++	0,
++	_nested_network_need_move_password_window_widgets, lengthof(_nested_network_need_move_password_window_widgets)
++);
++
++void ShowNetworkNeedPasswordWindow(NetworkPasswordType npt, Window *parent)
++{
++	switch(npt) {
++		default:
++			NOT_REACHED();
++			break;
++	
++		case NETWORK_GAME_PASSWORD: {
++			NetworkJoinStatusWindow *njsw = (NetworkJoinStatusWindow *)FindWindowById(WC_NETWORK_STATUS_WINDOW, WN_NETWORK_STATUS_WINDOW_JOIN);
++			DeleteWindowById(WC_NETWORK_NEED_PASSWORD_WINDOW, WN_NETWORK_STATUS_NEED_PASSWORD);
++			new NetworkNeedGamePasswordWindow(&_network_need_game_password_window_desc, njsw);
++			break;
++		}
++		
++		case NETWORK_COMPANY_PASSWORD: {
++			NetworkJoinStatusWindow *njsw = (NetworkJoinStatusWindow *)FindWindowById(WC_NETWORK_STATUS_WINDOW, WN_NETWORK_STATUS_WINDOW_JOIN);
++			DeleteWindowById(WC_NETWORK_NEED_PASSWORD_WINDOW, WN_NETWORK_STATUS_NEED_PASSWORD);
++			new NetworkNeedCompanyPasswordWindow(&_network_need_company_password_window_desc, njsw);
++			break;
++		}
++
++		case NETWORK_MOVE_PASSWORD:
++			DeleteWindowById(WC_NETWORK_NEED_PASSWORD_WINDOW, WN_NETWORK_STATUS_NEED_PASSWORD);
++			new NetworkNeedMovePasswordWindow(&_network_need_move_password_window_desc, parent);
++			break;
++	}
++}
++
+ struct NetworkCompanyPasswordWindow : public Window {
+ 	QueryString password_editbox; ///< Password editbox.
+ 
+Index: src/widgets/network_widget.h
+===================================================================
+--- src/widgets/network_widget.h	(revision 25937)
++++ src/widgets/network_widget.h	(working copy)
+@@ -116,6 +116,16 @@
+ 	WID_NJS_CANCELOK,   ///< Cancel / OK button.
+ };
+ 
++/** Widgets of the #NetworkJoinCompanyPasswordWindow class. */
++enum NetworkNeedPasswordWidgets {
++	WID_NNP_BACKGROUND,			///< Background of the window.
++	WID_NNP_LABEL,				///< Label in front of the password field.
++	WID_NNP_PASSWORD,			///< Input field for the password.
++	WID_NNP_DEFAULT_PASSWORD,	///< Connect with default company password button.
++	WID_NNP_CANCEL,				///< Close the window.
++	WID_NNP_OK,					///< Connect with string of the password field.
++};
++
+ /** Widgets of the #NetworkCompanyPasswordWindow class. */
+ enum NetworkCompanyPasswordWidgets {
+ 	WID_NCP_BACKGROUND,               ///< Background of the window.

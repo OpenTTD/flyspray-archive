@@ -1,0 +1,69 @@
+Index: music/win32_m.cpp
+===================================================================
+--- music/win32_m.cpp	(revision 25941)
++++ music/win32_m.cpp	(working copy)
+@@ -24,6 +24,7 @@
+ 	HANDLE thread;
+ 	UINT_PTR devid;
+ 	char start_song[MAX_PATH];
++	bool song_started;
+ } _midi;
+ 
+ static FMusicDriver_Win32 iFMusicDriver_Win32;
+@@ -32,6 +33,7 @@
+ {
+ 	assert(filename != NULL);
+ 	strecpy(_midi.start_song, filename, lastof(_midi.start_song));
++	_midi.song_started = false;
+ 	_midi.playing = true;
+ 	_midi.stop_song = false;
+ 	SetEvent(_midi.wait_obj);
+@@ -41,7 +43,7 @@
+ {
+ 	if (_midi.playing) {
+ 		_midi.stop_song = true;
+-		_midi.start_song[0] = '\0';
++		_midi.song_started = true;
+ 		SetEvent(_midi.wait_obj);
+ 	}
+ }
+@@ -88,6 +90,13 @@
+ 	MidiSendCommand(_T("close all"));
+ }
+ 
++static char *MidiGetCurrentSong()
++{
++	char filename[MAX_PATH];
++	mciSendStringA("info song file", filename, sizeof(filename), 0);
++	return filename;
++}
++
+ static void MidiIntSetVolume(int vol)
+ {
+ 	DWORD v = (vol * 65535 / 127);
+@@ -105,6 +114,7 @@
+ {
+ 	do {
+ 		char *s;
++		char *current_song;
+ 		int vol;
+ 
+ 		vol = _midi.new_vol;
+@@ -114,9 +124,15 @@
+ 		}
+ 
+ 		s = _midi.start_song;
+-		if (s[0] != '\0') {
++		if (!_midi.song_started) {
+ 			_midi.playing = MidiIntPlaySong(s);
+-			s[0] = '\0';
++			_midi.song_started = _midi.playing;
++			
++			/* Since the songs could be skipped outside this thread (music_gui.cpp), it's not guaranteed that the last chosen song is used.
++			 * So, read the current song, and compare it with the requested one. If not, song_started will stay false, and the song will be requested again.
++			 */
++			current_song = MidiGetCurrentSong();
++			_midi.song_started = strcmp(s, current_song) == 0;
+ 
+ 			/* Delay somewhat in case we don't manage to play. */
+ 			if (!_midi.playing) WaitForMultipleObjects(1, &_midi.wait_obj, FALSE, 5000);

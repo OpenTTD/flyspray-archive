@@ -1,0 +1,231 @@
+# HG changeset patch
+# User Wormnest
+# Date 1376508596 -7200
+#      Wed Aug 14 21:29:56 2013 +0200
+# Node ID 39454dac9f6af059d1ba7729d731f403a60517c9
+# Parent  c076a9121416ca1ff86212db3e8415c21bcdf200
+Add: GUI parts of the news type selection and filtering widgets.
+
+diff -r c076a9121416 -r 39454dac9f6a src/news_gui.cpp
+--- a/src/news_gui.cpp	Wed Aug 14 21:29:56 2013 +0200
++++ b/src/news_gui.cpp	Wed Aug 14 21:29:56 2013 +0200
+@@ -987,6 +987,29 @@
+ 	DrawString(left, right, y, buffer2, colour);
+ }
+ 
++///< Strings for the news type selection dropdown, terminated by INVALID_STRING_ID
++static const StringID news_filter_texts[NT_END + 2] = {
++	STR_NEWS_ALL_TYPES,
++	STR_NEWS_ARRIVAL_COMPANY,
++	STR_NEWS_ARRIVAL_OTHER,
++	STR_NEWS_ACCIDENT,
++	STR_NEWS_COMPANY_INFO,
++	STR_NEWS_INDUSTRY_OPEN,
++	STR_NEWS_INDUSTRY_CLOSE,
++	STR_NEWS_ECONOMY,
++	STR_NEWS_INDUSTRY_COMPANY,
++	STR_NEWS_NDUSTRY_OTHER,
++	STR_NEWS_INDUSTRY_NOBODY,
++	STR_NEWS_ADVICE,
++	STR_NEWS_NEW_VEHICLES,
++	STR_NEWS_ACCEPTANCE,
++	STR_NEWS_SUBSIDIES,
++	STR_NEWS_GENERAL,
++	INVALID_STRING_ID
++};
++
++static byte _last_filter_criteria = 0; // 0 = all news unfiltered
++
+ struct MessageHistoryWindow : Window {
+ 	static const int top_spacing;    ///< Additional spacing at the top of the #WID_MH_BACKGROUND widget.
+ 	static const int bottom_spacing; ///< Additional spacing at the bottom of the #WID_MH_BACKGROUND widget.
+@@ -994,6 +1017,12 @@
+ 	int line_height; /// < Height of a single line in the news history window including spacing.
+ 	int date_width;  /// < Width needed for the date part.
+ 
++	byte news_filter[NT_END + 1];         ///< Available news filters; NewsType+1 or 0 for all news
++	static byte news_filter_criteria;     ///< Selected news filter
++	static byte vehicle_filter;           ///< Filter for types of vehicles to include
++	static const uint32 cargo_filter_max;
++	static uint32 cargo_filter;           ///< Filter fo cargo types to include
++
+ 	Scrollbar *vscroll;
+ 
+ 	MessageHistoryWindow(WindowDesc *desc) : Window(desc)
+@@ -1004,19 +1033,80 @@
+ 		this->OnInvalidateData(0);
+ 	}
+ 
++	/** Populate the news type list and set the news filter criteria. */
++	void SetNewsFilterArray()
++	{
++		uint filter_items = NT_END;
++
++		/* If not found, the news criteria will be set to all news. */
++		this->news_filter_criteria = 0;
++
++		/* Find the last news filter criteria. */
++		for (uint i = 0; i < filter_items; i++) {
++			if (this->news_filter[i] == _last_filter_criteria) {
++				this->news_filter_criteria = i;
++				break;
++			}
++		}
++	}
++
++	void OnInit()
++	{
++		this->SetNewsFilterArray();
++	}
++
++	/** Initialize the dropdown list of news types. */
++	virtual void SetStringParameters(int widget) const
++	{
++		switch (widget) {
++			case WID_MH_NEWS_FILTER_DROPDOWN:
++				SetDParam(0, news_filter_texts[this->news_filter_criteria]);
++				break;
++		}
++	}
++
+ 	virtual void UpdateWidgetSize(int widget, Dimension *size, const Dimension &padding, Dimension *fill, Dimension *resize)
+ 	{
+-		if (widget == WID_MH_BACKGROUND) {
+-			this->line_height = FONT_HEIGHT_NORMAL + 2;
+-			resize->height = this->line_height;
++		switch (widget) {
++			case WID_MH_TRAIN:
++			case WID_MH_TRUCK:
++			case WID_MH_BUS:
++			case WID_MH_AIRPLANE:
++			case WID_MH_SHIP:
++				size->height = max<uint>(FONT_HEIGHT_SMALL, 10) + padding.height;
++				break;
+ 
+-			/* Months are off-by-one, so it's actually 8. Not using
+-			 * month 12 because the 1 is usually less wide. */
+-			SetDParam(0, ConvertYMDToDate(ORIGINAL_MAX_YEAR, 7, 30));
+-			this->date_width = GetStringBoundingBox(STR_SHORT_DATE).width;
++			case WID_MH_CARGOALL:
++			case WID_MH_VEHICLEALL: {
++				Dimension d = GetStringBoundingBox(STR_ABBREV_ALL);
++				d.width  += padding.width + 2;
++				d.height += padding.height;
++				*size = maxdim(*size, d);
++				break;
++			}
++ 
++			case WID_MH_BACKGROUND: {
++				this->line_height = FONT_HEIGHT_NORMAL + 2;
++				resize->height = this->line_height;
+ 
+-			size->height = 4 * resize->height + this->top_spacing + this->bottom_spacing; // At least 4 lines are visible.
+-			size->width = max(200u, size->width); // At least 200 pixels wide.
++				/* Months are off-by-one, so it's actually 8. Not using
++				 * month 12 because the 1 is usually less wide. */
++				SetDParam(0, ConvertYMDToDate(ORIGINAL_MAX_YEAR, 7, 30));
++				this->date_width = GetStringBoundingBox(STR_SHORT_DATE).width;
++
++				size->height = 4 * resize->height + this->top_spacing + this->bottom_spacing; // At least 4 lines are visible.
++				size->width = max(200u, size->width); // At least 200 pixels wide.
++				break;
++			}
++
++			default:
++				if (widget >= WID_MH_CARGOSTART) {
++					Dimension d = GetStringBoundingBox(_sorted_cargo_specs[widget - WID_MH_CARGOSTART]->abbrev);
++					d.width  += padding.width + 2;
++					d.height += padding.height;
++					*size = maxdim(*size, d);
++				}
++				break;
+ 		}
+ 	}
+ 
+@@ -1028,6 +1118,30 @@
+ 
+ 	virtual void DrawWidget(const Rect &r, int widget) const
+ 	{
++		switch (widget) {
++			case WID_MH_CARGOALL: {
++				int cg_ofst = this->IsWidgetLowered(widget) ? 2 : 1;
++				DrawString(r.left + cg_ofst, r.right + cg_ofst, r.top + cg_ofst, STR_ABBREV_ALL, TC_BLACK, SA_HOR_CENTER);
++				break;
++			}
++
++			case WID_MH_VEHICLEALL: {
++				int cg_ofst = this->IsWidgetLowered(widget) ? 2 : 1;
++				DrawString(r.left + cg_ofst, r.right + cg_ofst, r.top + cg_ofst, STR_ABBREV_ALL, TC_BLACK);
++				break;
++			}
++
++			default:
++				if (widget >= WID_MH_CARGOSTART) {
++					const CargoSpec *cs = _sorted_cargo_specs[widget - WID_MH_CARGOSTART];
++					int cg_ofst = HasBit(this->cargo_filter, cs->Index()) ? 2 : 1;
++					GfxFillRect(r.left + cg_ofst, r.top + cg_ofst, r.right - 2 + cg_ofst, r.bottom - 2 + cg_ofst, cs->rating_colour);
++					TextColour tc = GetContrastColour(cs->rating_colour);
++					DrawString(r.left + cg_ofst, r.right + cg_ofst, r.top + cg_ofst, cs->abbrev, tc, SA_HOR_CENTER);
++				}
++				break;
++		}
++
+ 		if (widget != WID_MH_BACKGROUND || _total_news == 0) return;
+ 
+ 		/* Find the first news item to display. */
+@@ -1090,6 +1204,31 @@
+ 
+ const int MessageHistoryWindow::top_spacing = WD_FRAMERECT_TOP + 4;
+ const int MessageHistoryWindow::bottom_spacing = WD_FRAMERECT_BOTTOM;
++byte MessageHistoryWindow::news_filter_criteria = 0;
++byte MessageHistoryWindow::vehicle_filter = VTFN_TRAIN | VTFN_TRUCK | VTFN_BUS | VTFN_SHIP | VTFN_AIRCRAFT;
++const uint32 MessageHistoryWindow::cargo_filter_max = UINT32_MAX;
++uint32 MessageHistoryWindow::cargo_filter = UINT32_MAX;
++
++/**
++ * Make a horizontal row of cargo buttons, starting at widget #WID_MH_CARGOSTART.
++ * @param biggest_index Pointer to store biggest used widget number of the buttons.
++ * @return Horizontal row.
++ */
++static NWidgetBase *NewsCargoWidgets(int *biggest_index)
++{
++	NWidgetHorizontal *container = new NWidgetHorizontal();
++
++	for (uint i = 0; i < _sorted_standard_cargo_specs_size; i++) {
++		NWidgetBackground *panel = new NWidgetBackground(WWT_PANEL, COLOUR_BROWN, WID_MH_CARGOSTART + i);
++		panel->SetMinimalSize(14, 11);
++		panel->SetResize(0, 0);
++		panel->SetFill(0, 1);
++		panel->SetDataTip(0, STR_STATION_LIST_USE_CTRL_TO_SELECT_MORE);
++		container->Add(panel);
++	}
++	*biggest_index = WID_MH_CARGOSTART + _sorted_standard_cargo_specs_size;
++	return container;
++}
+ 
+ static const NWidgetPart _nested_message_history[] = {
+ 	NWidget(NWID_HORIZONTAL),
+@@ -1101,6 +1240,23 @@
+ 	EndContainer(),
+ 
+ 	NWidget(NWID_HORIZONTAL),
++		NWidget(WWT_TEXTBTN, COLOUR_BROWN, WID_MH_TRAIN), SetMinimalSize(14, 11), SetDataTip(STR_TRAIN, STR_STATION_LIST_USE_CTRL_TO_SELECT_MORE), SetFill(0, 1),
++		NWidget(WWT_TEXTBTN, COLOUR_BROWN, WID_MH_TRUCK), SetMinimalSize(14, 11), SetDataTip(STR_LORRY, STR_STATION_LIST_USE_CTRL_TO_SELECT_MORE), SetFill(0, 1),
++		NWidget(WWT_TEXTBTN, COLOUR_BROWN, WID_MH_BUS), SetMinimalSize(14, 11), SetDataTip(STR_BUS, STR_STATION_LIST_USE_CTRL_TO_SELECT_MORE), SetFill(0, 1),
++		NWidget(WWT_TEXTBTN, COLOUR_BROWN, WID_MH_SHIP), SetMinimalSize(14, 11), SetDataTip(STR_SHIP, STR_STATION_LIST_USE_CTRL_TO_SELECT_MORE), SetFill(0, 1),
++		NWidget(WWT_TEXTBTN, COLOUR_BROWN, WID_MH_AIRPLANE), SetMinimalSize(14, 11), SetDataTip(STR_PLANE, STR_STATION_LIST_USE_CTRL_TO_SELECT_MORE), SetFill(0, 1),
++		NWidget(WWT_PUSHBTN, COLOUR_BROWN, WID_MH_VEHICLEALL), SetMinimalSize(14, 11), SetDataTip(0x0, STR_MESSAGE_HISTORY_ALL_VEHICLES), SetFill(0, 1),
++		NWidget(WWT_PANEL, COLOUR_BROWN), SetMinimalSize(5, 11), SetFill(0, 1), EndContainer(),
++		NWidgetFunction(NewsCargoWidgets),
++		NWidget(WWT_PUSHBTN, COLOUR_BROWN, WID_MH_CARGOALL), SetMinimalSize(14, 11), SetDataTip(0x0, STR_MESSAGE_HISTORY_ALL_CARGOS), SetFill(0, 1),
++		NWidget(WWT_PANEL, COLOUR_BROWN), SetDataTip(0x0, STR_NULL), SetResize(1, 0), SetFill(1, 1), EndContainer(),
++	EndContainer(),
++
++	NWidget(NWID_HORIZONTAL),
++		NWidget(WWT_DROPDOWN, COLOUR_BROWN, WID_MH_NEWS_FILTER_DROPDOWN), SetResize(1, 0), SetFill(1, 0), SetDataTip(STR_JUST_STRING, STR_TOOLTIP_FILTER_CRITERIA),
++	EndContainer(),
++
++	NWidget(NWID_HORIZONTAL),
+ 		NWidget(WWT_PANEL, COLOUR_BROWN, WID_MH_BACKGROUND), SetMinimalSize(200, 125), SetDataTip(0x0, STR_MESSAGE_HISTORY_TOOLTIP), SetResize(1, 12), SetScrollbar(WID_MH_SCROLLBAR),
+ 		EndContainer(),
+ 		NWidget(NWID_VERTICAL),

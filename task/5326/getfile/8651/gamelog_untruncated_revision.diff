@@ -1,0 +1,130 @@
+Index: src/gamelog_internal.h
+===================================================================
+--- src/gamelog_internal.h	(revision 24591)
++++ src/gamelog_internal.h	(working copy)
+@@ -42,7 +42,7 @@
+ 			byte landscape;  ///< landscape (temperate, arctic, ...)
+ 		} mode;
+ 		struct {
+-			char text[NETWORK_REVISION_LENGTH]; ///< revision string, _openttd_revision
++			char *name;      ///< revision string, _openttd_revision
+ 			uint32 newgrf;   ///< _openttd_newgrf_version
+ 			uint16 slver;    ///< _sl_version
+ 			byte modified;   ///< _openttd_revision_modified
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 24591)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -240,8 +240,9 @@
+  *  174   23973   1.2.x
+  *  175   24136
+  *  176   24446
++ *  177   TODO
+  */
+-extern const uint16 SAVEGAME_VERSION = 176; ///< Current savegame version of OpenTTD.
++extern const uint16 SAVEGAME_VERSION = 177; ///< Current savegame version of OpenTTD.
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+@@ -1040,6 +1041,8 @@
+ 			break;
+ 	}
+ 
++	assert(GetVarFileType(conv) == SLE_FILE_STRING); // saving only supports this type
++
+ 	len = SlCalcNetStringLen(str, len);
+ 	return len + SlGetArrayLength(len); // also include the length of the index
+ }
+@@ -1068,13 +1071,20 @@
+ 					break;
+ 			}
+ 
++			assert(GetVarFileType(conv) == SLE_FILE_STRING); // saving only supports this type
++
+ 			SlWriteArrayLength(len);
+ 			SlCopyBytes(ptr, len);
+ 			break;
+ 		}
+ 		case SLA_LOAD_CHECK:
+ 		case SLA_LOAD: {
+-			size_t len = SlReadArrayLength();
++			size_t len;
++			switch (GetVarFileType(conv)) {
++				case SLE_FILE_STRINGB: len = length;              break;
++				case SLE_FILE_STRING:  len = SlReadArrayLength(); break;
++				default: NOT_REACHED();
++			}
+ 
+ 			switch (GetVarMemType(conv)) {
+ 				default: NOT_REACHED();
+Index: src/saveload/gamelog_sl.cpp
+===================================================================
+--- src/saveload/gamelog_sl.cpp	(revision 24591)
++++ src/saveload/gamelog_sl.cpp	(working copy)
+@@ -27,7 +27,8 @@
+ };
+ 
+ static const SaveLoad _glog_revision_desc[] = {
+-	SLE_ARR(LoggedChange, revision.text,     SLE_UINT8,  NETWORK_REVISION_LENGTH),
++	SLE_CONDSTR(LoggedChange, revision.name, SLE_FILE_STRINGB | SLE_VAR_STR,  15,        0, 176),
++	SLE_CONDSTR(LoggedChange, revision.name, SLE_STR,                        128,      177, SL_MAX_VERSION),
+ 	SLE_VAR(LoggedChange, revision.newgrf,   SLE_UINT32),
+ 	SLE_VAR(LoggedChange, revision.slver,    SLE_UINT16),
+ 	SLE_VAR(LoggedChange, revision.modified, SLE_UINT8),
+Index: src/saveload/saveload.h
+===================================================================
+--- src/saveload/saveload.h	(revision 24591)
++++ src/saveload/saveload.h	(working copy)
+@@ -118,6 +118,7 @@
+ 	SLE_FILE_U64      = 7,
+ 	SLE_FILE_STRINGID = 8, ///< StringID offset into strings-array
+ 	SLE_FILE_STRING   = 9,
++	SLE_FILE_STRINGB  = 10, ///< string is stored as fixed size array in file.
+ 	/* 6 more possible file-primitives */
+ 
+ 	/* 4 bits allocated a maximum of 16 types for NumberType */
+Index: src/gamelog.cpp
+===================================================================
+--- src/gamelog.cpp	(revision 24591)
++++ src/gamelog.cpp	(working copy)
+@@ -72,7 +72,11 @@
+ 		const LoggedAction *la = &gamelog_action[i];
+ 		for (uint j = 0; j < la->changes; j++) {
+ 			const LoggedChange *lc = &la->change[j];
+-			if (lc->ct == GLCT_SETTING) free(lc->setting.name);
++			switch (lc->ct) {
++				case GLCT_SETTING:  free(lc->setting.name);  break;
++				case GLCT_REVISION: free(lc->revision.name); break;
++				default: break;
++			}
+ 		}
+ 		free(la->change);
+ 	}
+@@ -205,7 +209,7 @@
+ 
+ 				case GLCT_REVISION:
+ 					AddDebugText(buf, "Revision text changed to %s, savegame version %u, ",
+-						lc->revision.text, lc->revision.slver);
++						lc->revision.name, lc->revision.slver);
+ 
+ 					switch (lc->revision.modified) {
+ 						case 0: AddDebugText(buf, "not "); break;
+@@ -429,8 +433,7 @@
+ 	LoggedChange *lc = GamelogChange(GLCT_REVISION);
+ 	if (lc == NULL) return;
+ 
+-	memset(lc->revision.text, 0, sizeof(lc->revision.text));
+-	strecpy(lc->revision.text, _openttd_revision, lastof(lc->revision.text));
++	lc->revision.name = strdup(_openttd_revision);
+ 	lc->revision.slver = SAVEGAME_VERSION;
+ 	lc->revision.modified = _openttd_revision_modified;
+ 	lc->revision.newgrf = _openttd_newgrf_version;
+@@ -499,7 +502,7 @@
+ 		}
+ 	}
+ 
+-	if (rev == NULL || strcmp(rev->revision.text, _openttd_revision) != 0 ||
++	if (rev == NULL || strcmp(rev->revision.name, _openttd_revision) != 0 ||
+ 			rev->revision.modified != _openttd_revision_modified ||
+ 			rev->revision.newgrf != _openttd_newgrf_version) {
+ 		GamelogRevision();

@@ -1,0 +1,134 @@
+# HG changeset patch
+# Parent 26479f12af1e6944fc992eb58311ccbb9ec1bb63
+
+diff --git a/src/crashlog.cpp b/src/crashlog.cpp
+--- a/src/crashlog.cpp
++++ b/src/crashlog.cpp
+@@ -26,6 +26,7 @@
+ #include "gfx_func.h"
+ #include "network/network.h"
+ #include "language.h"
++#include "news_func.h"
+ 
+ #include "ai/ai_info.hpp"
+ #include "game/game.hpp"
+@@ -290,6 +291,31 @@
+ }
+ 
+ /**
++ * Writes any pending news messages to the buffer.
++ * @param buffer The begin where to write at.
++ * @param last   The last position in the buffer to write to.
++ * @return the position of the \c '\0' character after the buffer.
++ */
++char *CrashLog::LogPendingNews(char *buffer, const char *last) const
++{
++	buffer += seprintf(buffer, last, "Pending news messages:\n");
++
++	for (NewsItem *news = _oldest_news; news != NULL; news = news->next) {
++		if (news->string_id > STR_LAST_STRINGID) {
++			buffer += seprintf(buffer, last, "Invalid StringID in NewsItem\n");
++			continue;
++		}
++		char tmpbuf[512];
++		WriteNewsString(news, tmpbuf);
++		YearMonthDay ymd;
++		ConvertDateToYMD(_date, &ymd);
++		buffer += seprintf(buffer, last, "(%i-%i-%i) %s\n", ymd.year, ymd.month + 1, ymd.day, tmpbuf);
++	}
++	buffer += seprintf(buffer, last, "\n");
++	return buffer;
++}
++
++/**
+  * Fill the crash log buffer with all data of a crash log.
+  * @param buffer The begin where to write at.
+  * @param last   The last position in the buffer to write to.
+@@ -315,6 +341,7 @@
+ 	buffer = this->LogLibraries(buffer, last);
+ 	buffer = this->LogModules(buffer, last);
+ 	buffer = this->LogGamelog(buffer, last);
++	buffer = this->LogPendingNews(buffer, last);
+ 
+ 	buffer += seprintf(buffer, last, "*** End of OpenTTD Crash Report ***\n");
+ 	return buffer;
+diff --git a/src/crashlog.h b/src/crashlog.h
+--- a/src/crashlog.h
++++ b/src/crashlog.h
+@@ -85,6 +85,7 @@
+ 	char *LogConfiguration(char *buffer, const char *last) const;
+ 	char *LogLibraries(char *buffer, const char *last) const;
+ 	char *LogGamelog(char *buffer, const char *last) const;
++	char *LogPendingNews(char *buffer, const char *last) const;
+ 
+ public:
+ 	/** Stub destructor to silence some compilers. */
+diff --git a/src/news.cpp b/src/news.cpp
+--- a/src/news.cpp
++++ b/src/news.cpp
+@@ -477,17 +477,13 @@
+ }
+ 
+ /**
+- * Draw an unformatted news message truncated to a maximum length. Will
+- * be postfixed by '...' if length exceeds maximum length.
+- * @param left  The left most location for the string.
+- * @param right The right most location for the string.
+- * @param y Position of the string.
+- * @param colour The colour the string will be shown in.
+- * @param ni NewsItem being printed.
++ * Write a news message as an unformatted string.
++ * @param ni The NewsItem in question.
++ * @param outbuf The buffer to write to.
+  */
+-void DrawNewsString(uint left, uint right, int y, TextColour colour, const NewsItem *ni)
++void WriteNewsString(const NewsItem *ni, char *outbuf)
+ {
+-	char buffer[512], buffer2[512];
++	char buffer[512];
+ 	StringID str;
+ 
+ 	CopyInDParam(0, ni->params, lengthof(ni->params));
+@@ -497,7 +493,7 @@
+ 	/* Copy the just gotten string to another buffer to remove any formatting
+ 	 * from it such as big fonts, etc. */
+ 	const char *ptr = buffer;
+-	char *dest = buffer2;
++	char *dest = outbuf;
+ 	WChar c_last = '\0';
+ 	for (;;) {
+ 		WChar c = Utf8Consume(&ptr);
+@@ -516,6 +512,21 @@
+ 	}
+ 
+ 	*dest = '\0';
++}
++
++/**
++ * Draw an unformatted news message truncated to a maximum length. Will
++ * be postfixed by '...' if length exceeds maximum length.
++ * @param left  The left most location for the string.
++ * @param right The right most location for the string.
++ * @param y Position of the string.
++ * @param colour The colour the string will be shown in.
++ * @param ni NewsItem being printed.
++ */
++void DrawNewsString(uint left, uint right, int y, TextColour colour, const NewsItem *ni)
++{
++	char buffer[512];
++	WriteNewsString(ni, buffer);
+ 	/* Truncate and show string; postfixed by '...' if necessary */
+-	DrawString(left, right, y, buffer2, colour);
++	DrawString(left, right, y, buffer, colour);
+ }
+diff --git a/src/news_func.h b/src/news_func.h
+--- a/src/news_func.h
++++ b/src/news_func.h
+@@ -64,6 +64,7 @@
+ 
+ TileIndex GetReferenceTile(NewsReferenceType reftype, uint32 ref);
+ void DrawNewsString(uint left, uint right, int y, TextColour colour, const NewsItem *ni);
++void WriteNewsString(const NewsItem *ni, char *outbuf);
+ void ShowNewsMessage(const NewsItem *ni);
+ 
+ extern const NewsItem *_forced_news;

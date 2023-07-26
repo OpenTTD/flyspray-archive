@@ -1,0 +1,159 @@
+From a82ad353f52167d195c078e486aa3bea37dc01aa Mon Sep 17 00:00:00 2001
+From: Chris Angelico <rosuav@gmail.com>
+Date: Sat, 3 Nov 2012 17:44:51 +1100
+Subject: [PATCH] Add automatic timetable distribution to shared orders window
+
+---
+ src/group_gui.cpp      |    2 +-
+ src/lang/english.txt   |    2 +
+ src/vehicle_gui.cpp    |   56 ++++++++++++++++++++++++++++++++++++++++++++++-
+ src/vehicle_gui_base.h |    3 +-
+ 4 files changed, 59 insertions(+), 4 deletions(-)
+
+diff --git a/src/group_gui.cpp b/src/group_gui.cpp
+index c68d440..e63c876 100644
+--- a/src/group_gui.cpp
++++ b/src/group_gui.cpp
+@@ -605,7 +605,7 @@ public:
+ 				break;
+ 
+ 			case WID_GL_MANAGE_VEHICLES_DROPDOWN: {
+-				DropDownList *list = this->BuildActionDropdownList(true, Group::IsValidID(this->vli.index));
++				DropDownList *list = this->BuildActionDropdownList(true, Group::IsValidID(this->vli.index), false);
+ 				ShowDropDownList(this, list, 0, WID_GL_MANAGE_VEHICLES_DROPDOWN);
+ 				break;
+ 			}
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+index 9a54340..c18c5d4 100644
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -3086,6 +3086,8 @@ STR_VEHICLE_LIST_MASS_START_LIST_TOOLTIP                        :{BLACK}Click to
+ 
+ STR_VEHICLE_LIST_SHARED_ORDERS_LIST_CAPTION                     :{WHITE}Shared orders of {COMMA} Vehicle{P "" s}
+ 
++STR_TIMETABLE_DISTRIBUTE_VEHICLES                               :Distribute vehicles
++
+ # Group window
+ STR_GROUP_ALL_TRAINS                                            :All trains
+ STR_GROUP_ALL_ROAD_VEHICLES                                     :All road vehicles
+diff --git a/src/vehicle_gui.cpp b/src/vehicle_gui.cpp
+index be36c01..1d968a4 100644
+--- a/src/vehicle_gui.cpp
++++ b/src/vehicle_gui.cpp
+@@ -26,6 +26,7 @@
+ #include "group_gui.h"
+ #include "strings_func.h"
+ #include "vehicle_func.h"
++#include "date_func.h"
+ #include "autoreplace_gui.h"
+ #include "string_func.h"
+ #include "widgets/dropdown_func.h"
+@@ -150,9 +151,10 @@ Dimension BaseVehicleListWindow::GetActionDropdownSize(bool show_autoreplace, bo
+  * Display the Action dropdown window.
+  * @param show_autoreplace If true include the autoreplace item.
+  * @param show_group If true include group-related stuff.
++ * @param show_shared If true include shared-orders management.
+  * @return Itemlist for dropdown
+  */
+-DropDownList *BaseVehicleListWindow::BuildActionDropdownList(bool show_autoreplace, bool show_group)
++DropDownList *BaseVehicleListWindow::BuildActionDropdownList(bool show_autoreplace, bool show_group, bool show_shared)
+ {
+ 	DropDownList *list = new DropDownList();
+ 
+@@ -164,6 +166,10 @@ DropDownList *BaseVehicleListWindow::BuildActionDropdownList(bool show_autorepla
+ 		list->push_back(new DropDownListStringItem(STR_GROUP_ADD_SHARED_VEHICLE, ADI_ADD_SHARED, false));
+ 		list->push_back(new DropDownListStringItem(STR_GROUP_REMOVE_ALL_VEHICLES, ADI_REMOVE_ALL, false));
+ 	}
++	if (show_shared && this->vehicles.Length() > 1) {
++		OrderList *orders = this->vehicles[0]->orders.list;
++		if (orders->GetTimetableTotalDuration() != INVALID_TICKS) list->push_back(new DropDownListStringItem(STR_TIMETABLE_DISTRIBUTE_VEHICLES, ADI_DISTRIBUTE, false));
++	}
+ 
+ 	return list;
+ }
+@@ -1521,7 +1527,7 @@ public:
+ 				break;
+ 
+ 			case WID_VL_MANAGE_VEHICLES_DROPDOWN: {
+-				DropDownList *list = this->BuildActionDropdownList(VehicleListIdentifier(this->window_number).type == VL_STANDARD, false);
++				DropDownList *list = this->BuildActionDropdownList(VehicleListIdentifier(this->window_number).type == VL_STANDARD, false, this->vli.type == VL_SHARED_ORDERS);
+ 				ShowDropDownList(this, list, 0, WID_VL_MANAGE_VEHICLES_DROPDOWN);
+ 				break;
+ 			}
+@@ -1550,6 +1556,52 @@ public:
+ 					case ADI_DEPOT: // Send to Depots
+ 						DoCommandP(0, DEPOT_MASS_SEND | (index == ADI_SERVICE ? DEPOT_SERVICE : (DepotCommand)0), this->window_number, GetCmdSendToDepot(this->vli.vtype));
+ 						break;
++					case ADI_DISTRIBUTE: {
++						uint vehcount = this->vehicles.Length();
++						uint first = -1; //Locate the vehicle closest to the beginning of the cycle and base everything off that one.
++						Ticks earliest = INVALID_TICKS;
++						for (uint veh=0; veh<vehcount; ++veh) {
++							const Vehicle *v=this->vehicles[veh];
++							Ticks start_time = INVALID_TICKS;
++							//Code lifted from FillTimetableArrivalDepartureTable in timetable_gui.cpp - there may very well be a simpler way of doing this!
++							bool travelling = (!v->current_order.IsType(OT_LOADING) || v->current_order.GetNonStopType() == ONSF_STOP_EVERYWHERE);
++							Ticks sum = _date_fract - v->current_order_time;
++							VehicleOrderID start = v->cur_real_order_index % v->GetNumOrders();
++							VehicleOrderID i = start;
++							const Order *order = v->GetOrder(i);
++							do {
++								if (!order->IsType(OT_IMPLICIT)) {
++									if (travelling || i != start) {
++										sum += order->travel_time;
++										if (!i) {start_time = sum; break;}
++									}
++									sum += order->wait_time;
++								}
++								++i;
++								order = order->next;
++								if (i >= v->GetNumOrders()) {
++									i = 0;
++									order = v->orders.list->GetFirstOrder();
++								}
++							} while (i != start);
++							if (!travelling && !i && start_time == INVALID_TICKS) start_time = sum + order->travel_time;
++							//End cut-down FillTimetableArrivalDepartureTable
++							if (earliest == INVALID_TICKS || start_time < earliest) {
++								earliest = start_time;
++								first = veh;
++							}
++						}
++						const Vehicle *v = this->vehicles[0];
++						OrderList *orders = v->orders.list;
++						Ticks span = orders->GetTimetableTotalDuration();
++						assert(orders->GetNumVehicles() == vehcount); // All vehicles in the list ought to be sharing the same orders
++						for (uint veh=0; veh<vehcount; ++veh) {
++							const Vehicle *v=this->vehicles[veh];
++							int pos = veh - first; if (pos<0) pos += vehcount;
++							DoCommandP(0, v->index, _date + (earliest + span*pos/vehcount) / DAY_TICKS, CMD_SET_TIMETABLE_START | CMD_MSG(STR_ERROR_CAN_T_TIMETABLE_VEHICLE));
++						}
++						break;
++					}
+ 
+ 					default: NOT_REACHED();
+ 				}
+diff --git a/src/vehicle_gui_base.h b/src/vehicle_gui_base.h
+index e4f6ccc..99318e6 100644
+--- a/src/vehicle_gui_base.h
++++ b/src/vehicle_gui_base.h
+@@ -32,6 +32,7 @@ struct BaseVehicleListWindow : public Window {
+ 		ADI_DEPOT,
+ 		ADI_ADD_SHARED,
+ 		ADI_REMOVE_ALL,
++		ADI_DISTRIBUTE,
+ 	};
+ 
+ 	static const StringID vehicle_depot_name[];
+@@ -47,7 +48,7 @@ struct BaseVehicleListWindow : public Window {
+ 	void SortVehicleList();
+ 	void BuildVehicleList();
+ 	Dimension GetActionDropdownSize(bool show_autoreplace, bool show_group);
+-	DropDownList *BuildActionDropdownList(bool show_autoreplace, bool show_group);
++	DropDownList *BuildActionDropdownList(bool show_autoreplace, bool show_group, bool show_shared);
+ };
+ 
+ uint GetVehicleListHeight(VehicleType type, uint divisor = 1);
+-- 
+1.7.9.GIT
+

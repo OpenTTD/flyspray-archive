@@ -1,0 +1,678 @@
+diff --git a/src/autoreplace_gui.cpp b/src/autoreplace_gui.cpp
+--- a/src/autoreplace_gui.cpp
++++ b/src/autoreplace_gui.cpp
+@@ -29,9 +29,6 @@
+ #include "widgets/autoreplace_widget.h"
+ 
+ 
+-uint GetEngineListHeight(VehicleType type);
+-void DrawEngineList(VehicleType type, int x, int r, int y, const GUIEngineList *eng_list, uint16 min, uint16 max, EngineID selected_id, bool show_count, GroupID selected_group);
+-
+ static int CDECL EngineNumberSorter(const EngineID *a, const EngineID *b)
+ {
+ 	int r = Engine::Get(*a)->list_position - Engine::Get(*b)->list_position;
+@@ -133,6 +130,7 @@
+ 				/* Skip drawing the engines we don't have any of and haven't set for replacement */
+ 				if (num_engines == 0 && EngineReplacementForCompany(Company::Get(_local_company), eid, this->sel_group) == INVALID_ENGINE) continue;
+ 			} else {
++				if (!this->IsWidgetLowered(WID_RV_FILTER) && HasBit(e->company_hidden, _local_company)) continue;
+ 				if (!CheckAutoreplaceValidity(this->sel_engine[0], eid, _local_company)) continue;
+ 			}
+ 
+@@ -366,7 +364,7 @@
+ 
+ 				/* Do the actual drawing */
+ 				DrawEngineList((VehicleType)this->window_number, r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, r.top + WD_FRAMERECT_TOP,
+-						&this->engines[side], start, end, this->sel_engine[side], side == 0, this->sel_group);
++						&this->engines[side], start, end, _local_company, this->sel_engine[side], side == 0, this->sel_group);
+ 				break;
+ 			}
+ 		}
+@@ -426,6 +424,14 @@
+ 	virtual void OnClick(Point pt, int widget, int click_count)
+ 	{
+ 		switch (widget) {
++			case WID_RV_FILTER:
++				/* Toggle state */
++				ToggleWidgetLoweredState(widget);
++				/* Update list */
++				this->OnInvalidateData();
++				this->SetDirty();
++				break;
++
+ 			case WID_RV_TRAIN_ENGINEWAGON_TOGGLE:
+ 				this->replace_engines  = !(this->replace_engines);
+ 				this->engines[0].ForceRebuild();
+@@ -471,6 +477,12 @@
+ 				size_t engine_count = this->engines[click_side].Length();
+ 
+ 				EngineID e = engine_count > i ? this->engines[click_side][i] : INVALID_ENGINE;
++
++				if (_ctrl_pressed) {
++					if (e != INVALID_ENGINE) DoCommandP(0, this->owner, e, CMD_TOGGLE_ENGINE_VISIBILITY | CMD_MSG(STR_ERROR_CAN_T_RENAME_TRAIN_TYPE));
++					break;
++				}
++
+ 				if (e == this->sel_engine[click_side]) break; // we clicked the one we already selected
+ 				this->sel_engine[click_side] = e;
+ 				if (click_side == 0) {
+@@ -536,6 +548,7 @@
+ 	NWidget(NWID_HORIZONTAL),
+ 		NWidget(WWT_CLOSEBOX, COLOUR_GREY),
+ 		NWidget(WWT_CAPTION, COLOUR_GREY, WID_RV_CAPTION), SetDataTip(STR_REPLACE_VEHICLES_WHITE, STR_TOOLTIP_WINDOW_TITLE_DRAG_THIS),
++		NWidget(WWT_IMGBTN, COLOUR_GREY, WID_RV_FILTER), SetDataTip(SPR_LARGE_SMALL_WINDOW, STR_BUY_VEHICLE_LIST_FILTER_TOOLTIP),
+ 		NWidget(WWT_SHADEBOX, COLOUR_GREY),
+ 		NWidget(WWT_STICKYBOX, COLOUR_GREY),
+ 	EndContainer(),
+@@ -576,6 +589,7 @@
+ 	NWidget(NWID_HORIZONTAL),
+ 		NWidget(WWT_CLOSEBOX, COLOUR_GREY),
+ 		NWidget(WWT_CAPTION, COLOUR_GREY, WID_RV_CAPTION), SetMinimalSize(433, 14), SetDataTip(STR_REPLACE_VEHICLES_WHITE, STR_TOOLTIP_WINDOW_TITLE_DRAG_THIS),
++		NWidget(WWT_IMGBTN, COLOUR_GREY, WID_RV_FILTER), SetDataTip(SPR_LARGE_SMALL_WINDOW, STR_BUY_VEHICLE_LIST_FILTER_TOOLTIP),
+ 		NWidget(WWT_SHADEBOX, COLOUR_GREY),
+ 		NWidget(WWT_STICKYBOX, COLOUR_GREY),
+ 	EndContainer(),
+diff --git a/src/build_vehicle_gui.cpp b/src/build_vehicle_gui.cpp
+--- a/src/build_vehicle_gui.cpp
++++ b/src/build_vehicle_gui.cpp
+@@ -50,6 +50,7 @@
+ 	NWidget(NWID_HORIZONTAL),
+ 		NWidget(WWT_CLOSEBOX, COLOUR_GREY),
+ 		NWidget(WWT_CAPTION, COLOUR_GREY, WID_BV_CAPTION), SetDataTip(STR_WHITE_STRING, STR_TOOLTIP_WINDOW_TITLE_DRAG_THIS),
++		NWidget(WWT_IMGBTN, COLOUR_GREY, WID_BV_FILTER_BUTTON), SetDataTip(SPR_LARGE_SMALL_WINDOW, STR_BUY_VEHICLE_LIST_FILTER_TOOLTIP),
+ 		NWidget(WWT_SHADEBOX, COLOUR_GREY),
+ 		NWidget(WWT_STICKYBOX, COLOUR_GREY),
+ 	EndContainer(),
+@@ -869,7 +870,7 @@
+  * @param show_count Whether to show the amount of engines or not
+  * @param selected_group the group to list the engines of
+  */
+-void DrawEngineList(VehicleType type, int l, int r, int y, const GUIEngineList *eng_list, uint16 min, uint16 max, EngineID selected_id, bool show_count, GroupID selected_group)
++void DrawEngineList(VehicleType type, int l, int r, int y, const GUIEngineList *eng_list, uint16 min, uint16 max, CompanyID company, EngineID selected_id, bool show_count, GroupID selected_group)
+ {
+ 	static const int sprite_widths[]  = { 60, 60, 76, 67 };
+ 	static const int sprite_y_offsets[] = { -1, -1, -2, -2 };
+@@ -906,12 +907,26 @@
+ 
+ 	for (; min < max; min++, y += step_size) {
+ 		const EngineID engine = (*eng_list)[min];
++		const Engine *e = Engine::Get(engine);
+ 		/* Note: num_engines is only used in the autoreplace GUI, so it is correct to use _local_company here. */
+ 		const uint num_engines = GetGroupNumEngines(_local_company, selected_group, engine);
+ 
++		/* Highlight the vehicle if it is selected. */
++		if (engine == selected_id) {
++			GfxFillRect(l, y + WD_FRAMERECT_TOP, r, y + step_size - WD_FRAMERECT_BOTTOM - 2, _colour_gradient[COLOUR_GREY][7]);
++		}
++
++		TextColour text_colour;
++		bool palette_crash = (show_count && num_engines == 0) || !HasBit(e->company_avail, company);
++		if (HasBit(e->company_hidden, company)) {
++			text_colour = HasBit(e->company_avail, company) ? TC_SILVER : TC_RED;
++		} else {
++			text_colour = HasBit(e->company_avail, company) ? TC_BLACK : TC_ORANGE;
++		}
++
+ 		SetDParam(0, engine);
+-		DrawString(text_left, text_right, y + normal_text_y_offset, STR_ENGINE_NAME, engine == selected_id ? TC_WHITE : TC_BLACK);
+-		DrawVehicleEngine(l, r, sprite_x, y + sprite_y_offset, engine, (show_count && num_engines == 0) ? PALETTE_CRASH : GetEnginePalette(engine, _local_company), EIT_PURCHASE);
++		DrawString(text_left, text_right, y + normal_text_y_offset, STR_ENGINE_NAME, text_colour);
++		DrawVehicleEngine(l, r, sprite_x, y + sprite_y_offset, engine, palette_crash ? PALETTE_CRASH : GetEnginePalette(engine, _local_company), EIT_PURCHASE);
+ 		if (show_count) {
+ 			SetDParam(0, num_engines);
+ 			DrawString(count_left, count_right, y + small_text_y_offset, STR_TINY_BLACK_COMA, TC_FROMSTRING, SA_RIGHT | SA_FORCE);
+@@ -1043,17 +1058,6 @@
+ 		this->SetCargoFilterArray();
+ 	}
+ 
+-	/** Filter the engine list against the currently selected cargo filter */
+-	void FilterEngineList()
+-	{
+-		this->eng_list.Filter(this->cargo_filter[this->cargo_filter_criteria]);
+-		if (0 == this->eng_list.Length()) { // no engine passed through the filter, invalidate the previously selected engine
+-			this->sel_engine = INVALID_ENGINE;
+-		} else if (!this->eng_list.Contains(this->sel_engine)) { // previously selected engine didn't pass the filter, select the first engine of the list
+-			this->sel_engine = this->eng_list[0];
+-		}
+-	}
+-
+ 	/** Filter a single engine */
+ 	bool FilterSingleEngine(EngineID eid)
+ 	{
+@@ -1062,44 +1066,44 @@
+ 	}
+ 
+ 	/* Figure out what train EngineIDs to put in the list */
+-	void GenerateBuildTrainList()
++	void BuildAndSortRailEngineList()
+ 	{
+-		EngineID sel_id = INVALID_ENGINE;
+ 		int num_engines = 0;
+ 		int num_wagons  = 0;
+ 
+-		this->filter.railtype = (this->listview_mode) ? RAILTYPE_END : GetRailType(this->window_number);
++		this->filter.railtype = this->listview_mode ? RAILTYPE_END : GetRailType(this->window_number);
+ 
+-		this->eng_list.Clear();
+-
+-		/* Make list of all available train engines and wagons.
+-		 * Also check to see if the previously selected engine is still available,
+-		 * and if not, reset selection to INVALID_ENGINE. This could be the case
+-		 * when engines become obsolete and are removed */
+ 		const Engine *e;
+ 		FOR_ALL_ENGINES_OF_TYPE(e, VEH_TRAIN) {
++			/* Do not introduce invalid engines */
++			if (!e->IsEnabled()) continue;
++
+ 			EngineID eid = e->index;
+-			const RailVehicleInfo *rvi = &e->u.rail;
+ 
+-			if (this->filter.railtype != RAILTYPE_END && !HasPowerOnRail(rvi->railtype, this->filter.railtype)) continue;
+-			if (!IsEngineBuildable(eid, VEH_TRAIN, _local_company)) continue;
++			/* If complete or filtered */
++			if (this->IsWidgetLowered(WID_BV_FILTER_BUTTON)) {
++				/* If vehicle is available on climate */
++				if (!HasBit(e->info.climates, _settings_game.game_creation.landscape)) continue;
++			} else {
++				/* If company can build engine and it is not hidden*/
++				if (HasBit(e->company_hidden, this->owner)) continue;
++				if (!IsEngineBuildable(eid, VEH_TRAIN, this->owner)) continue;
++			}
+ 
+-			/* Filter now! So num_engines and num_wagons is valid */
++			const RailVehicleInfo *rvi = &Engine::Get(eid)->u.rail;
++
++			if (!this->listview_mode && !HasPowerOnRail(rvi->railtype, this->filter.railtype)) continue;
++
+ 			if (!FilterSingleEngine(eid)) continue;
+ 
+-			*this->eng_list.Append() = eid;
+-
+ 			if (rvi->railveh_type != RAILVEH_WAGON) {
+ 				num_engines++;
+ 			} else {
+ 				num_wagons++;
+ 			}
+-
+-			if (eid == this->sel_engine) sel_id = eid;
++			*this->eng_list.Append() = eid;
+ 		}
+ 
+-		this->sel_engine = sel_id;
+-
+ 		/* make engines first, and then wagons, sorted by selected sort_criteria */
+ 		_internal_sort_order = false;
+ 		EngList_Sort(&this->eng_list, TrainEnginesThenWagonsSorter);
+@@ -1112,103 +1116,85 @@
+ 		EngList_SortPartial(&this->eng_list, _sorter[0][this->sort_criteria], num_engines, num_wagons);
+ 	}
+ 
+-	/* Figure out what road vehicle EngineIDs to put in the list */
+-	void GenerateBuildRoadVehList()
++	/* Figure out what EngineIDs to put in the list (for non-train transport type) */
++	void BuildAndSortEngineListButRail()
+ 	{
+-		EngineID sel_id = INVALID_ENGINE;
+-
+-		this->eng_list.Clear();
++		/* Get station for aircraft list */
++		const Station *st = (this->listview_mode || this->vehicle_type != VEH_AIRCRAFT) ? NULL : Station::GetByTile(this->window_number);
+ 
+ 		const Engine *e;
+-		FOR_ALL_ENGINES_OF_TYPE(e, VEH_ROAD) {
++		FOR_ALL_ENGINES_OF_TYPE(e, this->vehicle_type) {
++			/* Do not introduce invalid engines */
++			if (!e->IsEnabled()) continue;
++
+ 			EngineID eid = e->index;
+-			if (!IsEngineBuildable(eid, VEH_ROAD, _local_company)) continue;
+-			if (!HasBit(this->filter.roadtypes, HasBit(EngInfo(eid)->misc_flags, EF_ROAD_TRAM) ? ROADTYPE_TRAM : ROADTYPE_ROAD)) continue;
+-			*this->eng_list.Append() = eid;
+ 
+-			if (eid == this->sel_engine) sel_id = eid;
+-		}
+-		this->sel_engine = sel_id;
+-	}
++			/* If complete or filtered */
++			if (this->IsWidgetLowered(WID_BV_FILTER_BUTTON)) {
++				/* If vehicle is available on climate */
++				if (!HasBit(e->info.climates, _settings_game.game_creation.landscape)) continue;
++			} else {
++				/* If company can build engine and it is not hidden*/
++				if (HasBit(e->company_hidden, this->owner)) continue;
++				if (!IsEngineBuildable(eid, this->vehicle_type, this->owner)) continue;
++			}
+ 
+-	/* Figure out what ship EngineIDs to put in the list */
+-	void GenerateBuildShipList()
+-	{
+-		EngineID sel_id = INVALID_ENGINE;
+-		this->eng_list.Clear();
+-
+-		const Engine *e;
+-		FOR_ALL_ENGINES_OF_TYPE(e, VEH_SHIP) {
+-			EngineID eid = e->index;
+-			if (!IsEngineBuildable(eid, VEH_SHIP, _local_company)) continue;
+-			*this->eng_list.Append() = eid;
+-
+-			if (eid == this->sel_engine) sel_id = eid;
+-		}
+-		this->sel_engine = sel_id;
+-	}
+-
+-	/* Figure out what aircraft EngineIDs to put in the list */
+-	void GenerateBuildAircraftList()
+-	{
+-		EngineID sel_id = INVALID_ENGINE;
+-
+-		this->eng_list.Clear();
+-
+-		const Station *st = this->listview_mode ? NULL : Station::GetByTile(this->window_number);
+-
+-		/* Make list of all available planes.
+-		 * Also check to see if the previously selected plane is still available,
+-		 * and if not, reset selection to INVALID_ENGINE. This could be the case
+-		 * when planes become obsolete and are removed */
+-		const Engine *e;
+-		FOR_ALL_ENGINES_OF_TYPE(e, VEH_AIRCRAFT) {
+-			EngineID eid = e->index;
+-			if (!IsEngineBuildable(eid, VEH_AIRCRAFT, _local_company)) continue;
+-			/* First VEH_END window_numbers are fake to allow a window open for all different types at once */
+-			if (!this->listview_mode && !CanVehicleUseStation(eid, st)) continue;
++			if ((this->vehicle_type == VEH_AIRCRAFT && st !=NULL && !CanVehicleUseStation(eid, st)) ||
++					(this->vehicle_type == VEH_ROAD && !HasBit(this->filter.roadtypes, HasBit(EngInfo(eid)->misc_flags, EF_ROAD_TRAM) ? ROADTYPE_TRAM : ROADTYPE_ROAD))) {
++				continue;
++			}
+ 
+ 			*this->eng_list.Append() = eid;
+-			if (eid == this->sel_engine) sel_id = eid;
+ 		}
+ 
+-		this->sel_engine = sel_id;
++		this->eng_list.Filter(this->cargo_filter[this->cargo_filter_criteria]);
++
++		_internal_sort_order = this->descending_sort_order;
++		EngList_Sort(&this->eng_list, _sorter[this->vehicle_type][this->sort_criteria]);
+ 	}
+ 
+ 	/* Generate the list of vehicles */
+ 	void GenerateBuildList()
+ 	{
+ 		if (!this->eng_list.NeedRebuild()) return;
++
++		/* Clear list */
++		this->eng_list.Clear();
++
++		/* Build, filter and sort */
+ 		switch (this->vehicle_type) {
+ 			default: NOT_REACHED();
+ 			case VEH_TRAIN:
+-				this->GenerateBuildTrainList();
+-				this->eng_list.Compact();
+-				this->eng_list.RebuildDone();
+-				return; // trains should not reach the last sorting
++				this->BuildAndSortRailEngineList();
++				break;
+ 			case VEH_ROAD:
+-				this->GenerateBuildRoadVehList();
+-				break;
++			case VEH_AIRCRAFT:
+ 			case VEH_SHIP:
+-				this->GenerateBuildShipList();
+-				break;
+-			case VEH_AIRCRAFT:
+-				this->GenerateBuildAircraftList();
++				this->BuildAndSortEngineListButRail();
+ 				break;
+ 		}
+ 
+-		this->FilterEngineList();
+-
+-		_internal_sort_order = this->descending_sort_order;
+-		EngList_Sort(&this->eng_list, _sorter[this->vehicle_type][this->sort_criteria]);
+-
+ 		this->eng_list.Compact();
+ 		this->eng_list.RebuildDone();
++		this->vscroll->SetCount(this->eng_list.Length());
++
++		/* Update selected engine */
++		if (this->sel_engine != INVALID_ENGINE && eng_list.FindIndex(this->sel_engine) == -1) {
++			this->sel_engine = INVALID_ENGINE;
++		}
+ 	}
+ 
+ 	void OnClick(Point pt, int widget, int click_count)
+ 	{
+ 		switch (widget) {
++			case WID_BV_FILTER_BUTTON:
++				/* Toggle state */
++				ToggleWidgetLoweredState(widget);
++				/* Update list */
++				this->OnInvalidateData();
++				this->SetDirty();
++				break;
++
+ 			case WID_BV_SORT_ASSENDING_DESCENDING:
+ 				this->descending_sort_order ^= true;
+ 				_last_sort_order[this->vehicle_type] = this->descending_sort_order;
+@@ -1218,10 +1204,15 @@
+ 
+ 			case WID_BV_LIST: {
+ 				uint i = this->vscroll->GetScrolledRowFromWidget(pt.y, this, WID_BV_LIST);
+-				size_t num_items = this->eng_list.Length();
+-				this->sel_engine = (i < num_items) ? this->eng_list[i] : INVALID_ENGINE;
+-				this->SetDirty();
+-				if (click_count > 1 && !this->listview_mode) this->OnClick(pt, WID_BV_BUILD, 1);
++				if (i >= this->eng_list.Length()) break;
++
++				if (_ctrl_pressed) {
++					if (this->owner == _local_company) DoCommandP(0, this->owner, this->eng_list[i], CMD_TOGGLE_ENGINE_VISIBILITY | CMD_MSG(STR_ERROR_CAN_T_RENAME_TRAIN_TYPE));
++				} else {
++					this->sel_engine = this->eng_list[i];
++					if (click_count > 1 && !this->listview_mode) this->OnClick(pt, WID_BV_BUILD, 1);
++					this->SetDirty();
++				}
+ 				break;
+ 			}
+ 
+@@ -1333,7 +1324,7 @@
+ 	{
+ 		switch (widget) {
+ 			case WID_BV_LIST:
+-				DrawEngineList(this->vehicle_type, r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, r.top + WD_FRAMERECT_TOP, &this->eng_list, this->vscroll->GetPosition(), min(this->vscroll->GetPosition() + this->vscroll->GetCapacity(), this->eng_list.Length()), this->sel_engine, false, DEFAULT_GROUP);
++				DrawEngineList(this->vehicle_type, r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, r.top + WD_FRAMERECT_TOP, &this->eng_list, this->vscroll->GetPosition(), min(this->vscroll->GetPosition() + this->vscroll->GetCapacity(), this->eng_list.Length()), this->owner, this->sel_engine, false, DEFAULT_GROUP);
+ 				break;
+ 
+ 			case WID_BV_SORT_ASSENDING_DESCENDING:
+@@ -1345,7 +1336,6 @@
+ 	virtual void OnPaint()
+ 	{
+ 		this->GenerateBuildList();
+-		this->vscroll->SetCount(this->eng_list.Length());
+ 
+ 		this->DrawWidgets();
+ 
+diff --git a/src/command.cpp b/src/command.cpp
+--- a/src/command.cpp
++++ b/src/command.cpp
+@@ -103,6 +103,8 @@
+ 
+ CommandProc CmdWantEnginePreview;
+ 
++CommandProc CmdToggleEngineVisibility;
++
+ CommandProc CmdRenameVehicle;
+ CommandProc CmdRenameEngine;
+ 
+@@ -251,6 +253,8 @@
+ 
+ 	DEF_CMD(CmdWantEnginePreview,                              0, CMDT_VEHICLE_MANAGEMENT    ), // CMD_WANT_ENGINE_PREVIEW
+ 
++	DEF_CMD(CmdToggleEngineVisibility,                         0, CMDT_OTHER_MANAGEMENT      ), // CMD_TOGGLE_ENGINE_VISIBILITY
++
+ 	DEF_CMD(CmdRenameVehicle,                       CMD_STR_CTRL, CMDT_OTHER_MANAGEMENT      ), // CMD_RENAME_VEHICLE
+ 	DEF_CMD(CmdRenameEngine,                        CMD_STR_CTRL, CMDT_OTHER_MANAGEMENT      ), // CMD_RENAME_ENGINE
+ 
+diff --git a/src/command_type.h b/src/command_type.h
+--- a/src/command_type.h
++++ b/src/command_type.h
+@@ -227,6 +227,8 @@
+ 
+ 	CMD_WANT_ENGINE_PREVIEW,          ///< confirm the preview of an engine
+ 
++	CMD_TOGGLE_ENGINE_VISIBILITY,     ///< toggle visibility on list for engine
++
+ 	CMD_RENAME_VEHICLE,               ///< rename a whole vehicle
+ 	CMD_RENAME_ENGINE,                ///< rename a engine (in the engine list)
+ 	CMD_RENAME_COMPANY,               ///< change the company name
+diff --git a/src/company_cmd.cpp b/src/company_cmd.cpp
+--- a/src/company_cmd.cpp
++++ b/src/company_cmd.cpp
+@@ -10,6 +10,7 @@
+ /** @file company_cmd.cpp Handling of companies. */
+ 
+ #include "stdafx.h"
++#include "engine_func.h"
+ #include "company_base.h"
+ #include "company_func.h"
+ #include "company_gui.h"
+@@ -554,6 +555,8 @@
+ 
+ 	SetDefaultCompanySettings(c->index);
+ 
++	ResetHiddenEnginesForCompany(c->index);
++
+ 	GeneratePresidentName(c);
+ 
+ 	SetWindowDirty(WC_GRAPH_LEGEND, 0);
+diff --git a/src/engine.cpp b/src/engine.cpp
+--- a/src/engine.cpp
++++ b/src/engine.cpp
+@@ -71,6 +71,7 @@
+ 
+ Engine::Engine() :
+ 	name(NULL),
++	company_hidden(0),
+ 	overrides_count(0),
+ 	overrides(NULL)
+ {
+@@ -81,6 +82,7 @@
+ 	this->type = type;
+ 	this->grf_prop.local_id = base;
+ 	this->list_position = base;
++	this->company_hidden = 0;
+ 
+ 	/* Check if this base engine is within the original engine data range */
+ 	if (base >= _engine_counts[type]) {
+@@ -723,6 +725,17 @@
+ }
+ 
+ /**
++ * When starting a company, set all engines to visible state for that company.
++ * @param company we want to reset the hidden/visible state of engines.
++ */
++void ResetHiddenEnginesForCompany(CompanyID company)
++{
++	Engine *e;
++	FOR_ALL_ENGINES(e) ClrBit(e->company_hidden, company);
++}
++
++
++/**
+  * Company \a company accepts engine \a eid for preview.
+  * @param eid Engine being accepted (is under preview).
+  * @param company Current company previewing the engine.
+@@ -836,6 +849,28 @@
+ }
+ 
+ /**
++ * Switch visibility for an engine of a company on engine lists
++ * @param tile unused
++ * @param flags operation to perfom
++ * @param p1 CompanyID
++ * @param p2 EngineID
++ * @param text unused
++ * @return the cost of this operation or an error
++ */
++CommandCost CmdToggleEngineVisibility(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
++{
++	Engine *e = Engine::GetIfValid(p2);
++	if (e == NULL || p1 != _current_company) return CMD_ERROR;
++
++	if (flags & DC_EXEC) ToggleBit(e->company_hidden, p1);
++
++	InvalidateWindowData(WC_REPLACE_VEHICLE, e->type, 0); // Update the autoreplace window
++	InvalidateWindowClassesData(WC_BUILD_VEHICLE); // The build windows needs updating as well
++
++	return CommandCost();
++}
++
++/**
+  * An engine has become available for general use.
+  * Also handle the exclusive engine preview contract.
+  * @param e Engine generally available as of now.
+diff --git a/src/engine_base.h b/src/engine_base.h
+--- a/src/engine_base.h
++++ b/src/engine_base.h
+@@ -36,6 +36,7 @@
+ 	uint8 preview_company_rank; ///< Rank of the company that is offered a preview. \c 0xFF means no company.
+ 	byte preview_wait;          ///< Daily countdown timer for timeout of offering the engine to the #preview_company_rank company.
+ 	CompanyMask company_avail;  ///< Bit for each company whether the engine is available for that company.
++	CompanyMask company_hidden; ///< Bit for each company whether the engine is hidden for that company (it might be available but the company managers do not want to see it on the build lists)
+ 	uint8 original_image_index; ///< Original vehicle image index, thus the image index of the overridden vehicle
+ 	VehicleType type;           ///< %Vehicle type, ie #VEH_ROAD, #VEH_TRAIN, etc.
+ 
+diff --git a/src/engine_func.h b/src/engine_func.h
+--- a/src/engine_func.h
++++ b/src/engine_func.h
+@@ -27,6 +27,7 @@
+ bool IsEngineRefittable(EngineID engine);
+ void SetYearEngineAgingStops();
+ void StartupOneEngine(Engine *e, Date aging_date);
++void ResetHiddenEnginesForCompany(CompanyID company);
+ 
+ uint GetTotalCapacityOfArticulatedParts(EngineID engine);
+ 
+diff --git a/src/engine_gui.h b/src/engine_gui.h
+--- a/src/engine_gui.h
++++ b/src/engine_gui.h
+@@ -16,6 +16,8 @@
+ #include "sortlist_type.h"
+ #include "gfx_type.h"
+ #include "vehicle_type.h"
++#include "group.h"
++#include "company_type.h"
+ 
+ typedef GUIList<EngineID, CargoID> GUIEngineList;
+ 
+@@ -32,4 +34,7 @@
+ void DrawShipEngine(int left, int right, int preferred_x, int y, EngineID engine, PaletteID pal, EngineImageType image_type);
+ void DrawAircraftEngine(int left, int right, int preferred_x, int y, EngineID engine, PaletteID pal, EngineImageType image_type);
+ 
++uint GetEngineListHeight(VehicleType type);
++void DrawEngineList(VehicleType type, int x, int r, int y, const GUIEngineList *eng_list, uint16 min, uint16 max, CompanyID company, EngineID selected_id, bool show_count, GroupID selected_group);
++
+ #endif /* ENGINE_GUI_H */
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -3138,10 +3138,12 @@
+ STR_PURCHASE_INFO_MAX_TE                                        :{BLACK}Max. Tractive Effort: {GOLD}{FORCE}
+ STR_PURCHASE_INFO_AIRCRAFT_RANGE                                :{BLACK}Range: {GOLD}{COMMA} tiles
+ 
+-STR_BUY_VEHICLE_TRAIN_LIST_TOOLTIP                              :{BLACK}Train vehicle selection list - click on vehicle for information
+-STR_BUY_VEHICLE_ROAD_VEHICLE_LIST_TOOLTIP                       :{BLACK}Road vehicle selection list - click on vehicle for information
+-STR_BUY_VEHICLE_SHIP_LIST_TOOLTIP                               :{BLACK}Ship selection list - click on ship for information
+-STR_BUY_VEHICLE_AIRCRAFT_LIST_TOOLTIP                           :{BLACK}Aircraft selection list - click on aircraft for information
++STR_BUY_VEHICLE_LIST_FILTER_TOOLTIP                             :{BLACK}Show filtered/all engines available
++
++STR_BUY_VEHICLE_TRAIN_LIST_TOOLTIP                              :{BLACK}Train vehicle selection list - click on vehicle for information (+CTRL, hide/show engine on lists for company)
++STR_BUY_VEHICLE_ROAD_VEHICLE_LIST_TOOLTIP                       :{BLACK}Road vehicle selection list - click on vehicle for information (+CTRL, hide/show engine on lists for company)
++STR_BUY_VEHICLE_SHIP_LIST_TOOLTIP                               :{BLACK}Ship selection list - click on ship for information (+CTRL, hide/show engine on lists for company)
++STR_BUY_VEHICLE_AIRCRAFT_LIST_TOOLTIP                           :{BLACK}Aircraft selection list - click on aircraft for information (+CTRL, hide/show engine on lists for company)
+ 
+ STR_BUY_VEHICLE_TRAIN_BUY_VEHICLE_BUTTON                        :{BLACK}Buy Vehicle
+ STR_BUY_VEHICLE_ROAD_VEHICLE_BUY_VEHICLE_BUTTON                 :{BLACK}Buy Vehicle
+@@ -3267,8 +3269,8 @@
+ STR_REPLACE_VEHICLE_SHIP                                        :Ship
+ STR_REPLACE_VEHICLE_AIRCRAFT                                    :Aircraft
+ 
+-STR_REPLACE_HELP_LEFT_ARRAY                                     :{BLACK}Select the engine type to replace
+-STR_REPLACE_HELP_RIGHT_ARRAY                                    :{BLACK}Select the new engine type you would like to use in place of the left selected engine type
++STR_REPLACE_HELP_LEFT_ARRAY                                     :{BLACK}Select the engine type to replace (+CTRL, hide/show engine on lists for company)
++STR_REPLACE_HELP_RIGHT_ARRAY                                    :{BLACK}Select the new engine type you would like to use in place of the left selected engine type (+CTRL, hide/show engine on lists for company)
+ 
+ STR_REPLACE_VEHICLES_START                                      :{BLACK}Start Replacing Vehicles
+ STR_REPLACE_VEHICLES_NOW                                        :Replace all vehicles now
+diff --git a/src/saveload/engine_sl.cpp b/src/saveload/engine_sl.cpp
+--- a/src/saveload/engine_sl.cpp
++++ b/src/saveload/engine_sl.cpp
+@@ -35,6 +35,7 @@
+ 	SLE_CONDNULL(1,                                                        0,  44),
+ 	 SLE_CONDVAR(Engine, company_avail,       SLE_FILE_U8  | SLE_VAR_U16,  0, 103),
+ 	 SLE_CONDVAR(Engine, company_avail,       SLE_UINT16,                104, SL_MAX_VERSION),
++	 SLE_CONDVAR(Engine, company_hidden,      SLE_UINT16,                177, SL_MAX_VERSION),
+ 	 SLE_CONDSTR(Engine, name,                SLE_STR, 0,                 84, SL_MAX_VERSION),
+ 
+ 	SLE_CONDNULL(16,                                                       2, 143), // old reserved space
+@@ -94,6 +95,7 @@
+ 		e->preview_company_rank= se->preview_company_rank;
+ 		e->preview_wait        = se->preview_wait;
+ 		e->company_avail       = se->company_avail;
++		e->company_hidden      = se->company_hidden;
+ 		if (se->name != NULL) e->name = strdup(se->name);
+ 	}
+ 
+diff --git a/src/saveload/saveload.cpp b/src/saveload/saveload.cpp
+--- a/src/saveload/saveload.cpp
++++ b/src/saveload/saveload.cpp
+@@ -241,7 +241,7 @@
+  *  175   24136
+  *  176   24446
+  */
+-extern const uint16 SAVEGAME_VERSION = 176; ///< Current savegame version of OpenTTD.
++extern const uint16 SAVEGAME_VERSION = 177; ///< Current savegame version of OpenTTD.
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+diff --git a/src/script/api/game/game_window.hpp.sq b/src/script/api/game/game_window.hpp.sq
+--- a/src/script/api/game/game_window.hpp.sq
++++ b/src/script/api/game/game_window.hpp.sq
+@@ -211,6 +211,7 @@
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_AP_BTN_DONTHILIGHT,                    "WID_AP_BTN_DONTHILIGHT");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_AP_BTN_DOHILIGHT,                      "WID_AP_BTN_DOHILIGHT");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_RV_CAPTION,                            "WID_RV_CAPTION");
++	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_RV_FILTER,                             "WID_RV_FILTER");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_RV_LEFT_MATRIX,                        "WID_RV_LEFT_MATRIX");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_RV_LEFT_SCROLLBAR,                     "WID_RV_LEFT_SCROLLBAR");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_RV_RIGHT_MATRIX,                       "WID_RV_RIGHT_MATRIX");
+@@ -235,6 +236,7 @@
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_BBS_BRIDGE_LIST,                       "WID_BBS_BRIDGE_LIST");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_BBS_SCROLLBAR,                         "WID_BBS_SCROLLBAR");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_BV_CAPTION,                            "WID_BV_CAPTION");
++	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_BV_FILTER_BUTTON,                      "WID_BV_FILTER_BUTTON");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_BV_SORT_ASSENDING_DESCENDING,          "WID_BV_SORT_ASSENDING_DESCENDING");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_BV_SORT_DROPDOWN,                      "WID_BV_SORT_DROPDOWN");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_BV_CARGO_FILTER_DROPDOWN,              "WID_BV_CARGO_FILTER_DROPDOWN");
+diff --git a/src/script/api/script_window.hpp b/src/script/api/script_window.hpp
+--- a/src/script/api/script_window.hpp
++++ b/src/script/api/script_window.hpp
+@@ -890,6 +890,7 @@
+ 	/** Widgets of the #ReplaceVehicleWindow class. */
+ 	enum ReplaceVehicleWidgets {
+ 		WID_RV_CAPTION                       = ::WID_RV_CAPTION,                       ///< Caption of the window.
++		WID_RV_FILTER                        = ::WID_RV_FILTER,                        ///< Button to toggle filtered/complete list.
+ 		WID_RV_LEFT_MATRIX                   = ::WID_RV_LEFT_MATRIX,                   ///< The matrix on the left.
+ 		WID_RV_LEFT_SCROLLBAR                = ::WID_RV_LEFT_SCROLLBAR,                ///< The scrollbar for the matrix on the left.
+ 		WID_RV_RIGHT_MATRIX                  = ::WID_RV_RIGHT_MATRIX,                  ///< The matrix on the right.
+@@ -930,6 +931,7 @@
+ 	/** Widgets of the #BuildVehicleWindow class. */
+ 	enum BuildVehicleWidgets {
+ 		WID_BV_CAPTION                       = ::WID_BV_CAPTION,                       ///< Caption of window.
++		WID_BV_FILTER_BUTTON                 = ::WID_BV_FILTER_BUTTON,                 ///< Button to toggle between filtered/complete list of engines
+ 		WID_BV_SORT_ASSENDING_DESCENDING     = ::WID_BV_SORT_ASSENDING_DESCENDING,     ///< Sort direction.
+ 		WID_BV_SORT_DROPDOWN                 = ::WID_BV_SORT_DROPDOWN,                 ///< Criteria of sorting dropdown.
+ 		WID_BV_CARGO_FILTER_DROPDOWN         = ::WID_BV_CARGO_FILTER_DROPDOWN,         ///< Cargo filter dropdown.
+diff --git a/src/widgets/autoreplace_widget.h b/src/widgets/autoreplace_widget.h
+--- a/src/widgets/autoreplace_widget.h
++++ b/src/widgets/autoreplace_widget.h
+@@ -16,6 +16,8 @@
+ enum ReplaceVehicleWidgets {
+ 	WID_RV_CAPTION,                  ///< Caption of the window.
+ 
++	WID_RV_FILTER,                   ///< Button to toggle filtered list/complete list.
++
+ 	/* Left and right matrix + details. */
+ 	WID_RV_LEFT_MATRIX,              ///< The matrix on the left.
+ 	WID_RV_LEFT_SCROLLBAR,           ///< The scrollbar for the matrix on the left.
+diff --git a/src/widgets/build_vehicle_widget.h b/src/widgets/build_vehicle_widget.h
+--- a/src/widgets/build_vehicle_widget.h
++++ b/src/widgets/build_vehicle_widget.h
+@@ -15,6 +15,7 @@
+ /** Widgets of the #BuildVehicleWindow class. */
+ enum BuildVehicleWidgets {
+ 	WID_BV_CAPTION,                   ///< Caption of window.
++	WID_BV_FILTER_BUTTON,             ///< Button show filtered list/complete list.
+ 	WID_BV_SORT_ASSENDING_DESCENDING, ///< Sort direction.
+ 	WID_BV_SORT_DROPDOWN,             ///< Criteria of sorting dropdown.
+ 	WID_BV_CARGO_FILTER_DROPDOWN,     ///< Cargo filter dropdown.

@@ -1,0 +1,110 @@
+diff --git a/src/music/dmusic.cpp b/src/music/dmusic.cpp
+index 4d366ef..b762281 100644
+--- a/src/music/dmusic.cpp
++++ b/src/music/dmusic.cpp
+@@ -66,6 +66,72 @@ struct ProcPtrs {
+ static ProcPtrs proc;
+ 
+ 
++/**
++ * Intercept DirectMusic note messages and adjust their volume
++ */
++class VolumeControlTool : public IDirectMusicTool {
++public:
++	/* IUnknown */
++	STDMETHOD(QueryInterface) (THIS_ REFIID iid, LPVOID FAR *outptr) {
++		if (iid == IID_IUnknown)
++			*outptr = (IUnknown*)this;
++		else if (iid == IID_IDirectMusicTool)
++			*outptr = (IDirectMusicTool*)this;
++		else
++			*outptr = NULL;
++		if (*outptr == NULL)
++			return E_NOINTERFACE;
++		else
++			return S_OK;
++	}
++	STDMETHOD_(ULONG, AddRef) (THIS) {
++		/* class is only used as a single static instance, doesn't need refcounting */
++		return 1;
++	}
++	STDMETHOD_(ULONG, Release) (THIS) {
++		/* class is only used as a single static instance, doesn't need refcounting */
++		return 1;
++	}
++
++	/*  IDirectMusicTool */
++	STDMETHOD(Init) (THIS_ IDirectMusicGraph* pGraph) {
++		return S_OK;
++	}
++	STDMETHOD(GetMsgDeliveryType) (THIS_ DWORD* pdwDeliveryType) {
++		*pdwDeliveryType = DMUS_PMSGF_TOOL_QUEUE;
++		return S_OK;
++	}
++	STDMETHOD(GetMediaTypeArraySize) (THIS_ DWORD* pdwNumElements) {
++		*pdwNumElements = 1;
++		return S_OK;
++	}
++	STDMETHOD(GetMediaTypes) (THIS_ DWORD** padwMediaTypes, DWORD dwNumElements) {
++		if (dwNumElements < 1)
++			return S_FALSE;
++		**padwMediaTypes = DMUS_PMSGT_NOTE;
++		return S_OK;
++	}
++	STDMETHOD(ProcessPMsg) (THIS_ IDirectMusicPerformance* pPerf, DMUS_PMSG* pPMSG) {
++		pPMSG->pGraph->StampPMsg(pPMSG);
++		if (pPMSG->dwType == DMUS_PMSGT_NOTE) {
++			DMUS_NOTE_PMSG *note_msg = (DMUS_NOTE_PMSG*)pPMSG;
++			note_msg->bVelocity = note_msg->bVelocity * current_volume / 127;
++		}
++		return DMUS_S_REQUEUE;
++	}
++	STDMETHOD(Flush) (THIS_ IDirectMusicPerformance* pPerf, DMUS_PMSG* pPMSG, REFERENCE_TIME rtTime) {
++		return DMUS_S_FREE;
++	}
++public:
++	static byte current_volume;
++	static VolumeControlTool instance;
++};
++byte VolumeControlTool::current_volume = 255;
++
++/** static instance of the volume control tool */
++VolumeControlTool VolumeControlTool::instance;
++
++
+ const char *MusicDriver_DMusic::Start(const char * const *parm)
+ {
+ 	if (performance != NULL) return NULL;
+@@ -152,6 +218,22 @@ const char *MusicDriver_DMusic::Start(const char * const *parm)
+ 		return "AddPort failed";
+ 	}
+ 
++	IDirectMusicGraph *graph = NULL;
++	if (FAILED(performance->GetGraph(&graph))) {
++		if (FAILED(proc.CoCreateInstance(
++			CLSID_DirectMusicGraph,
++			NULL,
++			CLSCTX_INPROC,
++			IID_IDirectMusicGraph,
++			(LPVOID*)&graph
++			))) {
++			return "Failed to get or create the graph object";
++		}
++	}
++	graph->InsertTool(&VolumeControlTool::instance, NULL, 0, 0);
++	performance->SetGraph(graph);
++	graph->Release();
++
+ 	/* Assign a performance channel block to the performance if we added
+ 	 * a custom port to the performance. */
+ 	if (music_port != NULL) {
+@@ -317,8 +399,7 @@ bool MusicDriver_DMusic::IsSongPlaying()
+ 
+ void MusicDriver_DMusic::SetVolume(byte vol)
+ {
+-	long db = vol * 2000 / 127 - 2000; ///< 0 - 127 -> -2000 - 0
+-	performance->SetGlobalParam(GUID_PerfMasterVolume, &db, sizeof(db));
++	VolumeControlTool::current_volume = vol;
+ }
+ 
+ 
