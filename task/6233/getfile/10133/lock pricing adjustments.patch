@@ -1,0 +1,104 @@
+Index: src/saveload/company_sl.cpp
+===================================================================
+--- src/saveload/company_sl.cpp	(revision 27154)
++++ src/saveload/company_sl.cpp	(working copy)
+@@ -179,8 +179,11 @@
+ 						if (IsShipDepot(tile)) c->infrastructure.water += LOCK_DEPOT_TILE_FACTOR;
+ 						if (IsLock(tile) && GetLockPart(tile) == LOCK_PART_MIDDLE) {
+ 							/* The middle tile specifies the owner of the lock. */
+-							c->infrastructure.water += 3 * LOCK_DEPOT_TILE_FACTOR; // the middle tile specifies the owner of the
+-							break; // do not count the middle tile as canal
++							c->infrastructure.water += 3 * LOCK_DEPOT_TILE_FACTOR;
++
++							/* Only count the middle tile as canal if the tile is not river. */
++							if (GetWaterClass(tile) != WATER_CLASS_RIVER) c->infrastructure.water++;
++							break;
+ 						}
+ 					}
+ 				}
+Index: src/water_cmd.cpp
+===================================================================
+--- src/water_cmd.cpp	(revision 27154)
++++ src/water_cmd.cpp	(working copy)
+@@ -258,9 +258,14 @@
+ 
+ 	/* middle tile */
+ 	WaterClass wc_middle = IsWaterTile(tile) ? GetWaterClass(tile) : WATER_CLASS_CANAL;
+-	ret = DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
+-	if (ret.Failed()) return ret;
+-	cost.AddCost(ret);
++		
++	if (!IsWaterTile(tile)) {
++		ret = DoCommand(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
++		if (ret.Failed()) return ret;
++		cost.AddCost(ret);
++		/* Add an extra cost only if not building on a river. */
++		cost.AddCost(_price[PR_BUILD_CANAL]);
++	}
+ 
+ 	/* lower tile */
+ 	WaterClass wc_lower = IsWaterTile(tile - delta) ? GetWaterClass(tile - delta) : WATER_CLASS_CANAL;
+@@ -298,6 +303,7 @@
+ 		if (c != NULL) {
+ 			/* Counts for the water. */
+ 			if (!IsWaterTile(tile - delta)) c->infrastructure.water++;
++			if (!IsWaterTile(tile)) c->infrastructure.water++;
+ 			if (!IsWaterTile(tile + delta)) c->infrastructure.water++;
+ 			/* Count for the lock itself. */
+ 			c->infrastructure.water += 3 * LOCK_DEPOT_TILE_FACTOR; // Lock is three tiles.
+@@ -324,6 +330,8 @@
+  */
+ static CommandCost RemoveLock(TileIndex tile, DoCommandFlag flags)
+ {
++	CommandCost cost(EXPENSES_CONSTRUCTION);
++	
+ 	if (GetTileOwner(tile) != OWNER_NONE) {
+ 		CommandCost ret = CheckTileOwnership(tile);
+ 		if (ret.Failed()) return ret;
+@@ -337,6 +345,9 @@
+ 	if (ret.Succeeded()) ret = EnsureNoVehicleOnGround(tile - delta);
+ 	if (ret.Failed()) return ret;
+ 
++	/* Add an extra cost only if it was not built on a river. */
++	if (GetWaterClass(tile) != WATER_CLASS_RIVER) cost.AddCost(_price[PR_CLEAR_CANAL]);
++
+ 	if (flags & DC_EXEC) {
+ 		/* Remove middle part from company infrastructure count. */
+ 		Company *c = Company::GetIfValid(GetTileOwner(tile));
+@@ -348,6 +359,7 @@
+ 		if (GetWaterClass(tile) == WATER_CLASS_RIVER) {
+ 			MakeRiver(tile, Random());
+ 		} else {
++			if (c != NULL) c->infrastructure.water--; // Make sure it's not a leftover or neutral lock.
+ 			DoClearSquare(tile);
+ 		}
+ 		MakeWaterKeepingClass(tile + delta, GetTileOwner(tile + delta));
+@@ -357,7 +369,9 @@
+ 		MarkCanalsAndRiversAroundDirty(tile + delta);
+ 	}
+ 
+-	return CommandCost(EXPENSES_CONSTRUCTION, _price[PR_CLEAR_LOCK]);
++	cost.AddCost(_price[PR_CLEAR_LOCK]);
++	return cost;
++
+ }
+ 
+ /**
+@@ -1275,9 +1289,15 @@
+ 	bool is_lock_middle = IsLock(tile) && GetLockPart(tile) == LOCK_PART_MIDDLE;
+ 
+ 	/* No need to dirty company windows here, we'll redraw the whole screen anyway. */
+-	if (is_lock_middle) Company::Get(old_owner)->infrastructure.water -= 3 * LOCK_DEPOT_TILE_FACTOR; // Lock has three parts.
++	if (is_lock_middle) {
++		Company::Get(old_owner)->infrastructure.water -= 3 * LOCK_DEPOT_TILE_FACTOR; // Lock has three parts.
++		if (GetWaterClass(tile) == WATER_CLASS_CANAL) Company::Get(old_owner)->infrastructure.water--;
++	}
+ 	if (new_owner != INVALID_OWNER) {
+-		if (is_lock_middle) Company::Get(new_owner)->infrastructure.water += 3 * LOCK_DEPOT_TILE_FACTOR; // Lock has three parts.
++		if (is_lock_middle) {
++			Company::Get(new_owner)->infrastructure.water += 3 * LOCK_DEPOT_TILE_FACTOR; // Lock has three parts.
++			if (GetWaterClass(tile) == WATER_CLASS_CANAL) Company::Get(new_owner)->infrastructure.water++;
++		}
+ 		/* Only subtract from the old owner here if the new owner is valid,
+ 		 * otherwise we clear ship depots and canal water below. */
+ 		if (GetWaterClass(tile) == WATER_CLASS_CANAL && !is_lock_middle) {

@@ -1,0 +1,150 @@
+Upstream: pending
+Author: Wouter van Kesteren <woutershep@gmail.com>
+Reason: honor user set cc, cxx
+
+Actual:
+./configure --build=x86_64-pc-linux-gnu --cc-build=x86_64-pc-linux-gnu-cc --cxx-build=x86_64-pc-linux-gnu-c++ ...
+checking build system type... x86_64-pc-linux-gnu
+checking build cc... x86_64-pc-linux-gnu-gcc
+checking build c++... x86_64-pc-linux-gnu-g++
+
+Expected:
+./configure --build=x86_64-pc-linux-gnu --cc-build=x86_64-pc-linux-gnu-cc --cxx-build=x86_64-pc-linux-gnu-c++ ...
+checking build system type... x86_64-pc-linux-gnu
+checking build cc... x86_64-pc-linux-gnu-cc
+checking build c++... x86_64-pc-linux-gnu-c++
+
+No actual code was added/removed, the checks for the explitly user-provided $4 and $5 where simply moved before the guessing $3 check.
+
+--- a/config.lib	2016-01-23 01:43:26.382756221 +0100
++++ b/config.lib	2016-01-23 01:47:02.907371725 +0100
+@@ -1922,7 +1922,38 @@ check_compiler() {
+ 	# $8 - "0" gcc, "1" g++, "2" windres, "3" strip, "4" lipo
+ 	# $9 - What the command is to check for
+ 
+-	if [ -n "$3" ]; then
++	if [ -n "$4" ]; then
++		# Check for manual compiler
++		machine=`$4 $9 2>/dev/null`
++		ret=$?
++		eval "$2=\"$4\""
++
++		log 2 "executing $4 $9"
++		log 2 "  returned $machine"
++		log 2 "  exit code $ret"
++
++		if ( [ -z "$machine" ] && [ "$8" != "3" ] ) || [ "$ret" != "0" ]; then
++			log 1 "checking $1... $4 not found"
++			log 1 "the selected binary doesn't seem to be a $6 binary"
++			exit 1
++		fi
++	elif [ -n "$5" ]; then
++		machine=`$5 $9 2>/dev/null`
++		ret=$?
++		eval "$2=\"$5\""
++
++		log 2 "executing $5 $9"
++		log 2 "  returned $machine"
++		log 2 "  exit code $ret"
++
++		# The user defined a GCC that doesn't reply to $9.. abort
++		if ( [ -z "$machine" ] && [ "$8" != "3" ] ) || [ "$ret" != "0" ]; then
++			log 1 "checking $1... $5 unusable"
++			log 1 "the CC environment variable is set, but it doesn't seem to be a $6 binary"
++			log 1 "please redefine the CC/CXX environment to a $6 binary"
++			exit 1
++		fi
++	elif [ -n "$3" ]; then
+ 		# Check for system
+ 		if [ -z "$6" ]; then
+ 			compiler="$3"
+@@ -1948,70 +1979,37 @@ check_compiler() {
+ 			log 1 "the compiler suggests it doesn't build code for the machine you specified"
+ 			exit 1
+ 		fi
+-	elif [ -n "$4" ]; then
+-		# Check for manual compiler
+-		machine=`$4 $9 2>/dev/null`
+-		ret=$?
+-		eval "$2=\"$4\""
+-
+-		log 2 "executing $4 $9"
+-		log 2 "  returned $machine"
+-		log 2 "  exit code $ret"
+-
+-		if ( [ -z "$machine" ] && [ "$8" != "3" ] ) || [ "$ret" != "0" ]; then
+-			log 1 "checking $1... $4 not found"
+-			log 1 "the selected binary doesn't seem to be a $6 binary"
+-			exit 1
+-		fi
+ 	else
+ 		# Nothing given, autodetect
+ 
+-		if [ -n "$5" ]; then
+-			machine=`$5 $9 2>/dev/null`
+-			ret=$?
+-			eval "$2=\"$5\""
++		log 2 "checking $1... CC/CXX not set (skipping)"
+ 
+-			log 2 "executing $5 $9"
+-			log 2 "  returned $machine"
+-			log 2 "  exit code $ret"
++		# No $5, so try '$6'
++		machine=`$6 $9 2>/dev/null`
++		ret=$?
++		eval "$2=\"$6\""
+ 
+-			# The user defined a GCC that doesn't reply to $9.. abort
+-			if ( [ -z "$machine" ] && [ "$8" != "3" ] ) || [ "$ret" != "0" ]; then
+-				log 1 "checking $1... $5 unusable"
+-				log 1 "the CC environment variable is set, but it doesn't seem to be a $6 binary"
+-				log 1 "please redefine the CC/CXX environment to a $6 binary"
+-				exit 1
+-			fi
+-		else
+-			log 2 "checking $1... CC/CXX not set (skipping)"
++		log 2 "executing $6 $9"
++		log 2 "  returned $machine"
++		log 2 "  exit code $ret"
+ 
+-			# No $5, so try '$6'
+-			machine=`$6 $9 2>/dev/null`
++		if ( [ -z "$machine" ] && [ "$8" != "3" ] ) || [ "$ret" != "0" ]; then
++			# Maybe '$7'?
++			machine=`$7 $9 2>/dev/null`
+ 			ret=$?
+-			eval "$2=\"$6\""
++			eval "$2=\"$7\""
+ 
+-			log 2 "executing $6 $9"
++			log 2 "executing $7 $9"
+ 			log 2 "  returned $machine"
+ 			log 2 "  exit code $ret"
+ 
+-			if ( [ -z "$machine" ] && [ "$8" != "3" ] ) || [ "$ret" != "0" ]; then
+-				# Maybe '$7'?
+-				machine=`$7 $9 2>/dev/null`
+-				ret=$?
+-				eval "$2=\"$7\""
+-
+-				log 2 "executing $7 $9"
+-				log 2 "  returned $machine"
+-				log 2 "  exit code $ret"
+-
+-				# All failed, abort
+-				if [ -z "$machine" ]; then
+-					log 1 "checking $1... $6 not found"
+-					log 1 "I couldn't detect any $6 binary on your system"
+-					log 1 "please define the CC/CXX environment to where it is located"
++			# All failed, abort
++			if [ -z "$machine" ]; then
++				log 1 "checking $1... $6 not found"
++				log 1 "I couldn't detect any $6 binary on your system"
++				log 1 "please define the CC/CXX environment to where it is located"
+ 
+-					exit 1
+-				fi
++				exit 1
+ 			fi
+ 		fi
+ 	fi

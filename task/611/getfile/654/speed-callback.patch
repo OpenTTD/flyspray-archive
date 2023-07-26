@@ -1,0 +1,150 @@
+diff --git a/src/aircraft_cmd.cpp b/src/aircraft_cmd.cpp
+index 36d4004..56a0a3f 100644
+--- a/src/aircraft_cmd.cpp
++++ b/src/aircraft_cmd.cpp
+@@ -862,17 +862,37 @@ enum AircraftSpeedLimits {
+ 	SPEED_LIMIT_BROKEN = 27,  ///< Maximum speed of an aircraft that is broken
+ };
+ 
+-static bool UpdateAircraftSpeed(Vehicle *v, uint speed_limit)
++// taxiing is true iff the aircraft speed should be limited to taxiing speed
++// (12 in original)
++static bool UpdateAircraftSpeed(Vehicle *v, AircraftSpeedLimits speed_limit)
+ {
+ 	uint spd = v->acceleration * 2;
+-	byte t;
++	byte t = v->subspeed;
++	uint16 callback = GetVehicleCallback(CBID_CHANGE_VEHICLE_PROPERTY, 0x0C, 0, v->engine_type, v);
+ 
+-	v->subspeed = (t=v->subspeed) + (byte)spd;
+-	if (speed_limit == SPEED_LIMIT_NONE) speed_limit = v->max_speed;
+-	spd = min(v->cur_speed + (spd >> 8) + (v->subspeed < t), speed_limit);
++	// Initialize the desired speed from callback
++	if (callback == CALLBACK_FAILED) {
++	    v->u.air.desired_speed = v->max_speed;
++	} else {
++	    v->u.air.desired_speed = callback;
++	}
++	
++	// apply desired speed limit
++	if (speed_limit != SPEED_LIMIT_NONE) v->u.air.desired_speed = min(v->u.air.desired_speed, speed_limit);
+ 
+ 	// adjust speed for broken vehicles
+-	if (v->vehstatus & VS_AIRCRAFT_BROKEN) spd = min(spd, SPEED_LIMIT_BROKEN);
++	if (v->vehstatus & VS_AIRCRAFT_BROKEN) v->u.air.desired_speed = min(v->u.air.desired_speed, SPEED_LIMIT_BROKEN);
++
++	// accelerate/decelerate the aircraft as appropriate
++	if (v->cur_speed < v->u.air.desired_speed) {
++		v->subspeed = t + (byte)spd;
++		spd = v->cur_speed + (spd >> 8) + (v->subspeed < t);
++	} else if (v->cur_speed > v->u.air.desired_speed) {
++		v->subspeed = t - (byte)spd;
++		spd = v->cur_speed - (spd >> 8) - (v->subspeed > t);
++	} else {
++		spd = v->cur_speed;
++	}
+ 
+ 	//updates statusbar only if speed have changed to save CPU time
+ 	if (spd != v->cur_speed) {
+@@ -1096,7 +1116,7 @@ static bool AircraftController(Vehicle *v)
+ 			z++;
+ 		}
+ 
+-		if (dist < 64 && v->cur_speed > 12) v->cur_speed -= 4;
++		if (dist < 64 && v->cur_speed > 12) v->cur_speed -= max((v->cur_speed >> 4), 1);
+ 	}
+ 
+ 	SetAircraftPosition(v, gp.x, gp.y, z);
+diff --git a/src/newgrf_callbacks.h b/src/newgrf_callbacks.h
+index 1ed611a..a615707 100644
+--- a/src/newgrf_callbacks.h
++++ b/src/newgrf_callbacks.h
+@@ -58,6 +58,9 @@ enum CallbackID {
+ 
+ 	/* Called to play a special sound effect */
+ 	CBID_VEHICLE_SOUND_EFFECT       = 0x33,
++
++	/* Called to change a vehicle's property value */
++	CBID_CHANGE_VEHICLE_PROPERTY    = 0x36,
+ };
+ 
+ /**
+diff --git a/src/newgrf_engine.cpp b/src/newgrf_engine.cpp
+index 7b9517e..d06d372 100644
+--- a/src/newgrf_engine.cpp
++++ b/src/newgrf_engine.cpp
+@@ -267,9 +267,9 @@ enum {
+ 	AMS_TTDP_CLIMBING,
+ 	AMS_TTDP_FLIGHT_APPROACH,
+ 	AMS_TTDP_UNUSED_0x11,
+-	AMS_TTDP_FLIGHT_TO_TOWER,
++	AMS_TTDP_FLIGHT_EN_ROUTE,
+ 	AMS_TTDP_UNUSED_0x13,
+-	AMS_TTDP_FLIGHT_FINAL,
++	AMS_TTDP_FLIGHT_PATTERN,
+ 	AMS_TTDP_FLIGHT_DESCENT,
+ 	AMS_TTDP_BRAKING,
+ 	AMS_TTDP_HELI_TAKEOFF_AIRPORT,
+@@ -280,7 +280,6 @@ enum {
+ 	AMS_TTDP_HELI_LAND_HELIPORT,
+ };
+ 
+-
+ /**
+  * Map OTTD aircraft movement states to TTDPatch style movement states
+  * (VarAction 2 Variable 0xE2)
+@@ -302,7 +301,7 @@ static byte MapAircraftMovementState(const Vehicle *v)
+ 
+ 			/* This condition only occurs for helicopters, before starting descent,
+ 			 * to a landing by the hanger of an international airport. */
+-			if (amdflag & AMED_SLOWTURN) return AMS_TTDP_FLIGHT_TO_TOWER;
++			if (amdflag & AMED_SLOWTURN) return AMS_TTDP_FLIGHT_APPROACH;
+ 
+ 			// The final two conditions apply to helicopters or aircraft.
+ 			/* Has reached hanger? */
+@@ -334,7 +333,7 @@ static byte MapAircraftMovementState(const Vehicle *v)
+ 		case HELIPAD3:
+ 		case HELIPAD4: // Will only occur for helicopters.
+ 			if (amdflag & AMED_HELI_LOWER) return AMS_TTDP_HELI_LAND_AIRPORT; // Descending.
+-			if (amdflag & AMED_SLOWTURN)   return AMS_TTDP_FLIGHT_TO_TOWER;   // Still hasn't started descent.
++			if (amdflag & AMED_SLOWTURN)   return AMS_TTDP_FLIGHT_APPROACH;   // Still hasn't started descent.
+ 			return AMS_TTDP_TO_JUNCTION; // On the ground.
+ 
+ 		case TAKEOFF: // Moving to takeoff position.
+@@ -369,8 +368,13 @@ static byte MapAircraftMovementState(const Vehicle *v)
+ 					return AMS_TTDP_HELI_TAKEOFF_AIRPORT;
+ 			}
+ 
+-		case FLYING:
+-			return AMS_TTDP_FLIGHT_TO_TOWER;
++		case FLYING: {
++			// The previous and current pos is set to equal in
++			// AircraftNextAirportPos_and_Order and that is only
++			// set if comming from another airport.
++			if (v->u.air.pos == v->u.air.previous_pos) return AMS_TTDP_FLIGHT_EN_ROUTE;
++			return AMS_TTDP_FLIGHT_PATTERN;
++		}
+ 
+ 		case LANDING: // Descent
+ 			return AMS_TTDP_FLIGHT_DESCENT;
+@@ -394,7 +398,7 @@ static byte MapAircraftMovementState(const Vehicle *v)
+ 						return AMS_TTDP_HELI_LAND_AIRPORT;
+ 				}
+ 			}
+-			return AMS_TTDP_FLIGHT_TO_TOWER;
++			return AMS_TTDP_FLIGHT_APPROACH;
+ 
+ 		default:
+ 			return AMS_TTDP_HANGAR;
+diff --git a/src/vehicle.h b/src/vehicle.h
+index 4c45796..8608347 100644
+--- a/src/vehicle.h
++++ b/src/vehicle.h
+@@ -113,6 +113,7 @@ typedef struct VehicleAir {
+ 	byte previous_pos;
+ 	StationID targetairport;
+ 	byte state;
++	uint16 desired_speed;
+ } VehicleAir;
+ 
+ typedef struct VehicleRoad {

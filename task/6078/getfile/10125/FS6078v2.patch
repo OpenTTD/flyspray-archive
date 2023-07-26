@@ -1,0 +1,134 @@
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+index 059c791..f65350e 100644
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -4448,6 +4448,10 @@ STR_ERROR_CAN_T_STOP_SHARING_ORDER_LIST                         :{WHITE}Can't st
+ STR_ERROR_CAN_T_COPY_ORDER_LIST                                 :{WHITE}Can't copy order list...
+ STR_ERROR_TOO_FAR_FROM_PREVIOUS_DESTINATION                     :{WHITE}... too far from previous destination
+ STR_ERROR_AIRCRAFT_NOT_ENOUGH_RANGE                             :{WHITE}... aircraft has not enough range
++#related to conditional Orders
++STR_ERROR_COND_ORDER_ALWAYS_TRUE                                :{WHITE}Condition of conditional order is always true
++STR_ERROR_COND_ORDER_ALWAYS_FALSE                               :{WHITE}Condition of conditional order is always false
++STR_ERROR_COND_ORDER_NO_SERVICING                               :{WHITE}Servicing was disabled in settings.
+ 
+ # Timetable related errors
+ STR_ERROR_CAN_T_TIMETABLE_VEHICLE                               :{WHITE}Can't timetable vehicle...
+diff --git a/src/order_cmd.cpp b/src/order_cmd.cpp
+index 57b29f3..2a31900 100644
+--- a/src/order_cmd.cpp
++++ b/src/order_cmd.cpp
+@@ -28,6 +28,7 @@
+ #include "company_base.h"
+ #include "order_backup.h"
+ #include "cheat_type.h"
++#include "error.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -1292,6 +1293,7 @@ CommandCost CmdModifyOrder(TileIndex tile, DoCommandFlag flags, uint32 p1, uint3
+ 	VehicleID veh          = GB(p1,  0, 20);
+ 	ModifyOrderFlags mof   = Extract<ModifyOrderFlags, 0, 4>(p2);
+ 	uint16 data            = GB(p2,  4, 11);
++	bool cond_order_needs_check = false; //Should get set to true, if a conditional order is modified
+ 
+ 	if (mof >= MOF_END) return CMD_ERROR;
+ 
+@@ -1449,8 +1451,10 @@ CommandCost CmdModifyOrder(TileIndex tile, DoCommandFlag flags, uint32 p1, uint3
+ 			}
+ 
+ 			case MOF_COND_VARIABLE: {
++				cond_order_needs_check = true;
+ 				order->SetConditionVariable((OrderConditionVariable)data);
+ 
++
+ 				OrderConditionComparator occ = order->GetConditionComparator();
+ 				switch (order->GetConditionVariable()) {
+ 					case OCV_UNCONDITIONALLY:
+@@ -1475,20 +1479,87 @@ CommandCost CmdModifyOrder(TileIndex tile, DoCommandFlag flags, uint32 p1, uint3
+ 			}
+ 
+ 			case MOF_COND_COMPARATOR:
++				cond_order_needs_check = true;
+ 				order->SetConditionComparator((OrderConditionComparator)data);
+ 				break;
+ 
+ 			case MOF_COND_VALUE:
++				cond_order_needs_check = true;
+ 				order->SetConditionValue(data);
+ 				break;
+ 
+ 			case MOF_COND_DESTINATION:
++				cond_order_needs_check = true;
+ 				order->SetConditionSkipToOrder(data);
+ 				break;
+ 
+ 			default: NOT_REACHED();
+ 		}
+ 
++		/* Check if a Conditional order is always true or always false */
++		if (cond_order_needs_check) {
++			OrderConditionVariable ocvar = order->GetConditionVariable();
++
++			/* If servicing is disabled, you shouldn't check, if the vehicle needs servicing */
++			if (ocvar == OCV_REQUIRES_SERVICE && _settings_game.order.no_servicing_if_no_breakdowns == true && _settings_game.difficulty.vehicle_breakdowns == 0) {
++				ShowErrorMessage(STR_ERROR_COND_ORDER_NO_SERVICING, INVALID_STRING_ID, WL_WARNING);
++			}
++
++			/* No need to check an unconditional jump */
++			if (ocvar !=OCV_UNCONDITIONALLY) {
++				OrderConditionComparator occ = order->GetConditionComparator();
++				const uint16 ocval = order->GetConditionValue();
++
++				/* >= 0 is always true, since the value is unsigned
++				 * <0 is always false */
++				if (ocval == 0) {
++					switch (occ) {
++						case OCC_MORE_EQUALS:
++							ShowErrorMessage(STR_ERROR_COND_ORDER_ALWAYS_TRUE, INVALID_STRING_ID, WL_WARNING);
++							break;
++						case OCC_LESS_THAN:
++							ShowErrorMessage(STR_ERROR_COND_ORDER_ALWAYS_FALSE, INVALID_STRING_ID, WL_WARNING);
++							break;
++						default:
++							break;
++					}
++				}
++
++				/* for Percentages, <= 100 is always true
++				 * >100 is always false*/
++				if (ocval == 100) {
++					switch (ocvar) {
++						case OCV_LOAD_PERCENTAGE:
++						case OCV_RELIABILITY: //Deliberate Passthrough
++							if (occ == OCC_LESS_EQUALS) {
++								ShowErrorMessage(STR_ERROR_COND_ORDER_ALWAYS_TRUE, INVALID_STRING_ID, WL_WARNING);
++							}
++							if (occ == OCC_MORE_THAN) {
++								ShowErrorMessage(STR_ERROR_COND_ORDER_ALWAYS_FALSE, INVALID_STRING_ID, WL_WARNING);
++							}
++							break;
++						default:
++							break;
++					}
++				}
++
++				/* In general, the maximum is 2047, so <=2047 is always true,
++				 * >2047 is always false */
++				if (ocval == 2047) {
++					switch (occ) {
++						case OCC_LESS_EQUALS:
++							ShowErrorMessage(STR_ERROR_COND_ORDER_ALWAYS_TRUE, INVALID_STRING_ID, WL_WARNING);
++							break;
++						case OCC_MORE_THAN:
++							ShowErrorMessage(STR_ERROR_COND_ORDER_ALWAYS_FALSE, INVALID_STRING_ID, WL_WARNING);
++							break;
++						default:
++							break;
++					}
++				}
++			}
++		}
++
+ 		/* Update the windows and full load flags, also for vehicles that share the same order list */
+ 		Vehicle *u = v->FirstShared();
+ 		DeleteOrderWarnings(u);

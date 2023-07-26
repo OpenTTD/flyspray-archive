@@ -1,0 +1,253 @@
+Index: vehicle_gui.c
+===================================================================
+--- vehicle_gui.c	(revision 3261)
++++ vehicle_gui.c	(working copy)
+@@ -208,7 +208,7 @@
+  * @param sel selected refit cargo-type in the window
+  * @return the cargo type that is hightlighted, CT_INVALID if none
+  */
+-CargoID DrawVehicleRefitWindow(const Vehicle *v, int sel)
++CargoID DrawVehicleRefitWindow(const Vehicle *v, int sel, bool refit_consist)
+ {
+ 	uint32 cmask;
+ 	CargoID cid, cargo = CT_INVALID;
+@@ -234,7 +234,7 @@
+ 		do {
+ 			cmask |= _engine_info[u->engine_type].refit_mask;
+ 			u = u->next;
+-		} while (v->type == VEH_Train && u != NULL);
++		} while (v->type == VEH_Train && refit_consist && u != NULL);
+ 
+ 		/* Check which cargo has been selected from the refit window and draw list */
+ 		for (cid = 0; cmask != 0; cmask >>= 1, cid++) {
+Index: vehicle_gui.h
+===================================================================
+--- vehicle_gui.h	(revision 3261)
++++ vehicle_gui.h	(working copy)
+@@ -9,7 +9,7 @@
+ struct vehiclelist_d;
+ 
+ void DrawVehicleProfitButton(const Vehicle *v, int x, int y);
+-CargoID DrawVehicleRefitWindow(const Vehicle *v, int sel);
++CargoID DrawVehicleRefitWindow(const Vehicle *v, int sel, bool refit_consist);
+ void InitializeVehiclesGuiList(void);
+ 
+ /* sorter stuff */
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 3261)
++++ lang/english.txt	(working copy)
+@@ -285,7 +285,7 @@
+ STR_013D_INFORMATION                                            :{BLACK}Information
+ STR_013E_CAPACITIES                                             :{BLACK}Capacities
+ STR_013E_TOTAL_CARGO                                            :{BLACK}Total Cargo
+-STR_013F_CAPACITY                                               :{BLACK}Capacity: {LTBLUE}{STRING1}
++STR_013F_CAPACITY                                               :{BLACK}Capacity: {LTBLUE}{STRING1} {STRING}
+ STR_013F_TOTAL_CAPACITY_TEXT                                    :{BLACK}Total cargo capacity of this train:
+ STR_013F_TOTAL_CAPACITY                                         :{LTBLUE}- {CARGO} ({SHORTCARGO})
+ STR_0140_NEW_GAME                                               :{BLACK}New Game
+Index: aircraft_gui.c
+===================================================================
+--- aircraft_gui.c	(revision 3261)
++++ aircraft_gui.c	(working copy)
+@@ -241,7 +241,7 @@
+ 		DrawString(1, 15, STR_A040_SELECT_CARGO_TYPE_TO_CARRY, 0);
+ 
+ 		/* TODO: Support for custom GRFSpecial-specified refitting! --pasky */
+-		WP(w,refit_d).cargo = DrawVehicleRefitWindow(v, WP(w, refit_d).sel);
++		WP(w,refit_d).cargo = DrawVehicleRefitWindow(v, WP(w, refit_d).sel, false);
+ 
+ 		if (WP(w,refit_d).cargo != CT_INVALID) {
+ 			int32 cost = DoCommandByTile(v->tile, v->index, WP(w,refit_d).cargo, DC_QUERY_COST, CMD_REFIT_AIRCRAFT);
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 3261)
++++ train_cmd.c	(working copy)
+@@ -1689,11 +1689,14 @@
+ /** Refits a train to the specified cargo type.
+  * @param x,y unused
+  * @param p1 vehicle ID of the train to refit
+- * @param p2 the new cargo type to refit to (p2 & 0xFF)
++ * @param p2 various bitstuffed elements:
++ * - p2 = (bit  0 -  7) - the new cargo type to refit to (p2 & 0xFF)
++ * - p2 = (bit  8     ) - set to only refit one vehicle, not the consist
+  */
+ int32 CmdRefitRailVehicle(int x, int y, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	CargoID new_cid = GB(p2, 0, 8);
++	bool refit_consist = HASBIT(p2, 8) != 0;
+ 	Vehicle *v;
+ 	int32 cost;
+ 	uint num;
+@@ -1757,7 +1760,7 @@
+ 				}
+ 			}
+ 		}
+-	} while ( (v=v->next) != NULL );
++	} while (((v=v->next) != NULL) && refit_consist);
+ 
+ 	_returned_refit_amount = num;
+ 
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 3261)
++++ train_gui.c	(working copy)
+@@ -803,6 +803,8 @@
+ 	switch (e->event) {
+ 	case WE_PAINT: {
+ 		const Vehicle *v = GetVehicle(w->window_number);
++		CargoID cargo;
++		int wagon;
+ 
+ 		SetDParam(0, v->string_id);
+ 		SetDParam(1, v->unitnumber);
+@@ -810,17 +812,23 @@
+ 
+ 		DrawString(1, 15, STR_983F_SELECT_CARGO_TYPE_TO_CARRY, 0);
+ 
++		for (wagon = WP(w, refit_d).wagon; wagon > 0; wagon--)
++			v = GetNextVehicle(v);
++
++		assert(v != NULL);
++
+ 		/* TODO: Support for custom GRFSpecial-specified refitting! --pasky */
+-		WP(w,refit_d).cargo = DrawVehicleRefitWindow(v, WP(w, refit_d).sel);
++		cargo = DrawVehicleRefitWindow(v, WP(w, refit_d).sel, WP(w, refit_d).refit_consist);
++		if (cargo != WP(w,refit_d).cargo) {
++			WP(w,refit_d).cargo = cargo;
++			WP(w,refit_d).cost = DoCommandByTile(v->tile, v->index, WP(w,refit_d).cargo | (WP(w,refit_d).refit_consist << 8), DC_QUERY_COST, CMD_REFIT_RAIL_VEHICLE);
++		}
+ 
+-		if (WP(w,refit_d).cargo != CT_INVALID) {
+-			int32 cost = DoCommandByTile(v->tile, v->index, WP(w,refit_d).cargo, DC_QUERY_COST, CMD_REFIT_RAIL_VEHICLE);
+-			if (!CmdFailed(cost)) {
+-				SetDParam(2, cost);
+-				SetDParam(0, _cargoc.names_long[WP(w,refit_d).cargo]);
+-				SetDParam(1, _returned_refit_amount);
+-				DrawString(1, 137, STR_9840_NEW_CAPACITY_COST_OF_REFIT, 0);
+-			}
++		if (WP(w,refit_d).cargo != CT_INVALID && !CmdFailed(WP(w,refit_d).cost)) {
++			SetDParam(2, WP(w,refit_d).cost);
++			SetDParam(0, _cargoc.names_long[WP(w,refit_d).cargo]);
++			SetDParam(1, _returned_refit_amount);
++			DrawString(1, 137, STR_9840_NEW_CAPACITY_COST_OF_REFIT, 0);
+ 		}
+ 	}	break;
+ 
+@@ -836,7 +844,14 @@
+ 		case 4: /* refit button */
+ 			if (WP(w,refit_d).cargo != CT_INVALID) {
+ 				const Vehicle *v = GetVehicle(w->window_number);
+-				if (DoCommandP(v->tile, v->index, WP(w,refit_d).cargo, NULL, CMD_REFIT_RAIL_VEHICLE | CMD_MSG(STR_RAIL_CAN_T_REFIT_VEHICLE)))
++				int wagon;
++
++				for (wagon = WP(w, refit_d).wagon; wagon > 0; wagon--)
++					v = GetNextVehicle(v);
++
++				assert(v != NULL);
++
++				if (DoCommandP(v->tile, v->index, WP(w,refit_d).cargo | (WP(w,refit_d).refit_consist << 8), NULL, CMD_REFIT_RAIL_VEHICLE | CMD_MSG(STR_RAIL_CAN_T_REFIT_VEHICLE)))
+ 					DeleteWindow(w);
+ 			}
+ 			break;
+@@ -863,7 +878,7 @@
+ 	RailVehicleRefitWndProc,
+ };
+ 
+-static void ShowRailVehicleRefitWindow(Vehicle *v)
++static void ShowRailVehicleRefitWindow(const Vehicle *v, uint wagon, bool refit_consist)
+ {
+ 	Window *w;
+ 	DeleteWindowById(WC_VEHICLE_REFIT, v->index);
+@@ -872,6 +887,8 @@
+ 	w->window_number = v->index;
+ 	w->caption_color = v->owner;
+ 	WP(w,refit_d).sel = -1;
++	WP(w,refit_d).wagon = wagon;
++	WP(w,refit_d).refit_consist = refit_consist;
+ }
+ 
+ static const Widget _train_view_widgets[] = {
+@@ -1006,7 +1023,7 @@
+ 			ShowTrainDetailsWindow(v);
+ 			break;
+ 		case 12:
+-			ShowRailVehicleRefitWindow(v);
++			ShowRailVehicleRefitWindow(v, 0, true);
+ 			break;
+ 		case 13:
+ 			DoCommandP(v->tile, v->index, _ctrl_pressed ? 1 : 0, NULL, CMD_CLONE_VEHICLE | CMD_MSG(STR_882B_CAN_T_BUILD_RAILROAD_VEHICLE));
+@@ -1101,6 +1118,10 @@
+ 	if (v->cargo_cap != 0) {
+ 		SetDParam(0, _cargoc.names_long[v->cargo_type]);
+ 		SetDParam(1, v->cargo_cap);
++		if (_engine_info[v->engine_type].refit_mask != 0)
++			SetDParam(2, STR_9842_REFITTABLE);
++		else
++			SetDParam(2, STR_EMPTY);
+ 		DrawString(x, y, STR_013F_CAPACITY, 0);
+ 	}
+ }
+@@ -1194,6 +1215,7 @@
+ 
+ 	// draw the first 3 details tabs
+ 	if (det_tab != 3) {
++		bool in_depot = CheckTrainStoppedInDepot(v) != -1;
+ 		for(;;) {
+ 			if (--sel < 0 && sel >= -6) {
+ 				int dx = 0;
+@@ -1221,7 +1243,7 @@
+ 				SetDParam(1, tot_cargo[i][0]);	// {CARGO} #2
+ 				SetDParam(2, i);								// {SHORTCARGO} #1
+ 				SetDParam(3, tot_cargo[i][1]);	// {SHORTCARGO} #2
+-				DrawString(x, y, STR_013F_TOTAL_CAPACITY, 0);
++				DrawString(x, y + 2, STR_013F_TOTAL_CAPACITY, 0);
+ 			}
+ 		} while (++i != NUM_CARGO);
+ 	}
+@@ -1242,6 +1264,18 @@
+ 			SetDParam(0, v->unitnumber);
+ 			ShowQueryString(v->string_id, STR_8865_NAME_TRAIN, 31, 150, w->window_class, w->window_number);
+ 			break;
++		case 4: /* wagon display */
++			v = GetVehicle(w->window_number);
++			if (WP(w, traindetails_d).tab == 2 && CheckTrainStoppedInDepot(v) != -1) {
++				// refit clicked
++				uint sel = (e->click.pt.y - 56) / 14 + w->vscroll.pos;
++				uint wagon = sel;
++				const Vehicle *u = v;
++
++				while (sel--) u = GetNextVehicle(u);
++				if (_engine_info[u->engine_type].refit_mask != 0)
++					ShowRailVehicleRefitWindow(v, wagon, false);
++			}
+ 		case 6:	/* inc serv interval */
+ 			mod = _ctrl_pressed? 5 : 10;
+ 			goto do_change_service_int;
+Index: ship_gui.c
+===================================================================
+--- ship_gui.c	(revision 3261)
++++ ship_gui.c	(working copy)
+@@ -86,7 +86,7 @@
+ 		DrawString(1, 15, STR_983F_SELECT_CARGO_TYPE_TO_CARRY, 0);
+ 
+ 		/* TODO: Support for custom GRFSpecial-specified refitting! --pasky */
+-		WP(w,refit_d).cargo = DrawVehicleRefitWindow(v, WP(w, refit_d).sel);;
++		WP(w,refit_d).cargo = DrawVehicleRefitWindow(v, WP(w, refit_d).sel, false);
+ 
+ 		if (WP(w,refit_d).cargo != CT_INVALID) {
+ 			int32 cost = DoCommandByTile(v->tile, v->index, WP(w,refit_d).cargo, DC_QUERY_COST, CMD_REFIT_SHIP);
+Index: window.h
+===================================================================
+--- window.h	(revision 3261)
++++ window.h	(working copy)
+@@ -389,6 +389,9 @@
+ typedef struct {
+ 	int sel;
+ 	byte cargo;
++	uint wagon;
++	bool refit_consist;
++	int32 cost;
+ } refit_d;
+ assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(refit_d));
+ 

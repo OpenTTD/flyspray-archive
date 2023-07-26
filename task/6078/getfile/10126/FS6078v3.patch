@@ -1,0 +1,164 @@
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+index 059c791..4e71256 100644
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -845,6 +845,7 @@ STR_NEWS_VEHICLE_HAS_VOID_ORDER                                 :{WHITE}{VEHICLE
+ STR_NEWS_VEHICLE_HAS_DUPLICATE_ENTRY                            :{WHITE}{VEHICLE} has duplicate orders
+ STR_NEWS_VEHICLE_HAS_INVALID_ENTRY                              :{WHITE}{VEHICLE} has an invalid station in its orders
+ STR_NEWS_PLANE_USES_TOO_SHORT_RUNWAY                            :{WHITE}{VEHICLE} has in its orders an airport whose runway is too short
++STR_NEWS_CONDITIONAL_ORDER_IS_USELESS                           :{WHITE}{VEHICLE} has an useless conditional order
+ 
+ STR_NEWS_VEHICLE_IS_GETTING_OLD                                 :{WHITE}{VEHICLE} is getting old
+ STR_NEWS_VEHICLE_IS_GETTING_VERY_OLD                            :{WHITE}{VEHICLE} is getting very old
+@@ -4448,6 +4449,10 @@ STR_ERROR_CAN_T_STOP_SHARING_ORDER_LIST                         :{WHITE}Can't st
+ STR_ERROR_CAN_T_COPY_ORDER_LIST                                 :{WHITE}Can't copy order list...
+ STR_ERROR_TOO_FAR_FROM_PREVIOUS_DESTINATION                     :{WHITE}... too far from previous destination
+ STR_ERROR_AIRCRAFT_NOT_ENOUGH_RANGE                             :{WHITE}... aircraft has not enough range
++#related to conditional Orders
++STR_ERROR_COND_ORDER_ALWAYS_TRUE                                :{RED}(Condition of conditional order is always true)
++STR_ERROR_COND_ORDER_ALWAYS_FALSE                               :{RED}(Condition of conditional order is always false)
++STR_ERROR_COND_ORDER_NO_SERVICING                               :{RED}Servicing was disabled in settings.
+ 
+ # Timetable related errors
+ STR_ERROR_CAN_T_TIMETABLE_VEHICLE                               :{WHITE}Can't timetable vehicle...
+diff --git a/src/order_cmd.cpp b/src/order_cmd.cpp
+index 57b29f3..8cea5da 100644
+--- a/src/order_cmd.cpp
++++ b/src/order_cmd.cpp
+@@ -1800,6 +1800,11 @@ void CheckOrders(const Vehicle *v)
+ 					message = STR_NEWS_PLANE_USES_TOO_SHORT_RUNWAY;
+ 				}
+ 			}
++
++			/* Is there a Conditional Order that checks if maintenance is required, even if disabled */
++			if (order->IsType(OT_CONDITIONAL) && order->GetConditionVariable() == OCV_REQUIRES_SERVICE && _settings_game.order.no_servicing_if_no_breakdowns && _settings_game.difficulty.vehicle_breakdowns == 0) {
++				message = STR_NEWS_CONDITIONAL_ORDER_IS_USELESS;
++			}
+ 		}
+ 
+ 		/* Check if the last and the first order are the same */
+diff --git a/src/order_gui.cpp b/src/order_gui.cpp
+index d4feae3..99f6d32 100644
+--- a/src/order_gui.cpp
++++ b/src/order_gui.cpp
+@@ -319,17 +319,78 @@ void DrawOrderString(const Vehicle *v, const Order *order, int order_index, int
+ 			SetDParam(1, order->GetDestination());
+ 			break;
+ 
+-		case OT_CONDITIONAL:
++		case OT_CONDITIONAL: {
+ 			SetDParam(1, order->GetConditionSkipToOrder() + 1);
+-			if (order->GetConditionVariable() == OCV_UNCONDITIONALLY) {
++			OrderConditionVariable ocvar = order->GetConditionVariable();
++			if (ocvar == OCV_UNCONDITIONALLY) {
+ 				SetDParam(0, STR_ORDER_CONDITIONAL_UNCONDITIONAL);
+ 			} else {
+ 				OrderConditionComparator occ = order->GetConditionComparator();
++
+ 				SetDParam(0, (occ == OCC_IS_TRUE || occ == OCC_IS_FALSE) ? STR_ORDER_CONDITIONAL_TRUE_FALSE : STR_ORDER_CONDITIONAL_NUM);
+ 				SetDParam(2, STR_ORDER_CONDITIONAL_LOAD_PERCENTAGE + order->GetConditionVariable());
+ 				SetDParam(3, STR_ORDER_CONDITIONAL_COMPARATOR_EQUALS + occ);
+ 
+ 				uint value = order->GetConditionValue();
++
++				/* Check Orders
++				 * If there is a useless Condition, append an error String
++				 * String is appended at the same place as in the aircraft range check */
++
++				/* A Comparison >= 0 is always true, since the value is unsigned
++				 * <0 is always false */
++				if (value == 0) {
++					switch (occ) {
++						case OCC_MORE_EQUALS:
++							SetDParam(8, STR_ERROR_COND_ORDER_ALWAYS_TRUE);
++							break;
++						case OCC_LESS_THAN:
++							SetDParam(8, STR_ERROR_COND_ORDER_ALWAYS_FALSE);
++							break;
++						default:
++							break;
++					}
++				}
++
++				/* for Percentages, <= 100 is always true
++				 * >100 is always false*/
++				if (value == 100) {
++					switch (ocvar) {
++						case OCV_LOAD_PERCENTAGE:
++						/* FALL THROUGH */
++						case OCV_RELIABILITY:
++							if (occ == OCC_LESS_EQUALS) {
++								SetDParam(8, STR_ERROR_COND_ORDER_ALWAYS_TRUE);
++							}
++							if (occ == OCC_MORE_THAN) {
++								SetDParam(8, STR_ERROR_COND_ORDER_ALWAYS_FALSE);
++							}
++							break;
++						default:
++							break;
++					}
++				}
++
++				/* In general, the maximum is 2047, so <=2047 is always true,
++				 * >2047 is always false */
++				if (value == 2047) {
++					switch (occ) {
++						case OCC_LESS_EQUALS:
++							SetDParam(8, STR_ERROR_COND_ORDER_ALWAYS_TRUE);
++							break;
++						case OCC_MORE_THAN:
++							SetDParam(8, STR_ERROR_COND_ORDER_ALWAYS_FALSE);
++							break;
++						default:
++							break;
++					}
++				}
++
++				/* If servicing is disabled, you shouldn't check, if the vehicle needs servicing */
++				if (ocvar == OCV_REQUIRES_SERVICE && _settings_game.order.no_servicing_if_no_breakdowns && _settings_game.difficulty.vehicle_breakdowns == 0) {
++					SetDParam(8, STR_ERROR_COND_ORDER_NO_SERVICING);
++				}
++
+ 				if (order->GetConditionVariable() == OCV_MAX_SPEED) value = ConvertSpeedToDisplaySpeed(value);
+ 				SetDParam(4, value);
+ 			}
+@@ -341,6 +402,7 @@ void DrawOrderString(const Vehicle *v, const Order *order, int order_index, int
+ 				SetDParam(5, STR_EMPTY);
+ 			}
+ 			break;
++		}
+ 
+ 		default: NOT_REACHED();
+ 	}
+@@ -395,10 +457,10 @@ static Order GetOrderCmdFromTile(const Vehicle *v, TileIndex tile)
+ 		if (st->owner == _local_company || st->owner == OWNER_NONE) {
+ 			byte facil;
+ 			(facil = FACIL_DOCK, v->type == VEH_SHIP) ||
+-			(facil = FACIL_TRAIN, v->type == VEH_TRAIN) ||
+-			(facil = FACIL_AIRPORT, v->type == VEH_AIRCRAFT) ||
+-			(facil = FACIL_BUS_STOP, v->type == VEH_ROAD && RoadVehicle::From(v)->IsBus()) ||
+-			(facil = FACIL_TRUCK_STOP, 1);
++				(facil = FACIL_TRAIN, v->type == VEH_TRAIN) ||
++				(facil = FACIL_AIRPORT, v->type == VEH_AIRCRAFT) ||
++				(facil = FACIL_BUS_STOP, v->type == VEH_ROAD && RoadVehicle::From(v)->IsBus()) ||
++				(facil = FACIL_TRUCK_STOP, 1);
+ 			if (st->facilities & facil) {
+ 				order.MakeGoToStation(st_index);
+ 				if (_ctrl_pressed) order.SetLoadType(OLF_FULL_LOAD_ANY);
+@@ -470,11 +532,11 @@ enum {
+  * For vehicles of other companies, both button rows are not displayed.
+  */
+ struct OrdersWindow : public Window {
+-private:
+-	/** Under what reason are we using the PlaceObject functionality? */
+-	enum OrderPlaceObjectState {
+-		OPOS_NONE,
+-		OPOS_GOTO,
++	private:
++		/** Under what reason are we using the PlaceObject functionality? */
++		enum OrderPlaceObjectState {
++			OPOS_NONE,
++			OPOS_GOTO,
+ 		OPOS_CONDITIONAL,
+ 		OPOS_SHARE,
+ 		OPOS_END,

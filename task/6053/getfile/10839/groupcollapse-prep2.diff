@@ -1,0 +1,83 @@
+diff --git a/src/group_cmd.cpp b/src/group_cmd.cpp
+index 9a19090a2..7d29b4f84 100644
+--- a/src/group_cmd.cpp
++++ b/src/group_cmd.cpp
+@@ -173,7 +173,13 @@ void GroupStatistics::Clear()
+ {
+ 	assert(delta == 1 || delta == -1);
+ 	GroupStatistics::GetAllGroup(v).num_engines[v->engine_type] += delta;
+-	GroupStatistics::Get(v).num_engines[v->engine_type] += delta;
++	if (IsDefaultGroupID(v->group_id)) {
++		GroupStatistics::Get(v).num_engines[v->engine_type] += delta;
++	} else {
++		for (Group *g = Group::Get(v->group_id); g != NULL; g = Group::GetIfValid(g->parent)) {
++			g->statistics.num_engines[v->engine_type] += delta;
++		}
++	}
+ }
+ 
+ /**
+@@ -265,10 +271,22 @@ static inline void UpdateNumEngineGroup(const Vehicle *v, GroupID old_g, GroupID
+ {
+ 	if (old_g != new_g) {
+ 		/* Decrease the num engines in the old group */
+-		GroupStatistics::Get(v->owner, old_g, v->type).num_engines[v->engine_type]--;
++		if (IsDefaultGroupID(old_g)) {
++			GroupStatistics::Get(v->owner, old_g, v->type).num_engines[v->engine_type]--;
++		} else {
++			for (Group *g = Group::Get(old_g); g != NULL; g = Group::GetIfValid(g->parent)) {
++				g->statistics.num_engines[v->engine_type]--;
++			}
++		}
+ 
+ 		/* Increase the num engines in the new group */
+-		GroupStatistics::Get(v->owner, new_g, v->type).num_engines[v->engine_type]++;
++		if (IsDefaultGroupID(old_g)) {
++			GroupStatistics::Get(v->owner, new_g, v->type).num_engines[v->engine_type]++;
++		} else {
++			for (Group *g = Group::Get(new_g); g != NULL; g = Group::GetIfValid(g->parent)) {
++				g->statistics.num_engines[v->engine_type]++;
++			}
++		}
+ 	}
+ }
+ 
+@@ -432,6 +450,11 @@ CommandCost CmdAlterGroup(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32
+ 				g2->statistics.num_vehicle -= g->statistics.num_vehicle;
+ 				g2->statistics.num_profit_vehicle -= g->statistics.num_profit_vehicle;
+ 				g2->statistics.profit_last_year -= g->statistics.profit_last_year;
++
++				Engine *e;
++				FOR_ALL_ENGINES(e) {
++					g2->statistics.num_engines[e->index] -= g->statistics.num_engines[e->index];
++				}
+ 			}
+ 
+ 			g->parent = (pg == NULL) ? INVALID_GROUP : pg->index;
+@@ -440,6 +463,11 @@ CommandCost CmdAlterGroup(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32
+ 				g2->statistics.num_vehicle += g->statistics.num_vehicle;
+ 				g2->statistics.num_profit_vehicle += g->statistics.num_profit_vehicle;
+ 				g2->statistics.profit_last_year += g->statistics.profit_last_year;
++
++				Engine *e;
++				FOR_ALL_ENGINES(e) {
++					g2->statistics.num_engines[e->index] += g->statistics.num_engines[e->index];
++				}
+ 			}
+ 		}
+ 	}
+@@ -724,13 +752,8 @@ void UpdateTrainGroupID(Train *v)
+  */
+ uint GetGroupNumEngines(CompanyID company, GroupID id_g, EngineID id_e)
+ {
+-	uint count = 0;
+ 	const Engine *e = Engine::Get(id_e);
+-	const Group *g;
+-	FOR_ALL_GROUPS(g) {
+-		if (g->parent == id_g) count += GetGroupNumEngines(company, g->index, id_e);
+-	}
+-	return count + GroupStatistics::Get(company, id_g, e->type).num_engines[id_e];
++	return GroupStatistics::Get(company, id_g, e->type).num_engines[id_e];
+ }
+ 
+ void RemoveAllGroupsForCompany(const CompanyID company)

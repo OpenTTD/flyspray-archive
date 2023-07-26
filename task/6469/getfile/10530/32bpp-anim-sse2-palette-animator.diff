@@ -1,0 +1,576 @@
+Index: source.list
+===================================================================
+--- source.list	(revision 27582)
++++ source.list	(working copy)
+@@ -909,6 +909,8 @@
+ blitter/32bpp_anim.cpp
+ blitter/32bpp_anim.hpp
+ #if SSE
++blitter/32bpp_anim_sse2.cpp
++blitter/32bpp_anim_sse2.hpp
+ blitter/32bpp_anim_sse4.cpp
+ blitter/32bpp_anim_sse4.hpp
+ #end
+Index: src/blitter/32bpp_anim.cpp
+===================================================================
+--- src/blitter/32bpp_anim.cpp	(revision 27582)
++++ src/blitter/32bpp_anim.cpp	(working copy)
+@@ -22,7 +22,7 @@
+ 
+ Blitter_32bppAnim::~Blitter_32bppAnim()
+ {
+-	free(this->anim_buf);
++	free(this->anim_alloc);
+ }
+ 
+ template <BlitterMode mode>
+@@ -39,13 +39,13 @@
+ 	}
+ 
+ 	Colour *dst = (Colour *)bp->dst + bp->top * bp->pitch + bp->left;
+-	uint16 *anim = this->anim_buf + ((uint32 *)bp->dst - (uint32 *)_screen.dst_ptr) + bp->top * this->anim_buf_width + bp->left;
++	uint16 *anim = this->anim_buf + this->ScreenToAnimOffset((uint32 *)bp->dst) + bp->top * this->anim_buf_pitch + bp->left;
+ 
+ 	const byte *remap = bp->remap; // store so we don't have to access it via bp everytime
+ 
+ 	for (int y = 0; y < bp->height; y++) {
+ 		Colour *dst_ln = dst + bp->pitch;
+-		uint16 *anim_ln = anim + this->anim_buf_width;
++		uint16 *anim_ln = anim + this->anim_buf_pitch;
+ 
+ 		const Colour *src_px_ln = (const Colour *)((const byte *)src_px + *(const uint32 *)src_px);
+ 		src_px++;
+@@ -281,7 +281,7 @@
+ 	Colour *udst = (Colour *)dst;
+ 	uint16 *anim;
+ 
+-	anim = this->anim_buf + ((uint32 *)dst - (uint32 *)_screen.dst_ptr);
++	anim = this->anim_buf + this->ScreenToAnimOffset((uint32 *)dst);
+ 
+ 	if (pal == PALETTE_TO_TRANSPARENT) {
+ 		do {
+@@ -292,7 +292,7 @@
+ 				anim++;
+ 			}
+ 			udst = udst - width + _screen.pitch;
+-			anim = anim - width + this->anim_buf_width;
++			anim = anim - width + this->anim_buf_pitch;
+ 		} while (--height);
+ 		return;
+ 	}
+@@ -305,7 +305,7 @@
+ 				anim++;
+ 			}
+ 			udst = udst - width + _screen.pitch;
+-			anim = anim - width + this->anim_buf_width;
++			anim = anim - width + this->anim_buf_pitch;
+ 		} while (--height);
+ 		return;
+ 	}
+@@ -319,7 +319,7 @@
+ 
+ 	/* Set the colour in the anim-buffer too, if we are rendering to the screen */
+ 	if (_screen_disable_anim) return;
+-	this->anim_buf[((uint32 *)video - (uint32 *)_screen.dst_ptr) + x + y * this->anim_buf_width] = colour | (DEFAULT_BRIGHTNESS << 8);
++	this->anim_buf[this->ScreenToAnimOffset((uint32 *)video) + x + y * this->anim_buf_pitch] = colour | (DEFAULT_BRIGHTNESS << 8);
+ }
+ 
+ void Blitter_32bppAnim::DrawRect(void *video, int width, int height, uint8 colour)
+@@ -333,7 +333,7 @@
+ 	Colour colour32 = LookupColourInPalette(colour);
+ 	uint16 *anim_line;
+ 
+-	anim_line = ((uint32 *)video - (uint32 *)_screen.dst_ptr) + this->anim_buf;
++	anim_line = this->ScreenToAnimOffset((uint32 *)video) + this->anim_buf;
+ 
+ 	do {
+ 		Colour *dst = (Colour *)video;
+@@ -347,7 +347,7 @@
+ 			anim++;
+ 		}
+ 		video = (uint32 *)video + _screen.pitch;
+-		anim_line += this->anim_buf_width;
++		anim_line += this->anim_buf_pitch;
+ 	} while (--height);
+ }
+ 
+@@ -357,7 +357,7 @@
+ 	assert(video >= _screen.dst_ptr && video <= (uint32 *)_screen.dst_ptr + _screen.width + _screen.height * _screen.pitch);
+ 	Colour *dst = (Colour *)video;
+ 	const uint32 *usrc = (const uint32 *)src;
+-	uint16 *anim_line = ((uint32 *)video - (uint32 *)_screen.dst_ptr) + this->anim_buf;
++	uint16 *anim_line = this->ScreenToAnimOffset((uint32 *)video) + this->anim_buf;
+ 
+ 	for (; height > 0; height--) {
+ 		/* We need to keep those for palette animation. */
+@@ -370,7 +370,7 @@
+ 		/* Copy back the anim-buffer */
+ 		memcpy(anim_line, usrc, width * sizeof(uint16));
+ 		usrc = (const uint32 *)((const uint16 *)usrc + width);
+-		anim_line += this->anim_buf_width;
++		anim_line += this->anim_buf_pitch;
+ 
+ 		/* Okay, it is *very* likely that the image we stored is using
+ 		 * the wrong palette animated colours. There are two things we
+@@ -401,7 +401,7 @@
+ 
+ 	if (this->anim_buf == NULL) return;
+ 
+-	anim_line = ((const uint32 *)video - (uint32 *)_screen.dst_ptr) + this->anim_buf;
++	anim_line = this->ScreenToAnimOffset((const uint32 *)video) + this->anim_buf;
+ 
+ 	for (; height > 0; height--) {
+ 		memcpy(udst, src, width * sizeof(uint32));
+@@ -410,7 +410,7 @@
+ 		/* Copy the anim-buffer */
+ 		memcpy(udst, anim_line, width * sizeof(uint16));
+ 		udst = (uint32 *)((uint16 *)udst + width);
+-		anim_line += this->anim_buf_width;
++		anim_line += this->anim_buf_pitch;
+ 	}
+ }
+ 
+@@ -422,8 +422,8 @@
+ 
+ 	/* We need to scroll the anim-buffer too */
+ 	if (scroll_y > 0) {
+-		dst = this->anim_buf + left + (top + height - 1) * this->anim_buf_width;
+-		src = dst - scroll_y * this->anim_buf_width;
++		dst = this->anim_buf + left + (top + height - 1) * this->anim_buf_pitch;
++		src = dst - scroll_y * this->anim_buf_pitch;
+ 
+ 		/* Adjust left & width */
+ 		if (scroll_x >= 0) {
+@@ -436,13 +436,13 @@
+ 		uint th = height - scroll_y;
+ 		for (; th > 0; th--) {
+ 			memcpy(dst, src, tw * sizeof(uint16));
+-			src -= this->anim_buf_width;
+-			dst -= this->anim_buf_width;
++			src -= this->anim_buf_pitch;
++			dst -= this->anim_buf_pitch;
+ 		}
+ 	} else {
+ 		/* Calculate pointers */
+-		dst = this->anim_buf + left + top * this->anim_buf_width;
+-		src = dst - scroll_y * this->anim_buf_width;
++		dst = this->anim_buf + left + top * this->anim_buf_pitch;
++		src = dst - scroll_y * this->anim_buf_pitch;
+ 
+ 		/* Adjust left & width */
+ 		if (scroll_x >= 0) {
+@@ -457,8 +457,8 @@
+ 		uint th = height + scroll_y;
+ 		for (; th > 0; th--) {
+ 			memmove(dst, src, tw * sizeof(uint16));
+-			src += this->anim_buf_width;
+-			dst += this->anim_buf_width;
++			src += this->anim_buf_pitch;
++			dst += this->anim_buf_pitch;
+ 		}
+ 	}
+ 
+@@ -484,17 +484,22 @@
+ 	Colour *dst = (Colour *)_screen.dst_ptr;
+ 
+ 	/* Let's walk the anim buffer and try to find the pixels */
++	const int width = this->anim_buf_width;
++	const int pitch_offset = _screen.pitch - width;
++	const int anim_pitch_offset = this->anim_buf_pitch - width;
+ 	for (int y = this->anim_buf_height; y != 0 ; y--) {
+-		for (int x = this->anim_buf_width; x != 0 ; x--) {
+-			uint colour = GB(*anim, 0, 8);
++		for (int x = width; x != 0 ; x--) {
++			uint16 value = *anim;
++			uint8 colour = GB(value, 0, 8);
+ 			if (colour >= PALETTE_ANIM_START) {
+ 				/* Update this pixel */
+-				*dst = this->AdjustBrightness(LookupColourInPalette(colour), GB(*anim, 8, 8));
++				*dst = this->AdjustBrightness(LookupColourInPalette(colour), GB(value, 8, 8));
+ 			}
+ 			dst++;
+ 			anim++;
+ 		}
+-		dst += _screen.pitch - this->anim_buf_width;
++		dst += pitch_offset;
++		anim += anim_pitch_offset;
+ 	}
+ 
+ 	/* Make sure the backend redraws the whole screen */
+@@ -510,9 +515,13 @@
+ {
+ 	if (_screen.width != this->anim_buf_width || _screen.height != this->anim_buf_height) {
+ 		/* The size of the screen changed; we can assume we can wipe all data from our buffer */
+-		free(this->anim_buf);
+-		this->anim_buf = CallocT<uint16>(_screen.width * _screen.height);
+-		this->anim_buf_width = _screen.width;
++		free(this->anim_alloc);
+ 		this->anim_buf_height = _screen.height;
++		this->anim_buf_width = _screen.width;
++		this->anim_buf_pitch = (_screen.width + 7) & ~7;
++		this->anim_alloc = CallocT<uint16>(this->anim_buf_pitch * this->anim_buf_height + 8);
++
++		/* align buffer to next 16 byte boundary */
++		this->anim_buf = reinterpret_cast<uint16 *>((reinterpret_cast<uintptr_t>(this->anim_alloc) + 0xF) & (~0xF));
+ 	}
+ }
+Index: src/blitter/32bpp_anim.hpp
+===================================================================
+--- src/blitter/32bpp_anim.hpp	(revision 27582)
++++ src/blitter/32bpp_anim.hpp	(working copy)
+@@ -18,14 +18,18 @@
+ class Blitter_32bppAnim : public Blitter_32bppOptimized {
+ protected:
+ 	uint16 *anim_buf;    ///< In this buffer we keep track of the 8bpp indexes so we can do palette animation
++	void *anim_alloc;    ///< The raw allocated buffer, not necessarily aligned correctly
+ 	int anim_buf_width;  ///< The width of the animation buffer.
++	int anim_buf_pitch;  ///< The pitch of the animation buffer (width rounded up to 16 byte boundary).
+ 	int anim_buf_height; ///< The height of the animation buffer.
+ 	Palette palette;     ///< The current palette.
+ 
+ public:
+ 	Blitter_32bppAnim() :
+ 		anim_buf(NULL),
++		anim_alloc(NULL),
+ 		anim_buf_width(0),
++		anim_buf_pitch(0),
+ 		anim_buf_height(0)
+ 	{}
+ 
+@@ -54,6 +58,15 @@
+ 		return this->palette.palette[index];
+ 	}
+ 
++	inline int ScreenToAnimOffset(const uint32 *video)
++	{
++		int raw_offset = video - (const uint32 *)_screen.dst_ptr;
++		if (_screen.pitch == this->anim_buf_pitch) return raw_offset;
++		int lines = raw_offset / _screen.pitch;
++		int across = raw_offset % _screen.pitch;
++		return across + (lines * this->anim_buf_pitch);
++	}
++
+ 	template <BlitterMode mode> void Draw(const Blitter::BlitterParams *bp, ZoomLevel zoom);
+ };
+ 
+Index: src/blitter/32bpp_anim_sse2.cpp
+new file mode 100644
+===================================================================
+--- src/blitter/32bpp_anim_sse2.cpp	(revision 0)
++++ src/blitter/32bpp_anim_sse2.cpp	(working copy)
+@@ -0,0 +1,100 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/** @file 32bpp_anim.cpp Implementation of a partially SSSE2 32bpp blitter with animation support. */
++
++#ifdef WITH_SSE
++
++#include "../stdafx.h"
++#include "../video/video_driver.hpp"
++#include "32bpp_anim_sse2.hpp"
++#include "32bpp_sse_func.hpp"
++
++#include "../safeguards.h"
++
++/** Instantiation of the partially SSSE2 32bpp with animation blitter factory. */
++static FBlitter_32bppSSE2_Anim iFBlitter_32bppSSE2_Anim;
++
++void Blitter_32bppSSE2_Anim::PaletteAnimate(const Palette &palette)
++{
++	assert(!_screen_disable_anim);
++
++	this->palette = palette;
++	/* If first_dirty is 0, it is for 8bpp indication to send the new
++	 *  palette. However, only the animation colours might possibly change.
++	 *  Especially when going between toyland and non-toyland. */
++	assert(this->palette.first_dirty == PALETTE_ANIM_START || this->palette.first_dirty == 0);
++
++	const uint16 *anim = this->anim_buf;
++	Colour *dst = (Colour *)_screen.dst_ptr;
++
++	bool screen_dirty = false;
++
++	/* Let's walk the anim buffer and try to find the pixels */
++	const int width = this->anim_buf_width;
++	const int screen_pitch = _screen.pitch;
++	const int anim_pitch = this->anim_buf_pitch;
++	__m128i anim_cmp = _mm_set1_epi16(PALETTE_ANIM_START - 1);
++	__m128i brightness_cmp = _mm_set1_epi16(Blitter_32bppBase::DEFAULT_BRIGHTNESS);
++	__m128i colour_mask = _mm_set1_epi16(0xFF);
++	for (int y = this->anim_buf_height; y != 0 ; y--) {
++		Colour *next_dst_ln = dst + screen_pitch;
++		const uint16 *next_anim_ln = anim + anim_pitch;
++		int x = width;
++		while (x > 0) {
++			__m128i data = _mm_load_si128((const __m128i *) anim);
++
++			/* low bytes only, shifted into high positions */
++			__m128i colour_data = _mm_and_si128(data, colour_mask);
++
++			/* test if any colour >= PALETTE_ANIM_START */
++			int colour_cmp_result = _mm_movemask_epi8(_mm_cmpgt_epi16(colour_data, anim_cmp));
++			if (unlikely(colour_cmp_result)) {
++				/* test if any brightness is unexpected */
++				if (unlikely(x < 8 || colour_cmp_result != 0xFFFF ||
++						_mm_movemask_epi8(_mm_cmpeq_epi16(_mm_srli_epi16(data, 8), brightness_cmp)) != 0xFFFF)) {
++					/* slow path: < 8 pixels left or unexpected brightnesses */
++					for (int z = min<int>(x, 8); z != 0 ; z--) {
++						int value = _mm_extract_epi16(data, 0);
++						uint8 colour = GB(value, 0, 8);
++						if (colour >= PALETTE_ANIM_START) {
++							/* Update this pixel */
++							*dst = AdjustBrightneSSE(LookupColourInPalette(colour), GB(value, 8, 8));
++							screen_dirty = true;
++						}
++						data = _mm_srli_si128(data, 2);
++						dst++;
++					}
++				} else {
++					/* medium path: 8 pixels to animate all of expected brightnesses */
++					for (int z = 0; z < 8; z++) {
++						*dst = LookupColourInPalette(_mm_extract_epi16(colour_data, 0));
++						colour_data = _mm_srli_si128(colour_data, 2);
++						dst++;
++					}
++					screen_dirty = true;
++				}
++			} else {
++				/* fast path, no animation */
++				dst += 8;
++			}
++			anim += 8;
++			x -= 8;
++		}
++		dst = next_dst_ln;
++		anim = next_anim_ln;
++	}
++
++	if (screen_dirty) {
++		/* Make sure the backend redraws the whole screen */
++		VideoDriver::GetInstance()->MakeDirty(0, 0, _screen.width, _screen.height);
++	}
++}
++
++#endif /* WITH_SSE */
+Index: src/blitter/32bpp_anim_sse2.hpp
+new file mode 100644
+===================================================================
+--- src/blitter/32bpp_anim_sse2.hpp	(revision 0)
++++ src/blitter/32bpp_anim_sse2.hpp	(working copy)
+@@ -0,0 +1,43 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/** @file 32bpp_anim.hpp A partially SSE2 32 bpp blitter with animation support. */
++
++#ifndef BLITTER_32BPP_SSE2_ANIM_HPP
++#define BLITTER_32BPP_SSE2_ANIM_HPP
++
++#ifdef WITH_SSE
++
++#ifndef SSE_VERSION
++#define SSE_VERSION 2
++#endif
++
++#ifndef FULL_ANIMATION
++#define FULL_ANIMATION 1
++#endif
++
++#include "32bpp_anim.hpp"
++#include "32bpp_sse2.hpp"
++
++/** A partially 32 bpp blitter with palette animation. */
++class Blitter_32bppSSE2_Anim : public Blitter_32bppAnim {
++public:
++	/* virtual */ void PaletteAnimate(const Palette &palette);
++	/* virtual */ const char *GetName() { return "32bpp-sse2-anim"; }
++};
++
++/** Factory for the partially 32bpp blitter with animation. */
++class FBlitter_32bppSSE2_Anim : public BlitterFactory {
++public:
++	FBlitter_32bppSSE2_Anim() : BlitterFactory("32bpp-sse2-anim", "32bpp partially SSE2 Animation Blitter (palette animation)", HasCPUIDFlag(1, 3, 26)) {}
++	/* virtual */ Blitter *CreateInstance() { return new Blitter_32bppSSE2_Anim(); }
++};
++
++#endif /* WITH_SSE */
++#endif /* BLITTER_32BPP_ANIM_HPP */
+Index: src/blitter/32bpp_anim_sse4.cpp
+===================================================================
+--- src/blitter/32bpp_anim_sse4.cpp	(revision 27582)
++++ src/blitter/32bpp_anim_sse4.cpp	(working copy)
+@@ -35,7 +35,7 @@
+ {
+ 	const byte * const remap = bp->remap;
+ 	Colour *dst_line = (Colour *) bp->dst + bp->top * bp->pitch + bp->left;
+-	uint16 *anim_line = this->anim_buf + ((uint32 *)bp->dst - (uint32 *)_screen.dst_ptr) + bp->top * this->anim_buf_width + bp->left;
++	uint16 *anim_line = this->anim_buf + this->ScreenToAnimOffset((uint32 *)bp->dst) + bp->top * this->anim_buf_pitch + bp->left;
+ 	int effective_width = bp->width;
+ 
+ 	/* Find where to start reading in the source sprite. */
+@@ -353,7 +353,7 @@
+ 		if (mode != BM_TRANSPARENT) src_mv_line += si->sprite_width;
+ 		src_rgba_line = (const Colour*) ((const byte*) src_rgba_line + si->sprite_line_size);
+ 		dst_line += bp->pitch;
+-		anim_line += this->anim_buf_width;
++		anim_line += this->anim_buf_pitch;
+ 	}
+ }
+ IGNORE_UNINITIALIZED_WARNING_STOP
+Index: src/blitter/32bpp_anim_sse4.hpp
+===================================================================
+--- src/blitter/32bpp_anim_sse4.hpp	(revision 27582)
++++ src/blitter/32bpp_anim_sse4.hpp	(working copy)
+@@ -23,13 +23,14 @@
+ #endif
+ 
+ #include "32bpp_anim.hpp"
++#include "32bpp_anim_sse2.hpp"
+ #include "32bpp_sse4.hpp"
+ 
+ #undef MARGIN_NORMAL_THRESHOLD
+ #define MARGIN_NORMAL_THRESHOLD 4
+ 
+ /** The SSE4 32 bpp blitter with palette animation. */
+-class Blitter_32bppSSE4_Anim FINAL : public Blitter_32bppAnim, public Blitter_32bppSSE_Base {
++class Blitter_32bppSSE4_Anim FINAL : public Blitter_32bppSSE2_Anim, public Blitter_32bppSSE_Base {
+ private:
+ 
+ public:
+Index: src/blitter/32bpp_base.cpp
+===================================================================
+--- src/blitter/32bpp_base.cpp	(revision 27582)
++++ src/blitter/32bpp_base.cpp	(working copy)
+@@ -143,6 +143,36 @@
+ 	/* By default, 32bpp doesn't have palette animation */
+ }
+ 
++Colour Blitter_32bppBase::ReallyAdjustBrightness(Colour colour, uint8 brightness)
++{
++	assert(DEFAULT_BRIGHTNESS == 1 << 7);
++
++	uint64 combined = (((uint64) colour.r) << 32) | (colour.g << 16) | colour.b;
++	combined *= brightness;
++
++	uint16 r = GB(combined, 39, 8);
++	uint16 g = GB(combined, 23, 8);
++	uint16 b = GB(combined, 7, 8);
++
++	if ((combined & 0x800080008000L) == 0L) {
++		return Colour(r, g, b, colour.a);
++	}
++
++	uint16 ob = 0;
++	/* Sum overbright */
++	if (r > 255) ob += r - 255;
++	if (g > 255) ob += g - 255;
++	if (b > 255) ob += b - 255;
++
++	/* Reduce overbright strength */
++	ob /= 2;
++	return Colour(
++						 r >= 255 ? 255 : min(r + ob * (255 - r) / 256, 255),
++						 g >= 255 ? 255 : min(g + ob * (255 - g) / 256, 255),
++						 b >= 255 ? 255 : min(b + ob * (255 - b) / 256, 255),
++						 colour.a);
++}
++
+ Blitter::PaletteAnimation Blitter_32bppBase::UsePaletteAnimation()
+ {
+ 	return Blitter::PALETTE_ANIMATION_NONE;
+Index: src/blitter/32bpp_base.hpp
+===================================================================
+--- src/blitter/32bpp_base.hpp	(revision 27582)
++++ src/blitter/32bpp_base.hpp	(working copy)
+@@ -146,30 +146,14 @@
+ 
+ 	static const int DEFAULT_BRIGHTNESS = 128;
+ 
++	static Colour ReallyAdjustBrightness(Colour colour, uint8 brightness);
++
+ 	static inline Colour AdjustBrightness(Colour colour, uint8 brightness)
+ 	{
+ 		/* Shortcut for normal brightness */
+-		if (brightness == DEFAULT_BRIGHTNESS) return colour;
+-
+-		uint16 ob = 0;
+-		uint16 r = colour.r * brightness / DEFAULT_BRIGHTNESS;
+-		uint16 g = colour.g * brightness / DEFAULT_BRIGHTNESS;
+-		uint16 b = colour.b * brightness / DEFAULT_BRIGHTNESS;
+-
+-		/* Sum overbright */
+-		if (r > 255) ob += r - 255;
+-		if (g > 255) ob += g - 255;
+-		if (b > 255) ob += b - 255;
++		if (likely(brightness == DEFAULT_BRIGHTNESS)) return colour;
+ 
+-		if (ob == 0) return Colour(r, g, b, colour.a);
+-
+-		/* Reduce overbright strength */
+-		ob /= 2;
+-		return Colour(
+-		                     r >= 255 ? 255 : min(r + ob * (255 - r) / 256, 255),
+-		                     g >= 255 ? 255 : min(g + ob * (255 - g) / 256, 255),
+-		                     b >= 255 ? 255 : min(b + ob * (255 - b) / 256, 255),
+-		                     colour.a);
++		return ReallyAdjustBrightness(colour, brightness);
+ 	}
+ };
+ 
+Index: src/blitter/32bpp_sse_func.hpp
+===================================================================
+--- src/blitter/32bpp_sse_func.hpp	(revision 27582)
++++ src/blitter/32bpp_sse_func.hpp	(working copy)
+@@ -138,7 +138,7 @@
+ static inline Colour AdjustBrightneSSE(Colour colour, uint8 brightness)
+ {
+ 	/* Shortcut for normal brightness. */
+-	if (brightness == Blitter_32bppBase::DEFAULT_BRIGHTNESS) return colour;
++	if (likely(brightness == Blitter_32bppBase::DEFAULT_BRIGHTNESS)) return colour;
+ 
+ 	return ReallyAdjustBrightness(colour, brightness);
+ }
+Index: src/gfxinit.cpp
+===================================================================
+--- src/gfxinit.cpp	(revision 27582)
++++ src/gfxinit.cpp	(working copy)
+@@ -266,6 +266,9 @@
+ #endif
+ 		{ "8bpp-optimized",  2,  8,  8,  8,  8 },
+ 		{ "32bpp-optimized", 0,  8, 32,  8, 32 },
++#ifdef WITH_SSE
++		{ "32bpp-sse2-anim", 1,  8, 32,  8, 32 },
++#endif
+ 		{ "32bpp-anim",      1,  8, 32,  8, 32 },
+ 	};
+ 
+Index: src/stdafx.h
+===================================================================
+--- src/stdafx.h	(revision 27582)
++++ src/stdafx.h	(working copy)
+@@ -516,4 +516,12 @@
+ 	#define IGNORE_UNINITIALIZED_WARNING_STOP
+ #endif
+ 
++#ifdef __GNUC__
++#define likely(x)       __builtin_expect(!!(x), 1)
++#define unlikely(x)     __builtin_expect(!!(x), 0)
++#else
++#define likely(x)       (x)
++#define unlikely(x)     (x)
++#endif
++
+ #endif /* STDAFX_H */

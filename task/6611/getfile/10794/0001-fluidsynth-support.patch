@@ -1,0 +1,360 @@
+From 88210d6c7d1c3a1e56211de77c89f5e6319fc34f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jind=C5=99ich=20Makovi=C4=8Dka?= <makovick@gmail.com>
+Date: Tue, 25 Oct 2011 09:14:42 +0200
+Subject: [PATCH] fluidsynth support
+
+---
+ config.lib               |   16 ++++
+ configure                |    1 +
+ source.list              |    4 +
+ src/music/fluidsynth.cpp |  184 ++++++++++++++++++++++++++++++++++++++++++++++
+ src/music/fluidsynth.h   |   43 +++++++++++
+ 5 files changed, 248 insertions(+), 0 deletions(-)
+ create mode 100644 src/music/fluidsynth.cpp
+ create mode 100644 src/music/fluidsynth.h
+
+diff --git a/config.lib b/config.lib
+index 2c7e0ff..94383d7 100644
+--- a/config.lib
++++ b/config.lib
+@@ -83,6 +83,7 @@ set_default() {
+ 	with_midi=""
+ 	with_midi_arg=""
+ 	with_libtimidity="1"
++	with_fluidsynth="1"
+ 	with_freetype="1"
+ 	with_fontconfig="1"
+ 	with_icu="1"
+@@ -156,6 +157,7 @@ set_default() {
+ 		with_midi
+ 		with_midi_arg
+ 		with_libtimidity
++		with_fluidsynth
+ 		with_freetype
+ 		with_fontconfig
+ 		with_icu
+@@ -362,6 +364,9 @@ detect_params() {
+ 			--without-libtimidity)        with_libtimidity="0";;
+ 			--with-libtimidity=*)         with_libtimidity="$optarg";;
+ 
++			--with-fluidsynth)            with_fluidsynth="2";;
++			--without-fluidsynth)         with_fluidsynth="0";;
++
+ 			--with-freetype)              with_freetype="2";;
+ 			--without-freetype)           with_freetype="0";;
+ 			--with-freetype=*)            with_freetype="$optarg";;
+@@ -822,6 +827,7 @@ check_params() {
+ 	detect_icu
+ 	detect_pspconfig
+ 	detect_libtimidity
++	detect_fluidsynth
+ 
+ 	if [ "$with_direct_music" != "0" ]; then
+ 		if [ "$os" != "MINGW" ] && [ "$os" != "CYGWIN" ]; then
+@@ -1671,6 +1677,11 @@ make_cflags_and_ldflags() {
+ 		CFLAGS="$CFLAGS -DLIBTIMIDITY"
+ 	fi
+ 
++	if [ -n "$fluidsynth" ]; then
++		LIBS="$LIBS -lfluidsynth"
++		CFLAGS="$CFLAGS -DFLUIDSYNTH"
++	fi
++
+ 	if [ "$with_iconv" != "0" ]; then
+ 		CFLAGS="$CFLAGS -DWITH_ICONV"
+ 		if [ "$link_to_iconv" = "yes" ]; then
+@@ -2579,6 +2590,10 @@ detect_libtimidity() {
+ 	detect_library "$with_libtimidity" "libtimidity" "libtimidity.a" "" "timidity.h"
+ }
+ 
++detect_fluidsynth() {
++	detect_library "$with_fluidsynth" "fluidsynth" "" "" "fluidsynth.h"
++}
++
+ detect_lzma() {
+ 	# 0 means no, 1 is auto-detect, 2 is force
+ 	if [ "$with_lzma" = "0" ]; then
+@@ -3440,6 +3455,7 @@ showhelp() {
+ 	echo "  --with-midi-arg=arg            define which args to use for the"
+ 	echo "                                 midi-player"
+ 	echo "  --with-libtimidity             enables libtimidity support"
++	echo "  --with-fluidsynth              enables fluidsynth support"
+ 	echo "  --with-allegro[=allegro-config]"
+ 	echo "                                 enables Allegro video driver support"
+ 	echo "  --with-cocoa                   enables COCOA video driver (OSX ONLY)"
+diff --git a/configure b/configure
+index c80fb2f..47fb46c 100755
+--- a/configure
++++ b/configure
+@@ -128,6 +128,7 @@ AWKCOMMAND='
+ 		if ($0 == "MSVC"        && "'$os'" != "MSVC")              { next; }
+ 		if ($0 == "DIRECTMUSIC" && "'$with_direct_music'" == "0")  { next; }
+ 		if ($0 == "LIBTIMIDITY" && "'$libtimidity'" == "" )        { next; }
++		if ($0 == "FLUIDSYNTH"  && "'$fluidsynth'" == "" )         { next; }
+ 		if ($0 == "HAVE_THREAD" && "'$with_threads'" == "0")       { next; }
+ 
+ 		skip += 1;
+diff --git a/source.list b/source.list
+index 610a4e5..6fd41dc 100644
+--- a/source.list
++++ b/source.list
+@@ -345,6 +345,7 @@ music/bemidi.h
+ music/cocoa_m.h
+ music/extmidi.h
+ music/libtimidity.h
++music/fluidsynth.h
+ music/os2_m.h
+ music/qtmidi.h
+ os/macosx/macos.h
+@@ -940,6 +941,9 @@ music/null_m.cpp
+ #if LIBTIMIDITY
+ 	music/libtimidity.cpp
+ #end
++#if FLUIDSYNTH
++	music/fluidsynth.cpp
++#end
+ #end
+ 
+ # Sound
+diff --git a/src/music/fluidsynth.cpp b/src/music/fluidsynth.cpp
+new file mode 100644
+index 0000000..6b5da8c
+--- /dev/null
++++ b/src/music/fluidsynth.cpp
+@@ -0,0 +1,184 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/** @file fluidsynth.cpp Playing music via the fluidsynth library. */
++
++#include "../stdafx.h"
++#include "../openttd.h"
++#include "../sound_type.h"
++#include "../debug.h"
++#include "fluidsynth.h"
++#include <fluidsynth.h>
++
++static struct {
++	fluid_settings_t* settings;     ///< FluidSynth settings handle
++	fluid_synth_t* synth;           ///< FluidSynth synthesizer handle
++	fluid_audio_driver_t* adriver;  ///< FluidSynth audio driver handle
++	fluid_player_t* player;         ///< FluidSynth MIDI player handle
++} _midi; ///< Metadata about the midi we're playing.
++
++/** Factory for the FluidSynth driver. */
++static FMusicDriver_FluidSynth iFMusicDriver_FluidSynth;
++
++/** List of sound fonts to try by default. */
++static const char * default_sf[] = {
++    // Debian/Ubuntu/OpenSUSE preferred
++    "/usr/share/sounds/sf2/FluidR3_GM.sf2",
++
++    // RedHat/Fedora preferred
++    "/usr/share/soundfonts/FluidR3_GM.sf2",
++
++    // Debian/Ubuntu/OpenSUSE alternatives
++    "/usr/share/sounds/sf2/TimGM6mb.sf2",
++    "/usr/share/sounds/sf2/FluidR3_GS.sf2",
++
++    NULL
++};
++
++/**
++ * Initializes the MIDI player.
++ *
++ * Initialize the synthesizer and audio driver, load the sound font.
++ *
++ * @param param Driver parameters.
++ * @return NULL on success, error message on failure.
++ */
++const char *MusicDriver_FluidSynth::Start(const char * const *param)
++{
++	const char *driver_name = GetDriverParam(param, "driver");
++	const char *sfont_name = GetDriverParam(param, "soundfont");
++	int sfont_id;
++
++	if (!driver_name) driver_name = "alsa";
++
++	DEBUG(driver, 0, "Fluidsynth: driver %s, sf %s", driver_name, sfont_name);
++
++	/* Create the settings. */
++	_midi.settings = new_fluid_settings();
++	if (!_midi.settings) return "Could not create midi settings";
++
++	if (fluid_settings_setstr(_midi.settings, "audio.driver", driver_name) != 1) {
++		return "Could not set audio driver name";
++	}
++
++	/* Create the synthesizer. */
++	_midi.synth = new_fluid_synth(_midi.settings);
++	if (!_midi.synth) return "Could not open synth";
++
++	/* Create the audio driver. The synthesizer starts playing as soon
++	   as the driver is created. */
++	_midi.adriver = new_fluid_audio_driver(_midi.settings, _midi.synth);
++	if (!_midi.adriver) return "Could not open audio driver";
++
++	/* Load a SoundFont and reset presets (so that new instruments
++	 * get used from the SoundFont) */
++	if (!sfont_name) {
++		int i;
++		sfont_id = FLUID_FAILED;
++		for (i = 0; default_sf[i]; i++) {
++			if (!fluid_is_soundfont(default_sf[i])) continue;
++			sfont_id = fluid_synth_sfload(_midi.synth, default_sf[i], 1);
++			if (sfont_id != FLUID_FAILED) break;
++		}
++		if (sfont_id == FLUID_FAILED) return "Could not open any sound font";
++	} else {
++		sfont_id = fluid_synth_sfload(_midi.synth, sfont_name, 1);
++		if (sfont_id == FLUID_FAILED) return "Could not open sound font";
++	}
++
++	_midi.player = NULL;
++
++	return NULL;
++}
++
++/**
++ * Stops the MIDI player.
++ *
++ * Stops playing and frees any used resources before returning.
++ */
++void MusicDriver_FluidSynth::Stop()
++{
++	this->StopSong();
++	delete_fluid_audio_driver(_midi.adriver);
++	delete_fluid_synth(_midi.synth);
++	delete_fluid_settings(_midi.settings);
++}
++
++/**
++ * Starts playing a new song.
++ *
++ * @param filename Path to a MIDI file.
++ */
++void MusicDriver_FluidSynth::PlaySong(const char *filename)
++{
++	this->StopSong();
++
++	_midi.player = new_fluid_player(_midi.synth);
++	if (!_midi.player) {
++		DEBUG(driver, 0, "Could not create midi player");
++		return;
++	}
++
++	if (fluid_player_add(_midi.player, filename) != FLUID_OK) {
++		DEBUG(driver, 0, "Could not open music file");
++		delete_fluid_player(_midi.player);
++		_midi.player = NULL;
++		return;
++	}
++	if (fluid_player_play(_midi.player) != FLUID_OK) {
++		DEBUG(driver, 0, "Could not start midi player");
++		delete_fluid_player(_midi.player);
++		_midi.player = NULL;
++		return;
++	}
++}
++
++/**
++ * Stops playing the current song, if the player is active.
++ */
++void MusicDriver_FluidSynth::StopSong()
++{
++	if (!_midi.player) return;
++
++	fluid_player_stop(_midi.player);
++	if (fluid_player_join(_midi.player) != FLUID_OK) {
++		DEBUG(driver, 0, "Could not join player");
++	}
++	delete_fluid_player(_midi.player);
++	fluid_synth_system_reset(_midi.synth);
++	_midi.player = NULL;
++}
++
++/**
++ * Checks wether the player is active.
++ *
++ * This function is called at regular intervals from OpenTTD's main loop.
++ * If the player handle exists, we check if if's still playing.
++ *
++ * @return True if a song is playing, false otherwise.
++ */
++bool MusicDriver_FluidSynth::IsSongPlaying()
++{
++	if (!_midi.player) return false;
++
++	return fluid_player_get_status(_midi.player) == FLUID_PLAYER_PLAYING;
++}
++
++/**
++ * Changes the playing volume of the MIDI player.
++ *
++ * @param vol The desired volume, range of the value is @c 0-127.
++ */
++void MusicDriver_FluidSynth::SetVolume(byte vol)
++{
++	// Allowed range of synth.gain is 0.0 to 10.0
++	if (fluid_settings_setnum(_midi.settings, "synth.gain", 1.0 * vol / 128.0) != 1) {
++		DEBUG(driver, 0, "Could not set volume");
++	}
++}
+diff --git a/src/music/fluidsynth.h b/src/music/fluidsynth.h
+new file mode 100644
+index 0000000..b026e1b
+--- /dev/null
++++ b/src/music/fluidsynth.h
+@@ -0,0 +1,43 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/** @file fluidsynth.h Base for FluidSynth music playback. */
++
++#ifndef MUSIC_FLUIDSYNTH_H
++#define MUSIC_FLUIDSYNTH_H
++
++#include "music_driver.hpp"
++
++/** Music driver making use of FluidSynth. */
++class MusicDriver_FluidSynth: public MusicDriver {
++public:
++	/* virtual */ const char *Start(const char * const *param);
++
++	/* virtual */ void Stop();
++
++	/* virtual */ void PlaySong(const char *filename);
++
++	/* virtual */ void StopSong();
++
++	/* virtual */ bool IsSongPlaying();
++
++	/* virtual */ void SetVolume(byte vol);
++	/* virtual */ const char *GetName() const { return "fluidsynth"; }
++};
++
++/** Factory for the fluidsynth driver. */
++class FMusicDriver_FluidSynth: public MusicDriverFactory<FMusicDriver_FluidSynth> {
++public:
++	static const int priority = 5;
++	/* virtual */ const char *GetName() { return "fluidsynth"; }
++	/* virtual */ const char *GetDescription() { return "FluidSynth MIDI Driver"; }
++	/* virtual */ Driver *CreateInstance() { return new MusicDriver_FluidSynth(); }
++};
++
++#endif /* MUSIC_FLUIDSYNTH_H */
+-- 
+1.7.7
+

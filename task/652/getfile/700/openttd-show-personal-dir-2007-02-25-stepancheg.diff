@@ -1,0 +1,98 @@
+Index: fios.cpp
+===================================================================
+--- fios.cpp	(revision 8904)
++++ fios.cpp	(working copy)
+@@ -33,6 +33,7 @@
+ /* OS-specific functions are taken from their respective files (win32/unix/os2 .c) */
+ extern bool FiosIsRoot(const char *path);
+ extern bool FiosIsValidFile(const char *path, const struct dirent *ent, struct stat *sb);
++extern bool FiosIsHiddenFile(const char *path, const struct dirent *ent);
+ extern void FiosGetDrives(void);
+ extern bool FiosGetDiskFreeSpace(const char *path, uint32 *tot);
+ 
+@@ -226,7 +227,10 @@
+ 			ttd_strlcpy(d_name, FS2OTTD(dirent->d_name), sizeof(d_name));
+ 
+ 			/* found file must be directory, but not '.' or '..' */
+-			if (FiosIsValidFile(_fios_path, dirent, &sb) && (sb.st_mode & S_IFDIR) &&
++			if (FiosIsValidFile(_fios_path, dirent, &sb) &&
++				(!FiosIsHiddenFile(_fios_path, dirent)
++						|| strncasecmp(d_name, PERSONAL_DIR, strlen(d_name)) == 0) &&
++				(sb.st_mode & S_IFDIR) &&
+ 				strcmp(d_name, ".") != 0 && strcmp(d_name, "..") != 0) {
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_DIR;
+@@ -259,6 +263,7 @@
+ 			ttd_strlcpy(d_name, FS2OTTD(dirent->d_name), sizeof(d_name));
+ 
+ 			if (!FiosIsValidFile(_fios_path, dirent, &sb) || !(sb.st_mode & S_IFREG)) continue;
++			if (FiosIsHiddenFile(_fios_path, dirent)) continue;
+ 
+ 			/* File has no extension, skip it */
+ 			if ((t = strrchr(d_name, '.')) == NULL) continue;
+Index: win32.cpp
+===================================================================
+--- win32.cpp	(revision 8904)
++++ win32.cpp	(working copy)
+@@ -743,7 +743,6 @@
+ 	// hectonanoseconds between Windows and POSIX epoch
+ 	static const int64 posix_epoch_hns = 0x019DB1DED53E8000LL;
+ 	const WIN32_FIND_DATAW *fd = &ent->dir->fd;
+-	if (fd->dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) return false;
+ 
+ 	sb->st_size  = ((uint64) fd->nFileSizeHigh << 32) + fd->nFileSizeLow;
+ 	/* UTC FILETIME to seconds-since-1970 UTC
+@@ -757,6 +756,12 @@
+ 	return true;
+ }
+ 
++bool FiosIsHiddenFile(const char *path, const struct dirent *ent)
++{
++	const WIN32_FIND_DATAW *fd = &ent->dir->fd;
++	return (fd->dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM));
++}
++    
+ bool FiosGetDiskFreeSpace(const char *path, uint32 *tot)
+ {
+ 	UINT sem = SetErrorMode(SEM_FAILCRITICALERRORS);  // disable 'no-disk' message box
+Index: os2.cpp
+===================================================================
+--- os2.cpp	(revision 8904)
++++ os2.cpp	(working copy)
+@@ -116,9 +116,15 @@
+ 	snprintf(filename, lengthof(filename), "%s" PATHSEP "%s", path, ent->d_name);
+ 	if (stat(filename, sb) != 0) return false;
+ 
+-	return (ent->d_name[0] != '.'); // hidden file
++	return true;
+ }
+ 
++bool FiosIsHiddenFile(const char *path, const struct dirent *ent)
++{
++	return (ent->d_name[0] == '.');
++}
++    
++
+ static void ChangeWorkingDirectory(char *exe)
+ {
+ 	char *s = strrchr(exe, PATHSEPCHAR);
+Index: unix.cpp
+===================================================================
+--- unix.cpp	(revision 8904)
++++ unix.cpp	(working copy)
+@@ -94,9 +94,14 @@
+ 
+ 	if (stat(filename, sb) != 0) return false;
+ 
+-	return (ent->d_name[0] != '.'); // hidden file
++	return true;
+ }
+ 
++bool FiosIsHiddenFile(const char *path, const struct dirent *ent)
++{
++	return (ent->d_name[0] == '.');
++}
++
+ #if defined(__BEOS__) || defined(__linux__)
+ static void ChangeWorkingDirectory(char *exe)
+ {

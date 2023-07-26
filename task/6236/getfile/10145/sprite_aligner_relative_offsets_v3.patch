@@ -1,0 +1,180 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 27171)
++++ src/lang/english.txt	(working copy)
+@@ -2880,6 +2880,10 @@
+ STR_SPRITE_ALIGNER_SPRITE_TOOLTIP                               :{BLACK}Representation of the currently selected sprite. The alignment is ignored when drawing this sprite
+ STR_SPRITE_ALIGNER_MOVE_TOOLTIP                                 :{BLACK}Move the sprite around, changing the X and Y offsets
+ STR_SPRITE_ALIGNER_OFFSETS                                      :{BLACK}X offset: {NUM}, Y offset: {NUM}
++STR_SPRITE_ALIGNER_RESET_BUTTON                                 :{BLACK}Reset relative
++STR_SPRITE_ALIGNER_RESET_TOOLTIP                                :{BLACK}Reset the current relative offsets
++STR_SPRITE_ALIGNER_OFFSETS_ABS                                  :{BLACK}X offset: {NUM}, Y offset: {NUM} (Absolute)
++STR_SPRITE_ALIGNER_OFFSETS_REL                                  :{BLACK}X offset: {NUM}, Y offset: {NUM} (Relative)
+ STR_SPRITE_ALIGNER_PICKER_BUTTON                                :{BLACK}Pick sprite
+ STR_SPRITE_ALIGNER_PICKER_TOOLTIP                               :{BLACK}Pick a sprite from anywhere on the screen
+ 
+Index: src/newgrf_debug_gui.cpp
+===================================================================
+--- src/newgrf_debug_gui.cpp	(revision 27171)
++++ src/newgrf_debug_gui.cpp	(working copy)
+@@ -806,8 +806,10 @@
+ 
+ /** Window used for aligning sprites. */
+ struct SpriteAlignerWindow : Window {
+-	SpriteID current_sprite; ///< The currently shown sprite
++	typedef SmallPair<int16, int16> XyOffs;    ///< Pair for x and y offsets of the sprite before alignment. First value contains the x offset, second value y offset.
++	SpriteID current_sprite;                   ///< The currently shown sprite
+ 	Scrollbar *vscroll;
++	SmallMap<SpriteID, XyOffs> offs_start_map; ///< Mapping of starting offsets for the sprites which have been aligned in the sprite aligner window.
+ 
+ 	SpriteAlignerWindow(WindowDesc *desc, WindowNumber wno) : Window(desc)
+ 	{
+@@ -821,6 +823,7 @@
+ 
+ 	virtual void SetStringParameters(int widget) const
+ 	{
++		const Sprite *spr = GetSprite(this->current_sprite, ST_NORMAL);
+ 		switch (widget) {
+ 			case WID_SA_CAPTION:
+ 				SetDParam(0, this->current_sprite);
+@@ -828,11 +831,27 @@
+ 				break;
+ 
+ 			case WID_SA_OFFSETS: {
+-				const Sprite *spr = GetSprite(this->current_sprite, ST_NORMAL);
+ 				SetDParam(0, spr->x_offs);
+ 				SetDParam(1, spr->y_offs);
+ 				break;
+ 			}
++			case WID_SA_OFFSETS_REL: {
++				/*
++				 * Relative offset is new absolute offset - starting absolute offset.
++				 *
++				 * Show 0, 0 as the relative offsets if Find() returns pointer behind the last valid item in mapping.
++				 * In this case, the offsets for this sprite are not yet in mapping.
++				 */
++				const SmallPair<SpriteID, XyOffs> *key_offs_pair = this->offs_start_map.Find(this->current_sprite);
++				if (key_offs_pair != this->offs_start_map.End()) {
++					SetDParam(0, spr->x_offs - key_offs_pair->second.first);
++					SetDParam(1, spr->y_offs - key_offs_pair->second.second);
++				} else {
++					SetDParam(0, 0);
++					SetDParam(1, 0);
++				}
++				break;
++			}
+ 
+ 			default:
+ 				break;
+@@ -949,6 +968,10 @@
+ 				 * particular NewGRF developer.
+ 				 */
+ 				Sprite *spr = const_cast<Sprite *>(GetSprite(this->current_sprite, ST_NORMAL));
++				/* Remember the original offsets of the current sprite, if not already in mapping. */
++				if (!(this->offs_start_map.Contains(this->current_sprite))) {
++					this->offs_start_map.Insert(this->current_sprite, XyOffs(spr->x_offs, spr->y_offs));
++				}
+ 				switch (widget) {
+ 					case WID_SA_UP:    spr->y_offs--; break;
+ 					case WID_SA_DOWN:  spr->y_offs++; break;
+@@ -960,6 +983,13 @@
+ 				MarkWholeScreenDirty();
+ 				break;
+ 			}
++
++			case WID_SA_RESET_REL: {
++				/* Reset the starting offsets for the current sprite. */
++				this->offs_start_map.Erase(this->current_sprite);
++				this->SetDirty();
++				break;
++			}
+ 		}
+ 	}
+ 
+@@ -1035,8 +1065,12 @@
+ 					NWidget(WWT_PUSHIMGBTN, COLOUR_GREY, WID_SA_DOWN), SetDataTip(SPR_ARROW_DOWN, STR_SPRITE_ALIGNER_MOVE_TOOLTIP), SetResize(0, 0),
+ 					NWidget(NWID_SPACER), SetFill(1, 1),
+ 				EndContainer(),
++				NWidget(WWT_LABEL, COLOUR_GREY, WID_SA_OFFSETS), SetDataTip(STR_SPRITE_ALIGNER_OFFSETS_ABS, STR_NULL), SetPadding(0, 10, 0, 10),
++				NWidget(WWT_LABEL, COLOUR_GREY, WID_SA_OFFSETS_REL), SetDataTip(STR_SPRITE_ALIGNER_OFFSETS_REL, STR_NULL), SetPadding(0, 10, 0, 10),
+ 				NWidget(NWID_HORIZONTAL), SetPIP(10, 5, 10),
+-					NWidget(WWT_LABEL, COLOUR_GREY, WID_SA_OFFSETS), SetDataTip(STR_SPRITE_ALIGNER_OFFSETS, STR_NULL), SetFill(1, 0),
++					NWidget(NWID_SPACER), SetFill(1, 1),
++					NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_SA_RESET_REL), SetDataTip(STR_SPRITE_ALIGNER_RESET_BUTTON, STR_SPRITE_ALIGNER_RESET_TOOLTIP), SetFill(0, 0),
++					NWidget(NWID_SPACER), SetFill(1, 1),
+ 				EndContainer(),
+ 			EndContainer(),
+ 			NWidget(NWID_VERTICAL), SetPIP(10, 5, 10),
+Index: src/script/api/game/game_window.hpp.sq
+===================================================================
+--- src/script/api/game/game_window.hpp.sq	(revision 27171)
++++ src/script/api/game/game_window.hpp.sq	(working copy)
+@@ -775,9 +775,11 @@
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_SA_DOWN,                               "WID_SA_DOWN");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_SA_SPRITE,                             "WID_SA_SPRITE");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_SA_OFFSETS,                            "WID_SA_OFFSETS");
++	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_SA_OFFSETS_REL,                        "WID_SA_OFFSETS_REL");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_SA_PICKER,                             "WID_SA_PICKER");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_SA_LIST,                               "WID_SA_LIST");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_SA_SCROLLBAR,                          "WID_SA_SCROLLBAR");
++	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_SA_RESET_REL,                          "WID_SA_RESET_REL");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_NP_SHOW_NUMPAR,                        "WID_NP_SHOW_NUMPAR");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_NP_NUMPAR_DEC,                         "WID_NP_NUMPAR_DEC");
+ 	SQGSWindow.DefSQConst(engine, ScriptWindow::WID_NP_NUMPAR_INC,                         "WID_NP_NUMPAR_INC");
+Index: src/script/api/script_window.hpp
+===================================================================
+--- src/script/api/script_window.hpp	(revision 27171)
++++ src/script/api/script_window.hpp	(working copy)
+@@ -1800,10 +1800,12 @@
+ 		WID_SA_RIGHT                                 = ::WID_SA_RIGHT,                                 ///< Move the sprite to the right.
+ 		WID_SA_DOWN                                  = ::WID_SA_DOWN,                                  ///< Move the sprite down.
+ 		WID_SA_SPRITE                                = ::WID_SA_SPRITE,                                ///< The actual sprite.
+-		WID_SA_OFFSETS                               = ::WID_SA_OFFSETS,                               ///< The sprite offsets.
++		WID_SA_OFFSETS                               = ::WID_SA_OFFSETS,                               ///< The sprite offsets (absolute).
++		WID_SA_OFFSETS_REL                           = ::WID_SA_OFFSETS_REL,                           ///< The sprite offsets (relative).
+ 		WID_SA_PICKER                                = ::WID_SA_PICKER,                                ///< Sprite picker.
+ 		WID_SA_LIST                                  = ::WID_SA_LIST,                                  ///< Queried sprite list.
+ 		WID_SA_SCROLLBAR                             = ::WID_SA_SCROLLBAR,                             ///< Scrollbar for sprite list.
++		WID_SA_RESET_REL                             = ::WID_SA_RESET_REL,                             ///< Reset relative sprite offset.
+ 	};
+ 
+ 	/* automatically generated from ../../widgets/newgrf_widget.h */
+Index: src/widgets/newgrf_debug_widget.h
+===================================================================
+--- src/widgets/newgrf_debug_widget.h	(revision 27171)
++++ src/widgets/newgrf_debug_widget.h	(working copy)
+@@ -25,19 +25,21 @@
+ 
+ /** Widgets of the #SpriteAlignerWindow class. */
+ enum SpriteAlignerWidgets {
+-	WID_SA_CAPTION,   ///< Caption of the window.
+-	WID_SA_PREVIOUS,  ///< Skip to the previous sprite.
+-	WID_SA_GOTO,      ///< Go to a given sprite.
+-	WID_SA_NEXT,      ///< Skip to the next sprite.
+-	WID_SA_UP,        ///< Move the sprite up.
+-	WID_SA_LEFT,      ///< Move the sprite to the left.
+-	WID_SA_RIGHT,     ///< Move the sprite to the right.
+-	WID_SA_DOWN,      ///< Move the sprite down.
+-	WID_SA_SPRITE,    ///< The actual sprite.
+-	WID_SA_OFFSETS,   ///< The sprite offsets.
+-	WID_SA_PICKER,    ///< Sprite picker.
+-	WID_SA_LIST,      ///< Queried sprite list.
+-	WID_SA_SCROLLBAR, ///< Scrollbar for sprite list.
++	WID_SA_CAPTION,     ///< Caption of the window.
++	WID_SA_PREVIOUS,    ///< Skip to the previous sprite.
++	WID_SA_GOTO,        ///< Go to a given sprite.
++	WID_SA_NEXT,        ///< Skip to the next sprite.
++	WID_SA_UP,          ///< Move the sprite up.
++	WID_SA_LEFT,        ///< Move the sprite to the left.
++	WID_SA_RIGHT,       ///< Move the sprite to the right.
++	WID_SA_DOWN,        ///< Move the sprite down.
++	WID_SA_SPRITE,      ///< The actual sprite.
++	WID_SA_OFFSETS,     ///< The sprite offsets (absolute).
++	WID_SA_OFFSETS_REL, ///< The sprite offsets (relative).
++	WID_SA_PICKER,      ///< Sprite picker.
++	WID_SA_LIST,        ///< Queried sprite list.
++	WID_SA_SCROLLBAR,   ///< Scrollbar for sprite list.
++	WID_SA_RESET_REL,   ///< Reset relative sprite offset
+ };
+ 
+ #endif /* WIDGETS_NEWGRF_DEBUG_WIDGET_H */

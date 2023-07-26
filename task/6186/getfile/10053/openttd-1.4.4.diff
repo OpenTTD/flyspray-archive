@@ -1,0 +1,912 @@
+diff -urN openttd-1.4.4-o/source.list openttd-1.4.4/source.list
+--- openttd-1.4.4-o/source.list	2014-10-22 05:06:38.000000000 +1030
++++ openttd-1.4.4/source.list	2014-12-17 05:55:52.000000000 +1030
+@@ -98,6 +98,8 @@
+ 	#else
+ 		#if OS2
+ 			os/os2/os2.cpp
++			os/os2/getnameinfo.c
++			os/os2/getaddrinfo.c
+ 		#else
+ 			#if OSX
+ 				os/macosx/crashlog_osx.cpp
+diff -urN openttd-1.4.4-o/src/network/core/address.cpp openttd-1.4.4/src/network/core/address.cpp
+--- openttd-1.4.4-o/src/network/core/address.cpp	2014-10-22 05:06:30.000000000 +1030
++++ openttd-1.4.4/src/network/core/address.cpp	2014-12-14 14:19:52.000000000 +1030
+@@ -354,11 +354,12 @@
+ 		DEBUG(net, 3, "[%s] could not set reusable %s sockets for port %s: %s", type, family, address, strerror(errno));
+ 	}
+ 
++#ifndef __OS2__
+ 	if (runp->ai_family == AF_INET6 &&
+ 			setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&on, sizeof(on)) == -1) {
+ 		DEBUG(net, 3, "[%s] could not disable IPv4 over IPv6 on port %s: %s", type, address, strerror(errno));
+ 	}
+-
++#endif
+ 	if (bind(sock, runp->ai_addr, (int)runp->ai_addrlen) != 0) {
+ 		DEBUG(net, 1, "[%s] could not bind on %s port %s: %s", type, family, address, strerror(errno));
+ 		closesocket(sock);
+diff -urN openttd-1.4.4-o/src/network/core/os_abstraction.h openttd-1.4.4/src/network/core/os_abstraction.h
+--- openttd-1.4.4-o/src/network/core/os_abstraction.h	2014-10-22 05:06:30.000000000 +1030
++++ openttd-1.4.4/src/network/core/os_abstraction.h	2014-12-14 14:16:40.000000000 +1030
+@@ -239,11 +239,38 @@
+ #	include <netdb.h>
+ #	include <nerrno.h>
+ #	define INADDR_NONE 0xffffffff
++#       include "../../os/os2/getaddrinfo.h"
++#       include "../../os/os2/getnameinfo.h"
++
++#define IPV6_V6ONLY 27
++
++/*
++ * IPv6 address
++ */
++struct in6_addr {
++	union {
++		uint8_t		__u6_addr8[16];
++		uint16_t	__u6_addr16[8];
++		uint32_t	__u6_addr32[4];
++	} __u6_addr;			/* 128-bit IP6 address */
++};
++
++#define s6_addr   __u6_addr.__u6_addr8
++
++struct sockaddr_in6 {
++         uint8_t         sin6_len;       /* length of this struct */
++         sa_family_t     sin6_family;    /* AF_INET6 */
++         in_port_t       sin6_port;      /* Transport layer port # */
++         uint32_t        sin6_flowinfo;  /* IP6 flow information */
++         struct in6_addr sin6_addr;      /* IP6 address */
++         uint32_t        sin6_scope_id;  /* scope zone index */
++};
+ 
+ typedef int socklen_t;
+ #if !defined(__INNOTEK_LIBC__)
+ typedef unsigned long in_addr_t;
+ #endif /* __INNOTEK_LIBC__ */
++
+ #endif /* OS/2 */
+ 
+ /* MorphOS and Amiga stuff */
+diff -urN openttd-1.4.4-o/src/os/os2/getaddrinfo.c openttd-1.4.4/src/os/os2/getaddrinfo.c
+--- openttd-1.4.4-o/src/os/os2/getaddrinfo.c	1970-01-01 10:30:00.000000000 +1030
++++ openttd-1.4.4/src/os/os2/getaddrinfo.c	2014-01-17 19:23:02.000000000 +1030
+@@ -0,0 +1,300 @@
++
++/*
++ *  This file is part of libESMTP, a library for submission of RFC 2822
++ *  formatted electronic mail messages using the SMTP protocol described
++ *  in RFC 2821.
++ *
++ *  Copyright (C) 2001,2002  Brian Stafford  <brian@stafford.uklinux.net>
++ *
++ *  This library is free software; you can redistribute it and/or
++ *  modify it under the terms of the GNU Lesser General Public
++ *  License as published by the Free Software Foundation; either
++ *  version 2.1 of the License, or (at your option) any later version.
++ *
++ *  This library is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *  Lesser General Public License for more details.
++ *
++ *  You should have received a copy of the GNU Lesser General Public
++ *  License along with this library; if not, write to the Free Software
++ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++/* An emulation of the RFC 2553 / Posix getaddrinfo resolver interface.
++ */
++
++#if !HAVE_GETADDRINFO
++
++/* Need to turn off Posix features in glibc to build this */
++#undef _POSIX_C_SOURCE
++#undef _XOPEN_SOURCE
++
++#include "getaddrinfo.h"
++//#include "compat/inet_pton.h"
++
++#include <string.h>
++#include <ctype.h>
++#include <errno.h>
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <arpa/inet.h>
++#include <netdb.h>
++
++static struct addrinfo *
++dup_addrinfo (struct addrinfo *info, void *addr, size_t addrlen) {
++    struct addrinfo *ret;
++
++    ret = malloc (sizeof (struct addrinfo));
++    if (ret == NULL)
++        return NULL;
++    memcpy (ret, info, sizeof (struct addrinfo));
++    ret->ai_addr = malloc (addrlen);
++    if (ret->ai_addr == NULL) {
++        free (ret);
++        return NULL;
++    }
++    memcpy (ret->ai_addr, addr, addrlen);
++    ret->ai_addrlen = addrlen;
++    return ret;
++}
++
++int
++getaddrinfo (const char *nodename, const char *servname,
++              const struct addrinfo *hints, struct addrinfo **res)
++{
++    struct hostent *hp;
++    struct servent *servent;
++    const char *socktype;
++    int port;
++    struct addrinfo hint, result;
++    struct addrinfo *ai, *sai, *eai;
++    char **addrs;
++
++    if (servname == NULL && nodename == NULL)
++        return EAI_NONAME;
++
++    memset (&result, 0, sizeof result);
++
++    /* default for hints */
++    if (hints == NULL) {
++        memset (&hint, 0, sizeof hint);
++        hint.ai_family = PF_UNSPEC;
++        hints = &hint;
++    }
++
++    if (servname == NULL)
++        port = 0;
++    else {
++        /* check for tcp or udp sockets only */
++        if (hints->ai_socktype == SOCK_STREAM)
++            socktype = "tcp";
++        else if (hints->ai_socktype == SOCK_DGRAM)
++            socktype = "udp";
++        else
++            return EAI_SERVICE;
++        result.ai_socktype = hints->ai_socktype;
++
++        /* Note: maintain port in host byte order to make debugging easier */
++        if (isdigit (*servname))
++            port = strtol (servname, NULL, 10);
++        else if ((servent = getservbyname (servname, socktype)) != NULL)
++            port = ntohs (servent->s_port);
++        else
++            return EAI_NONAME;
++    }
++
++    /* if nodename == NULL refer to the local host for a client or any
++       for a server */
++    if (nodename == NULL) {
++        struct sockaddr_in sin;
++
++        /* check protocol family is PF_UNSPEC or PF_INET - could try harder
++           for IPv6 but that's more code than I'm prepared to write */
++        if (hints->ai_family == PF_UNSPEC || hints->ai_family == PF_INET)
++            result.ai_family = AF_INET;
++        else
++            return EAI_FAMILY;
++
++        sin.sin_family = result.ai_family;
++        sin.sin_port = htons (port);
++        if (hints->ai_flags & AI_PASSIVE)
++            sin.sin_addr.s_addr = htonl (INADDR_ANY);
++        else
++            sin.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
++        /* Duplicate result and addr and return */
++        *res = dup_addrinfo (&result, &sin, sizeof sin);
++        return (*res == NULL) ? EAI_MEMORY : 0;
++    }
++
++    /* If AI_NUMERIC is specified, use inet_pton to translate numbers and
++       dots notation. */
++    if (hints->ai_flags & AI_NUMERICHOST) {
++        struct sockaddr_in sin;
++
++        /* check protocol family is PF_UNSPEC or PF_INET */
++        if (hints->ai_family == PF_UNSPEC || hints->ai_family == PF_INET)
++            result.ai_family = AF_INET;
++        else
++            return EAI_FAMILY;
++
++        sin.sin_family = result.ai_family;
++        sin.sin_port = htons (port);
++        if (inet_pton(result.ai_family, nodename, &sin.sin_addr)==0)
++            return EAI_NONAME;
++        sin.sin_addr.s_addr = inet_addr (nodename);
++        /* Duplicate result and addr and return */
++        *res = dup_addrinfo (&result, &sin, sizeof sin);
++        return (*res == NULL) ? EAI_MEMORY : 0;
++    }
++
++#if HAVE_H_ERRNO
++    h_errno = 0;
++#endif
++    errno = 0;
++    hp = gethostbyname(nodename);
++    if (hp == NULL) {
++#ifdef EAI_SYSTEM
++        if (errno != 0) {
++            return EAI_SYSTEM;
++        }
++#endif
++        switch (h_errno) {
++        case HOST_NOT_FOUND:
++            return EAI_NODATA;
++        case NO_DATA:
++            return EAI_NODATA;
++#if defined(NO_ADDRESS) && NO_ADDRESS != NO_DATA
++        case NO_ADDRESS:
++            return EAI_NODATA;
++#endif
++        case NO_RECOVERY:
++            return EAI_FAIL;
++        case TRY_AGAIN:
++            return EAI_AGAIN;
++        default:
++            return EAI_FAIL;
++        }
++        return EAI_FAIL;
++    }
++
++    /* Check that the address family is acceptable.
++     */
++    switch (hp->h_addrtype) {
++    case AF_INET:
++        if (!(hints->ai_family == PF_UNSPEC || hints->ai_family == PF_INET))
++            return EAI_FAMILY;
++        break;
++#ifndef __OS2__
++    case AF_INET6:
++        if (!(hints->ai_family == PF_UNSPEC || hints->ai_family == PF_INET6))
++            return EAI_FAMILY;
++        break;
++#endif
++    default:
++        return EAI_FAMILY;
++    }
++
++    /* For each element pointed to by hp, create an element in the
++       result linked list. */
++    sai = eai = NULL;
++    for (addrs = hp->h_addr_list; *addrs != NULL; addrs++) {
++        struct sockaddr sa;
++        size_t addrlen;
++
++        if (hp->h_length < 1)
++            continue;
++        sa.sa_family = hp->h_addrtype;
++        switch (hp->h_addrtype) {
++        case AF_INET:
++            ((struct sockaddr_in *) &sa)->sin_port = htons (port);
++            memcpy (&((struct sockaddr_in *) &sa)->sin_addr,
++                    *addrs, hp->h_length);
++            addrlen = sizeof (struct sockaddr_in);
++            break;
++#ifndef __OS2__
++        case AF_INET6:
++#if SIN6_LEN
++            ((struct sockaddr_in6 *) &sa)->sin6_len = hp->h_length;
++#endif
++            ((struct sockaddr_in6 *) &sa)->sin6_port = htons (port);
++            memcpy (&((struct sockaddr_in6 *) &sa)->sin6_addr,
++                    *addrs, hp->h_length);
++            addrlen = sizeof (struct sockaddr_in6);
++            break;
++#endif
++        default:
++            continue;
++        }
++
++        result.ai_family = hp->h_addrtype;
++        ai = dup_addrinfo (&result, &sa, addrlen);
++        if (ai == NULL) {
++            freeaddrinfo (sai);
++            return EAI_MEMORY;
++        }
++        if (sai == NULL)
++            sai = ai;
++        else
++            eai->ai_next = ai;
++        eai = ai;
++    }
++
++    if (sai == NULL) {
++        return EAI_NODATA;
++    }
++
++    if (hints->ai_flags & AI_CANONNAME) {
++        sai->ai_canonname = malloc (strlen (hp->h_name) + 1);
++        if (sai->ai_canonname == NULL) {
++            freeaddrinfo (sai);
++            return EAI_MEMORY;
++        }
++        strcpy (sai->ai_canonname, hp->h_name);
++    }
++
++    *res = sai;
++    return 0;
++}
++
++void
++freeaddrinfo (struct addrinfo *ai)
++{
++    struct addrinfo *next;
++
++    while (ai != NULL) {
++        next = ai->ai_next;
++        if (ai->ai_canonname != NULL)
++            free (ai->ai_canonname);
++        if (ai->ai_addr != NULL)
++            free (ai->ai_addr);
++        free (ai);
++        ai = next;
++    }
++}
++
++const char *
++gai_strerror (int ecode)
++{
++    static const char *eai_descr[] = {
++        "no error",
++        "address family for nodename not supported",	/* EAI_ADDRFAMILY */
++        "temporary failure in name resolution",		/* EAI_AGAIN */
++        "invalid value for ai_flags",	 		/* EAI_BADFLAGS */
++        "non-recoverable failure in name resolution",	/* EAI_FAIL */
++        "ai_family not supported",			/* EAI_FAMILY */
++        "memory allocation failure",			/* EAI_MEMORY */
++        "no address associated with nodename",		/* EAI_NODATA */
++        "nodename nor servname provided, or not known",	/* EAI_NONAME */
++        "servname not supported for ai_socktype",		/* EAI_SERVICE */
++        "ai_socktype not supported",			/* EAI_SOCKTYPE */
++        "system error returned in errno",			/* EAI_SYSTEM */
++        "argument buffer overflow",			/* EAI_OVERFLOW */
++    };
++
++    if (ecode < 0 || ecode > (int) (sizeof eai_descr/ sizeof eai_descr[0]))
++        return "unknown error";
++    return eai_descr[ecode];
++}
++
++#endif /* HAVE_GETADDRINFO */
+diff -urN openttd-1.4.4-o/src/os/os2/getaddrinfo.h openttd-1.4.4/src/os/os2/getaddrinfo.h
+--- openttd-1.4.4-o/src/os/os2/getaddrinfo.h	1970-01-01 10:30:00.000000000 +1030
++++ openttd-1.4.4/src/os/os2/getaddrinfo.h	2014-01-17 19:15:20.000000000 +1030
+@@ -0,0 +1,101 @@
++#ifndef _getaddrinfo_h
++#define _getaddrinfo_h
++
++/*
++ *  Shamelessly duplicated from the fetchmail public sources
++ *  for use by the Squid Project under GNU Public License.
++ *
++ * Update/Maintenance History:
++ *
++ *    15-Aug-2007 : Copied from fetchmail 6.3.8
++ *			- added protection around libray headers
++ *
++ *    16-Aug-2007 : Altered configure checks
++ *                  Un-hacked slightly to use system gethostbyname()
++ *
++ *  Original License and code follows.
++ */
++
++/*
++ *  This file is part of libESMTP, a library for submission of RFC 2822
++ *  formatted electronic mail messages using the SMTP protocol described
++ *  in RFC 2821.
++ *
++ *  Copyright (C) 2001,2002  Brian Stafford  <brian@stafford.uklinux.net>
++ *
++ *  This library is free software; you can redistribute it and/or
++ *  modify it under the terms of the GNU Lesser General Public
++ *  License as published by the Free Software Foundation; either
++ *  version 2.1 of the License, or (at your option) any later version.
++ *
++ *  This library is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *  Lesser General Public License for more details.
++ *
++ *  You should have received a copy of the GNU Lesser General Public
++ *  License along with this library; if not, write to the Free Software
++ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++/* Structure and prototypes taken from RFC 2553 */
++
++/* SG 23/09/2007:
++On Windows the following definitions are already available, may be that
++this could be needed on some other platform */
++typedef int socklen_t;
++
++struct addrinfo {
++    int ai_flags;  	  	/* AI_PASSIVE, AI_CANONNAME, AI_NUMERICHOST */
++    int ai_family; 	  	/* PF_xxx */
++    int ai_socktype;	 	/* SOCK_xxx */
++    int ai_protocol;	 	/* 0 or IPPROTO_xxx for IPv4 and IPv6 */
++    socklen_t ai_addrlen;	/* length of ai_addr */
++    char *ai_canonname;		/* canonical name for nodename */
++    struct sockaddr *ai_addr;	/* binary address */
++    struct addrinfo *ai_next;	/* next structure in linked list */
++};
++
++/* Supposed to be defined in <netdb.h> */
++#define AI_ADDRCONFIG  0
++#define AI_PASSIVE     1       /* Socket address is intended for `bind'.  */
++#define AI_CANONNAME   2       /* Request for canonical name.  */
++#define AI_NUMERICHOST 4       /* Don't use name resolution.  */
++
++/* Supposed to be defined in <netdb.h> */
++#define EAI_ADDRFAMILY 1   /* address family for nodename not supported */
++#define EAI_AGAIN      2   /* temporary failure in name resolution */
++#define EAI_BADFLAGS   3   /* invalid value for ai_flags */
++#define EAI_FAIL       4   /* non-recoverable failure in name resolution */
++#define EAI_FAMILY     5   /* ai_family not supported */
++#define EAI_MEMORY     6   /* memory allocation failure */
++#define EAI_NODATA     7   /* no address associated with nodename */
++#define EAI_NONAME     8   /* nodename nor servname provided, or not known */
++#define EAI_SERVICE    9   /* servname not supported for ai_socktype */
++#define EAI_SOCKTYPE   10  /* ai_socktype not supported */
++
++#ifndef EAI_SYSTEM
++/* Not defined on mingw32. */
++#define EAI_SYSTEM     11  /* System error returned in `errno'.  */
++#endif
++#ifndef EAI_OVERFLOW
++/* Not defined on mingw32. */
++#define EAI_OVERFLOW   12 /* Argument buffer overflow.  */
++#endif
++
++#ifdef	__cplusplus
++extern "C" {
++#endif
++/* RFC 2553 / Posix resolver */
++int getaddrinfo (const char *nodename, const char *servname,
++                               const struct addrinfo *hints, struct addrinfo **res);
++/* Free addrinfo structure and associated storage */
++void freeaddrinfo (struct addrinfo *ai);
++
++/* Convert error return from getaddrinfo() to string */
++const char *gai_strerror (int code);
++#ifdef	__cplusplus
++}
++#endif
++
++#endif /* _getaddrinfo_h */
+diff -urN openttd-1.4.4-o/src/os/os2/getnameinfo.c openttd-1.4.4/src/os/os2/getnameinfo.c
+--- openttd-1.4.4-o/src/os/os2/getnameinfo.c	1970-01-01 10:30:00.000000000 +1030
++++ openttd-1.4.4/src/os/os2/getnameinfo.c	2014-01-17 19:00:06.000000000 +1030
+@@ -0,0 +1,369 @@
++/*	KAME: getnameinfo.c,v 1.72 2005/01/13 04:12:03 itojun Exp 	*/
++
++/*
++ * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the project nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE PROJECT AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE PROJECT OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*
++ * Issues to be discussed:
++ * - RFC2553 says that we should raise error on short buffer.  X/Open says
++ *   we need to truncate the result.  We obey RFC2553 (and X/Open should be
++ *   modified).  ipngwg rough consensus seems to follow RFC2553.  RFC3493 says
++ *   nothing about it, but defines a new error code EAI_OVERFLOW which seems
++ *   to be intended the code for this case.
++ * - What is "local" in NI_NOFQDN?  (see comments in the code)
++ * - NI_NAMEREQD and NI_NUMERICHOST conflict with each other.
++ * - (KAME extension) always attach textual scopeid (fe80::1%lo0), if
++ *   sin6_scope_id is filled - standardization status?
++ * - what should we do if we should do getservbyport("sctp")?
++ */
++
++/*
++ * Considerations about thread-safeness
++ *   The code in this file is thread-safe, and so the thread-safeness of
++ *   getnameinfo() depends on the property of backend functions.
++ *     - getservbyport() is not thread safe for most systems we are targeting.
++ *     - getipnodebyaddr() is thread safe.  However, many resolver libraries
++ *       used in the function are not thread safe.
++ *     - gethostbyaddr() is usually not thread safe.
++ */
++
++#if !HAVE_GETNAMEINFO
++
++#include <sys/socket.h>
++#include <net/if.h>
++#include <netinet/in.h>
++#include <arpa/inet.h>
++#include <arpa/nameser.h>
++#include <netdb.h>
++#include <resolv.h>
++#include <string.h>
++#include <stddef.h>
++#include <errno.h>
++#include <inttypes.h>
++#include "getaddrinfo.h"
++#include "getnameinfo.h"
++
++static const struct afd {
++    int a_af;
++    int a_addrlen;
++    int a_socklen;
++    int a_off;
++    int a_portoff;
++} afdl [] = {
++#if INET6
++    {PF_INET6, sizeof(struct in6_addr), sizeof(struct sockaddr_in6),
++        offsetof(struct sockaddr_in6, sin6_addr),
++        offsetof(struct sockaddr_in6, sin6_port)},
++#endif
++    {PF_INET, sizeof(struct in_addr), sizeof(struct sockaddr_in),
++     offsetof(struct sockaddr_in, sin_addr),
++     offsetof(struct sockaddr_in, sin_port)},
++    {0, 0, 0, 0, 0},
++};
++
++#if INET6
++static int ip6_parsenumeric __P((const struct sockaddr *, const char *, char *,
++                                 size_t, int));
++static int ip6_sa2str __P((const struct sockaddr_in6 *, char *, size_t, int));
++#endif
++
++int
++getnameinfo(sa, salen, host, hostlen, serv, servlen, flags)
++const struct sockaddr *sa;
++socklen_t salen;
++char *host;
++size_t hostlen;
++char *serv;
++size_t servlen;
++int flags;
++{
++    const struct afd *afd;
++    struct servent *sp;
++    struct hostent *hp;
++    unsigned short port;
++    int family, i;
++    const char *addr;
++    uint32_t v4a;
++    char numserv[512];
++
++    if (sa == NULL)
++        return EAI_FAIL;
++
++#if HAVE_SA_LEN	/*XXX*/
++    if (sa->sa_len != salen)
++        return EAI_FAIL;
++#endif
++
++    family = sa->sa_family;
++    for (i = 0; afdl[i].a_af; i++)
++        if (afdl[i].a_af == family) {
++            afd = &afdl[i];
++            goto found;
++        }
++    return EAI_FAMILY;
++
++found:
++    if (salen != afd->a_socklen)
++        return EAI_FAIL;
++
++    /* network byte order */
++    memcpy(&port, (const char *)sa + afd->a_portoff, sizeof(port));
++    addr = (const char *)sa + afd->a_off;
++
++    if (serv == NULL || servlen == 0) {
++        /*
++         * do nothing in this case.
++         * in case you are wondering if "&&" is more correct than
++         * "||" here: RFC3493 says that serv == NULL OR servlen == 0
++         * means that the caller does not want the result.
++         */
++    } else {
++        if (flags & NI_NUMERICSERV)
++            sp = NULL;
++        else {
++            sp = getservbyport(port,
++                               (flags & NI_DGRAM) ? "udp" : "tcp");
++        }
++        if (sp) {
++            if (strlen(sp->s_name) + 1 > servlen)
++                return EAI_OVERFLOW;
++            strncpy(serv, sp->s_name, servlen);
++        } else {
++            snprintf(numserv, sizeof(numserv), "%u", ntohs(port));
++            if (strlen(numserv) + 1 > servlen)
++                return EAI_OVERFLOW;
++            strncpy(serv, numserv, servlen);
++        }
++    }
++
++    switch (sa->sa_family) {
++    case AF_INET:
++        v4a = (uint32_t)
++              ntohl(((const struct sockaddr_in *)sa)->sin_addr.s_addr);
++        if (IN_MULTICAST(v4a) || IN_EXPERIMENTAL(v4a))
++            flags |= NI_NUMERICHOST;
++        v4a >>= IN_CLASSA_NSHIFT;
++        if (v4a == 0)
++            flags |= NI_NUMERICHOST;
++        break;
++#if INET6
++    case AF_INET6: {
++        const struct sockaddr_in6 *sin6;
++        sin6 = (const struct sockaddr_in6 *)sa;
++        switch (sin6->sin6_addr.s6_addr[0]) {
++        case 0x00:
++            if (IN6_IS_ADDR_V4MAPPED(&sin6->sin6_addr))
++                ;
++            else if (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr))
++                ;
++            else
++                flags |= NI_NUMERICHOST;
++            break;
++        default:
++            if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr))
++                flags |= NI_NUMERICHOST;
++            else if (IN6_IS_ADDR_MULTICAST(&sin6->sin6_addr))
++                flags |= NI_NUMERICHOST;
++            break;
++        }
++    }
++    break;
++#endif
++    }
++    if (host == NULL || hostlen == 0) {
++        /*
++         * do nothing in this case.
++         * in case you are wondering if "&&" is more correct than
++         * "||" here: RFC3493 says that host == NULL or hostlen == 0
++         * means that the caller does not want the result.
++         */
++    } else if (flags & NI_NUMERICHOST) {
++        /* NUMERICHOST and NAMEREQD conflicts with each other */
++        if (flags & NI_NAMEREQD)
++            return EAI_NONAME;
++
++        goto numeric;
++    } else {
++#if USE_GETIPNODEBY
++        int h_error = 0;
++        hp = getipnodebyaddr(addr, afd->a_addrlen, afd->a_af, &h_error);
++#else
++        hp = gethostbyaddr(addr, afd->a_addrlen, afd->a_af);
++#if 0 // getnameinfo.c:161:9: error: variable 'h_error' set but not used
++#if HAVE_H_ERRNO
++        h_error = h_errno;
++#else
++        h_error = EINVAL;
++#endif
++#endif /* 0 */
++#endif
++
++        if (hp) {
++#if 0
++            if (flags & NI_NOFQDN) {
++                /*
++                 * According to RFC3493 section 6.2, NI_NOFQDN
++                 * means "node name portion of the FQDN shall
++                 * be returned for local hosts."  The following
++                 * code tries to implement it by returning the
++                 * first label (the part before the first
++                 * period) of the FQDN.  However, it is not
++                 * clear if this always makes sense, since the
++                 * given address may be outside of "local
++                 * hosts."  Due to the unclear description, we
++                 * disable the code in this implementation.
++                 */
++                char *p;
++                p = strchr(hp->h_name, '.');
++                if (p)
++                    *p = '\0';
++            }
++#endif
++            if (strlen(hp->h_name) + 1 > hostlen) {
++#if USE_GETIPNODEBY
++                freehostent(hp);
++#endif
++                return EAI_OVERFLOW;
++            }
++            strncpy(host, hp->h_name, hostlen);
++#if USE_GETIPNODEBY
++            freehostent(hp);
++#endif
++        } else {
++            if (flags & NI_NAMEREQD)
++                return EAI_NONAME;
++
++numeric:
++            switch (afd->a_af) {
++#if INET6
++            case AF_INET6: {
++                int error;
++
++                if ((error = ip6_parsenumeric(sa, addr, host,
++                                              hostlen,
++                                              flags)) != 0)
++                    return(error);
++                break;
++            }
++#endif
++            default:
++                if (inet_ntop(afd->a_af, addr, host,
++                              hostlen) == NULL)
++                    return EAI_SYSTEM;
++                break;
++            }
++        }
++    }
++    return(0);
++}
++
++#if INET6
++static int
++ip6_parsenumeric(sa, addr, host, hostlen, flags)
++const struct sockaddr *sa;
++const char *addr;
++char *host;
++size_t hostlen;
++int flags;
++{
++    int numaddrlen;
++    char numaddr[512];
++
++    if (inet_ntop(AF_INET6, addr, numaddr, sizeof(numaddr)) == NULL)
++        return EAI_SYSTEM;
++
++    numaddrlen = strlen(numaddr);
++    if (numaddrlen + 1 > hostlen) /* don't forget terminator */
++        return EAI_OVERFLOW;
++    strncpy(host, numaddr, hostlen);
++
++    if (((const struct sockaddr_in6 *)sa)->sin6_scope_id) {
++        char zonebuf[SQUIDHOSTNAMELEN];
++        int zonelen;
++
++        zonelen = ip6_sa2str(
++                      (const struct sockaddr_in6 *)(const void *)sa,
++                      zonebuf, sizeof(zonebuf), flags);
++        if (zonelen < 0)
++            return EAI_OVERFLOW;
++        if (zonelen + 1 + numaddrlen + 1 > hostlen)
++            return EAI_OVERFLOW;
++
++        /* construct <numeric-addr><delim><zoneid> */
++        memcpy(host + numaddrlen + 1, zonebuf,
++               (size_t)zonelen);
++        host[numaddrlen] = SCOPE_DELIMITER;
++        host[numaddrlen + 1 + zonelen] = '\0';
++    }
++
++    return 0;
++}
++
++/* ARGSUSED */
++static int
++ip6_sa2str(sa6, buf, bufsiz, flags)
++const struct sockaddr_in6 *sa6;
++char *buf;
++size_t bufsiz;
++int flags;
++{
++    unsigned int ifindex;
++    const struct in6_addr *a6;
++    int n;
++
++    ifindex = (unsigned int)sa6->sin6_scope_id;
++    a6 = &sa6->sin6_addr;
++
++#if NI_NUMERICSCOPE
++    if ((flags & NI_NUMERICSCOPE) != 0) {
++        n = snprintf(buf, bufsiz, "%u", sa6->sin6_scope_id);
++        if (n < 0 || n >= bufsiz)
++            return -1;
++        else
++            return n;
++    }
++#endif
++
++    /* if_indextoname() does not take buffer size.  not a good api... */
++    if ((IN6_IS_ADDR_LINKLOCAL(a6) || IN6_IS_ADDR_MC_LINKLOCAL(a6) ||
++            IN6_IS_ADDR_MC_NODELOCAL(a6)) && bufsiz >= IF_NAMESIZE) {
++        char *p = if_indextoname(ifindex, buf);
++        if (p)
++            return (strlen(p));
++    }
++
++    /* last resort */
++    n = snprintf(buf, bufsiz, "%u", sa6->sin6_scope_id);
++    if (n < 0 || n >= bufsiz)
++        return -1;
++    else
++        return n;
++}
++#endif /* INET6 */
++#endif
+diff -urN openttd-1.4.4-o/src/os/os2/getnameinfo.h openttd-1.4.4/src/os/os2/getnameinfo.h
+--- openttd-1.4.4-o/src/os/os2/getnameinfo.h	1970-01-01 10:30:00.000000000 +1030
++++ openttd-1.4.4/src/os/os2/getnameinfo.h	2014-01-17 19:22:04.000000000 +1030
+@@ -0,0 +1,29 @@
++#ifndef _getnameinfo_h
++#define _getnameinfo_h
++/*
++ * Reconstructed from KAME getnameinfo.c (in lib/)
++ */
++
++    /* getnameinfo flags */
++#define	NI_NOFQDN	0x0001
++#define	NI_NUMERICHOST	0x0002	/* return numeric form of address */
++#define	NI_NAMEREQD	0x0004	/* request DNS name */
++#define	NI_NUMERICSERV	0x0008
++#define	NI_DGRAM	0x0010
++
++#ifdef	__cplusplus
++extern "C" {
++#endif
++/* RFC 2553 / Posix resolver */
++int getnameinfo(const struct sockaddr *sa,
++                              socklen_t salen,
++                              char *host,
++                              size_t hostlen,
++                              char *serv,
++                              size_t servlen,
++                              int flags );
++#ifdef	__cplusplus
++}
++#endif
++
++#endif /* _getnameinfo_h */
+diff -urN openttd-1.4.4-o/src/os/os2/os2.cpp openttd-1.4.4/src/os/os2/os2.cpp
+--- openttd-1.4.4-o/src/os/os2/os2.cpp	2014-10-22 05:06:22.000000000 +1030
++++ openttd-1.4.4/src/os/os2/os2.cpp	2014-12-17 06:05:08.000000000 +1030
+@@ -215,3 +215,10 @@
+ {
+ 	return 1;
+ }
++
++void OSOpenBrowser(const char *url)
++{
++	// stub only
++	DEBUG(misc, 0, "Failed to open url: %s", url);
++	exit(0);
++}
+diff -urN openttd-1.4.4-o/src/thread/thread_os2.cpp openttd-1.4.4/src/thread/thread_os2.cpp
+--- openttd-1.4.4-o/src/thread/thread_os2.cpp	2014-10-22 05:06:28.000000000 +1030
++++ openttd-1.4.4/src/thread/thread_os2.cpp	2014-12-17 05:55:38.000000000 +1030
+@@ -36,7 +36,7 @@
+ 		param(param),
+ 		self_destruct(self_destruct)
+ 	{
+-		thread = _beginthread(stThreadProc, NULL, 32768, this);
++		thread = _beginthread(stThreadProc, NULL, 1048576, this);
+ 	}
+ 
+ 	/* virtual */ bool Exit()

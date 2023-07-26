@@ -1,0 +1,395 @@
+Index: src/base_station_base.h
+===================================================================
+--- src/base_station_base.h	(revision 27871)
++++ src/base_station_base.h	(working copy)
+@@ -22,8 +22,8 @@
+ 
+ struct StationSpecList {
+ 	const StationSpec *spec;
+-	uint32 grfid;      ///< GRF ID of this custom station
+-	uint8  localidx;   ///< Station ID within GRF of station
++	uint32 grfid;           ///< GRF ID of this custom station
++	uint16 localidx;        ///< Station ID within GRF of station
+ };
+ 
+ 
+Index: src/newgrf.cpp
+===================================================================
+--- src/newgrf.cpp	(revision 27871)
++++ src/newgrf.cpp	(working copy)
+@@ -294,7 +294,7 @@
+ 
+ typedef void (*SpecialSpriteHandler)(ByteReader *buf);
+ 
+-static const uint NUM_STATIONS_PER_GRF = 255; ///< Number of StationSpecs per NewGRF; limited to 255 to allow extending Action3 with an extended byte later on.
++static const uint NUM_STATIONS_PER_GRF = 65535; ///< Number of StationSpecs per NewGRF.
+ 
+ /** Temporary engine data used when loading only */
+ struct GRFTempEngineData {
+@@ -550,7 +550,7 @@
+  */
+ StringID MapGRFStringID(uint32 grfid, StringID str)
+ {
+-	if (IsInsideMM(str, 0xD800, 0xE000)) {
++	if (IsInsideMM(str, 0x0000D800, 0x0000E000)) {
+ 		/* General text provided by NewGRF.
+ 		 * In the specs this is called the 0xDCxx range (misc presistent texts),
+ 		 * but we meanwhile extended the range to 0xD800-0xDFFF.
+@@ -557,7 +557,7 @@
+ 		 * Note: We are not involved in the "persistent" business, since we do not store
+ 		 * any NewGRF strings in savegames. */
+ 		return GetGRFStringID(grfid, str);
+-	} else if (IsInsideMM(str, 0xD000, 0xD800)) {
++	} else if (IsInsideMM(str, 0x0000D000, 0x0000D800)) {
+ 		/* Callback text provided by NewGRF.
+ 		 * In the specs this is called the 0xD0xx range (misc graphics texts).
+ 		 * These texts can be returned by various callbacks.
+@@ -1928,7 +1928,11 @@
+ 				break;
+ 
+ 			case 0x0A: { // Copy sprite layout
+-				byte srcid = buf->ReadByte();
++				uint16 srcid;
++				if (_cur.grffile->grf_version >= 9)
++					srcid = buf->ReadExtendedByte();
++				else
++					srcid = buf->ReadByte();
+ 				const StationSpec *srcstatspec = _cur.grffile->stations[srcid];
+ 
+ 				if (srcstatspec == NULL) {
+@@ -2011,7 +2015,11 @@
+ 				break;
+ 
+ 			case 0x0F: { // Copy custom layout
+-				byte srcid = buf->ReadByte();
++				uint16 srcid;
++				if (_cur.grffile->grf_version >= 9)
++					srcid = buf->ReadExtendedByte();
++				else
++					srcid = buf->ReadByte();
+ 				const StationSpec *srcstatspec = _cur.grffile->stations[srcid];
+ 
+ 				if (srcstatspec == NULL) {
+@@ -2078,6 +2086,14 @@
+ 					if (ReadSpriteLayout(buf, num_building_sprites, false, GSF_STATIONS, true, false, dts)) return CIR_DISABLED;
+ 				}
+ 				break;
++				
++			case 0x1B: // Class name
++				if (_cur.grffile->grf_version >= 9) {
++					StationClass *staclass = StationClass::Get(statspec->cls_id);
++					AddStringForMapping(buf->ReadWord(), &staclass->name);
++				}
++				break;
++				
+ 
+ 			default:
+ 				ret = CIR_UNKNOWN;
+@@ -2213,7 +2229,7 @@
+ 				break;
+ 
+ 			case 0x10: { // purchase string
+-				StringID newone = GetGRFStringID(_cur.grffile->grfid, buf->ReadWord());
++				StringID newone = GetGRFStringID(_cur.grffile->grfid, (uint32)(buf->ReadWord()));
+ 				if (newone != STR_UNDEFINED) bridge->material = newone;
+ 				break;
+ 			}
+@@ -2220,7 +2236,7 @@
+ 
+ 			case 0x11: // description of bridge with rails or roads
+ 			case 0x12: {
+-				StringID newone = GetGRFStringID(_cur.grffile->grfid, buf->ReadWord());
++				StringID newone = GetGRFStringID(_cur.grffile->grfid, (uint32)(buf->ReadWord()));
+ 				if (newone != STR_UNDEFINED) bridge->transport_name[prop - 0x11] = newone;
+ 				break;
+ 			}
+@@ -2612,7 +2628,7 @@
+ 
+ 			case 0x0A: { // Currency display names
+ 				uint curidx = GetNewgrfCurrencyIdConverted(gvid + i);
+-				StringID newone = GetGRFStringID(_cur.grffile->grfid, buf->ReadWord());
++				StringID newone = GetGRFStringID(_cur.grffile->grfid, (uint32)(buf->ReadWord()));
+ 
+ 				if ((newone != STR_UNDEFINED) && (curidx < CURRENCY_END)) {
+ 					_currency_specs[curidx].name = newone;
+@@ -5008,9 +5024,12 @@
+ 
+ static void StationMapSpriteGroup(ByteReader *buf, uint8 idcount)
+ {
+-	uint8 *stations = AllocaM(uint8, idcount);
++	uint16 *stations = AllocaM(uint16, idcount);
+ 	for (uint i = 0; i < idcount; i++) {
+-		stations[i] = buf->ReadByte();
++		if (_cur.grffile->grf_version >= 9) 
++			stations[i] = buf->ReadExtendedByte();
++		else
++			stations[i] = buf->ReadByte();
+ 	}
+ 
+ 	uint8 cidcount = buf->ReadByte();
+@@ -5447,7 +5466,7 @@
+ 	uint16 id;
+ 	if (generic) {
+ 		id = buf->ReadWord();
+-	} else if (feature <= GSF_AIRCRAFT) {
++	} else if (feature <= GSF_STATIONS) {
+ 		id = buf->ReadExtendedByte();
+ 	} else {
+ 		id = buf->ReadByte();
+@@ -5478,6 +5497,15 @@
+ 					AddGRFString(_cur.grffile->grfid, id, lang, new_scheme, true, name, STR_UNDEFINED);
+ 				}
+ 				break;
++			
++			case GSF_STATIONS:
++				if (_cur.grffile->grf_version >= 9 ) {
++					if (_cur.grffile->stations == NULL || _cur.grffile->stations[id] == NULL) {
++						grfmsg(1, "FeatureNewName: Attempt to name undefined station 0x%X, ignoring", id);
++					} else {
++						_cur.grffile->stations[id]->name = AddGRFString(_cur.grffile->grfid, id, lang, new_scheme, false, name, STR_UNDEFINED);
++					}
++				}
+ 
+ 			default:
+ 				if (IsInsideMM(id, 0xD000, 0xD400) || IsInsideMM(id, 0xD800, 0xE000)) {
+@@ -5487,19 +5515,23 @@
+ 
+ 				switch (GB(id, 8, 8)) {
+ 					case 0xC4: // Station class name
+-						if (_cur.grffile->stations == NULL || _cur.grffile->stations[GB(id, 0, 8)] == NULL) {
+-							grfmsg(1, "FeatureNewName: Attempt to name undefined station 0x%X, ignoring", GB(id, 0, 8));
+-						} else {
+-							StationClassID cls_id = _cur.grffile->stations[GB(id, 0, 8)]->cls_id;
+-							StationClass::Get(cls_id)->name = AddGRFString(_cur.grffile->grfid, id, lang, new_scheme, false, name, STR_UNDEFINED);
++						if (_cur.grffile->grf_version <= 8 ) {
++							if (_cur.grffile->stations == NULL || _cur.grffile->stations[GB(id, 0, 8)] == NULL) {
++								grfmsg(1, "FeatureNewName: Attempt to name undefined station 0x%X, ignoring", GB(id, 0, 8));
++							} else {
++								StationClassID cls_id = _cur.grffile->stations[GB(id, 0, 8)]->cls_id;
++								StationClass::Get(cls_id)->name = AddGRFString(_cur.grffile->grfid, id, lang, new_scheme, false, name, STR_UNDEFINED);
++							}
+ 						}
+ 						break;
+ 
+ 					case 0xC5: // Station name
+-						if (_cur.grffile->stations == NULL || _cur.grffile->stations[GB(id, 0, 8)] == NULL) {
+-							grfmsg(1, "FeatureNewName: Attempt to name undefined station 0x%X, ignoring", GB(id, 0, 8));
+-						} else {
+-							_cur.grffile->stations[GB(id, 0, 8)]->name = AddGRFString(_cur.grffile->grfid, id, lang, new_scheme, false, name, STR_UNDEFINED);
++						if (_cur.grffile->grf_version <= 8 ) {
++							if (_cur.grffile->stations == NULL || _cur.grffile->stations[GB(id, 0, 8)] == NULL) {
++								grfmsg(1, "FeatureNewName: Attempt to name undefined station 0x%X, ignoring", GB(id, 0, 8));
++							} else {
++								_cur.grffile->stations[GB(id, 0, 8)]->name = AddGRFString(_cur.grffile->grfid, id, lang, new_scheme, false, name, STR_UNDEFINED);
++							}
+ 						}
+ 						break;
+ 
+@@ -6160,7 +6192,7 @@
+ 
+ 	_cur.grfconfig->ident.grfid = grfid;
+ 
+-	if (grf_version < 2 || grf_version > 8) {
++	if (grf_version < 2 || grf_version > 9) {
+ 		SetBit(_cur.grfconfig->flags, GCF_INVALID);
+ 		DEBUG(grf, 0, "%s: NewGRF \"%s\" (GRFID %08X) uses GRF version %d, which is incompatible with this version of OpenTTD.", _cur.grfconfig->filename, name, BSWAP32(grfid), grf_version);
+ 	}
+@@ -8589,25 +8621,25 @@
+ 					/* process the conversion of text at the end, so to be sure everything will be fine
+ 					 * and available.  Check if it does not return undefind marker, which is a very good sign of a
+ 					 * substitute industry who has not changed the string been examined, thus using it as such */
+-					strid = GetGRFStringID(indsp->grf_prop.grffile->grfid, indsp->name);
++					strid = GetGRFStringID(indsp->grf_prop.grffile->grfid, (uint32)indsp->name);
+ 					if (strid != STR_UNDEFINED) indsp->name = strid;
+ 
+-					strid = GetGRFStringID(indsp->grf_prop.grffile->grfid, indsp->closure_text);
++					strid = GetGRFStringID(indsp->grf_prop.grffile->grfid, (uint32)indsp->closure_text);
+ 					if (strid != STR_UNDEFINED) indsp->closure_text = strid;
+ 
+-					strid = GetGRFStringID(indsp->grf_prop.grffile->grfid, indsp->production_up_text);
++					strid = GetGRFStringID(indsp->grf_prop.grffile->grfid, (uint32)indsp->production_up_text);
+ 					if (strid != STR_UNDEFINED) indsp->production_up_text = strid;
+ 
+-					strid = GetGRFStringID(indsp->grf_prop.grffile->grfid, indsp->production_down_text);
++					strid = GetGRFStringID(indsp->grf_prop.grffile->grfid, (uint32)indsp->production_down_text);
+ 					if (strid != STR_UNDEFINED) indsp->production_down_text = strid;
+ 
+-					strid = GetGRFStringID(indsp->grf_prop.grffile->grfid, indsp->new_industry_text);
++					strid = GetGRFStringID(indsp->grf_prop.grffile->grfid, (uint32)indsp->new_industry_text);
+ 					if (strid != STR_UNDEFINED) indsp->new_industry_text = strid;
+ 
+ 					if (indsp->station_name != STR_NULL) {
+ 						/* STR_NULL (0) can be set by grf.  It has a meaning regarding assignation of the
+ 						 * station's name. Don't want to lose the value, therefore, do not process. */
+-						strid = GetGRFStringID(indsp->grf_prop.grffile->grfid, indsp->station_name);
++						strid = GetGRFStringID(indsp->grf_prop.grffile->grfid, (uint32)indsp->station_name);
+ 						if (strid != STR_UNDEFINED) indsp->station_name = strid;
+ 					}
+ 
+Index: src/newgrf_class.h
+===================================================================
+--- src/newgrf_class.h	(revision 27871)
++++ src/newgrf_class.h	(working copy)
+@@ -62,7 +62,7 @@
+ 	static Tid GetUIClass(uint index);
+ 	static NewGRFClass *Get(Tid cls_id);
+ 
+-	static const Tspec *GetByGrf(uint32 grfid, byte local_id, int *index);
++	static const Tspec *GetByGrf(uint32 grfid, uint16 local_id, int *index);
+ };
+ 
+ #endif /* NEWGRF_CLASS_H */
+Index: src/newgrf_class_func.h
+===================================================================
+--- src/newgrf_class_func.h	(revision 27871)
++++ src/newgrf_class_func.h	(working copy)
+@@ -194,10 +194,10 @@
+  * @param index    Pointer to return the index of the spec in its class. If NULL then not used.
+  * @return The spec.
+  */
+-DEFINE_NEWGRF_CLASS_METHOD(const Tspec *)::GetByGrf(uint32 grfid, byte local_id, int *index)
++DEFINE_NEWGRF_CLASS_METHOD(const Tspec *)::GetByGrf(uint32 grfid, uint16 local_id, int *index)
+ {
+ 	uint j;
+-
++	
+ 	for (Tid i = (Tid)0; i < Tmax; i++) {
+ 		for (j = 0; j < classes[i].count; j++) {
+ 			const Tspec *spec = classes[i].spec[j];
+@@ -228,4 +228,4 @@
+ 	template const Tspec *name::GetSpec(uint index) const; \
+ 	template int name::GetUIFromIndex(int index) const; \
+ 	template int name::GetIndexFromUI(int ui_index) const; \
+-	template const Tspec *name::GetByGrf(uint32 grfid, byte localidx, int *index);
++	template const Tspec *name::GetByGrf(uint32 grfid, uint16 localidx, int *index);
+Index: src/newgrf_commons.cpp
+===================================================================
+--- src/newgrf_commons.cpp	(revision 27871)
++++ src/newgrf_commons.cpp	(working copy)
+@@ -122,7 +122,7 @@
+  * @param substitute_id is the original entity from which data is copied for the new one
+  * @return the proper usable slot id, or invalid marker if none is found
+  */
+-uint16 OverrideManagerBase::AddEntityID(byte grf_local_id, uint32 grfid, byte substitute_id)
++uint16 OverrideManagerBase::AddEntityID(uint8 grf_local_id, uint32 grfid, byte substitute_id)
+ {
+ 	uint16 id = this->GetID(grf_local_id, grfid);
+ 	EntityIDMapping *map;
+@@ -484,7 +484,7 @@
+ 	CommandCost res;
+ 
+ 	if (cb_res < 0x400) {
+-		res = CommandCost(GetGRFStringID(grffile->grfid, 0xD000 + cb_res));
++		res = CommandCost(GetGRFStringID(grffile->grfid, 0x0000D000 + cb_res));
+ 	} else {
+ 		switch (cb_res) {
+ 			case 0x400: return res; // No error.
+Index: src/newgrf_commons.h
+===================================================================
+--- src/newgrf_commons.h	(revision 27871)
++++ src/newgrf_commons.h	(working copy)
+@@ -212,7 +212,7 @@
+ 	void ResetMapping();
+ 
+ 	void Add(uint8 local_id, uint32 grfid, uint entity_type);
+-	virtual uint16 AddEntityID(byte grf_local_id, uint32 grfid, byte substitute_id);
++	virtual uint16 AddEntityID(uint8 grf_local_id, uint32 grfid, byte substitute_id);
+ 
+ 	uint32 GetGRFID(uint16 entity_id) const;
+ 	uint16 GetSubstituteID(uint16 entity_id) const;
+Index: src/newgrf_station.cpp
+===================================================================
+--- src/newgrf_station.cpp	(revision 27871)
++++ src/newgrf_station.cpp	(working copy)
+@@ -372,7 +372,7 @@
+ 
+ 			if (IsCustomStationSpecIndex(nearby_tile)) {
+ 				const StationSpecList ssl = BaseStation::GetByTile(nearby_tile)->speclist[GetCustomStationSpecIndex(nearby_tile)];
+-				res |= 1 << (ssl.grfid != grfid ? 9 : 8) | ssl.localidx;
++				res |= 1 << (ssl.grfid != grfid ? 9 : 8) | (ssl.localidx & 0xFF) | ((ssl.localidx & 0xFF00) << 6);
+ 			}
+ 			return res;
+ 		}
+Index: src/newgrf_station.h
+===================================================================
+--- src/newgrf_station.h	(revision 27871)
++++ src/newgrf_station.h	(working copy)
+@@ -107,7 +107,7 @@
+ /** Station specification. */
+ struct StationSpec {
+ 	/**
+-	 * Properties related the the grf file.
++	 * Properties related to the grf file.
+ 	 * NUM_CARGO real cargo plus three pseudo cargo sprite groups.
+ 	 * Used for obtaining the sprite offset of custom sprites, and for
+ 	 * evaluating callbacks.
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 27871)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -265,7 +265,7 @@
+  *  195   27572   1.6.x
+  *  196   27778   1.7.x
+  */
+-extern const uint16 SAVEGAME_VERSION = 196; ///< Current savegame version of OpenTTD.
++extern const uint16 SAVEGAME_VERSION = 197; ///< Current savegame version of OpenTTD.
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ FileToSaveLoad _file_to_saveload; ///< File to save or load in the openttd loop.
+Index: src/saveload/station_sl.cpp
+===================================================================
+--- src/saveload/station_sl.cpp	(revision 27871)
++++ src/saveload/station_sl.cpp	(working copy)
+@@ -115,7 +115,7 @@
+ 	FOR_ALL_BASE_STATIONS(st) {
+ 		for (uint i = 0; i < st->num_specs; i++) {
+ 			if (st->speclist[i].grfid == 0) continue;
+-
++			//int a = 0;
+ 			st->speclist[i].spec = StationClass::GetByGrf(st->speclist[i].grfid, st->speclist[i].localidx, NULL);
+ 		}
+ 
+@@ -233,8 +233,9 @@
+ static Money  _cargo_feeder_share;
+ 
+ static const SaveLoad _station_speclist_desc[] = {
+-	SLE_CONDVAR(StationSpecList, grfid,    SLE_UINT32, 27, SL_MAX_VERSION),
+-	SLE_CONDVAR(StationSpecList, localidx, SLE_UINT8,  27, SL_MAX_VERSION),
++	SLE_CONDVAR(StationSpecList, grfid,    SLE_UINT32,                 27, SL_MAX_VERSION),
++	SLE_CONDVAR(StationSpecList, localidx, SLE_VAR_U16 | SLE_FILE_U8,  27, 196),
++	SLE_CONDVAR(StationSpecList, localidx, SLE_UINT16,                197, SL_MAX_VERSION),
+ 
+ 	SLE_END()
+ };
+@@ -531,7 +532,7 @@
+ 			Station *st = Station::From(bst);
+ 
+ 			/* Before savegame version 161, persistent storages were not stored in a pool. */
+-			if (IsSavegameVersionBefore(161) && !IsSavegameVersionBefore(145) && st->facilities & FACIL_AIRPORT) {
++			if (IsSavegameVersionBefore(161) && !IsSavegameVersionBefore(145) && (st->facilities & FACIL_AIRPORT)) {
+ 				/* Store the old persistent storage. The GRFID will be added later. */
+ 				assert(PersistentStorage::CanAllocateItem());
+ 				st->airport.psa = new PersistentStorage(0, 0, 0);
+Index: src/saveload/waypoint_sl.cpp
+===================================================================
+--- src/saveload/waypoint_sl.cpp	(revision 27871)
++++ src/saveload/waypoint_sl.cpp	(working copy)
+@@ -33,7 +33,7 @@
+ 	char *name;
+ 	uint8 delete_ctr;
+ 	Date build_date;
+-	uint8 localidx;
++	uint16 localidx;
+ 	uint32 grfid;
+ 	const StationSpec *spec;
+ 	OwnerByte owner;
+@@ -162,7 +162,8 @@
+ 
+ 	SLE_CONDVAR(OldWaypoint, build_date, SLE_FILE_U16 | SLE_VAR_I32,  3, 30),
+ 	SLE_CONDVAR(OldWaypoint, build_date, SLE_INT32,                  31, SL_MAX_VERSION),
+-	SLE_CONDVAR(OldWaypoint, localidx,   SLE_UINT8,                   3, SL_MAX_VERSION),
++	SLE_CONDVAR(OldWaypoint, localidx,   SLE_FILE_U8 | SLE_UINT16,    3, 196),
++	SLE_CONDVAR(OldWaypoint, localidx,   SLE_UINT16,                197, SL_MAX_VERSION),
+ 	SLE_CONDVAR(OldWaypoint, grfid,      SLE_UINT32,                 17, SL_MAX_VERSION),
+ 	SLE_CONDVAR(OldWaypoint, owner,      SLE_UINT8,                 101, SL_MAX_VERSION),
+ 

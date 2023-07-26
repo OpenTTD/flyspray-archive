@@ -1,0 +1,228 @@
+Index: src/airport_movement.h
+===================================================================
+--- src/airport_movement.h	(revision 9523)
++++ src/airport_movement.h	(working copy)
+@@ -17,6 +17,14 @@
+ 
+ ///////////////////////////////////////////////////////////////////////
+ /////*********Movement Positions on Airports********************///////
++
++static const AirportMovingData _airport_moving_data_dummy[] = {
++	{    0,    0, AMED_NOSPDCLAMP | AMED_SLOWTURN,     {DIR_N} },
++	{    0,   96, AMED_NOSPDCLAMP | AMED_SLOWTURN,     {DIR_N} },
++	{   96,   96, AMED_NOSPDCLAMP | AMED_SLOWTURN,     {DIR_N} },
++	{   96,    0, AMED_NOSPDCLAMP | AMED_SLOWTURN,     {DIR_N} },
++};
++
+ // Country Airfield (small) 4x3
+ static const AirportMovingData _airport_moving_data_country[22] = {
+ 	{   53,    3, AMED_EXACTPOS,                   {DIR_SE} }, // 00 In Hangar
+@@ -376,6 +384,15 @@
+ 
+ ///////////////////////////////////////////////////////////////////////
+ /////**********Movement Machine on Airports*********************///////
++static const byte _airport_entries_dummy[] = {0, 1, 2, 3};
++static const AirportFTAbuildup _airport_fta_dummy[] = {
++	{ 0, 0, 0, 3},
++	{ 1, 0, 0, 0},
++	{ 2, 0, 0, 1},
++	{ 3, 0, 0, 2},
++	{ MAX_ELEMENTS, 0, 0, 0 } // end marker. DO NOT REMOVE
++};
++
+ /* First element of terminals array tells us how many depots there are (to know size of array)
+  * this may be changed later when airports are moved to external file  */
+ static const TileIndexDiffC _airport_depots_country[] = {{3, 0}};
+Index: src/airport.cpp
+===================================================================
+--- src/airport.cpp	(revision 9523)
++++ src/airport.cpp	(working copy)
+@@ -20,6 +20,7 @@
+  * - false: give a summarized report which only shows current and next position */
+ //#define DEBUG_AIRPORT false
+ 
++static AirportFTAClass *DummyAirport;
+ static AirportFTAClass *CountryAirport;
+ static AirportFTAClass *CityAirport;
+ static AirportFTAClass *Oilrig;
+@@ -34,6 +35,20 @@
+ 
+ void InitializeAirports()
+ {
++	DummyAirport = new AirportFTAClass(
++		_airport_moving_data_dummy,
++		NULL,
++		NULL,
++		_airport_entries_dummy,
++		AirportFTAClass::ALL,
++		_airport_fta_dummy,
++		NULL,
++		0,
++		0, 0,
++		0,
++		0
++	);
++
+ 	CountryAirport = new AirportFTAClass(
+ 		_airport_moving_data_country,
+ 		_airport_terminal_country,
+@@ -463,6 +478,7 @@
+ 		case AT_HELIDEPOT:     return HeliDepot;
+ 		case AT_INTERCON:      return IntercontinentalAirport;
+ 		case AT_HELISTATION:   return HeliStation;
++		case 0xFF:             return DummyAirport;
+ 	}
+ }
+ 
+Index: src/station_cmd.cpp
+===================================================================
+--- src/station_cmd.cpp	(revision 9523)
++++ src/station_cmd.cpp	(working copy)
+@@ -1600,6 +1600,13 @@
+ 
+ 	int32 cost = w * h * _price.remove_airport;
+ 
++	Vehicle *v;
++	FOR_ALL_VEHICLES(v) {
++		if ( !(v->type == VEH_AIRCRAFT && IsNormalAircraft(v))) continue;
++
++		if (v->u.air.targetairport == st->index && v->u.air.state != FLYING) return CMD_ERROR;
++	}
++
+ 	BEGIN_TILE_LOOP(tile_cur, w, h, tile) {
+ 		if (!EnsureNoVehicle(tile_cur)) return CMD_ERROR;
+ 
+Index: src/station.h
+===================================================================
+--- src/station.h	(revision 9523)
++++ src/station.h	(working copy)
+@@ -118,7 +118,7 @@
+ 
+ 		const AirportFTAClass *Airport() const
+ 		{
+-			assert(airport_tile != 0);
++			if (airport_tile == 0) return GetAirport(0xFF);
+ 			return GetAirport(airport_type);
+ 		}
+ 
+Index: src/aircraft_cmd.cpp
+===================================================================
+--- src/aircraft_cmd.cpp	(revision 9523)
++++ src/aircraft_cmd.cpp	(working copy)
+@@ -944,6 +944,42 @@
+ }
+ 
+ /**
++ * Find the entry point to an airport depending on direction which
++ * the airport is being approached from. Each airport can have up to
++ * four entry points for its approach system so that approaching
++ * aircraft do not fly through each other or are forced to do 180
++ * degree turns during the approach. The arrivals are grouped into
++ * four sectors dependent on the DiagDirection from which the airport
++ * is approached.
++ *
++ * @param v   The vehicle that is approaching the airport
++ * @param apc The Airport Class being approached.
++ * @returns   The index of the entry point
++ */
++static byte AircraftGetEntryPoint(const Vehicle *v, const AirportFTAClass *apc)
++{
++	assert(v != NULL);
++	assert(apc != NULL);
++
++	const Station *st = GetStation(v->u.air.targetairport);
++	/* Make sure we don't go to 0,0 if the airport has been removed. */
++	TileIndex tile = (st->airport_tile != 0) ? st->airport_tile : st->xy;
++
++	int delta_x = v->x_pos - TileX(tile) * TILE_SIZE;
++	int delta_y = v->y_pos - TileY(tile) * TILE_SIZE;
++
++	DiagDirection dir;
++	if (abs(delta_y) < abs(delta_x)) {
++		/* We are northeast or southwest of the airport */
++		dir = delta_x < 0 ? DIAGDIR_NE : DIAGDIR_SW;
++	} else {
++		/* We are northwest or southeast of the airport */
++		dir = delta_y < 0 ? DIAGDIR_NW : DIAGDIR_SE;
++	}
++	return apc->entry_points[dir];
++}
++
++/**
+  * Controls the movement of an aircraft. This function actually moves the vehicle
+  * on the map and takes care of minor things like sound playback.
+  * @todo    De-mystify the cur_speed values for helicopter rotors.
+@@ -954,17 +990,24 @@
+ {
+ 	int count;
+ 	const Station *st = GetStation(v->u.air.targetairport);
++	const AirportFTAClass *afc = st->Airport();
++	const AirportMovingData *amd;
+ 
+ 	/* prevent going to 0,0 if airport is deleted. */
+ 	TileIndex tile = st->airport_tile;
+-	if (tile == 0) tile = st->xy;
++	if (tile == 0) {
++		tile = st->xy;
++
++		/* Jump into our "holding pattern" state machine if possible */
++		if (v->u.air.pos >= afc->nofelements) v->u.air.pos = v->u.air.previous_pos = AircraftGetEntryPoint(v, afc);
++	}
++
++	/*  get airport moving data */
++	amd = afc->MovingData(v->u.air.pos);
++
+ 	int x = TileX(tile) * TILE_SIZE;
+ 	int y = TileY(tile) * TILE_SIZE;
+ 
+-	/*  get airport moving data */
+-	const AirportFTAClass *afc = st->Airport();
+-	const AirportMovingData *amd = afc->MovingData(v->u.air.pos);
+-
+ 	/* Helicopter raise */
+ 	if (amd->flag & AMED_HELI_RAISE) {
+ 		Vehicle *u = v->next->next;
+@@ -1470,43 +1513,7 @@
+ 	MaybeCrashAirplane(v);
+ }
+ 
+-/**
+- * Find the entry point to an airport depending on direction which
+- * the airport is being approached from. Each airport can have up to
+- * four entry points for its approach system so that approaching
+- * aircraft do not fly through each other or are forced to do 180
+- * degree turns during the approach. The arrivals are grouped into
+- * four sectors dependent on the DiagDirection from which the airport
+- * is approached.
+- *
+- * @param v   The vehicle that is approaching the airport
+- * @param apc The Airport Class being approached.
+- * @returns   The index of the entry point
+- */
+-static byte AircraftGetEntryPoint(const Vehicle *v, const AirportFTAClass *apc)
+-{
+-	assert(v != NULL);
+-	assert(apc != NULL);
+ 
+-	const Station *st = GetStation(v->u.air.targetairport);
+-	/* Make sure we don't go to 0,0 if the airport has been removed. */
+-	TileIndex tile = (st->airport_tile != 0) ? st->airport_tile : st->xy;
+-
+-	int delta_x = v->x_pos - TileX(tile) * TILE_SIZE;
+-	int delta_y = v->y_pos - TileY(tile) * TILE_SIZE;
+-
+-	DiagDirection dir;
+-	if (abs(delta_y) < abs(delta_x)) {
+-		/* We are northeast or southwest of the airport */
+-		dir = delta_x < 0 ? DIAGDIR_NE : DIAGDIR_SW;
+-	} else {
+-		/* We are northwest or southeast of the airport */
+-		dir = delta_y < 0 ? DIAGDIR_NW : DIAGDIR_SE;
+-	}
+-	return apc->entry_points[dir];
+-}
+-
+-
+ /** set the right pos when heading to other airports after takeoff */
+ static void AircraftNextAirportPos_and_Order(Vehicle *v)
+ {

@@ -1,0 +1,378 @@
+From 2b90a276cd0b45c67408d8b38967f70859e0ae6d Mon Sep 17 00:00:00 2001
+From: Henry Wilson <m3henry@googlemail.com>
+Date: Sun, 31 Dec 2017 01:55:49 +0000
+Subject: [PATCH 21/31] ContentVector ~> std::vector
+
+---
+ src/network/network_content.cpp     | 88 ++++++++++++++-----------------------
+ src/network/network_content.h       | 16 +++----
+ src/network/network_content_gui.cpp | 13 +++---
+ src/newgrf_gui.cpp                  |  4 +-
+ 4 files changed, 50 insertions(+), 71 deletions(-)
+
+diff --git a/src/network/network_content.cpp b/src/network/network_content.cpp
+index e998aaeaf..2d71165ac 100644
+--- a/src/network/network_content.cpp
++++ b/src/network/network_content.cpp
+@@ -139,8 +139,7 @@ bool ClientNetworkContentSocketHandler::Receive_SERVER_INFO(Packet *p)
+ 	if (ci->state == ContentInfo::UNSELECTED && ci->filesize == 0) ci->state = ContentInfo::DOES_NOT_EXIST;
+ 
+ 	/* Do we already have a stub for this? */
+-	for (ContentIterator iter = this->infos.Begin(); iter != this->infos.End(); iter++) {
+-		ContentInfo *ici = *iter;
++	for (auto &ici : this->infos) {
+ 		if (ici->type == ci->type && ici->unique_id == ci->unique_id &&
+ 				memcmp(ci->md5sum, ici->md5sum, sizeof(ci->md5sum)) == 0) {
+ 			/* Preserve the name if possible */
+@@ -167,12 +166,10 @@ bool ClientNetworkContentSocketHandler::Receive_SERVER_INFO(Packet *p)
+ 		return true;
+ 	}
+ 
+-	*this->infos.Append() = ci;
++	this->infos.push_back(ci);
+ 
+ 	/* Incoming data means that we might need to reconsider dependencies */
+-	for (ContentIterator iter = this->infos.Begin(); iter != this->infos.End(); iter++) {
+-		this->CheckDependencyState(*iter);
+-	}
++	for (auto& i : this->infos) this->CheckDependencyState(i);
+ 
+ 	this->OnReceiveContentInfo(ci);
+ 
+@@ -248,15 +245,14 @@ void ClientNetworkContentSocketHandler::RequestContentList(ContentVector *cv, bo
+ 
+ 	this->Connect();
+ 
+-	assert(cv->Length() < 255);
+-	assert(cv->Length() < (SEND_MTU - sizeof(PacketSize) - sizeof(byte) - sizeof(uint8)) /
++	assert(cv->size() < 255);
++	assert(cv->size() < (SEND_MTU - sizeof(PacketSize) - sizeof(byte) - sizeof(uint8)) /
+ 			(sizeof(uint8) + sizeof(uint32) + (send_md5sum ? /*sizeof(ContentInfo::md5sum)*/16 : 0)));
+ 
+ 	Packet *p = new Packet(send_md5sum ? PACKET_CONTENT_CLIENT_INFO_EXTID_MD5 : PACKET_CONTENT_CLIENT_INFO_EXTID);
+-	p->Send_uint8(cv->Length());
++	p->Send_uint8(cv->size());
+ 
+-	for (ContentIterator iter = cv->Begin(); iter != cv->End(); iter++) {
+-		const ContentInfo *ci = *iter;
++	for (const auto &ci : *cv) {
+ 		p->Send_uint8((byte)ci->type);
+ 		p->Send_uint32(ci->unique_id);
+ 		if (!send_md5sum) continue;
+@@ -268,11 +264,9 @@ void ClientNetworkContentSocketHandler::RequestContentList(ContentVector *cv, bo
+ 
+ 	this->SendPacket(p);
+ 
+-	for (ContentIterator iter = cv->Begin(); iter != cv->End(); iter++) {
+-		ContentInfo *ci = *iter;
++	for (const auto &ci : *cv) {
+ 		bool found = false;
+-		for (ContentIterator iter2 = this->infos.Begin(); iter2 != this->infos.End(); iter2++) {
+-			ContentInfo *ci2 = *iter2;
++		for (const auto &ci2 : this->infos) {
+ 			if (ci->type == ci2->type && ci->unique_id == ci2->unique_id &&
+ 					(!send_md5sum || memcmp(ci->md5sum, ci2->md5sum, sizeof(ci->md5sum)) == 0)) {
+ 				found = true;
+@@ -280,7 +274,7 @@ void ClientNetworkContentSocketHandler::RequestContentList(ContentVector *cv, bo
+ 			}
+ 		}
+ 		if (!found) {
+-			*this->infos.Append() = ci;
++			this->infos.push_back(ci);
+ 		} else {
+ 			delete ci;
+ 		}
+@@ -298,8 +292,7 @@ void ClientNetworkContentSocketHandler::DownloadSelectedContent(uint &files, uin
+ 	bytes = 0;
+ 
+ 	ContentIDList content;
+-	for (ContentIterator iter = this->infos.Begin(); iter != this->infos.End(); iter++) {
+-		const ContentInfo *ci = *iter;
++	for (const auto &ci : this->infos) {
+ 		if (!ci->IsSelected() || ci->state == ContentInfo::ALREADY_HERE) continue;
+ 
+ 		*content.Append() = ci->id;
+@@ -717,7 +710,7 @@ ClientNetworkContentSocketHandler::~ClientNetworkContentSocketHandler()
+ 	delete this->curInfo;
+ 	if (this->curFile != NULL) fclose(this->curFile);
+ 
+-	for (ContentIterator iter = this->infos.Begin(); iter != this->infos.End(); iter++) delete *iter;
++	for (auto &i : this->infos) delete i;
+ }
+ 
+ /** Connect to the content server. */
+@@ -812,8 +805,7 @@ void ClientNetworkContentSocketHandler::DownloadContentInfo(ContentID cid)
+  */
+ ContentInfo *ClientNetworkContentSocketHandler::GetContent(ContentID cid)
+ {
+-	for (ContentIterator iter = this->infos.Begin(); iter != this->infos.End(); iter++) {
+-		ContentInfo *ci = *iter;
++	for (auto &ci : this->infos) {
+ 		if (ci->id == cid) return ci;
+ 	}
+ 	return NULL;
+@@ -849,8 +841,7 @@ void ClientNetworkContentSocketHandler::Unselect(ContentID cid)
+ /** Select everything we can select */
+ void ClientNetworkContentSocketHandler::SelectAll()
+ {
+-	for (ContentIterator iter = this->infos.Begin(); iter != this->infos.End(); iter++) {
+-		ContentInfo *ci = *iter;
++	for (auto &ci : this->infos) {
+ 		if (ci->state == ContentInfo::UNSELECTED) {
+ 			ci->state = ContentInfo::SELECTED;
+ 			this->CheckDependencyState(ci);
+@@ -861,8 +852,7 @@ void ClientNetworkContentSocketHandler::SelectAll()
+ /** Select everything that's an update for something we've got */
+ void ClientNetworkContentSocketHandler::SelectUpgrade()
+ {
+-	for (ContentIterator iter = this->infos.Begin(); iter != this->infos.End(); iter++) {
+-		ContentInfo *ci = *iter;
++	for (auto &ci : this->infos) {
+ 		if (ci->state == ContentInfo::UNSELECTED && ci->upgrade) {
+ 			ci->state = ContentInfo::SELECTED;
+ 			this->CheckDependencyState(ci);
+@@ -873,8 +863,7 @@ void ClientNetworkContentSocketHandler::SelectUpgrade()
+ /** Unselect everything that we've not downloaded so far. */
+ void ClientNetworkContentSocketHandler::UnselectAll()
+ {
+-	for (ContentIterator iter = this->infos.Begin(); iter != this->infos.End(); iter++) {
+-		ContentInfo *ci = *iter;
++	for (auto &ci : this->infos) {
+ 		if (ci->IsSelected() && ci->state != ContentInfo::ALREADY_HERE) ci->state = ContentInfo::UNSELECTED;
+ 	}
+ }
+@@ -904,13 +893,12 @@ void ClientNetworkContentSocketHandler::ToggleSelectedState(const ContentInfo *c
+  */
+ void ClientNetworkContentSocketHandler::ReverseLookupDependency(ConstContentVector &parents, const ContentInfo *child) const
+ {
+-	for (ConstContentIterator iter = this->infos.Begin(); iter != this->infos.End(); iter++) {
+-		const ContentInfo *ci = *iter;
++	for (auto &ci : this->infos) {
+ 		if (ci == child) continue;
+ 
+ 		for (uint i = 0; i < ci->dependency_count; i++) {
+ 			if (ci->dependencies[i] == child->id) {
+-				*parents.Append() = ci;
++				parents.push_back(ci);
+ 				break;
+ 			}
+ 		}
+@@ -924,19 +912,17 @@ void ClientNetworkContentSocketHandler::ReverseLookupDependency(ConstContentVect
+  */
+ void ClientNetworkContentSocketHandler::ReverseLookupTreeDependency(ConstContentVector &tree, const ContentInfo *child) const
+ {
+-	*tree.Append() = child;
++	tree.push_back(child);
+ 
+ 	/* First find all direct parents. We can't use the "normal" iterator as
+ 	 * we are including stuff into the vector and as such the vector's data
+ 	 * store can be reallocated (and thus move), which means out iterating
+ 	 * pointer gets invalid. So fall back to the indices. */
+-	for (uint i = 0; i < tree.Length(); i++) {
++	for (uint i = 0; i < tree.size(); i++) {
+ 		ConstContentVector parents;
+ 		this->ReverseLookupDependency(parents, tree[i]);
+ 
+-		for (ConstContentIterator piter = parents.Begin(); piter != parents.End(); piter++) {
+-			tree.Include(*piter);
+-		}
++		for (auto &p : parents) Include(tree, p);
+ 	}
+ }
+ 
+@@ -970,11 +956,8 @@ void ClientNetworkContentSocketHandler::CheckDependencyState(ContentInfo *ci)
+ 	 * we automatically selected them. */
+ 	ConstContentVector parents;
+ 	this->ReverseLookupDependency(parents, ci);
+-	for (ConstContentIterator iter = parents.Begin(); iter != parents.End(); iter++) {
+-		const ContentInfo *c = *iter;
+-		if (!c->IsSelected()) continue;
+-
+-		this->Unselect(c->id);
++	for (auto &p : parents) {
++		if (p->IsSelected()) this->Unselect(p->id);
+ 	}
+ 
+ 	for (uint i = 0; i < ci->dependency_count; i++) {
+@@ -986,15 +969,15 @@ void ClientNetworkContentSocketHandler::CheckDependencyState(ContentInfo *ci)
+ 		if (c->state != ContentInfo::AUTOSELECTED) continue;
+ 
+ 		/* Only unselect when WE are the only parent. */
+-		parents.Clear();
++		parents.clear();
+ 		this->ReverseLookupDependency(parents, c);
+ 
+ 		/* First check whether anything depends on us */
+ 		int sel_count = 0;
+ 		bool force_selection = false;
+-		for (ConstContentIterator iter = parents.Begin(); iter != parents.End(); iter++) {
+-			if ((*iter)->IsSelected()) sel_count++;
+-			if ((*iter)->state == ContentInfo::SELECTED) force_selection = true;
++		for (auto &p : parents) {
++			if (p->IsSelected()) sel_count++;
++			if (p->state == ContentInfo::SELECTED) force_selection = true;
+ 		}
+ 		if (sel_count == 0) {
+ 			/* Nothing depends on us */
+@@ -1005,12 +988,12 @@ void ClientNetworkContentSocketHandler::CheckDependencyState(ContentInfo *ci)
+ 		if (force_selection) continue;
+ 
+ 		/* "Flood" search to find all items in the dependency graph*/
+-		parents.Clear();
++		parents.clear();
+ 		this->ReverseLookupTreeDependency(parents, c);
+ 
+ 		/* Is there anything that is "force" selected?, if so... we're done. */
+-		for (ConstContentIterator iter = parents.Begin(); iter != parents.End(); iter++) {
+-			if ((*iter)->state != ContentInfo::SELECTED) continue;
++		for (auto &p : parents) {
++			if (p->state != ContentInfo::SELECTED) continue;
+ 
+ 			force_selection = true;
+ 			break;
+@@ -1023,22 +1006,19 @@ void ClientNetworkContentSocketHandler::CheckDependencyState(ContentInfo *ci)
+ 		 * After that's done run over them once again to test their children
+ 		 * to unselect. Don't do it immediately because it'll do exactly what
+ 		 * we're doing now. */
+-		for (ConstContentIterator iter = parents.Begin(); iter != parents.End(); iter++) {
+-			const ContentInfo *c = *iter;
++		for (auto &c : parents) {
+ 			if (c->state == ContentInfo::AUTOSELECTED) this->Unselect(c->id);
+ 		}
+-		for (ConstContentIterator iter = parents.Begin(); iter != parents.End(); iter++) {
+-			this->CheckDependencyState(this->GetContent((*iter)->id));
+-		}
++		for (auto &p : parents) this->CheckDependencyState(this->GetContent(p->id));
+ 	}
+ }
+ 
+ /** Clear all downloaded content information. */
+ void ClientNetworkContentSocketHandler::Clear()
+ {
+-	for (ContentIterator iter = this->infos.Begin(); iter != this->infos.End(); iter++) delete *iter;
++	for (auto &i : this->infos) delete i;
+ 
+-	this->infos.Clear();
++	this->infos.clear();
+ 	this->requested.Clear();
+ }
+ 
+diff --git a/src/network/network_content.h b/src/network/network_content.h
+index 25788065f..35979acaa 100644
+--- a/src/network/network_content.h
++++ b/src/network/network_content.h
+@@ -18,14 +18,14 @@
+ #if defined(ENABLE_NETWORK)
+ 
+ /** Vector with content info */
+-typedef SmallVector<ContentInfo *, 16> ContentVector;
++using ContentVector = std::vector<ContentInfo *>;
+ /** Vector with constant content info */
+-typedef SmallVector<const ContentInfo *, 16> ConstContentVector;
++using ConstContentVector = std::vector<const ContentInfo *> ;
+ 
+ /** Iterator for the content vector */
+-typedef ContentInfo **ContentIterator;
++using ContentIterator = ContentVector::iterator;
+ /** Iterator for the constant content vector */
+-typedef const ContentInfo * const * ConstContentIterator;
++using ConstContentIterator = ContentVector::const_iterator;
+ 
+ /** Callbacks for notifying others about incoming data */
+ struct ContentCallback {
+@@ -131,13 +131,13 @@ public:
+ 	void CheckDependencyState(ContentInfo *ci);
+ 
+ 	/** Get the number of content items we know locally. */
+-	uint Length() const { return this->infos.Length(); }
++	uint Length() const { return this->infos.size(); }
+ 	/** Get the begin of the content inf iterator. */
+-	ConstContentIterator Begin() const { return this->infos.Begin(); }
++	ConstContentIterator Begin() const { return this->infos.begin(); }
+ 	/** Get the nth position of the content inf iterator. */
+-	ConstContentIterator Get(uint32 index) const { return this->infos.Get(index); }
++	ConstContentIterator Get(uint32 index) const { return this->Begin() + index; }
+ 	/** Get the end of the content inf iterator. */
+-	ConstContentIterator End() const { return this->infos.End(); }
++	ConstContentIterator End() const { return this->infos.end(); }
+ 
+ 	void Clear();
+ 
+diff --git a/src/network/network_content_gui.cpp b/src/network/network_content_gui.cpp
+index 4b1332c58..80f421f2f 100644
+--- a/src/network/network_content_gui.cpp
++++ b/src/network/network_content_gui.cpp
+@@ -334,7 +334,7 @@ class NetworkContentListWindow : public Window, ContentCallback {
+ 			pos = strecpy(pos, "do=searchgrfid&q=", last);
+ 
+ 			bool first = true;
+-			for (ConstContentIterator iter = this->content.Begin(); iter != this->content.End(); iter++) {
++			for (auto iter = this->content.Begin(); iter != this->content.End(); iter++) {
+ 				const ContentInfo *ci = *iter;
+ 				if (ci->state != ContentInfo::DOES_NOT_EXIST) continue;
+ 
+@@ -436,7 +436,7 @@ class NetworkContentListWindow : public Window, ContentCallback {
+ 	{
+ 		if (!this->content.Sort()) return;
+ 
+-		for (ConstContentIterator iter = this->content.Begin(); iter != this->content.End(); iter++) {
++		for (auto iter = this->content.Begin(); iter != this->content.End(); iter++) {
+ 			if (*iter == this->selected) {
+ 				this->list_pos = iter - this->content.Begin();
+ 				break;
+@@ -479,7 +479,7 @@ class NetworkContentListWindow : public Window, ContentCallback {
+ 		if (!changed) return;
+ 
+ 		/* update list position */
+-		for (ConstContentIterator iter = this->content.Begin(); iter != this->content.End(); iter++) {
++		for (auto iter = this->content.Begin(); iter != this->content.End(); iter++) {
+ 			if (*iter == this->selected) {
+ 				this->list_pos = iter - this->content.Begin();
+ 				return;
+@@ -642,7 +642,7 @@ public:
+ 		int text_y_offset = WD_MATRIX_TOP + (line_height - FONT_HEIGHT_NORMAL) / 2;
+ 		uint y = r.top;
+ 		int cnt = 0;
+-		for (ConstContentIterator iter = this->content.Get(this->vscroll->GetPosition()); iter != this->content.End() && cnt < this->vscroll->GetCapacity(); iter++, cnt++) {
++		for (auto iter = this->content.Get(this->vscroll->GetPosition()); iter != this->content.End() && cnt < this->vscroll->GetCapacity(); iter++, cnt++) {
+ 			const ContentInfo *ci = *iter;
+ 
+ 			if (ci == this->selected) GfxFillRect(r.left + 1, y + 1, r.right - 1, y + this->resize.step_height - 1, PC_GREY);
+@@ -767,8 +767,7 @@ public:
+ 
+ 			char buf[DRAW_STRING_BUFFER] = "";
+ 			char *p = buf;
+-			for (ConstContentIterator iter = tree.Begin(); iter != tree.End(); iter++) {
+-				const ContentInfo *ci = *iter;
++			for (auto &ci : tree) {
+ 				if (ci == this->selected || ci->state != ContentInfo::SELECTED) continue;
+ 
+ 				p += seprintf(p, lastof(buf), buf == p ? "%s" : ", %s", ci->name);
+@@ -991,7 +990,7 @@ public:
+ 		this->filesize_sum = 0;
+ 		bool show_select_all = false;
+ 		bool show_select_upgrade = false;
+-		for (ConstContentIterator iter = this->content.Begin(); iter != this->content.End(); iter++) {
++		for (auto iter = this->content.Begin(); iter != this->content.End(); iter++) {
+ 			const ContentInfo *ci = *iter;
+ 			switch (ci->state) {
+ 				case ContentInfo::SELECTED:
+diff --git a/src/newgrf_gui.cpp b/src/newgrf_gui.cpp
+index c0aa160c2..722b943a5 100644
+--- a/src/newgrf_gui.cpp
++++ b/src/newgrf_gui.cpp
+@@ -1564,9 +1564,9 @@ void ShowMissingContentWindow(const GRFConfig *list)
+ 		strecpy(ci->name, c->GetName(), lastof(ci->name));
+ 		ci->unique_id = BSWAP32(c->ident.grfid);
+ 		memcpy(ci->md5sum, HasBit(c->flags, GCF_COMPATIBLE) ? c->original_md5sum : c->ident.md5sum, sizeof(ci->md5sum));
+-		*cv.Append() = ci;
++		cv.push_back(ci);
+ 	}
+-	ShowNetworkContentListWindow(cv.Length() == 0 ? NULL : &cv, CONTENT_TYPE_NEWGRF);
++	ShowNetworkContentListWindow(cv.empty() ? NULL : &cv, CONTENT_TYPE_NEWGRF);
+ }
+ #endif
+ 
+-- 
+2.14.1
+

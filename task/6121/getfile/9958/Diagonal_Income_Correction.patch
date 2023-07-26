@@ -1,0 +1,324 @@
+Index: src/economy.cpp
+===================================================================
+--- src/economy.cpp	(revision 26870)
++++ src/economy.cpp	(working copy)
+@@ -54,6 +54,7 @@
+ #include "table/strings.h"
+ #include "table/pricebase.h"
+ 
++#include <math.h>
+ #include "safeguards.h"
+ 
+ 
+@@ -61,22 +62,6 @@
+ CargoPaymentPool _cargo_payment_pool("CargoPayment");
+ INSTANTIATE_POOL_METHODS(CargoPayment)
+ 
+-/**
+- * Multiply two integer values and shift the results to right.
+- *
+- * This function multiplies two integer values. The result is
+- * shifted by the amount of shift to right.
+- *
+- * @param a The first integer
+- * @param b The second integer
+- * @param shift The amount to shift the value to right.
+- * @return The shifted result
+- */
+-static inline int32 BigMulS(const int32 a, const int32 b, const uint8 shift)
+-{
+-	return (int32)((int64)a * (int64)b >> shift);
+-}
+-
+ typedef SmallVector<Industry *, 16> SmallIndustryList;
+ 
+ /**
+@@ -945,17 +930,25 @@
+ 	return cost;
+ }
+ 
+-Money GetTransportedGoodsIncome(uint num_pieces, uint dist, byte transit_days, CargoID cargo_type)
++Money GetTransportedGoodsIncome(uint num_pieces, uint distance, byte transit_days, CargoID cargo_type)
+ {
++	return GetTransportedGoodsIncome_precise(num_pieces, distance << 16, transit_days, cargo_type);
++}
++
++Money GetTransportedGoodsIncome_precise(uint num_pieces, uint d64k, byte transit_days, CargoID cargo_type)
++{
+ 	const CargoSpec *cs = CargoSpec::Get(cargo_type);
+ 	if (!cs->IsValid()) {
+ 		/* User changed newgrfs and some vehicle still carries some cargo which is no longer available. */
+ 		return 0;
+ 	}
++	// Support legacy callback
++	// In this case iff the distance method is 'euclidian' the distances are rounded.
++	uint dist_int = d64k >> 16;
+ 
+ 	/* Use callback to calculate cargo profit, if available */
+ 	if (HasBit(cs->callback_mask, CBM_CARGO_PROFIT_CALC)) {
+-		uint32 var18 = min(dist, 0xFFFF) | (min(num_pieces, 0xFF) << 16) | (transit_days << 24);
++		uint32 var18 = min(dist_int, 0xFFFF) | (min(num_pieces, 0xFF) << 16) | (transit_days << 24);
+ 		uint16 callback = GetCargoCallback(CBID_CARGO_PROFIT_CALC, 0, var18, cs);
+ 		if (callback != CALLBACK_FAILED) {
+ 			int result = GB(callback, 0, 14);
+@@ -966,7 +959,7 @@
+ 			/* "The result should be a signed multiplier that gets multiplied
+ 			 * by the amount of cargo moved and the price factor, then gets
+ 			 * divided by 8192." */
+-			return result * num_pieces * cs->current_payment / 8192;
++			return (result * num_pieces * cs->current_payment) >> 13;
+ 		}
+ 	}
+ 
+@@ -989,8 +982,16 @@
+ 	 *
+ 	 */
+ 	const int time_factor = max(MAX_TIME_FACTOR - days_over_days1 - days_over_days2, MIN_TIME_FACTOR);
+-
+-	return BigMulS(dist * time_factor * num_pieces, cs->current_payment, 21);
++	// do some work to prevent integer overflow from occurring too easy here. 
++	uint64 A =  d64k * num_pieces * time_factor;
++	uint64 B = cs->current_payment;
++	uint32 A_a = A >> 32;	// upper part of A
++	uint32 A_b = (uint32) A;// lower part
++	uint32 B_a = B >> 32;
++	uint32 B_b = (uint32) B; 
++	return (((uint64)A_b * (uint64)B_b) >> 37) + (((uint64)A_a*(uint64)B_b) >> 5) + (((uint64)A_b*(uint64)B_a) >> 5) + (((uint64)A_a*(uint64)B_a)<<27);
++	// Old:
++	//return ((cs->current_payment * d64k * num_pieces) * time_factor) >> 37; // 21 + 16
+ }
+ 
+ /** The industries we've currently brought cargo to. */
+@@ -1057,6 +1058,7 @@
+  */
+ static Money DeliverGoods(int num_pieces, CargoID cargo_type, StationID dest, TileIndex source_tile, byte days_in_transit, Company *company, SourceType src_type, SourceID src)
+ {
++	Money profit;
+ 	assert(num_pieces > 0);
+ 
+ 	Station *st = Station::Get(dest);
+@@ -1080,9 +1082,16 @@
+ 	/* Increase town's counter for town effects */
+ 	const CargoSpec *cs = CargoSpec::Get(cargo_type);
+ 	st->town->received[cs->town_effect].new_act += accepted;
+-
++	
+ 	/* Determine profit */
+-	Money profit = GetTransportedGoodsIncome(accepted, DistanceManhattan(source_tile, st->xy), days_in_transit, cargo_type);
++	if(_settings_game.economy.income_distance_type) 
++	{
++		profit = GetTransportedGoodsIncome_precise(accepted, DistancePlaneEx(source_tile, st->xy), days_in_transit, cargo_type);
++	}
++	else
++	{
++		profit = GetTransportedGoodsIncome(accepted, DistanceManhattan(source_tile, st->xy), days_in_transit, cargo_type);
++	}
+ 
+ 	/* Update the cargo monitor. */
+ 	AddCargoDelivery(cargo_type, company->index, accepted, src_type, src, st);
+@@ -1200,12 +1209,25 @@
+  */
+ Money CargoPayment::PayTransfer(const CargoPacket *cp, uint count)
+ {
+-	Money profit = GetTransportedGoodsIncome(
+-			count,
+-			/* pay transfer vehicle for only the part of transfer it has done: ie. cargo_loaded_at_xy to here */
+-			DistanceManhattan(cp->LoadedAtXY(), Station::Get(this->current_station)->xy),
+-			cp->DaysInTransit(),
+-			this->ct);
++	Money profit;
++	if(_settings_game.economy.income_distance_type) 
++	{
++		profit = GetTransportedGoodsIncome_precise(
++				count,
++				/* pay transfer vehicle for only the part of transfer it has done: ie. cargo_loaded_at_xy to here */
++				DistancePlaneEx(cp->LoadedAtXY(), Station::Get(this->current_station)->xy),
++				cp->DaysInTransit(),
++				this->ct);
++	}
++	else 
++	{
++		profit = GetTransportedGoodsIncome(
++				count,
++				/* pay transfer vehicle for only the part of transfer it has done: ie. cargo_loaded_at_xy to here */
++				DistanceManhattan(cp->LoadedAtXY(), Station::Get(this->current_station)->xy),
++				cp->DaysInTransit(),
++				this->ct);
++	}
+ 
+ 	profit = profit * _settings_game.economy.feeder_payment_share / 100;
+ 
+Index: src/economy_func.h
+===================================================================
+--- src/economy_func.h	(revision 26870)
++++ src/economy_func.h	(working copy)
+@@ -30,7 +30,8 @@
+ int UpdateCompanyRatingAndValue(Company *c, bool update);
+ void StartupIndustryDailyChanges(bool init_counter);
+ 
+-Money GetTransportedGoodsIncome(uint num_pieces, uint dist, byte transit_days, CargoID cargo_type);
++Money GetTransportedGoodsIncome(uint num_pieces, uint distance, byte transit_days, CargoID cargo_type);
++Money GetTransportedGoodsIncome_precise(uint num_pieces, uint d64k, byte transit_days, CargoID cargo_type);
+ uint MoveGoodsToStation(CargoID type, uint amount, SourceType source_type, SourceID source_id, const StationList *all_stations);
+ 
+ void PrepareUnload(Vehicle *front_v);
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 26870)
++++ src/lang/english.txt	(working copy)
+@@ -1195,6 +1195,10 @@
+ STR_CONFIG_SETTING_RAW_INDUSTRY_CONSTRUCTION_METHOD_PROSPECTING :Prospecting
+ STR_CONFIG_SETTING_INDUSTRY_PLATFORM                            :Flat area around industries: {STRING2}
+ STR_CONFIG_SETTING_INDUSTRY_PLATFORM_HELPTEXT                   :Amount of flat space around an industry. This ensures empty space will remain available around an industry for building tracks, et cetera
++STR_CONFIG_SETTING_INCOMEDISTANCETYPE                           :Distance calculation for vehicle income: {STRING2}
++STR_CONFIG_SETTING_INCOMEDISTANCETYPE_HELPTEXT                  :Allows to use as-the-planes fly distance or width plus length, or 'manhattan' distance. Vehicle income is lower using Balanced.
++STR_CONFIG_SETTING_INCOMEDISTANCETYPE_MANHATTAN                 :Manhattan
++STR_CONFIG_SETTING_INCOMEDISTANCETYPE_BALANCED	                :Balanced
+ STR_CONFIG_SETTING_MULTIPINDTOWN                                :Allow multiple similar industries per town: {STRING2}
+ STR_CONFIG_SETTING_MULTIPINDTOWN_HELPTEXT                       :Normally, a town does not want more than one industry of each type. With this setting, it will allow several industries of the same type in the same town
+ STR_CONFIG_SETTING_SIGNALSIDE                                   :Show signals: {STRING2}
+Index: src/map.cpp
+===================================================================
+--- src/map.cpp	(revision 26870)
++++ src/map.cpp	(working copy)
+@@ -32,7 +32,6 @@
+ Tile *_m = NULL;          ///< Tiles of the map
+ TileExtended *_me = NULL; ///< Extended Tiles of the map
+ 
+-
+ /**
+  * (Re)allocates a map with the given dimension
+  * @param size_x the width of the map along the NE/SW edge
+@@ -148,6 +147,23 @@
+ };
+ 
+ /**
++ * Gets the 'as the plane flies' distance between the two given tiles.
++ * This distance is the sum of the delta of the long complement with the short complement, 
++ * plus root two times the remainder.
++ * distance is returned multiplied by 65536 (or << 16).
++ * @param t0 the start tile
++ * @param t1 the end tile
++ * @return the distance
++ */
++uint DistancePlaneEx(TileIndex t0, TileIndex t1)
++{
++	const uint dx = Delta(TileX(t0), TileX(t1));
++	const uint dy = Delta(TileY(t0), TileY(t1));
++	const uint dm = min(dx,dy);
++	return 92682 * dm + ((max(dx, dy) - dm) << 16);
++}
++
++/**
+  * Gets the Manhattan distance between the two given tiles.
+  * The Manhattan distance is the sum of the delta of both the
+  * X and Y component.
+Index: src/map_func.h
+===================================================================
+--- src/map_func.h	(revision 26870)
++++ src/map_func.h	(working copy)
+@@ -327,6 +327,7 @@
+ 
+ /* Functions to calculate distances */
+ uint DistanceManhattan(TileIndex, TileIndex); ///< also known as L1-Norm. Is the shortest distance one could go over diagonal tracks (or roads)
++uint DistancePlaneEx(TileIndex t0, TileIndex t1); ///< 64K times the distance an openTTD plane flies. (Going both diagonal and orthogonal)
+ uint DistanceSquare(TileIndex, TileIndex); ///< euclidian- or L2-Norm squared
+ uint DistanceMax(TileIndex, TileIndex); ///< also known as L-Infinity-Norm
+ uint DistanceMaxPlusManhattan(TileIndex, TileIndex); ///< Max + Manhattan
+Index: src/saveload/afterload.cpp
+===================================================================
+--- src/saveload/afterload.cpp	(revision 26870)
++++ src/saveload/afterload.cpp	(working copy)
+@@ -2820,8 +2820,7 @@
+ 		/* Initialise script settings profile */
+ 		_settings_game.script.settings_profile = IsInsideMM(_old_diff_level, SP_BEGIN, SP_END) ? _old_diff_level : (uint)SP_MEDIUM;
+ 	}
+-
+-	if (IsSavegameVersionBefore(182)) {
++		if (IsSavegameVersionBefore(182)) {
+ 		Aircraft *v;
+ 		/* Aircraft acceleration variable was bonkers */
+ 		FOR_ALL_AIRCRAFT(v) {
+@@ -2920,6 +2919,10 @@
+ 			}
+ 		}
+ 	}
++	
++	if(isSavegameVersionBefore(193)) {	
++		_settings_game.economy.income_distance_type = 0;
++	}
+ 
+ 	/*
+ 	 * Only keep order-backups for network clients.
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 26870)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -260,7 +260,8 @@
+  *  190   26547
+  *  191   26646
+  *  192   26700
+- *  193   26802
++ *  193   26802 mhd patch
++>>>>>>> .r26870
+  */
+ extern const uint16 SAVEGAME_VERSION = 193; ///< Current savegame version of OpenTTD.
+ 
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 26870)
++++ src/settings_gui.cpp	(working copy)
+@@ -1566,6 +1566,7 @@
+ 			accounting->Add(new SettingEntry("difficulty.subsidy_multiplier"));
+ 			accounting->Add(new SettingEntry("economy.feeder_payment_share"));
+ 			accounting->Add(new SettingEntry("economy.infrastructure_maintenance"));
++			accounting->Add(new SettingEntry("economy.income_distance_type"));
+ 			accounting->Add(new SettingEntry("difficulty.vehicle_costs"));
+ 			accounting->Add(new SettingEntry("difficulty.construction_cost"));
+ 		}
+@@ -1627,6 +1628,8 @@
+ 			disasters->Add(new SettingEntry("vehicle.plane_crashes"));
+ 		}
+ 
++/** Economy sub-page */
++static SettingsPage _settings_economy_page = {_settings_economy, lengthof(_settings_economy)};
+ 		SettingsPage *genworld = main->Add(new SettingsPage(STR_CONFIG_SETTING_GENWORLD));
+ 		{
+ 			genworld->Add(new SettingEntry("game_creation.landscape"));
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 26870)
++++ src/settings_type.h	(working copy)
+@@ -475,6 +475,7 @@
+ 	bool   fund_roads;                       ///< allow funding local road reconstruction
+ 	bool   give_money;                       ///< allow giving other companies money
+ 	bool   mod_road_rebuild;                 ///< roadworks remove unnecessary RoadBits
++	uint8   income_distance_type;            ///< Euclidian or Manhattan profit distances
+ 	bool   multiple_industry_per_town;       ///< allow many industries of the same type per town
+ 	uint8  town_growth_rate;                 ///< town growth rate
+ 	uint8  larger_towns;                     ///< the number of cities to build. These start off larger and grow twice as fast
+Index: src/table/settings.ini
+===================================================================
+--- src/table/settings.ini	(revision 26870)
++++ src/table/settings.ini	(working copy)
+@@ -1256,6 +1256,20 @@
+ strval   = STR_CONFIG_SETTING_TILE_LENGTH
+ cat      = SC_EXPERT
+ 
++[SDT_VAR]
++base     = GameSettings
++var      = economy.income_distance_type
++type     = SLE_UINT8
++from     = 193
++def      = 0
++min      = 0
++max      = 1
++str      = STR_CONFIG_SETTING_INCOMEDISTANCETYPE
++strhelp  = STR_CONFIG_SETTING_INCOMEDISTANCETYPE_HELPTEXT
++strval   = STR_CONFIG_SETTING_INCOMEDISTANCETYPE_MANHATTAN
++guiflags = SGF_MULTISTRING
++cat      = SC_EXPERT
++
+ [SDT_BOOL]
+ base     = GameSettings
+ var      = economy.multiple_industry_per_town

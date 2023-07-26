@@ -1,0 +1,481 @@
+diff --git a/bin/baseset/orig_win.obm b/bin/baseset/orig_win.obm
+index 8e2053e..c8c4923 100644
+--- a/bin/baseset/orig_win.obm
++++ b/bin/baseset/orig_win.obm
+@@ -142,5 +142,17 @@ GM_TT19.GM = Funk Central
+ GM_TT20.GM = Jammit
+ GM_TT21.GM = Movin' On
+ 
++; MIDI timecodes where the playback should attemp to start and stop short.
++; This is to allow fixing undesired silences in original MIDI files.
++; However not all music drivers may support this.
++[timingtrim]
++; Theme has two beats silence at the beginning which prevents clean looping.
++GM_TT00.GM = 768:53760
++; Can't Get There From Here from the Windows version has a long silence at the end,
++; followed by a solo repeat. This isn't in the original DOS version music and is likely
++; unintentional from the people who converted the music from the DOS version.
++; Actual song ends after measure 152.
++GM_TT10.GM = 0:235008
++
+ [origin]
+ default      = You can find it on your Transport Tycoon Deluxe CD-ROM.
+diff --git a/src/base_media_base.h b/src/base_media_base.h
+index d5de6c3..43928dd 100644
+--- a/src/base_media_base.h
++++ b/src/base_media_base.h
+@@ -286,6 +286,9 @@ struct MusicSet : BaseSet<MusicSet, NUM_SONGS_AVAILABLE, false> {
+ 	char song_name[NUM_SONGS_AVAILABLE][32];
+ 	byte track_nr[NUM_SONGS_AVAILABLE];
+ 	byte num_available;
++	int override_start[NUM_SONGS_AVAILABLE];
++	int override_end[NUM_SONGS_AVAILABLE];
++	bool has_theme;
+ 
+ 	bool FillSetDetails(struct IniFile *ini, const char *path, const char *full_filename);
+ };
+diff --git a/src/music.cpp b/src/music.cpp
+index 4001e62..4511ce6 100644
+--- a/src/music.cpp
++++ b/src/music.cpp
+@@ -65,8 +65,13 @@ bool MusicSet::FillSetDetails(IniFile *ini, const char *path, const char *full_f
+ 	bool ret = this->BaseSet<MusicSet, NUM_SONGS_AVAILABLE, false>::FillSetDetails(ini, path, full_filename);
+ 	if (ret) {
+ 		this->num_available = 0;
++		this->has_theme = !StrEmpty(this->files[0].filename);
++		
++		uint next_track_nr = 1;
++
+ 		IniGroup *names = ini->GetGroup("names");
+-		for (uint i = 0, j = 1; i < lengthof(this->song_name); i++) {
++		IniGroup *timingtrim = ini->GetGroup("timingtrim");
++		for (uint i = 0; i < lengthof(this->song_name); i++) {
+ 			const char *filename = this->files[i].filename;
+ 			if (names == NULL || StrEmpty(filename)) {
+ 				this->song_name[i][0] = '\0';
+@@ -74,15 +79,16 @@ bool MusicSet::FillSetDetails(IniFile *ini, const char *path, const char *full_f
+ 			}
+ 
+ 			IniItem *item = NULL;
++			const char *trimmed_filename = filename;
+ 			/* As we possibly add a path to the filename and we compare
+ 			 * on the filename with the path as in the .obm, we need to
+ 			 * keep stripping path elements until we find a match. */
+-			for (const char *p = filename; p != NULL; p = strchr(p, PATHSEPCHAR)) {
++			for (; trimmed_filename != NULL; trimmed_filename = strchr(trimmed_filename, PATHSEPCHAR)) {
+ 				/* Remove possible double path separator characters from
+ 				 * the beginning, so we don't start reading e.g. root. */
+-				while (*p == PATHSEPCHAR) p++;
++				while (*trimmed_filename == PATHSEPCHAR) trimmed_filename++;
+ 
+-				item = names->GetItem(p, false);
++				item = names->GetItem(trimmed_filename, false);
+ 				if (item != NULL && !StrEmpty(item->value)) break;
+ 			}
+ 
+@@ -92,8 +98,18 @@ bool MusicSet::FillSetDetails(IniFile *ini, const char *path, const char *full_f
+ 			}
+ 
+ 			strecpy(this->song_name[i], item->value, lastof(this->song_name[i]));
+-			this->track_nr[i] = j++;
+ 			this->num_available++;
++			/* if there is a theme song, number that one zero */
++			this->track_nr[i] = (i==0 && this->has_theme) ? 0 : next_track_nr++;
++
++			item = timingtrim->GetItem(trimmed_filename, false);
++			if (item != NULL && !StrEmpty(item->value)) {
++				const char *endpos = strchr(item->value, ':');
++				if (endpos != NULL) {
++					this->override_start[i] = atoi(item->value);
++					this->override_end[i] = atoi(endpos + 1);
++				}
++			}
+ 		}
+ 	}
+ 	return ret;
+diff --git a/src/music/allegro_m.cpp b/src/music/allegro_m.cpp
+index 77b4881..d434304 100644
+--- a/src/music/allegro_m.cpp
++++ b/src/music/allegro_m.cpp
+@@ -58,7 +58,7 @@ void MusicDriver_Allegro::Stop()
+ 	if (--_allegro_instance_count == 0) allegro_exit();
+ }
+ 
+-void MusicDriver_Allegro::PlaySong(const char *filename)
++void MusicDriver_Allegro::PlaySong(const char *filename, int time_start, int time_end, bool loop)
+ {
+ 	if (_midi != NULL) destroy_midi(_midi);
+ 	_midi = load_midi(filename);
+diff --git a/src/music/allegro_m.h b/src/music/allegro_m.h
+index 69cf595..68cac0d 100644
+--- a/src/music/allegro_m.h
++++ b/src/music/allegro_m.h
+@@ -21,7 +21,7 @@ public:
+ 
+ 	/* virtual */ void Stop();
+ 
+-	/* virtual */ void PlaySong(const char *filename);
++	/* virtual */ void PlaySong(const char *filename, int time_start = 0, int time_end = 0, bool loop = false);
+ 
+ 	/* virtual */ void StopSong();
+ 
+diff --git a/src/music/bemidi.cpp b/src/music/bemidi.cpp
+index 2bc2074..a34e5a1 100644
+--- a/src/music/bemidi.cpp
++++ b/src/music/bemidi.cpp
+@@ -34,7 +34,7 @@ void MusicDriver_BeMidi::Stop()
+ 	midiSynthFile.UnloadFile();
+ }
+ 
+-void MusicDriver_BeMidi::PlaySong(const char *filename)
++void MusicDriver_BeMidi::PlaySong(const char *filename, int time_start, int time_end, bool loop)
+ {
+ 	this->Stop();
+ 	entry_ref midiRef;
+diff --git a/src/music/bemidi.h b/src/music/bemidi.h
+index 23c6249..fb8ce1c 100644
+--- a/src/music/bemidi.h
++++ b/src/music/bemidi.h
+@@ -21,7 +21,7 @@ public:
+ 
+ 	/* virtual */ void Stop();
+ 
+-	/* virtual */ void PlaySong(const char *filename);
++	/* virtual */ void PlaySong(const char *filename, int time_start = 0, int time_end = 0, bool loop = false);
+ 
+ 	/* virtual */ void StopSong();
+ 
+diff --git a/src/music/cocoa_m.cpp b/src/music/cocoa_m.cpp
+index 925dc21..b68ee6e 100644
+--- a/src/music/cocoa_m.cpp
++++ b/src/music/cocoa_m.cpp
+@@ -143,7 +143,7 @@ void MusicDriver_Cocoa::Stop()
+  *
+  * @param filename Path to a MIDI file.
+  */
+-void MusicDriver_Cocoa::PlaySong(const char *filename)
++void MusicDriver_Cocoa::PlaySong(const char *filename, int time_start, int time_end, bool loop)
+ {
+ 	DEBUG(driver, 2, "cocoa_m: trying to play '%s'", filename);
+ 
+diff --git a/src/music/cocoa_m.h b/src/music/cocoa_m.h
+index 1963bef..cc9d453 100644
+--- a/src/music/cocoa_m.h
++++ b/src/music/cocoa_m.h
+@@ -20,7 +20,7 @@ public:
+ 
+ 	/* virtual */ void Stop();
+ 
+-	/* virtual */ void PlaySong(const char *filename);
++	/* virtual */ void PlaySong(const char *filename, int time_start = 0, int time_end = 0, bool loop = false);
+ 
+ 	/* virtual */ void StopSong();
+ 
+diff --git a/src/music/dmusic.cpp b/src/music/dmusic.cpp
+index 94f556e..4d366ef 100644
+--- a/src/music/dmusic.cpp
++++ b/src/music/dmusic.cpp
+@@ -221,7 +221,7 @@ void MusicDriver_DMusic::Stop()
+ }
+ 
+ 
+-void MusicDriver_DMusic::PlaySong(const char *filename)
++void MusicDriver_DMusic::PlaySong(const char *filename, int time_start, int time_end, bool loop)
+ {
+ 	/* set up the loader object info */
+ 	DMUS_OBJECTDESC obj_desc;
+@@ -257,6 +257,19 @@ void MusicDriver_DMusic::PlaySong(const char *filename)
+ 		return;
+ 	}
+ 
++	/* All original TTD music has a timedivision of 384, while DirectMusic internally
++	 * works with a timedivision of 768 i.e. double. Not hardcoding this would require
++	 * either more addendum data in the baseset files, or reading a couple bytes from
++	 * the MIDI files to get the actual timedivision, and scale accordingly. */
++	time_start *= 2;
++	time_end *= 2;
++	segment->SetStartPoint(time_start);
++	/* Enable looping if required */
++	if (time_end > time_start && loop) {
++		segment->SetLoopPoints(time_start, time_end);
++		segment->SetRepeats(DMUS_SEG_REPEAT_INFINITE);
++	}
++
+ 	/* tell the segment to 'download' the instruments */
+ 	if (FAILED(segment->SetParam(GUID_Download, 0xFFFFFFFF, 0, 0, performance))) {
+ 		DEBUG(driver, 0, "DirectMusic: failed to download instruments");
+@@ -264,11 +277,18 @@ void MusicDriver_DMusic::PlaySong(const char *filename)
+ 	}
+ 
+ 	/* start playing the MIDI file */
++	MUSIC_TIME perf_time_start = 0;
++	performance->GetTime(NULL, &perf_time_start);
+ 	if (FAILED(performance->PlaySegment(segment, 0, 0, NULL))) {
+ 		DEBUG(driver, 0, "DirectMusic: PlaySegment failed");
+ 		return;
+ 	}
+ 
++	/* If an ending time is given, request a stop at that point */
++	if (time_end > time_start && !loop) {
++		performance->Stop(segment, NULL, perf_time_start + time_end, DMUS_SEGF_DEFAULT);
++	}
++
+ 	seeking = true;
+ }
+ 
+diff --git a/src/music/dmusic.h b/src/music/dmusic.h
+index 7287623..8a31eb5 100644
+--- a/src/music/dmusic.h
++++ b/src/music/dmusic.h
+@@ -23,7 +23,7 @@ public:
+ 
+ 	/* virtual */ void Stop();
+ 
+-	/* virtual */ void PlaySong(const char *filename);
++	/* virtual */ void PlaySong(const char *filename, int time_start = 0, int time_end = 0, bool loop = false);
+ 
+ 	/* virtual */ void StopSong();
+ 
+diff --git a/src/music/extmidi.cpp b/src/music/extmidi.cpp
+index d39a050..572e11a 100644
+--- a/src/music/extmidi.cpp
++++ b/src/music/extmidi.cpp
+@@ -83,7 +83,7 @@ void MusicDriver_ExtMidi::Stop()
+ 	this->DoStop();
+ }
+ 
+-void MusicDriver_ExtMidi::PlaySong(const char *filename)
++void MusicDriver_ExtMidi::PlaySong(const char *filename, int time_start, int time_end, bool loop)
+ {
+ 	strecpy(this->song, filename, lastof(this->song));
+ 	this->DoStop();
+diff --git a/src/music/extmidi.h b/src/music/extmidi.h
+index cfbd894..5724b34 100644
+--- a/src/music/extmidi.h
++++ b/src/music/extmidi.h
+@@ -28,7 +28,7 @@ public:
+ 
+ 	/* virtual */ void Stop();
+ 
+-	/* virtual */ void PlaySong(const char *filename);
++	/* virtual */ void PlaySong(const char *filename, int time_start = 0, int time_end = 0, bool loop = false);
+ 
+ 	/* virtual */ void StopSong();
+ 
+diff --git a/src/music/libtimidity.cpp b/src/music/libtimidity.cpp
+index 1cb2adc..a50991e 100644
+--- a/src/music/libtimidity.cpp
++++ b/src/music/libtimidity.cpp
+@@ -96,7 +96,7 @@ void MusicDriver_LibTimidity::Stop()
+ 	mid_exit();
+ }
+ 
+-void MusicDriver_LibTimidity::PlaySong(const char *filename)
++void MusicDriver_LibTimidity::PlaySong(const char *filename, int time_start, int time_end, bool loop)
+ {
+ 	this->StopSong();
+ 
+diff --git a/src/music/libtimidity.h b/src/music/libtimidity.h
+index abe17e7..2ee7ecc 100644
+--- a/src/music/libtimidity.h
++++ b/src/music/libtimidity.h
+@@ -21,7 +21,7 @@ public:
+ 
+ 	/* virtual */ void Stop();
+ 
+-	/* virtual */ void PlaySong(const char *filename);
++	/* virtual */ void PlaySong(const char *filename, int time_start = 0, int time_end = 0, bool loop = false);
+ 
+ 	/* virtual */ void StopSong();
+ 
+diff --git a/src/music/music_driver.hpp b/src/music/music_driver.hpp
+index be09d3e..5a0d5f5 100644
+--- a/src/music/music_driver.hpp
++++ b/src/music/music_driver.hpp
+@@ -21,7 +21,7 @@ public:
+ 	 * Play a particular song.
+ 	 * @param filename The name of file with the song to play.
+ 	 */
+-	virtual void PlaySong(const char *filename) = 0;
++	virtual void PlaySong(const char *filename, int time_start = 0, int time_end = 0, bool loop = false) = 0;
+ 
+ 	/**
+ 	 * Stop playing the current song.
+diff --git a/src/music/null_m.h b/src/music/null_m.h
+index df9f7d8..0e615bd 100644
+--- a/src/music/null_m.h
++++ b/src/music/null_m.h
+@@ -21,7 +21,7 @@ public:
+ 
+ 	/* virtual */ void Stop() { }
+ 
+-	/* virtual */ void PlaySong(const char *filename) { }
++	/* virtual */ void PlaySong(const char *filename, int time_start = 0, int time_end = 0, bool loop = false) { }
+ 
+ 	/* virtual */ void StopSong() { }
+ 
+diff --git a/src/music/os2_m.cpp b/src/music/os2_m.cpp
+index d7fb97d..622008e 100644
+--- a/src/music/os2_m.cpp
++++ b/src/music/os2_m.cpp
+@@ -49,7 +49,7 @@ static long CDECL MidiSendCommand(const char *cmd, ...)
+ /** OS/2's music player's factory. */
+ static FMusicDriver_OS2 iFMusicDriver_OS2;
+ 
+-void MusicDriver_OS2::PlaySong(const char *filename)
++void MusicDriver_OS2::PlaySong(const char *filename, int time_start, int time_end, bool loop)
+ {
+ 	MidiSendCommand("close all");
+ 
+diff --git a/src/music/os2_m.h b/src/music/os2_m.h
+index f35e2fd..f01b0bf 100644
+--- a/src/music/os2_m.h
++++ b/src/music/os2_m.h
+@@ -21,7 +21,7 @@ public:
+ 
+ 	/* virtual */ void Stop();
+ 
+-	/* virtual */ void PlaySong(const char *filename);
++	/* virtual */ void PlaySong(const char *filename, int time_start = 0, int time_end = 0, bool loop = false);
+ 
+ 	/* virtual */ void StopSong();
+ 
+diff --git a/src/music/qtmidi.cpp b/src/music/qtmidi.cpp
+index 9bc6a61..4219695 100644
+--- a/src/music/qtmidi.cpp
++++ b/src/music/qtmidi.cpp
+@@ -258,7 +258,7 @@ void MusicDriver_QtMidi::Stop()
+  *
+  * @param filename Path to a MIDI file.
+  */
+-void MusicDriver_QtMidi::PlaySong(const char *filename)
++void MusicDriver_QtMidi::PlaySong(const char *filename, int time_start, int time_end, bool loop)
+ {
+ 	if (!_quicktime_started) return;
+ 
+diff --git a/src/music/qtmidi.h b/src/music/qtmidi.h
+index f0e1708..4b29324 100644
+--- a/src/music/qtmidi.h
++++ b/src/music/qtmidi.h
+@@ -20,7 +20,7 @@ public:
+ 
+ 	/* virtual */ void Stop();
+ 
+-	/* virtual */ void PlaySong(const char *filename);
++	/* virtual */ void PlaySong(const char *filename, int time_start = 0, int time_end = 0, bool loop = false);
+ 
+ 	/* virtual */ void StopSong();
+ 
+diff --git a/src/music/win32_m.cpp b/src/music/win32_m.cpp
+index fff0376..e1e7f07 100644
+--- a/src/music/win32_m.cpp
++++ b/src/music/win32_m.cpp
+@@ -31,7 +31,7 @@ static struct {
+ 
+ static FMusicDriver_Win32 iFMusicDriver_Win32;
+ 
+-void MusicDriver_Win32::PlaySong(const char *filename)
++void MusicDriver_Win32::PlaySong(const char *filename, int time_start, int time_end, bool loop)
+ {
+ 	assert(filename != NULL);
+ 	strecpy(_midi.start_song, filename, lastof(_midi.start_song));
+diff --git a/src/music/win32_m.h b/src/music/win32_m.h
+index 3efee32..cec1b1c 100644
+--- a/src/music/win32_m.h
++++ b/src/music/win32_m.h
+@@ -21,7 +21,7 @@ public:
+ 
+ 	/* virtual */ void Stop();
+ 
+-	/* virtual */ void PlaySong(const char *filename);
++	/* virtual */ void PlaySong(const char *filename, int time_start = 0, int time_end = 0, bool loop = false);
+ 
+ 	/* virtual */ void StopSong();
+ 
+diff --git a/src/music_gui.cpp b/src/music_gui.cpp
+index 279f376..3695203 100644
+--- a/src/music_gui.cpp
++++ b/src/music_gui.cpp
+@@ -109,6 +109,7 @@ void InitializeMusic()
+ 	uint j = 0;
+ 	for (uint i = 0; i < NUM_SONGS_AVAILABLE; i++) {
+ 		if (StrEmpty(GetSongName(i))) continue;
++		if (i == 0 && BaseMusic::GetUsedSet()->has_theme) continue;
+ 		_playlist_all[j++] = i + 1;
+ 	}
+ 	/* Terminate the list */
+@@ -182,10 +183,16 @@ static void MusicVolumeChanged(byte new_vol)
+ static void DoPlaySong()
+ {
+ 	char filename[MAX_PATH];
+-	if (FioFindFullPath(filename, lastof(filename), BASESET_DIR, BaseMusic::GetUsedSet()->files[_music_wnd_cursong - 1].filename) == NULL) {
+-		FioFindFullPath(filename, lastof(filename), OLD_GM_DIR, BaseMusic::GetUsedSet()->files[_music_wnd_cursong - 1].filename);
++	int songid = _music_wnd_cursong - 1;
++	const MusicSet &set = *BaseMusic::GetUsedSet();
++	if (FioFindFullPath(filename, lastof(filename), BASESET_DIR, set.files[songid].filename) == NULL) {
++		FioFindFullPath(filename, lastof(filename), OLD_GM_DIR, set.files[songid].filename);
+ 	}
+-	MusicDriver::GetInstance()->PlaySong(filename);
++	bool loop = false;
++	if (_music_wnd_cursong == 1 && _game_mode == GM_MENU && set.has_theme) {
++		loop = true;
++	}
++	MusicDriver::GetInstance()->PlaySong(filename, set.override_start[songid], set.override_end[songid], loop);
+ 	SetWindowDirty(WC_MUSIC_WINDOW, 0);
+ }
+ 
+@@ -243,6 +250,16 @@ static void StopMusic()
+ 
+ static void PlayPlaylistSong()
+ {
++	if (_game_mode == GM_MENU && BaseMusic::GetUsedSet()->has_theme) {
++		/* force first song (theme) on the main menu.
++		 * this is guaranteed to exist, otherwise
++		 * has_theme would not be set. */
++		_music_wnd_cursong = 1;
++		DoPlaySong();
++		_song_is_active = true;
++		return;
++	}
++
+ 	if (_cur_playlist[0] == 0) {
+ 		SelectSongToPlay();
+ 		/* if there is not songs in the playlist, it may indicate
+@@ -268,8 +285,19 @@ void ResetMusic()
+ 	DoPlaySong();
+ }
+ 
++/**
++ * Check music playback status and start/stop/song-finished
++ * Called from main loop.
++ */
+ void MusicLoop()
+ {
++	static GameMode _last_game_mode = GM_BOOTSTRAP;
++	bool force_restart = false;
++	if (_game_mode != _last_game_mode) {
++		force_restart = true;
++		_last_game_mode = _game_mode;
++	}
++
+ 	if (!_settings_client.music.playing && _song_is_active) {
+ 		StopMusic();
+ 	} else if (_settings_client.music.playing && !_song_is_active) {
+@@ -278,13 +306,13 @@ void MusicLoop()
+ 
+ 	if (!_song_is_active) return;
+ 
+-	if (!MusicDriver::GetInstance()->IsSongPlaying()) {
+-		if (_game_mode != GM_MENU) {
++	if (force_restart || !MusicDriver::GetInstance()->IsSongPlaying()) {
++		if (_game_mode == GM_MENU && BaseMusic::GetUsedSet()->has_theme) {
++			ResetMusic();
++		} else {
+ 			StopMusic();
+ 			SkipToNextSong();
+ 			PlayPlaylistSong();
+-		} else {
+-			ResetMusic();
+ 		}
+ 	}
+ }

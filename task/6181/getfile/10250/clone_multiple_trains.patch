@@ -1,0 +1,178 @@
+Index: src/depot_gui.cpp
+===================================================================
+--- src/depot_gui.cpp	(revision 27283)
++++ src/depot_gui.cpp	(working copy)
+@@ -69,7 +69,11 @@
+ 	EndContainer(),
+ 	NWidget(NWID_HORIZONTAL, NC_EQUALSIZE),
+ 		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_D_BUILD), SetDataTip(0x0, STR_NULL), SetFill(1, 1), SetResize(1, 0),
+-		NWidget(WWT_TEXTBTN, COLOUR_GREY, WID_D_CLONE), SetDataTip(0x0, STR_NULL), SetFill(1, 1), SetResize(1, 0),
++		NWidget(NWID_HORIZONTAL, NC_NONE),
++			NWidget(WWT_PUSHARROWBTN, COLOUR_GREY, WID_D_CLONE_LESS), SetFill(0, 1), SetDataTip(AWV_DECREASE, STR_NULL),
++			NWidget(WWT_TEXTBTN, COLOUR_GREY, WID_D_CLONE), SetDataTip(0x0, STR_NULL), SetFill(1, 1), SetResize(1, 0),
++			NWidget(WWT_PUSHARROWBTN, COLOUR_GREY, WID_D_CLONE_MORE), SetFill(0, 1), SetDataTip(AWV_INCREASE, STR_NULL),
++		EndContainer(),
+ 		NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_D_LOCATION), SetDataTip(STR_BUTTON_LOCATION, STR_NULL), SetFill(1, 1), SetResize(1, 0),
+ 		NWidget(NWID_SELECTION, INVALID_COLOUR, WID_D_SHOW_RENAME), // rename button
+ 			NWidget(WWT_PUSHTXTBTN, COLOUR_GREY, WID_D_RENAME), SetDataTip(STR_BUTTON_RENAME, STR_DEPOT_RENAME_TOOLTIP), SetFill(1, 1), SetResize(1, 0),
+@@ -226,15 +230,16 @@
+ 
+ struct DepotWindow : Window {
+ 	VehicleID sel;
+-	VehicleID vehicle_over; ///< Rail vehicle over which another one is dragged, \c INVALID_VEHICLE if none.
++	VehicleID vehicle_over; 	///< Rail vehicle over which another one is dragged, \c INVALID_VEHICLE if none.
+ 	VehicleType type;
+ 	bool generate_list;
+ 	VehicleList vehicle_list;
+ 	VehicleList wagon_list;
+ 	uint unitnumber_digits;
+-	uint num_columns;       ///< Number of columns.
+-	Scrollbar *hscroll;     ///< Only for trains.
++	uint num_columns;      		///< Number of columns.
++	Scrollbar *hscroll;    		///< Only for trains.
+ 	Scrollbar *vscroll;
++	uint32 num_cloned_vehicles;	///< Number of vehicles cloned at once.
+ 
+ 	DepotWindow(WindowDesc *desc, TileIndex tile, VehicleType type) : Window(desc)
+ 	{
+@@ -246,6 +251,7 @@
+ 		this->type = type;
+ 		this->num_columns = 1; // for non-trains this gets set in FinishInitNested()
+ 		this->unitnumber_digits = 2;
++		this->num_cloned_vehicles = 1;
+ 
+ 		this->CreateNestedTree();
+ 		this->hscroll = (this->type == VEH_TRAIN ? this->GetScrollbar(WID_D_H_SCROLL) : NULL);
+@@ -363,6 +369,10 @@
+ 			const Vehicle *v = this->wagon_list[num - this->vehicle_list.Length()];
+ 			this->DrawVehicleInDepot(v, r.left, r.right, y);
+ 		}
++
++		/* reset the proper number of cloned trains */
++		SetDParamMaxValue(0, 100);
++		SetDParam(0, this->num_cloned_vehicles);
+ 	}
+ 
+ 	void SetStringParameters(int widget) const
+@@ -542,7 +552,7 @@
+ 		this->GetWidget<NWidgetCore>(WID_D_SELL_ALL)->tool_tip     = STR_DEPOT_SELL_ALL_BUTTON_TRAIN_TOOLTIP + type;
+ 
+ 		this->GetWidget<NWidgetCore>(WID_D_BUILD)->SetDataTip(STR_DEPOT_TRAIN_NEW_VEHICLES_BUTTON + type, STR_DEPOT_TRAIN_NEW_VEHICLES_TOOLTIP + type);
+-		this->GetWidget<NWidgetCore>(WID_D_CLONE)->SetDataTip(STR_DEPOT_CLONE_TRAIN + type, STR_DEPOT_CLONE_TRAIN_DEPOT_INFO + type);
++		this->GetWidget<NWidgetCore>(WID_D_CLONE)->SetDataTip(STR_DEPOT_MULTI_CLONE_TRAIN + type, STR_DEPOT_MULTI_CLONE_TRAIN_DEPOT_INFO + type);
+ 
+ 		this->GetWidget<NWidgetCore>(WID_D_LOCATION)->tool_tip     = STR_DEPOT_TRAIN_LOCATION_TOOLTIP + type;
+ 		this->GetWidget<NWidgetCore>(WID_D_VEHICLE_LIST)->tool_tip = STR_DEPOT_VEHICLE_ORDER_LIST_TRAIN_TOOLTIP + type;
+@@ -693,11 +703,18 @@
+ 			WID_D_SELL_CHAIN,
+ 			WID_D_SELL_ALL,
+ 			WID_D_BUILD,
++			WID_D_CLONE_LESS,
+ 			WID_D_CLONE,
++			WID_D_CLONE_MORE,
+ 			WID_D_RENAME,
+ 			WID_D_AUTOREPLACE,
+ 			WIDGET_LIST_END);
+ 
++		this->SetWidgetDisabledState(WID_D_CLONE_LESS, this->num_cloned_vehicles == 1);
++
++		/* set proper number of cloned trains */
++		SetDParam(0, this->num_cloned_vehicles);
++
+ 		this->DrawWidgets();
+ 	}
+ 
+@@ -715,6 +732,21 @@
+ 				ShowBuildVehicleWindow(this->window_number, this->type);
+ 				break;
+ 
++			case WID_D_CLONE_LESS:
++				if(this->num_cloned_vehicles > 1) {
++					this->num_cloned_vehicles--;
++					this->SetWidgetDirty(WID_D_CLONE);
++					this->SetWidgetDirty(WID_D_CLONE_LESS);
++				}
++
++				break;
++
++			case WID_D_CLONE_MORE:
++				this->num_cloned_vehicles++;
++				this->SetWidgetDirty(WID_D_CLONE);
++				this->SetWidgetDirty(WID_D_CLONE_LESS);
++				break;
++
+ 			case WID_D_CLONE: // Clone button
+ 				this->SetWidgetDirty(WID_D_CLONE);
+ 				this->ToggleWidgetLoweredState(WID_D_CLONE);
+@@ -851,9 +883,13 @@
+ 	 */
+ 	virtual bool OnVehicleSelect(const Vehicle *v)
+ 	{
+-		if (DoCommandP(this->window_number, v->index, _ctrl_pressed ? 1 : 0, CMD_CLONE_VEHICLE | CMD_MSG(STR_ERROR_CAN_T_BUY_TRAIN + v->type), CcCloneVehicle)) {
+-			ResetObjectToPlace();
++		for (uint32 i = 0; i < this->num_cloned_vehicles; i++) {
++			if (DoCommandP(this->window_number, v->index, _ctrl_pressed ? 1 : 0, CMD_CLONE_VEHICLE | CMD_MSG(STR_ERROR_CAN_T_BUY_TRAIN + v->type), CcCloneVehicle)) {
++				ResetObjectToPlace();
++			}
+ 		}
++
++		this->num_cloned_vehicles = 1;
+ 		return true;
+ 	}
+ 
+Index: src/ini.cpp
+===================================================================
+--- src/ini.cpp	(revision 27283)
++++ src/ini.cpp	(working copy)
+@@ -81,9 +81,9 @@
+  * (modification date etc.) is not important to us; only the real data is.
+  */
+ #ifdef WITH_FDATASYNC
+-	int ret = fdatasync(fileno(f));
++	//int ret = fdatasync(fileno(f));
+ 	fclose(f);
+-	if (ret != 0) return false;
++	//if (ret != 0) return false;
+ #else
+ 	fclose(f);
+ #endif
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 27283)
++++ src/lang/english.txt	(working copy)
+@@ -3491,11 +3491,21 @@
+ STR_DEPOT_CLONE_SHIP                                            :{BLACK}Clone Ship
+ STR_DEPOT_CLONE_AIRCRAFT                                        :{BLACK}Clone Aircraft
+ 
+-STR_DEPOT_CLONE_TRAIN_DEPOT_INFO                                :{BLACK}This will buy a copy of a train including all cars. Click this button and then on a train inside or outside the depot. Ctrl+Click will share the orders. Shift+Click shows estimated cost without purchase
++STR_DEPOT_CLONE_TRAIN_DEPOT_INFO                                :{BLACK}This will buy a copy of train including all cars. Click this button and then on a train inside or outside the depot. Ctrl+Click will share the orders. Shift+Click shows estimated cost without purchase
+ STR_DEPOT_CLONE_ROAD_VEHICLE_DEPOT_INFO                         :{BLACK}This will buy a copy of a road vehicle. Click this button and then on a road vehicle inside or outside the depot. Ctrl+Click will share the orders. Shift+Click shows estimated cost without purchase
+ STR_DEPOT_CLONE_SHIP_DEPOT_INFO                                 :{BLACK}This will buy a copy of a ship. Click this button and then on a ship inside or outside the depot. Ctrl+Click will share the orders. Shift+Click shows estimated cost without purchase
+ STR_DEPOT_CLONE_AIRCRAFT_INFO_HANGAR_WINDOW                     :{BLACK}This will buy a copy of an aircraft. Click this button and then on an aircraft inside or outside the hangar. Ctrl+Click will share the orders. Shift+Click shows estimated cost without purchase
+ 
++STR_DEPOT_MULTI_CLONE_TRAIN										:{BLACK}Clone {COMMA} Train{P "" s}
++STR_DEPOT_MULTI_CLONE_ROAD_VEHICLE								:{BLACK}Clone {COMMA} Vehicle{P "" s}
++STR_DEPOT_MULTI_CLONE_SHIP										:{BLACK}Clone {COMMA} Ship{P "" s}
++STR_DEPOT_MULTI_CLONE_AIRCRAFT									:{BLACK}Clone {COMMA} Aircraft{P "" s}
++
++STR_DEPOT_MULTI_CLONE_TRAIN_DEPOT_INFO                          :{BLACK}This will buy copies of train including all cars. Click this button and then on a train inside or outside the depot. Ctrl+Click will share the orders. Shift+Click shows estimated cost without purchase
++STR_DEPOT_MULTI_CLONE_ROAD_VEHICLE_DEPOT_INFO                   :{BLACK}This will buy copies of a road vehicle. Click this button and then on a road vehicle inside or outside the depot. Ctrl+Click will share the orders. Shift+Click shows estimated cost without purchase
++STR_DEPOT_MULTI_CLONE_SHIP_DEPOT_INFO                           :{BLACK}This will buy copies of a ship. Click this button and then on a ship inside or outside the depot. Ctrl+Click will share the orders. Shift+Click shows estimated cost without purchase
++STR_DEPOT_MULTI_CLONE_AIRCRAFT_INFO_HANGAR_WINDOW               :{BLACK}This will buy copies of an aircraft. Click this button and then on an aircraft inside or outside the hangar. Ctrl+Click will share the orders. Shift+Click shows estimated cost without purchase
++
+ STR_DEPOT_TRAIN_LOCATION_TOOLTIP                                :{BLACK}Centre main view on train depot location. Ctrl+Click opens a new viewport on train depot location
+ STR_DEPOT_ROAD_VEHICLE_LOCATION_TOOLTIP                         :{BLACK}Centre main view on road vehicle depot location. Ctrl+Click opens a new viewport on road depot location
+ STR_DEPOT_SHIP_LOCATION_TOOLTIP                                 :{BLACK}Centre main view on ship depot location. Ctrl+Click opens a new viewport on ship depot location
+Index: src/widgets/depot_widget.h
+===================================================================
+--- src/widgets/depot_widget.h	(revision 27283)
++++ src/widgets/depot_widget.h	(working copy)
+@@ -26,6 +26,8 @@
+ 	WID_D_H_SCROLL,        ///< Horizontal scrollbar.
+ 	WID_D_BUILD,           ///< Build button.
+ 	WID_D_CLONE,           ///< Clone button.
++	WID_D_CLONE_LESS,	   ///< Clone less arrow.
++	WID_D_CLONE_MORE,	   ///< Clone more arrow.
+ 	WID_D_LOCATION,        ///< Location button.
+ 	WID_D_SHOW_RENAME,     ///< Show rename panel.
+ 	WID_D_RENAME,          ///< Rename button.

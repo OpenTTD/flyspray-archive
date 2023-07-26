@@ -1,0 +1,68 @@
+# HG changeset patch
+# User adf88@interia.pl
+# Date 1501086315 -7200
+#      Wed Jul 26 18:25:15 2017 +0200
+# Branch trunk
+# Node ID 2c2d3fd763c54fe8edc8692c9e6606af4f4e4a98
+# Parent  f07bd80d0326d34a6c478c97aa447b6b732a9cfb
+Fix unresolved 'WinMain' and '_safe_esp' symbols when linking with LTO on MinGW.
+
+diff -r f07bd80d0326 -r 2c2d3fd763c5 src/os/windows/crashlog_win.cpp
+--- a/src/os/windows/crashlog_win.cpp	Tue Jul 25 09:05:12 2017 +0200
++++ b/src/os/windows/crashlog_win.cpp	Wed Jul 26 18:25:15 2017 +0200
+@@ -487,8 +487,9 @@
+ /**
+  * Stack pointer for use when 'starting' the crash handler.
+  * Not static as gcc's inline assembly needs it that way.
++ * Also make it 'volatile' to prevent optimizing out by LTO.
+  */
+-void *_safe_esp = NULL;
++void * volatile _safe_esp = NULL;
+ 
+ static LONG WINAPI ExceptionHandler(EXCEPTION_POINTERS *ep)
+ {
+diff -r f07bd80d0326 -r 2c2d3fd763c5 src/os/windows/win32.cpp
+--- a/src/os/windows/win32.cpp	Tue Jul 25 09:05:12 2017 +0200
++++ b/src/os/windows/win32.cpp	Wed Jul 26 18:25:15 2017 +0200
+@@ -426,10 +426,12 @@
+ 	}
+ }
+ 
++/* Mark WinMain as "used" to prevent optimizong out by LTO.
++ * This was happening e.g. on MinGW-w64 4.0.6 with GCC 6.2.0. */
+ #if defined(WINCE)
+-int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmdShow)
++int GCC_USED APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmdShow)
+ #else
+-int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
++int GCC_USED APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+ #endif
+ {
+ 	int argc;
+diff -r f07bd80d0326 -r 2c2d3fd763c5 src/stdafx.h
+--- a/src/stdafx.h	Tue Jul 25 09:05:12 2017 +0200
++++ b/src/stdafx.h	Wed Jul 26 18:25:15 2017 +0200
+@@ -148,6 +148,7 @@
+ 	#define CDECL
+ 	#define __int64 long long
+ 	#define GCC_PACK __attribute__((packed))
++	#define GCC_USED __attribute__ ((used))
+ 	/* Warn about functions using 'printf' format syntax. First argument determines which parameter
+ 	 * is the format string, second argument is start of values passed to printf. */
+ 	#define WARN_FORMAT(string, args) __attribute__ ((format (printf, string, args)))
+@@ -162,6 +163,7 @@
+ 	#define NORETURN
+ 	#define CDECL
+ 	#define GCC_PACK
++	#define GCC_USED
+ 	#define WARN_FORMAT(string, args)
+ 	#define FINAL
+ 	#include <malloc.h>
+@@ -232,6 +234,7 @@
+ 	#endif
+ 
+ 	#define GCC_PACK
++	#define GCC_USED
+ 	#define WARN_FORMAT(string, args)
+ 	#define FINAL sealed
+ 

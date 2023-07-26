@@ -1,0 +1,359 @@
+diff --git a/src/aircraft_cmd.cpp b/src/aircraft_cmd.cpp
+index c9cddbf97..60ff5a7d6 100644
+--- a/src/aircraft_cmd.cpp
++++ b/src/aircraft_cmd.cpp
+@@ -442,7 +442,7 @@ void Aircraft::OnNewDay()
+ 
+ 	CommandCost cost(EXPENSES_AIRCRAFT_RUN, this->GetRunningCost() * this->running_ticks / (DAYS_IN_YEAR * DAY_TICKS));
+ 
+-	this->profit_this_year -= cost.GetCost();
++	this->ChangeProfitThisYear(-cost.GetCost());
+ 	this->running_ticks = 0;
+ 
+ 	SubtractMoneyFromCompanyFract(this->owner, cost);
+diff --git a/src/economy.cpp b/src/economy.cpp
+index 0106e87e1..7eccd8165 100644
+--- a/src/economy.cpp
++++ b/src/economy.cpp
+@@ -1183,7 +1183,7 @@ CargoPayment::~CargoPayment()
+ 	Backup<CompanyByte> cur_company(_current_company, this->front->owner, FILE_LINE);
+ 
+ 	SubtractMoneyFromCompany(CommandCost(this->front->GetExpenseType(true), -this->route_profit));
+-	this->front->profit_this_year += (this->visual_profit + this->visual_transfer) << 8;
++	this->front->ChangeProfitThisYear((this->visual_profit + this->visual_transfer) << 8);
+ 
+ 	if (this->route_profit != 0 && IsLocalCompany() && !PlayVehicleSound(this->front, VSE_LOAD_UNLOAD)) {
+ 		SndPlayVehicleFx(SND_14_CASHTILL, this->front);
+@@ -1508,7 +1508,7 @@ static void HandleStationRefit(Vehicle *v, CargoArray &consist_capleft, Station
+ 		 * misrouting it. */
+ 		IterateVehicleParts(v_start, ReturnCargoAction(st, INVALID_STATION));
+ 		CommandCost cost = DoCommand(v_start->tile, v_start->index, new_cid | 1U << 6 | 0xFF << 8 | 1U << 16, DC_EXEC, GetCmdRefitVeh(v_start)); // Auto-refit and only this vehicle including artic parts.
+-		if (cost.Succeeded()) v->First()->profit_this_year -= cost.GetCost() << 8;
++		if (cost.Succeeded()) v->First()->ChangeProfitThisYear(-cost.GetCost() << 8);
+ 	}
+ 
+ 	/* Add new capacity to consist capacity and reserve cargo */
+diff --git a/src/group.h b/src/group.h
+index 91ee77e60..d18c551ab 100644
+--- a/src/group.h
++++ b/src/group.h
+@@ -29,8 +29,12 @@ struct GroupStatistics {
+ 	bool autoreplace_defined;               ///< Are any autoreplace rules set?
+ 	bool autoreplace_finished;              ///< Have all autoreplacement finished?
+ 
+-	uint16 num_profit_vehicle;              ///< Number of vehicles considered for profit statistics;
+-	Money profit_last_year;                 ///< Sum of profits for all vehicles.
++	uint16 num_profit_vehicle;              ///< Number of vehicles considered for profit statistics, i.e. above a minimum age.
++	Money profit_last_year_profit_age;      ///< Sum of profits for vehicles considered for profit statistics.
++
++	Money profit_this_year;                 ///< Sum of profits for all vehicles during this year << 8, low 8 bits are fract.
++	Money profit_last_year;                 ///< Sum of profits for all vehicles during last year << 8, low 8 bits are fract.
++	uint32 occupancy;                       ///< Sum of the vehicles' load percentages for the detailed group info.
+ 
+ 	GroupStatistics();
+ 	~GroupStatistics();
+@@ -40,6 +44,9 @@ struct GroupStatistics {
+ 	void ClearProfits()
+ 	{
+ 		this->num_profit_vehicle = 0;
++		this->profit_last_year_profit_age = 0;
++
++		this->profit_this_year = 0;
+ 		this->profit_last_year = 0;
+ 	}
+ 
+diff --git a/src/group_cmd.cpp b/src/group_cmd.cpp
+index 7d29b4f84..9dd4c34a3 100644
+--- a/src/group_cmd.cpp
++++ b/src/group_cmd.cpp
+@@ -48,7 +48,11 @@ void GroupStatistics::Clear()
+ {
+ 	this->num_vehicle = 0;
+ 	this->num_profit_vehicle = 0;
++	this->profit_last_year_profit_age = 0;
++
++	this->profit_this_year = 0;
+ 	this->profit_last_year = 0;
++	this->occupancy = 0;
+ 
+ 	/* This is also called when NewGRF change. So the number of engines might have changed. Reallocate. */
+ 	free(this->num_engines);
+@@ -141,24 +145,37 @@ void GroupStatistics::Clear()
+ 
+ 	GroupStatistics &stats_all = GroupStatistics::GetAllGroup(v);
+ 	stats_all.num_vehicle += delta;
++
++	stats_all.profit_this_year += v->profit_this_year * delta;
++	stats_all.profit_last_year += v->profit_last_year * delta;
++	stats_all.occupancy += v->trip_occupancy * delta;
++
+ 	if (v->age > VEHICLE_PROFIT_MIN_AGE) {
+ 		stats_all.num_profit_vehicle += delta;
+-		stats_all.profit_last_year += v->GetDisplayProfitLastYear() * delta;
++		stats_all.profit_last_year_profit_age += v->GetDisplayProfitLastYear() * delta;
+ 	}
+ 
+ 	if (IsDefaultGroupID(v->group_id)) {
+ 		GroupStatistics &stats = GroupStatistics::Get(v);
+ 		stats.num_vehicle += delta;
++		stats.profit_this_year += v->profit_this_year * delta;
++		stats.profit_last_year += v->profit_last_year * delta;
++		stats.occupancy += v->trip_occupancy * delta;
++
+ 		if (v->age > VEHICLE_PROFIT_MIN_AGE) {
+ 			stats.num_profit_vehicle += delta;
+-			stats.profit_last_year += v->GetDisplayProfitLastYear() * delta;
++			stats.profit_last_year_profit_age += v->GetDisplayProfitLastYear() * delta;
+ 		}
+ 	} else {
+ 		for (Group *g = Group::Get(v->group_id); g != NULL; g = Group::GetIfValid(g->parent)) {
+ 			g->statistics.num_vehicle += delta;
++			g->statistics.profit_this_year += v->profit_this_year * delta;
++			g->statistics.profit_last_year += v->profit_last_year * delta;
++			g->statistics.occupancy += v->trip_occupancy * delta;
++
+ 			if (v->age > VEHICLE_PROFIT_MIN_AGE) {
+ 				g->statistics.num_profit_vehicle += delta;
+-				g->statistics.profit_last_year += v->GetDisplayProfitLastYear() * delta;
++				g->statistics.profit_last_year_profit_age += v->GetDisplayProfitLastYear() * delta;
+ 			}
+ 		}
+ 	}
+@@ -189,16 +206,16 @@ void GroupStatistics::Clear()
+ {
+ 	GroupStatistics &stats_all = GroupStatistics::GetAllGroup(v);
+ 	stats_all.num_profit_vehicle++;
+-	stats_all.profit_last_year += v->GetDisplayProfitLastYear();
++	stats_all.profit_last_year_profit_age += v->GetDisplayProfitLastYear();
+ 
+ 	if (IsDefaultGroupID(v->group_id)) {
+ 		GroupStatistics &stats = GroupStatistics::Get(v);
+ 		stats.num_profit_vehicle++;
+-		stats.profit_last_year += v->GetDisplayProfitLastYear();
++		stats.profit_last_year_profit_age += v->GetDisplayProfitLastYear();
+ 	} else {
+ 		for (Group *g = Group::Get(v->group_id); g != NULL; g = Group::GetIfValid(g->parent)) {
+ 			g->statistics.num_profit_vehicle++;
+-			g->statistics.profit_last_year += v->GetDisplayProfitLastYear();
++			g->statistics.profit_last_year_profit_age += v->GetDisplayProfitLastYear();
+ 		}
+ 	}
+ }
+@@ -225,6 +242,21 @@ void GroupStatistics::Clear()
+ 
+ 	const Vehicle *v;
+ 	FOR_ALL_VEHICLES(v) {
++		GroupStatistics &stats_all = GroupStatistics::GetAllGroup(v);
++		stats_all.profit_this_year += v->profit_this_year;
++		stats_all.profit_last_year += v->profit_last_year;
++
++		if (IsDefaultGroupID(v->group_id)) {
++			GroupStatistics &stats = GroupStatistics::Get(v);
++			stats.profit_this_year += v->profit_this_year;
++			stats.profit_last_year += v->profit_last_year;
++		} else {
++			for (Group *g = Group::Get(v->group_id); g != NULL; g = Group::GetIfValid(g->parent)) {
++				g->statistics.profit_this_year += v->profit_this_year;
++				g->statistics.profit_last_year += v->profit_last_year;
++			}
++		}
++
+ 		if (v->IsPrimaryVehicle() && v->age > VEHICLE_PROFIT_MIN_AGE) GroupStatistics::VehicleReachedProfitAge(v);
+ 	}
+ }
+@@ -449,7 +481,11 @@ CommandCost CmdAlterGroup(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32
+ 			for (Group *g2 = Group::GetIfValid(g->parent); g2 != NULL; g2 = Group::GetIfValid(g2->parent)) {
+ 				g2->statistics.num_vehicle -= g->statistics.num_vehicle;
+ 				g2->statistics.num_profit_vehicle -= g->statistics.num_profit_vehicle;
++				g2->statistics.profit_last_year_profit_age -= g->statistics.profit_last_year_profit_age;
++
++				g2->statistics.profit_this_year -= g->statistics.profit_this_year;
+ 				g2->statistics.profit_last_year -= g->statistics.profit_last_year;
++				g2->statistics.occupancy -= g->statistics.occupancy;
+ 
+ 				Engine *e;
+ 				FOR_ALL_ENGINES(e) {
+@@ -462,7 +498,11 @@ CommandCost CmdAlterGroup(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32
+ 			for (Group *g2 = pg; g2 != NULL; g2 = Group::GetIfValid(g2->parent)) {
+ 				g2->statistics.num_vehicle += g->statistics.num_vehicle;
+ 				g2->statistics.num_profit_vehicle += g->statistics.num_profit_vehicle;
++				g2->statistics.profit_last_year_profit_age += g->statistics.profit_last_year_profit_age;
++
++				g2->statistics.profit_this_year += g->statistics.profit_this_year;
+ 				g2->statistics.profit_last_year += g->statistics.profit_last_year;
++				g2->statistics.occupancy += g->statistics.occupancy;
+ 
+ 				Engine *e;
+ 				FOR_ALL_ENGINES(e) {
+diff --git a/src/group_gui.cpp b/src/group_gui.cpp
+index d3e1eafbb..572da38ca 100644
+--- a/src/group_gui.cpp
++++ b/src/group_gui.cpp
+@@ -275,9 +275,9 @@ private:
+ 		SpriteID spr;
+ 		if (stats.num_profit_vehicle == 0) {
+ 			spr = SPR_PROFIT_NA;
+-		} else if (stats.profit_last_year < 0) {
++		} else if (stats.profit_last_year_profit_age < 0) {
+ 			spr = SPR_PROFIT_NEGATIVE;
+-		} else if (stats.profit_last_year < 10000 * stats.num_profit_vehicle) { // TODO magic number
++		} else if (stats.profit_last_year_profit_age < 10000 * stats.num_profit_vehicle) { // TODO magic number
+ 			spr = SPR_PROFIT_SOME;
+ 		} else {
+ 			spr = SPR_PROFIT_LOT;
+@@ -537,37 +537,25 @@ public:
+ 				break;
+ 
+ 			case WID_GL_INFO: {
+-				Money this_year = 0;
+-				Money last_year = 0;
+-				uint32 occupancy = 0;
+-				uint32 vehicle_count = this->vehicles.Length();
+-
+-				for (uint i = 0; i < vehicle_count; i++) {
+-					const Vehicle *v = this->vehicles[i];
+-					assert(v->owner == this->owner);
+-
+-					this_year += v->GetDisplayProfitThisYear();
+-					last_year += v->GetDisplayProfitLastYear();
+-					occupancy += v->trip_occupancy;
+-				}
++				const GroupStatistics &stats = GroupStatistics::Get(this->vli.company, this->vli.index, this->vli.vtype);
+ 
+ 				const int left  = r.left + WD_FRAMERECT_LEFT + 8;
+ 				const int right = r.right - WD_FRAMERECT_RIGHT - 8;
+ 
+ 				int y = r.top + WD_FRAMERECT_TOP;
+ 				DrawString(left, right, y, STR_GROUP_PROFIT_THIS_YEAR, TC_BLACK);
+-				SetDParam(0, this_year);
++				SetDParam(0, stats.profit_this_year >> 8);
+ 				DrawString(left, right, y, STR_JUST_CURRENCY_LONG, TC_BLACK, SA_RIGHT);
+ 
+ 				y += FONT_HEIGHT_NORMAL;
+ 				DrawString(left, right, y, STR_GROUP_PROFIT_LAST_YEAR, TC_BLACK);
+-				SetDParam(0, last_year);
++				SetDParam(0, stats.profit_last_year >> 8);
+ 				DrawString(left, right, y, STR_JUST_CURRENCY_LONG, TC_BLACK, SA_RIGHT);
+ 
+ 				y += FONT_HEIGHT_NORMAL;
+ 				DrawString(left, right, y, STR_GROUP_OCCUPANCY, TC_BLACK);
+-				if (vehicle_count > 0) {
+-					SetDParam(0, occupancy / vehicle_count);
++				if (stats.num_vehicle > 0) {
++					SetDParam(0, stats.occupancy / stats.num_vehicle);
+ 					DrawString(left, right, y, STR_GROUP_OCCUPANCY_VALUE, TC_BLACK, SA_RIGHT);
+ 				}
+ 
+diff --git a/src/roadveh_cmd.cpp b/src/roadveh_cmd.cpp
+index 7adc532b6..c804aa420 100644
+--- a/src/roadveh_cmd.cpp
++++ b/src/roadveh_cmd.cpp
+@@ -1657,7 +1657,7 @@ void RoadVehicle::OnNewDay()
+ 
+ 	CommandCost cost(EXPENSES_ROADVEH_RUN, this->GetRunningCost() * this->running_ticks / (DAYS_IN_YEAR * DAY_TICKS));
+ 
+-	this->profit_this_year -= cost.GetCost();
++	this->ChangeProfitThisYear(-cost.GetCost());
+ 	this->running_ticks = 0;
+ 
+ 	SubtractMoneyFromCompanyFract(this->owner, cost);
+diff --git a/src/ship_cmd.cpp b/src/ship_cmd.cpp
+index 771863a24..2363e41dc 100644
+--- a/src/ship_cmd.cpp
++++ b/src/ship_cmd.cpp
+@@ -237,7 +237,7 @@ void Ship::OnNewDay()
+ 
+ 	CommandCost cost(EXPENSES_SHIP_RUN, this->GetRunningCost() * this->running_ticks / (DAYS_IN_YEAR * DAY_TICKS));
+ 
+-	this->profit_this_year -= cost.GetCost();
++	this->ChangeProfitThisYear(-cost.GetCost());
+ 	this->running_ticks = 0;
+ 
+ 	SubtractMoneyFromCompanyFract(this->owner, cost);
+diff --git a/src/train_cmd.cpp b/src/train_cmd.cpp
+index fb1d2b1ee..1f6d7dac5 100644
+--- a/src/train_cmd.cpp
++++ b/src/train_cmd.cpp
+@@ -4014,7 +4014,8 @@ void Train::OnNewDay()
+ 			/* running costs */
+ 			CommandCost cost(EXPENSES_TRAIN_RUN, this->GetRunningCost() * this->running_ticks / (DAYS_IN_YEAR  * DAY_TICKS));
+ 
+-			this->profit_this_year -= cost.GetCost();
++			this->ChangeProfitThisYear(-cost.GetCost());
++			
+ 			this->running_ticks = 0;
+ 
+ 			SubtractMoneyFromCompanyFract(this->owner, cost);
+diff --git a/src/vehicle.cpp b/src/vehicle.cpp
+index e4a8c7bf1..f76e021fb 100644
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -1486,7 +1486,7 @@ void VehicleEnterDepot(Vehicle *v)
+ 					AddVehicleAdviceNewsItem(STR_NEWS_ORDER_REFIT_FAILED, v->index);
+ 				}
+ 			} else if (cost.GetCost() != 0) {
+-				v->profit_this_year -= cost.GetCost() << 8;
++				v->ChangeProfitThisYear(-cost.GetCost() << 8);
+ 				if (v->owner == _local_company) {
+ 					ShowCostOrIncomeAnimation(v->x_pos, v->y_pos, v->z_pos, cost.GetCost());
+ 				}
+@@ -2160,7 +2160,11 @@ void Vehicle::LeaveStation()
+ 	st->loading_vehicles.remove(this);
+ 
+ 	HideFillingPercent(&this->fill_percent_te_id);
+-	trip_occupancy = CalcPercentVehicleFilled(this, NULL);
++
++	GroupStatistics &stats = GroupStatistics::Get(this->owner, this->group_id, this->type);
++	stats.occupancy -= this->trip_occupancy;
++	this->trip_occupancy = CalcPercentVehicleFilled(this, NULL);
++	stats.occupancy += this->trip_occupancy;
+ 
+ 	if (this->type == VEH_TRAIN && !(this->vehstatus & VS_CRASHED)) {
+ 		/* Trigger station animation (trains only) */
+@@ -2601,6 +2605,24 @@ void Vehicle::ShowVisualEffect() const
+ 	if (sound) PlayVehicleSound(this, VSE_VISUAL_EFFECT);
+ }
+ 
++/**
++ * Change the current year's profit for this vehicle.
++ * @param change The change in profit; positive for income, negative for costs.
++ */
++void Vehicle::ChangeProfitThisYear(Money change)
++{
++	this->profit_this_year += change;
++
++	GroupStatistics::GetAllGroup(this).profit_this_year += change;
++	if (IsDefaultGroupID(this->group_id)) {
++		GroupStatistics::Get(this).profit_this_year += change;
++	} else {
++		for (Group *g = Group::Get(this->group_id); g != NULL; g = Group::GetIfValid(g->parent)) {
++			g->statistics.profit_this_year += change;
++		}
++	}
++}
++
+ /**
+  * Set the next vehicle of this vehicle.
+  * @param next the next vehicle. NULL removes the next vehicle.
+diff --git a/src/vehicle_base.h b/src/vehicle_base.h
+index fc40f22a6..dd9730735 100644
+--- a/src/vehicle_base.h
++++ b/src/vehicle_base.h
+@@ -308,7 +308,7 @@ public:
+ 	uint16 refit_cap;                   ///< Capacity left over from before last refit.
+ 	VehicleCargoList cargo;             ///< The cargo this vehicle is carrying
+ 	uint16 cargo_age_counter;           ///< Ticks till cargo is aged next.
+-	int8 trip_occupancy;                ///< NOSAVE: Occupancy of vehicle of the current trip (updated after leaving a station).
++	uint8 trip_occupancy;                ///< NOSAVE: Occupancy of vehicle of the current trip (updated after leaving a station).
+ 
+ 	byte day_counter;                   ///< Increased by one for each day
+ 	byte tick_counter;                  ///< Increased by one for each tick
+@@ -572,6 +572,8 @@ public:
+ 	 */
+ 	Money GetDisplayProfitLastYear() const { return (this->profit_last_year >> 8); }
+ 
++	void ChangeProfitThisYear(Money change);
++
+ 	void SetNext(Vehicle *next);
+ 
+ 	/**

@@ -1,0 +1,240 @@
+Zoom and bevels.
+
+diff --git a/src/newgrf_debug_gui.cpp b/src/newgrf_debug_gui.cpp
+index 4abfa4b..947e67a 100644
+--- a/src/newgrf_debug_gui.cpp
++++ b/src/newgrf_debug_gui.cpp
+@@ -376,7 +376,7 @@ struct NewGRFInspectWindow : Window {
+ 			case WID_NGRFI_VEH_CHAIN: {
+ 				assert(this->HasChainIndex());
+ 				GrfSpecFeature f = GetFeatureNum(this->window_number);
+-				size->height = max(size->height, GetVehicleImageCellSize((VehicleType)(VEH_TRAIN + (f - GSF_TRAINS)), EIT_IN_DEPOT).height + 2 + WD_BEVEL_TOP + WD_BEVEL_BOTTOM);
++				size->height = max(size->height, GetVehicleImageCellSize((VehicleType)(VEH_TRAIN + (f - GSF_TRAINS)), EIT_IN_DEPOT).height + 2 + 2 * WD_BEVEL);
+ 				break;
+ 			}
+ 
+@@ -428,7 +428,7 @@ struct NewGRFInspectWindow : Window {
+ 					if (u == v) sel_end = total_width;
+ 				}
+ 
+-				int width = r.right + 1 - r.left - WD_BEVEL_LEFT - WD_BEVEL_RIGHT;
++				int width = r.right + 1 - r.left - 2 * WD_BEVEL;
+ 				int skip = 0;
+ 				if (total_width > width) {
+ 					int sel_center = (sel_start + sel_end) / 2;
+@@ -438,7 +438,7 @@ struct NewGRFInspectWindow : Window {
+ 				GrfSpecFeature f = GetFeatureNum(this->window_number);
+ 				int h = GetVehicleImageCellSize((VehicleType)(VEH_TRAIN + (f - GSF_TRAINS)), EIT_IN_DEPOT).height;
+ 				int y = (r.top + r.bottom - h) / 2;
+-				DrawVehicleImage(v->First(), r.left + WD_BEVEL_LEFT, r.right - WD_BEVEL_RIGHT, y + 1, INVALID_VEHICLE, EIT_IN_DETAILS, skip);
++				DrawVehicleImage(v->First(), r.left + WD_BEVEL, r.right - WD_BEVEL, y + 1, INVALID_VEHICLE, EIT_IN_DETAILS, skip);
+ 
+ 				/* Highlight the articulated part (this is different to the whole-vehicle highlighting of DrawVehicleImage */
+ 				if (_current_text_dir == TD_RTL) {
+diff --git a/src/widget.cpp b/src/widget.cpp
+index 471840a..3073bfd 100644
+--- a/src/widget.cpp
++++ b/src/widget.cpp
+@@ -186,24 +186,25 @@ void DrawFrameRect(int left, int top, int right, int bottom, Colours colour, Fra
+ 	if (flags & FR_TRANSPARENT) {
+ 		GfxFillRect(left, top, right, bottom, PALETTE_TO_TRANSPARENT, FILLRECT_RECOLOUR);
+ 	} else {
+-		uint interior;
+-
+-		if (flags & FR_LOWERED) {
+-			GfxFillRect(left,                 top,                left,                   bottom,                   dark);
+-			GfxFillRect(left + WD_BEVEL_LEFT, top,                right,                  top,                      dark);
+-			GfxFillRect(right,                top + WD_BEVEL_TOP, right,                  bottom - WD_BEVEL_BOTTOM, light);
+-			GfxFillRect(left + WD_BEVEL_LEFT, bottom,             right,                  bottom,                   light);
+-			interior = (flags & FR_DARKENED ? medium_dark : medium_light);
+-		} else {
+-			GfxFillRect(left,                 top,                left,                   bottom - WD_BEVEL_BOTTOM, light);
+-			GfxFillRect(left + WD_BEVEL_LEFT, top,                right - WD_BEVEL_RIGHT, top,                      light);
+-			GfxFillRect(right,                top,                right,                  bottom - WD_BEVEL_BOTTOM, dark);
+-			GfxFillRect(left,                 bottom,             right,                  bottom,                   dark);
+-			interior = medium_dark;
++		bool low_f = flags & FR_LOWERED;
++
++		if (!(flags & FR_BORDERONLY) &&
++				(left + WD_BEVEL <= right - WD_BEVEL)) {
++			uint interior = ((!low_f || flags & FR_DARKENED) ? medium_dark : medium_light);
++			GfxFillRect(left + WD_BEVEL, top + WD_BEVEL, right - WD_BEVEL, bottom - WD_BEVEL, interior);
+ 		}
+-		if (!(flags & FR_BORDERONLY)) {
+-			GfxFillRect(left + WD_BEVEL_LEFT, top + WD_BEVEL_TOP, right - WD_BEVEL_RIGHT, bottom - WD_BEVEL_BOTTOM, interior);
++
++		/* Draw the bevel from the exterior to the interior. */
++		for (uint i = WD_BEVEL; i--; left++, right--, top++, bottom--) {
++			if (left > right || top > bottom) break;
++
++			/* Left, top, right, bottom. */
++			GfxFillRect(left, top, left, bottom - (low_f ? 0 : 1), low_f ? dark : light);
++			GfxFillRect(left + 1, top, right - (low_f ? 0 : 1), top, low_f ? dark : light);
++			GfxFillRect(right, top + (low_f ? 1 : 0), right, bottom - 1, low_f ? light : dark);
++			GfxFillRect(left + (low_f ? 1 : 0), bottom, right, bottom, low_f ? light : dark);
+ 		}
++
+ 	}
+ }
+ 
+@@ -221,7 +222,7 @@ static inline void DrawImageButtons(const Rect &r, WidgetType type, Colours colo
+ 	DrawFrameRect(r.left, r.top, r.right, r.bottom, colour, (clicked) ? FR_LOWERED : FR_NONE);
+ 
+ 	if ((type & WWT_MASK) == WWT_IMGBTN_2 && clicked) img++; // Show different image when clicked for #WWT_IMGBTN_2.
+-	DrawSprite(img, PAL_NONE, r.left + WD_IMGBTN_LEFT + clicked, r.top + WD_IMGBTN_TOP + clicked);
++	DrawSprite(img, PAL_NONE, r.left + WD_IMGBTN_LEFT + clicked * WD_BEVEL, r.top + WD_IMGBTN_TOP + clicked * WD_BEVEL);
+ }
+ 
+ /**
+@@ -541,10 +542,10 @@ void DrawCaption(const Rect &r, Colours colour, Owner owner, StringID str)
+ 	bool company_owned = owner < MAX_COMPANIES;
+ 
+ 	DrawFrameRect(r.left, r.top, r.right, r.bottom, colour, FR_BORDERONLY);
+-	DrawFrameRect(r.left + 1, r.top + 1, r.right - 1, r.bottom - 1, colour, company_owned ? FR_LOWERED | FR_DARKENED | FR_BORDERONLY : FR_LOWERED | FR_DARKENED);
++	DrawFrameRect(r.left + WD_BEVEL, r.top + WD_BEVEL, r.right - WD_BEVEL, r.bottom - WD_BEVEL, colour, company_owned ? FR_LOWERED | FR_DARKENED | FR_BORDERONLY : FR_LOWERED | FR_DARKENED);
+ 
+ 	if (company_owned) {
+-		GfxFillRect(r.left + 2, r.top + 2, r.right - 2, r.bottom - 2, _colour_gradient[_company_colours[owner]][4]);
++		GfxFillRect(r.left + 2 * WD_BEVEL, r.top + 2 * WD_BEVEL, r.right - 2 * WD_BEVEL, r.bottom - 2 * WD_BEVEL, _colour_gradient[_company_colours[owner]][4]);
+ 	}
+ 
+ 	if (str != STR_NULL) {
+@@ -621,9 +622,9 @@ void Window::DrawWidgets() const
+ 
+ 			int colour = _string_colourmap[_window_highlight_colour ? widget->GetHighlightColour() : TC_WHITE];
+ 
+-			GfxFillRect(left,                 top,    left,                   bottom - WD_BEVEL_BOTTOM, colour);
+-			GfxFillRect(left + WD_BEVEL_LEFT, top,    right - WD_BEVEL_RIGHT, top,                      colour);
+-			GfxFillRect(right,                top,    right,                  bottom - WD_BEVEL_BOTTOM, colour);
++			GfxFillRect(left,                 top,    left,                   bottom - WD_BEVEL, colour);
++			GfxFillRect(left + WD_BEVEL, top,    right - WD_BEVEL, top,                      colour);
++			GfxFillRect(right,                top,    right,                  bottom - WD_BEVEL, colour);
+ 			GfxFillRect(left,                 bottom, right,                  bottom,                   colour);
+ 		}
+ 	}
+@@ -2084,13 +2085,21 @@ Dimension NWidgetScrollbar::horizontal_dimension = {0, 0};
+ /** Reset the cached dimensions. */
+ /* static */ void NWidgetLeaf::InvalidateDimensionCache()
+ {
+-	shadebox_dimension.width   = shadebox_dimension.height   = 0;
+-	debugbox_dimension.width   = debugbox_dimension.height   = 0;
+-	defsizebox_dimension.width = defsizebox_dimension.height = 0;
+-	stickybox_dimension.width  = stickybox_dimension.height  = 0;
+-	resizebox_dimension.width  = resizebox_dimension.height  = 0;
+-	closebox_dimension.width   = closebox_dimension.height   = 0;
+-	dropdown_dimension.width   = dropdown_dimension.height   = 0;
++	shadebox_dimension   = {0, 0};
++	debugbox_dimension   = {0, 0};
++	defsizebox_dimension = {0, 0};
++	stickybox_dimension  = {0, 0};
++	resizebox_dimension  = {0, 0};
++	closebox_dimension   = {0, 0};
++	dropdown_dimension   = {0, 0};
++
++	bevel_size = UnScaleByZoom(4, ZOOM_LVL_GUI);
++
++	/* Offsets (left, top, right, bottom). */
++	img_offsets = {bevel_size, bevel_size, 2 * bevel_size, 2 * bevel_size};
++
++	/* Padding (horizontal/vertical). */
++	img_padding = {img_offsets.left + img_offsets.right, img_offsets.top + img_offsets.bottom};
+ }
+ 
+ Dimension NWidgetLeaf::shadebox_dimension   = {0, 0};
+@@ -2100,6 +2109,9 @@ Dimension NWidgetLeaf::stickybox_dimension  = {0, 0};
+ Dimension NWidgetLeaf::resizebox_dimension  = {0, 0};
+ Dimension NWidgetLeaf::closebox_dimension   = {0, 0};
+ Dimension NWidgetLeaf::dropdown_dimension   = {0, 0};
++uint NWidgetLeaf::bevel_size = 1;
++Rect NWidgetLeaf::img_offsets = {1, 1, 2, 2};
++Dimension NWidgetLeaf::img_padding = {3, 3};
+ 
+ /**
+  * Nested leaf widget.
+@@ -2296,12 +2308,11 @@ void NWidgetLeaf::SetupSmallestSize(Window *w, bool init_array)
+ 		case WWT_IMGBTN:
+ 		case WWT_IMGBTN_2:
+ 		case WWT_PUSHIMGBTN: {
+-			static const Dimension extra = {WD_IMGBTN_LEFT + WD_IMGBTN_RIGHT,  WD_IMGBTN_TOP + WD_IMGBTN_BOTTOM};
+-			padding = &extra;
++			padding = &this->img_padding;
+ 			Dimension d2 = GetSpriteSize(this->widget_data);
+ 			if (this->type == WWT_IMGBTN_2) d2 = maxdim(d2, GetSpriteSize(this->widget_data + 1));
+-			d2.width += extra.width;
+-			d2.height += extra.height;
++			d2.width += padding->width;
++			d2.height += padding->height;
+ 			size = maxdim(size, d2);
+ 			break;
+ 		}
+@@ -2510,7 +2521,7 @@ void NWidgetLeaf::Draw(const Window *w)
+ 	if (this->index >= 0) w->DrawWidget(r, this->index);
+ 
+ 	if (this->IsDisabled()) {
+-		GfxFillRect(r.left + 1, r.top + 1, r.right - 1, r.bottom - 1, _colour_gradient[this->colour & 0xF][2], FILLRECT_CHECKER);
++		GfxFillRect(r.left + WD_BEVEL, r.top + WD_BEVEL, r.right - WD_BEVEL, r.bottom - WD_BEVEL, _colour_gradient[this->colour & 0xF][2], FILLRECT_CHECKER);
+ 	}
+ }
+ 
+diff --git a/src/widget_type.h b/src/widget_type.h
+index 39efbb4..98c3a9d 100644
+--- a/src/widget_type.h
++++ b/src/widget_type.h
+@@ -779,6 +779,16 @@ public:
+ 	static void InvalidateDimensionCache();
+ 
+ 	static Dimension dropdown_dimension;  ///< Cached size of a dropdown widget.
++
++	/* Size of bevels. */
++	static uint bevel_size;
++
++	/* Offsets (left, top, right, bottom). */
++	static Rect img_offsets;
++
++	/* Padding (horizontal, vertical). */
++	static Dimension img_padding;
++
+ private:
+ 	static Dimension shadebox_dimension;  ///< Cached size of a shadebox widget.
+ 	static Dimension debugbox_dimension;  ///< Cached size of a debugbox widget.
+@@ -1158,4 +1168,10 @@ NWidgetContainer *MakeWindowNWidgetTree(const NWidgetPart *parts, int count, int
+ 
+ NWidgetBase *MakeCompanyButtonRows(int *biggest_index, int widget_first, int widget_last, int max_length, StringID button_tooltip);
+ 
++#define WD_BEVEL (NWidgetLeaf::bevel_size)
++#define WD_IMGBTN_LEFT (NWidgetLeaf::img_offsets.left)
++#define WD_IMGBTN_TOP (NWidgetLeaf::img_offsets.top)
++#define WD_IMGBTN_RIGHT (NWidgetLeaf::img_offsets.right)
++#define WD_IMGBTN_BOTTOM (NWidgetLeaf::img_offsets.bottom)
++
+ #endif /* WIDGET_TYPE_H */
+diff --git a/src/window_gui.h b/src/window_gui.h
+index e3314d1..1675034 100644
+--- a/src/window_gui.h
++++ b/src/window_gui.h
+@@ -36,12 +36,6 @@ DECLARE_ENUM_AS_BIT_SET(FrameFlags)
+ 
+ /** Distances used in drawing widgets. */
+ enum WidgetDrawDistances {
+-	/* WWT_IMGBTN(_2) */
+-	WD_IMGBTN_LEFT    = 1,      ///< Left offset of the image in the button.
+-	WD_IMGBTN_RIGHT   = 2,      ///< Right offset of the image in the button.
+-	WD_IMGBTN_TOP     = 1,      ///< Top offset of image in the button.
+-	WD_IMGBTN_BOTTOM  = 2,      ///< Bottom offset of image in the button.
+-
+ 	/* WWT_INSET */
+ 	WD_INSET_LEFT  = 2,         ///< Left offset of string.
+ 	WD_INSET_RIGHT = 2,         ///< Right offset of string.
+@@ -52,12 +46,6 @@ enum WidgetDrawDistances {
+ 	WD_SCROLLBAR_TOP    = 2,    ///< Top offset of scrollbar.
+ 	WD_SCROLLBAR_BOTTOM = 2,    ///< Bottom offset of scrollbar.
+ 
+-	/* Size of the pure frame bevel without any padding. */
+-	WD_BEVEL_LEFT       = 1,    ///< Width of left bevel border.
+-	WD_BEVEL_RIGHT      = 1,    ///< Width of right bevel border.
+-	WD_BEVEL_TOP        = 1,    ///< Height of top bevel border.
+-	WD_BEVEL_BOTTOM     = 1,    ///< Height of bottom bevel border.
+-
+ 	/* FrameRect widgets, all text buttons, panel, editbox */
+ 	WD_FRAMERECT_LEFT   = 2,    ///< Offset at left to draw the frame rectangular area
+ 	WD_FRAMERECT_RIGHT  = 2,    ///< Offset at right to draw the frame rectangular area

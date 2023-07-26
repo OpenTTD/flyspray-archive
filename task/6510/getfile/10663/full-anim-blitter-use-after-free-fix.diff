@@ -1,0 +1,143 @@
+Index: src/gfxinit.cpp
+===================================================================
+--- src/gfxinit.cpp	(revision 27772)
++++ src/gfxinit.cpp	(working copy)
+@@ -290,6 +290,8 @@
+ 	const bool animation_wanted = HasBit(_display_opt, DO_FULL_ANIMATION);
+ 	const char *cur_blitter = BlitterFactory::GetCurrentBlitter()->GetName();
+ 
++	VideoDriver::GetInstance()->AcquireBlitterLock();
++
+ 	for (uint i = 0; i < lengthof(replacement_blitters); i++) {
+ 		if (animation_wanted && (replacement_blitters[i].animation == 0)) continue;
+ 		if (!animation_wanted && (replacement_blitters[i].animation == 1)) continue;
+@@ -298,7 +300,10 @@
+ 		if (!IsInsideMM(depth_wanted_by_grf, replacement_blitters[i].min_grf_depth, replacement_blitters[i].max_grf_depth + 1)) continue;
+ 		const char *repl_blitter = replacement_blitters[i].name;
+ 
+-		if (strcmp(repl_blitter, cur_blitter) == 0) return false;
++		if (strcmp(repl_blitter, cur_blitter) == 0) {
++			VideoDriver::GetInstance()->ReleaseBlitterLock();
++			return false;
++		}
+ 		if (BlitterFactory::GetBlitterFactory(repl_blitter) == NULL) continue;
+ 
+ 		DEBUG(misc, 1, "Switching blitter from '%s' to '%s'... ", cur_blitter, repl_blitter);
+@@ -313,6 +318,8 @@
+ 		if (BlitterFactory::SelectBlitter(cur_blitter) == NULL || !VideoDriver::GetInstance()->AfterBlitterChange()) usererror("Failed to reinitialize video driver. Specify a fixed blitter in the config");
+ 	}
+ 
++	VideoDriver::GetInstance()->ReleaseBlitterLock();
++
+ 	return true;
+ }
+ 
+Index: src/video/sdl_v.cpp
+===================================================================
+--- src/video/sdl_v.cpp	(revision 27772)
++++ src/video/sdl_v.cpp	(working copy)
+@@ -831,10 +831,17 @@
+ 
+ bool VideoDriver_SDL::AfterBlitterChange()
+ {
++	return CreateMainSurface(_screen.width, _screen.height);
++}
++
++void VideoDriver_SDL::AcquireBlitterLock()
++{
+ 	if (_draw_mutex != NULL) _draw_mutex->BeginCritical(true);
+-	bool ret = CreateMainSurface(_screen.width, _screen.height);
++}
++
++void VideoDriver_SDL::ReleaseBlitterLock()
++{
+ 	if (_draw_mutex != NULL) _draw_mutex->EndCritical(true);
+-	return ret;
+ }
+ 
+ #endif /* WITH_SDL */
+Index: src/video/sdl_v.h
+===================================================================
+--- src/video/sdl_v.h	(revision 27772)
++++ src/video/sdl_v.h	(working copy)
+@@ -31,6 +31,10 @@
+ 
+ 	/* virtual */ bool AfterBlitterChange();
+ 
++	/* virtual */ void AcquireBlitterLock();
++
++	/* virtual */ void ReleaseBlitterLock();
++
+ 	/* virtual */ bool ClaimMousePointer();
+ 
+ 	/* virtual */ const char *GetName() const { return "sdl"; }
+Index: src/video/video_driver.hpp
+===================================================================
+--- src/video/video_driver.hpp	(revision 27772)
++++ src/video/video_driver.hpp	(working copy)
+@@ -49,6 +49,7 @@
+ 
+ 	/**
+ 	 * Callback invoked after the blitter was changed.
++	 * This may only be called between AcquireBlitterLock and ReleaseBlitterLock.
+ 	 * @return True if no error.
+ 	 */
+ 	virtual bool AfterBlitterChange()
+@@ -56,6 +57,18 @@
+ 		return true;
+ 	}
+ 
++	/**
++	 * Acquire any lock(s) required to be held when changing blitters.
++	 * These lock(s) may not be acquired recursively.
++	 */
++	virtual void AcquireBlitterLock() { }
++
++	/**
++	 * Release any lock(s) required to be held when changing blitters.
++	 * These lock(s) may not be acquired recursively.
++	 */
++	virtual void ReleaseBlitterLock() { }
++
+ 	virtual bool ClaimMousePointer()
+ 	{
+ 		return true;
+Index: src/video/win32_v.cpp
+===================================================================
+--- src/video/win32_v.cpp	(revision 27772)
++++ src/video/win32_v.cpp	(working copy)
+@@ -1334,10 +1334,17 @@
+ 
+ bool VideoDriver_Win32::AfterBlitterChange()
+ {
++	return AllocateDibSection(_screen.width, _screen.height, true) && this->MakeWindow(_fullscreen);
++}
++
++void VideoDriver_Win32::AcquireBlitterLock()
++{
+ 	if (_draw_mutex != NULL) _draw_mutex->BeginCritical(true);
+-	bool ret = AllocateDibSection(_screen.width, _screen.height, true) && this->MakeWindow(_fullscreen);
++}
++
++void VideoDriver_Win32::ReleaseBlitterLock()
++{
+ 	if (_draw_mutex != NULL) _draw_mutex->EndCritical(true);
+-	return ret;
+ }
+ 
+ void VideoDriver_Win32::EditBoxLostFocus()
+Index: src/video/win32_v.h
+===================================================================
+--- src/video/win32_v.h	(revision 27772)
++++ src/video/win32_v.h	(working copy)
+@@ -31,6 +31,10 @@
+ 
+ 	/* virtual */ bool AfterBlitterChange();
+ 
++	/* virtual */ void AcquireBlitterLock();
++
++	/* virtual */ void ReleaseBlitterLock();
++
+ 	/* virtual */ bool ClaimMousePointer();
+ 
+ 	/* virtual */ void EditBoxLostFocus();

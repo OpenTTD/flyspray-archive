@@ -1,0 +1,328 @@
+diff --git a/src/window.cpp b/src/window.cpp
+index 3b33d3b1b..75f69d41e 100644
+--- a/src/window.cpp
++++ b/src/window.cpp
+@@ -1264,17 +1264,17 @@ static inline bool IsVitalWindow(const Window *w)
+  * Get the z-priority for a given window. This is used in comparison with other z-priority values;
+  * a window with a given z-priority will appear above other windows with a lower value, and below
+  * those with a higher one (the ordering within z-priorities is arbitrary).
+- * @param w The window to get the z-priority for
+- * @pre w->window_class != WC_INVALID
++ * @param wc The window class of window to get the z-priority for
++ * @pre wc != WC_INVALID
+  * @return The window's z-priority
+  */
+-static uint GetWindowZPriority(const Window *w)
++static uint GetWindowZPriority(const WindowClass wc)
+ {
+-	assert(w->window_class != WC_INVALID);
++	assert(wc != WC_INVALID);
+ 
+ 	uint z_priority = 0;
+ 
+-	switch (w->window_class) {
++	switch (wc) {
+ 		case WC_ENDSCREEN:
+ 			++z_priority;
+ 
+@@ -1346,11 +1346,11 @@ static void AddWindowToZOrdering(Window *w)
+ 		/* Search down the z-ordering for its location. */
+ 		Window *v = _z_front_window;
+ 		uint last_z_priority = UINT_MAX;
+-		while (v != NULL && (v->window_class == WC_INVALID || GetWindowZPriority(v) > GetWindowZPriority(w))) {
++		while (v != NULL && (v->window_class == WC_INVALID || GetWindowZPriority(v->window_class) > GetWindowZPriority(w->window_class))) {
+ 			if (v->window_class != WC_INVALID) {
+ 				/* Sanity check z-ordering, while we're at it. */
+-				assert(last_z_priority >= GetWindowZPriority(v));
+-				last_z_priority = GetWindowZPriority(v);
++				assert(last_z_priority >= GetWindowZPriority(v->window_class));
++				last_z_priority = GetWindowZPriority(v->window_class);
+ 			}
+ 
+ 			v = v->z_back;
+@@ -1535,153 +1535,136 @@ void Window::FindWindowPlacementAndResize(int def_width, int def_height)
+ 	this->SetDirty();
+ }
+ 
+-/**
+- * Decide whether a given rectangle is a good place to open a completely visible new window.
+- * The new window should be within screen borders, and not overlap with another already
+- * existing window (except for the main window in the background).
+- * @param left    Left edge of the rectangle
+- * @param top     Top edge of the rectangle
+- * @param width   Width of the rectangle
+- * @param height  Height of the rectangle
+- * @param toolbar_y Height of main toolbar
+- * @param pos     If rectangle is good, use this parameter to return the top-left corner of the new window
+- * @return Boolean indication that the rectangle is a good place for the new window
+- */
+-static bool IsGoodAutoPlace1(int left, int top, int width, int height, int toolbar_y, Point &pos)
++/** The penalty for placing a window partially off-screen. */
++static const uint WINDOW_PLACEMENT_PENALTY_OFFSCREEN = 5;
++/** The penalty for placing a window such that it overlaps with existing windows, per window. */
++static const uint WINDOW_PLACEMENT_PENALTY_OVERLAP = 2;
++/** The penalty for placing a window which has a parent in a spot not adjacent to the parent window. */
++static const uint WINDOW_PLACEMENT_PENALTY_PARENT = 3;
++/** The sentinel value for placement at a spot where nothing should ever be placed, e.g. entirely off-screen. */
++static const uint WINDOW_PLACEMENT_PENALTY_FORBIDDEN = UINT_MAX;
++
++/**
++ * Decide whether a given rectangle is a good place to open a new window.
++ * The new window should ideally be within screen borders, and not overlap with another already
++ * existing window (except for the main window in the background), though positions that do not
++ * fit these conditions only get a higher penalty instead of being rejected.
++ * @param left     Left edge of the rectangle
++ * @param top      Top edge of the rectangle
++ * @param width    Width of the rectangle
++ * @param height   Height of the rectangle
++ * @param priority The priority of the new window, used for checking if it would be obscured by a window with higher priority
++ * @param penalty  Initial penalty for this check, should be #WINDOW_PLACEMENT_PENALTY_PARENT if the window has a parent and this spot is not adjacent, or 0 otherwise.
++ * @param pos      If rectangle is good (better than previous best), use this parameter to return the top-left corner of the new window
++ * @param penalty_best The score for the best previous placement. If rectangle is good, overwrite this parameter with the new best score.
++ * @return Score for for this position, as a sum of penalties.
++ */
++static uint IsGoodAutoPlace(int left, int top, int width, int height, uint priority, uint penalty, Point &pos, uint &penalty_best)
+ {
+ 	int right  = width + left;
+ 	int bottom = height + top;
+ 
+-	if (left < 0 || top < toolbar_y || right > _screen.width || bottom > _screen.height) return false;
++	if (left < 0 || top < 0 || right > _screen.width || bottom > _screen.height) {
++		penalty += WINDOW_PLACEMENT_PENALTY_OFFSCREEN;
+ 
+-	/* Make sure it is not obscured by any window. */
+-	const Window *w;
+-	FOR_ALL_WINDOWS_FROM_BACK(w) {
+-		if (w->window_class == WC_MAIN_WINDOW) continue;
++		bool rtl = _current_text_dir == TD_RTL;
+ 
+-		if (right > w->left &&
+-				w->left + w->width > left &&
+-				bottom > w->top &&
+-				w->top + w->height > top) {
+-			return false;
+-		}
++		/* Left part (for LTR, otherwise right) of the rectangle may be at most 1/4 off-screen,
++		 * right part (for LTR, otherwise left) of the rectangle may be at most 1/2 off-screen
++		 */
++		if (left < -(width >> (rtl ? 1 : 2)) || left > _screen.width - (width >> (rtl ? 2 : 1))) return WINDOW_PLACEMENT_PENALTY_FORBIDDEN;
++		/* Bottom part of the rectangle may be at most 1/4 off-screen */
++		if (top < 0 || top > _screen.height - (height >> 2)) return WINDOW_PLACEMENT_PENALTY_FORBIDDEN;
+ 	}
+ 
+-	pos.x = left;
+-	pos.y = top;
+-	return true;
+-}
+-
+-/**
+- * Decide whether a given rectangle is a good place to open a mostly visible new window.
+- * The new window should be mostly within screen borders, and not overlap with another already
+- * existing window (except for the main window in the background).
+- * @param left    Left edge of the rectangle
+- * @param top     Top edge of the rectangle
+- * @param width   Width of the rectangle
+- * @param height  Height of the rectangle
+- * @param toolbar_y Height of main toolbar
+- * @param pos     If rectangle is good, use this parameter to return the top-left corner of the new window
+- * @return Boolean indication that the rectangle is a good place for the new window
+- */
+-static bool IsGoodAutoPlace2(int left, int top, int width, int height, int toolbar_y, Point &pos)
+-{
+-	/* Left part of the rectangle may be at most 1/4 off-screen,
+-	 * right part of the rectangle may be at most 1/2 off-screen
+-	 */
+-	if (left < -(width >> 2) || left > _screen.width - (width >> 1)) return false;
+-	/* Bottom part of the rectangle may be at most 1/4 off-screen */
+-	if (top < toolbar_y || top > _screen.height - (height >> 2)) return false;
+-
+ 	/* Make sure it is not obscured by any window. */
+ 	const Window *w;
+ 	FOR_ALL_WINDOWS_FROM_BACK(w) {
+-		if (w->window_class == WC_MAIN_WINDOW) continue;
++		if (w->window_class == WC_MAIN_WINDOW || w->window_class == WC_TOOLTIPS) continue;
+ 
+-		if (left + width > w->left &&
++		if (right > w->left &&
+ 				w->left + w->width > left &&
+-				top + height > w->top &&
++				bottom > w->top &&
+ 				w->top + w->height > top) {
+-			return false;
++			if (GetWindowZPriority(w->window_class) > priority) return WINDOW_PLACEMENT_PENALTY_FORBIDDEN;
++
++			penalty += WINDOW_PLACEMENT_PENALTY_OVERLAP;
+ 		}
+ 	}
+ 
+-	pos.x = left;
+-	pos.y = top;
+-	return true;
++	if (penalty_best == WINDOW_PLACEMENT_PENALTY_FORBIDDEN || penalty_best > penalty) {
++		pos.x = left;
++		pos.y = top;
++		penalty_best = penalty;
++	}
++	return penalty;
+ }
+ 
+ /**
+  * Find a good place for opening a new window of a given width and height.
+  * @param width  Width of the new window
+  * @param height Height of the new window
++ * @param priority The priority of the new window, used for checking if it would be obscured by a window with higher priority
++ * @param parent The parent of the new window, if it exists
+  * @return Top-left coordinate of the new window
+  */
+-static Point GetAutoPlacePosition(int width, int height)
++static Point GetAutoPlacePosition(int width, int height, uint priority, const Window *parent)
+ {
+ 	Point pt;
++	uint penalty_best = WINDOW_PLACEMENT_PENALTY_FORBIDDEN;
+ 
+ 	bool rtl = _current_text_dir == TD_RTL;
+ 
+ 	/* First attempt, try top-left of the screen */
+ 	const Window *main_toolbar = FindWindowByClass(WC_MAIN_TOOLBAR);
+ 	const int toolbar_y =  main_toolbar != NULL ? main_toolbar->height : 0;
+-	if (IsGoodAutoPlace1(rtl ? _screen.width - width : 0, toolbar_y, width, height, toolbar_y, pt)) return pt;
++	/* Does it fit next to the toolbar? If that is ideal, return right away.
++	 * If it collides with the toolbar, this spot is rated forbidden and discarded by IsGoodAutoPlace. */
++	if (IsGoodAutoPlace(rtl ? _screen.width - width : 0, 0, width, height, priority,
++			parent == NULL ? 0 : WINDOW_PLACEMENT_PENALTY_PARENT, pt, penalty_best) == 0) {
++		return pt;
++	}
++	/* If the position next to the toolbar is forbidden (most likely due to a collision with the toolbar),
++	 * perhaps the position right below the toolbar is better. */
++	if (penalty_best == WINDOW_PLACEMENT_PENALTY_FORBIDDEN &&
++			IsGoodAutoPlace(rtl ? _screen.width - width : 0, toolbar_y, width, height, priority,
++			parent == NULL ? 0 : WINDOW_PLACEMENT_PENALTY_PARENT, pt, penalty_best) == 0) {
++		return pt;
++	}
+ 
+ 	/* Second attempt, try around all existing windows.
+-	 * The new window must be entirely on-screen, and not overlap with an existing window.
++	 * The new window should ideally be entirely on-screen, and not overlap with an existing window.
+ 	 * Eight starting points are tried, two at each corner.
+ 	 */
+ 	const Window *w;
+ 	FOR_ALL_WINDOWS_FROM_BACK(w) {
+-		if (w->window_class == WC_MAIN_WINDOW) continue;
+-
+-		if (IsGoodAutoPlace1(w->left + w->width,         w->top,                      width, height, toolbar_y, pt)) return pt;
+-		if (IsGoodAutoPlace1(w->left            - width, w->top,                      width, height, toolbar_y, pt)) return pt;
+-		if (IsGoodAutoPlace1(w->left,                    w->top + w->height,          width, height, toolbar_y, pt)) return pt;
+-		if (IsGoodAutoPlace1(w->left,                    w->top             - height, width, height, toolbar_y, pt)) return pt;
+-		if (IsGoodAutoPlace1(w->left + w->width,         w->top + w->height - height, width, height, toolbar_y, pt)) return pt;
+-		if (IsGoodAutoPlace1(w->left            - width, w->top + w->height - height, width, height, toolbar_y, pt)) return pt;
+-		if (IsGoodAutoPlace1(w->left + w->width - width, w->top + w->height,          width, height, toolbar_y, pt)) return pt;
+-		if (IsGoodAutoPlace1(w->left + w->width - width, w->top             - height, width, height, toolbar_y, pt)) return pt;
+-	}
++		if (w->window_class == WC_MAIN_WINDOW || w->window_class == WC_TOOLTIPS) continue;
+ 
+-	/* Third attempt, try around all existing windows.
+-	 * The new window may be partly off-screen, and must not overlap with an existing window.
+-	 * Only four starting points are tried.
+-	 */
+-	FOR_ALL_WINDOWS_FROM_BACK(w) {
+-		if (w->window_class == WC_MAIN_WINDOW) continue;
++		uint penalty = (parent == NULL || parent == w) ? 0 : WINDOW_PLACEMENT_PENALTY_PARENT;
+ 
+-		if (IsGoodAutoPlace2(w->left + w->width, w->top,             width, height, toolbar_y, pt)) return pt;
+-		if (IsGoodAutoPlace2(w->left    - width, w->top,             width, height, toolbar_y, pt)) return pt;
+-		if (IsGoodAutoPlace2(w->left,            w->top + w->height, width, height, toolbar_y, pt)) return pt;
+-		if (IsGoodAutoPlace2(w->left,            w->top - height,    width, height, toolbar_y, pt)) return pt;
++		if (IsGoodAutoPlace(w->left + w->width,         w->top,                      width, height, priority, penalty, pt, penalty_best) == 0) return pt;
++		if (IsGoodAutoPlace(w->left            - width, w->top,                      width, height, priority, penalty, pt, penalty_best) == 0) return pt;
++		if (IsGoodAutoPlace(w->left,                    w->top + w->height,          width, height, priority, penalty, pt, penalty_best) == 0) return pt;
++		if (IsGoodAutoPlace(w->left,                    w->top             - height, width, height, priority, penalty, pt, penalty_best) == 0) return pt;
++		if (IsGoodAutoPlace(w->left + w->width,         w->top + w->height - height, width, height, priority, penalty, pt, penalty_best) == 0) return pt;
++		if (IsGoodAutoPlace(w->left            - width, w->top + w->height - height, width, height, priority, penalty, pt, penalty_best) == 0) return pt;
++		if (IsGoodAutoPlace(w->left + w->width - width, w->top + w->height,          width, height, priority, penalty, pt, penalty_best) == 0) return pt;
++		if (IsGoodAutoPlace(w->left + w->width - width, w->top             - height, width, height, priority, penalty, pt, penalty_best) == 0) return pt;
+ 	}
+ 
+-	/* Fourth and final attempt, put window at diagonal starting from (0, toolbar_y), try multiples
+-	 * of the closebox
++	if (penalty_best != WINDOW_PLACEMENT_PENALTY_FORBIDDEN) return pt;
++	/* Third and final attempt, if all previous spots were forbidden (which is very unlikely unless using an unsupported tiny screen size),
++	 * just place the window such that the closebox and caption are inside the screen and not covered by immovable objects like the toolbar.
++	 * Other windows of higher priority may need to be moved or closed to access the new window. If this is necessary, also print out a warning.
+ 	 */
+-	int left = rtl ? _screen.width - width : 0, top = toolbar_y;
+-	int offset_x = rtl ? -NWidgetLeaf::closebox_dimension.width : NWidgetLeaf::closebox_dimension.width;
+-	int offset_y = max<int>(NWidgetLeaf::closebox_dimension.height, FONT_HEIGHT_NORMAL + WD_CAPTIONTEXT_TOP + WD_CAPTIONTEXT_BOTTOM);
+-
+-restart:
+-	FOR_ALL_WINDOWS_FROM_BACK(w) {
+-		if (w->left == left && w->top == top) {
+-			left += offset_x;
+-			top += offset_y;
+-			goto restart;
+-		}
+-	}
+-
+-	pt.x = left;
+-	pt.y = top;
++	DEBUG(misc, 0, "Could not find a suitable spot for internal window, falling back to top left");
++	pt.x = rtl ? _screen.width - width : 0;
++	pt.y = toolbar_y;
+ 	return pt;
+ }
+ 
+ /**
+- * Computer the position of the top-left corner of a window to be opened right
++ * Compute the position of the top-left corner of a window to be opened right
+  * under the toolbar.
+  * @param window_width the width of the window to get the position for
+  * @return Coordinate of the top-left corner of the new window.
+@@ -1714,35 +1697,15 @@ Point GetToolbarAlignedWindowPosition(int window_width)
+ static Point LocalGetWindowPlacement(const WindowDesc *desc, int16 sm_width, int16 sm_height, int window_number)
+ {
+ 	Point pt;
+-	const Window *w;
++	const Window *w = desc->parent_cls != 0 /* WC_MAIN_WINDOW */ ? FindWindowById(desc->parent_cls, window_number) : NULL;
+ 
+ 	int16 default_width  = max(desc->GetDefaultWidth(),  sm_width);
+ 	int16 default_height = max(desc->GetDefaultHeight(), sm_height);
+ 
+-	if (desc->parent_cls != 0 /* WC_MAIN_WINDOW */ && (w = FindWindowById(desc->parent_cls, window_number)) != NULL) {
+-		bool rtl = _current_text_dir == TD_RTL;
+-		if (desc->parent_cls == WC_BUILD_TOOLBAR || desc->parent_cls == WC_SCEN_LAND_GEN) {
+-			pt.x = w->left + (rtl ? w->width - default_width : 0);
+-			pt.y = w->top + w->height;
+-		} else {
+-			/* Position child window with offset of closebox, but make sure that either closebox or resizebox is visible
+-			 *  - Y position: closebox of parent + closebox of child + statusbar
+-			 *  - X position: closebox on left/right, resizebox on right/left (depending on ltr/rtl)
+-			 */
+-			int indent_y = max<int>(NWidgetLeaf::closebox_dimension.height, FONT_HEIGHT_NORMAL + WD_CAPTIONTEXT_TOP + WD_CAPTIONTEXT_BOTTOM);
+-			if (w->top + 3 * indent_y < _screen.height) {
+-				pt.y = w->top + indent_y;
+-				int indent_close = NWidgetLeaf::closebox_dimension.width;
+-				int indent_resize = NWidgetLeaf::resizebox_dimension.width;
+-				if (_current_text_dir == TD_RTL) {
+-					pt.x = max(w->left + w->width - default_width - indent_close, 0);
+-					if (pt.x + default_width >= indent_close && pt.x + indent_resize <= _screen.width) return pt;
+-				} else {
+-					pt.x = min(w->left + indent_close, _screen.width - default_width);
+-					if (pt.x + default_width >= indent_resize && pt.x + indent_close <= _screen.width) return pt;
+-				}
+-			}
+-		}
++	if (w != NULL && (desc->parent_cls == WC_BUILD_TOOLBAR || desc->parent_cls == WC_SCEN_LAND_GEN)) {
++		pt.x = w->left + (_current_text_dir == TD_RTL ? w->width - default_width : 0);
++		pt.y = w->top + w->height;
++		return pt;
+ 	}
+ 
+ 	switch (desc->default_pos) {
+@@ -1750,7 +1713,7 @@ static Point LocalGetWindowPlacement(const WindowDesc *desc, int16 sm_width, int
+ 			return GetToolbarAlignedWindowPosition(default_width);
+ 
+ 		case WDP_AUTO: // Find a good automatic position for the window
+-			return GetAutoPlacePosition(default_width, default_height);
++			return GetAutoPlacePosition(default_width, default_height, GetWindowZPriority(desc->cls), w);
+ 
+ 		case WDP_CENTER: // Centre the window horizontally
+ 			pt.x = (_screen.width - default_width) / 2;

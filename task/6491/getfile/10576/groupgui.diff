@@ -1,0 +1,95 @@
+diff --git a/src/group.h b/src/group.h
+index 91ee77e..8c78e5a 100644
+--- a/src/group.h
++++ b/src/group.h
+@@ -73,7 +73,7 @@ struct Group : GroupPool::PoolItem<&_group_pool> {
+ 
+ 	GroupID parent;                         ///< Parent group
+ 
+-	Group(CompanyID owner = INVALID_COMPANY);
++	Group(CompanyID owner = INVALID_COMPANY, GroupID parent = INVALID_GROUP);
+ 	~Group();
+ };
+ 
+diff --git a/src/group_cmd.cpp b/src/group_cmd.cpp
+index 12cce41..468694c 100644
+--- a/src/group_cmd.cpp
++++ b/src/group_cmd.cpp
+@@ -256,9 +256,10 @@ static inline void UpdateNumEngineGroup(const Vehicle *v, GroupID old_g, GroupID
+ 
+ 
+ 
+-Group::Group(Owner owner)
++Group::Group(Owner owner, GroupID parent)
+ {
+ 	this->owner = owner;
++	this->parent = parent;
+ }
+ 
+ Group::~Group()
+@@ -272,7 +273,7 @@ Group::~Group()
+  * @param tile unused
+  * @param flags type of operation
+  * @param p1   vehicle type
+- * @param p2   unused
++ * @param p2   ID of parent group
+  * @param text unused
+  * @return the cost of this operation or an error
+  */
+@@ -281,13 +282,19 @@ CommandCost CmdCreateGroup(TileIndex tile, DoCommandFlag flags, uint32 p1, uint3
+ 	VehicleType vt = Extract<VehicleType, 0, 3>(p1);
+ 	if (!IsCompanyBuildableVehicleType(vt)) return CMD_ERROR;
+ 
++	const Group *pg = Group::GetIfValid(GB(p2, 0, 16));
++
++	if (pg != NULL) {
++		if (pg->owner != _current_company) return CMD_ERROR;
++		if (pg->vehicle_type != vt) return CMD_ERROR;
++	}
++
+ 	if (!Group::CanAllocateItem()) return CMD_ERROR;
+ 
+ 	if (flags & DC_EXEC) {
+-		Group *g = new Group(_current_company);
++		Group *g = new Group(_current_company, pg == NULL ? INVALID_GROUP : p2);
+ 		g->replace_protection = false;
+ 		g->vehicle_type = vt;
+-		g->parent = INVALID_GROUP;
+ 
+ 		_new_group_id = g->index;
+ 
+@@ -475,7 +482,7 @@ CommandCost CmdAddVehicleGroup(TileIndex tile, DoCommandFlag flags, uint32 p1, u
+ 
+ 	if (new_g == NEW_GROUP) {
+ 		/* Create new group. */
+-		CommandCost ret = CmdCreateGroup(0, flags, v->type, 0, NULL);
++		CommandCost ret = CmdCreateGroup(0, flags, v->type, INVALID_GROUP, NULL);
+ 		if (ret.Failed()) return ret;
+ 
+ 		new_g = _new_group_id;
+diff --git a/src/group_gui.cpp b/src/group_gui.cpp
+index 81fb120..bfaeb42 100644
+--- a/src/group_gui.cpp
++++ b/src/group_gui.cpp
+@@ -636,7 +636,7 @@ public:
+ 			}
+ 
+ 			case WID_GL_CREATE_GROUP: { // Create a new group
+-				DoCommandP(0, this->vli.vtype, 0, CMD_CREATE_GROUP | CMD_MSG(STR_ERROR_GROUP_CAN_T_CREATE), CcCreateGroup);
++				DoCommandP(0, this->vli.vtype, this->vli.index, CMD_CREATE_GROUP | CMD_MSG(STR_ERROR_GROUP_CAN_T_CREATE), CcCreateGroup);
+ 				break;
+ 			}
+ 
+diff --git a/src/script/api/script_group.cpp b/src/script/api/script_group.cpp
+index 1e8d6d7..74aa9f4 100644
+--- a/src/script/api/script_group.cpp
++++ b/src/script/api/script_group.cpp
+@@ -29,7 +29,7 @@
+ 
+ /* static */ ScriptGroup::GroupID ScriptGroup::CreateGroup(ScriptVehicle::VehicleType vehicle_type)
+ {
+-	if (!ScriptObject::DoCommand(0, (::VehicleType)vehicle_type, 0, CMD_CREATE_GROUP, NULL, &ScriptInstance::DoCommandReturnGroupID)) return GROUP_INVALID;
++	if (!ScriptObject::DoCommand(0, (::VehicleType)vehicle_type, GROUP_INVALID, CMD_CREATE_GROUP, NULL, &ScriptInstance::DoCommandReturnGroupID)) return GROUP_INVALID;
+ 
+ 	/* In case of test-mode, we return GroupID 0 */
+ 	return (ScriptGroup::GroupID)0;

@@ -1,0 +1,234 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 27477)
++++ src/lang/english.txt	(working copy)
+@@ -286,6 +286,7 @@
+ STR_SORT_BY_NUMBER                                              :Number
+ STR_SORT_BY_PROFIT_LAST_YEAR                                    :Profit last year
+ STR_SORT_BY_PROFIT_THIS_YEAR                                    :Profit this year
++STR_SORT_BY_PROFIT_LIFETIME                                     :Lifetime profit
+ STR_SORT_BY_AGE                                                 :Age
+ STR_SORT_BY_RELIABILITY                                         :Reliability
+ STR_SORT_BY_TOTAL_CAPACITY_PER_CARGOTYPE                        :Total capacity per cargo type
+@@ -852,6 +853,7 @@
+ STR_NEWS_TRAIN_IS_STUCK                                         :{WHITE}{VEHICLE} can't find a path to continue
+ STR_NEWS_VEHICLE_IS_LOST                                        :{WHITE}{VEHICLE} is lost
+ STR_NEWS_VEHICLE_IS_UNPROFITABLE                                :{WHITE}{VEHICLE}'s profit last year was {CURRENCY_LONG}
++STR_NEWS_VEHICLE_IS_UNPROFITABLE_LIFETIME                       :{WHITE}{VEHICLE}'s lifetime profit is {CURRENCY_LONG}
+ STR_NEWS_AIRCRAFT_DEST_TOO_FAR                                  :{WHITE}{VEHICLE} can't get to the next destination because it is out of range
+ 
+ STR_NEWS_ORDER_REFIT_FAILED                                     :{WHITE}{VEHICLE} stopped because an ordered refit failed
+@@ -1266,6 +1268,8 @@
+ STR_CONFIG_SETTING_ORDER_REVIEW_ON                              :Of all vehicles
+ STR_CONFIG_SETTING_WARN_INCOME_LESS                             :Warn if a vehicle's income is negative: {STRING2}
+ STR_CONFIG_SETTING_WARN_INCOME_LESS_HELPTEXT                    :When enabled, a news message gets sent when a vehicle has not made any profit within a calendar year
++STR_CONFIG_SETTING_WARN_INCOME_LESS_USE_LIFETIME                :Use lifetime profit to decide if news item shown: {STRING2}
++STR_CONFIG_SETTING_WARN_INCOME_LESS_USE_LIFETIME_HELPTEXT       :When enabled, a news message gets sent when a vehicles lifetime profit is negative
+ STR_CONFIG_SETTING_NEVER_EXPIRE_VEHICLES                        :Vehicles never expire: {STRING2}
+ STR_CONFIG_SETTING_NEVER_EXPIRE_VEHICLES_HELPTEXT               :When enabled, all vehicle models remain available forever after their introduction
+ STR_CONFIG_SETTING_AUTORENEW_VEHICLE                            :Autorenew vehicle when it gets old: {STRING2}
+@@ -3657,7 +3661,7 @@
+ STR_VEHICLE_INFO_WEIGHT_POWER_MAX_SPEED                         :{BLACK}Weight: {LTBLUE}{WEIGHT_SHORT} {BLACK}Power: {LTBLUE}{POWER}{BLACK} Max. speed: {LTBLUE}{VELOCITY}
+ STR_VEHICLE_INFO_WEIGHT_POWER_MAX_SPEED_MAX_TE                  :{BLACK}Weight: {LTBLUE}{WEIGHT_SHORT} {BLACK}Power: {LTBLUE}{POWER}{BLACK} Max. speed: {LTBLUE}{VELOCITY} {BLACK}Max. T.E.: {LTBLUE}{FORCE}
+ 
+-STR_VEHICLE_INFO_PROFIT_THIS_YEAR_LAST_YEAR                     :{BLACK}Profit this year: {LTBLUE}{CURRENCY_LONG} (last year: {CURRENCY_LONG})
++STR_VEHICLE_INFO_PROFIT_THIS_YEAR_LAST_YEAR                     :{BLACK}Profit this year: {LTBLUE}{CURRENCY_LONG} (last year: {CURRENCY_LONG}) (lifetime: {CURRENCY_LONG})
+ STR_VEHICLE_INFO_RELIABILITY_BREAKDOWNS                         :{BLACK}Reliability: {LTBLUE}{COMMA}%  {BLACK}Breakdowns since last service: {LTBLUE}{COMMA}
+ 
+ STR_VEHICLE_INFO_BUILT_VALUE                                    :{LTBLUE}{ENGINE} {BLACK}Built: {LTBLUE}{NUM}{BLACK} Value: {LTBLUE}{CURRENCY_LONG}
+Index: src/saveload/afterload.cpp
+===================================================================
+--- src/saveload/afterload.cpp	(revision 27477)
++++ src/saveload/afterload.cpp	(working copy)
+@@ -2975,6 +2975,12 @@
+ 		FOR_ALL_STATIONS(st) UpdateStationAcceptance(st, false);
+ 	}
+ 
++	/* Set lifetime vehicle profit to 0 if save game before 195 */
++	if (IsSavegameVersionBefore(195)) {
++		Vehicle *v;
++		FOR_ALL_VEHICLES(v) v->profit_lifetime = 0;
++	}
++
+ 	/* Road stops is 'only' updating some caches */
+ 	AfterLoadRoadStops();
+ 	AfterLoadLabelMaps();
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 27477)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -263,7 +263,7 @@
+  *  193   26802
+  *  194   26881   1.5.x
+  */
+-extern const uint16 SAVEGAME_VERSION = 194; ///< Current savegame version of OpenTTD.
++extern const uint16 SAVEGAME_VERSION = 195; ///< Current savegame version of OpenTTD.
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/saveload/vehicle_sl.cpp
+===================================================================
+--- src/saveload/vehicle_sl.cpp	(revision 27477)
++++ src/saveload/vehicle_sl.cpp	(working copy)
+@@ -683,6 +683,7 @@
+ 		 SLE_CONDVAR(Vehicle, profit_this_year,      SLE_INT64,                   65, SL_MAX_VERSION),
+ 		 SLE_CONDVAR(Vehicle, profit_last_year,      SLE_FILE_I32 | SLE_VAR_I64,   0,  64),
+ 		 SLE_CONDVAR(Vehicle, profit_last_year,      SLE_INT64,                   65, SL_MAX_VERSION),
++		 SLE_CONDVAR(Vehicle, profit_lifetime,       SLE_INT64,                   195, SL_MAX_VERSION),
+ 		SLEG_CONDVAR(         _cargo_feeder_share,   SLE_FILE_I32 | SLE_VAR_I64,  51,  64),
+ 		SLEG_CONDVAR(         _cargo_feeder_share,   SLE_INT64,                   65,  67),
+ 		SLEG_CONDVAR(         _cargo_loaded_at_xy,   SLE_UINT32,                  51,  67),
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 27477)
++++ src/settings_gui.cpp	(working copy)
+@@ -1559,6 +1559,7 @@
+ 			advisors->Add(new SettingEntry("news_display.advice"));
+ 			advisors->Add(new SettingEntry("gui.order_review_system"));
+ 			advisors->Add(new SettingEntry("gui.vehicle_income_warn"));
++			advisors->Add(new SettingEntry("gui.vehicle_income_warn_lifetime"));
+ 			advisors->Add(new SettingEntry("gui.lost_vehicle_warn"));
+ 			advisors->Add(new SettingEntry("gui.show_finances"));
+ 			advisors->Add(new SettingEntry("news_display.economy"));
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 27477)
++++ src/settings_type.h	(working copy)
+@@ -77,6 +77,7 @@
+ 	bool   lost_vehicle_warn;                ///< if a vehicle can't find its destination, show a warning
+ 	uint8  order_review_system;              ///< perform order reviews on vehicles
+ 	bool   vehicle_income_warn;              ///< if a vehicle isn't generating income, show a warning
++	bool   vehicle_income_warn_lifetime;     ///< use lifetime for warn instead of last year
+ 	bool   show_finances;                    ///< show finances at end of year
+ 	bool   sg_new_nonstop;                   ///< ttdpatch compatible nonstop handling read from pre v93 savegames
+ 	bool   new_nonstop;                      ///< ttdpatch compatible nonstop handling
+Index: src/table/settings.ini
+===================================================================
+--- src/table/settings.ini	(revision 27477)
++++ src/table/settings.ini	(working copy)
+@@ -2921,6 +2921,14 @@
+ strhelp  = STR_CONFIG_SETTING_WARN_INCOME_LESS_HELPTEXT
+ cat      = SC_BASIC
+ 
++[SDTC_BOOL]
++var      = gui.vehicle_income_warn_lifetime
++flags    = SLF_NOT_IN_SAVE | SLF_NO_NETWORK_SYNC
++def      = false
++str      = STR_CONFIG_SETTING_WARN_INCOME_LESS_USE_LIFETIME
++strhelp  = STR_CONFIG_SETTING_WARN_INCOME_LESS_USE_LIFETIME_HELPTEXT
++cat      = SC_BASIC
++
+ [SDTC_VAR]
+ var      = gui.order_review_system
+ type     = SLE_UINT8
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 27477)
++++ src/vehicle.cpp	(working copy)
+@@ -2645,13 +2645,29 @@
+ 	Vehicle *v;
+ 	FOR_ALL_VEHICLES(v) {
+ 		if (v->IsPrimaryVehicle()) {
++			/* update lifetime profit before anything else so news item is accurate */
++			v->profit_lifetime += v->profit_this_year;
++
+ 			/* show warning if vehicle is not generating enough income last 2 years (corresponds to a red icon in the vehicle list) */
+-			Money profit = v->GetDisplayProfitThisYear();
++			Money profit;
++
++			/* use lifetime profit for warning */
++			if (_settings_client.gui.vehicle_income_warn_lifetime){
++				profit = v->GetDisplayProfitLifetime();
++			} else {
++				profit = v->GetDisplayProfitThisYear();
++			}
++
+ 			if (v->age >= 730 && profit < 0) {
+ 				if (_settings_client.gui.vehicle_income_warn && v->owner == _local_company) {
+ 					SetDParam(0, v->index);
+ 					SetDParam(1, profit);
+-					AddVehicleAdviceNewsItem(STR_NEWS_VEHICLE_IS_UNPROFITABLE, v->index);
++					if (_settings_client.gui.vehicle_income_warn_lifetime){
++						AddVehicleAdviceNewsItem(STR_NEWS_VEHICLE_IS_UNPROFITABLE_LIFETIME, v->index);
++					}
++					else {
++						AddVehicleAdviceNewsItem(STR_NEWS_VEHICLE_IS_UNPROFITABLE, v->index);
++					}
+ 				}
+ 				AI::NewEvent(v->owner, new ScriptEventVehicleUnprofitable(v->index));
+ 			}
+Index: src/vehicle_base.h
+===================================================================
+--- src/vehicle_base.h	(revision 27477)
++++ src/vehicle_base.h	(working copy)
+@@ -180,6 +180,7 @@
+ 
+ 	Money profit_this_year;             ///< Profit this year << 8, low 8 bits are fract
+ 	Money profit_last_year;             ///< Profit last year << 8, low 8 bits are fract
++	Money profit_lifetime;              ///< Profit lifetime << 8, low 8 bits are fract
+ 	Money value;                        ///< Value of the vehicle
+ 
+ 	CargoPayment *cargo_payment;        ///< The cargo payment we're currently in
+@@ -513,6 +514,12 @@
+ 	 */
+ 	Money GetDisplayProfitLastYear() const { return (this->profit_last_year >> 8); }
+ 
++	/**
++	 * Gets the lifetime profit of vehicle. It can be sent into SetDParam for string processing.
++	 * @return the vehicle's lifetime profit
++	 */
++	Money GetDisplayProfitLifetime() const { return (this->profit_lifetime >> 8); }
++	
+ 	void SetNext(Vehicle *next);
+ 
+ 	/**
+Index: src/vehicle_gui.cpp
+===================================================================
+--- src/vehicle_gui.cpp	(revision 27477)
++++ src/vehicle_gui.cpp	(working copy)
+@@ -48,6 +48,7 @@
+ static GUIVehicleList::SortFunction VehicleNameSorter;
+ static GUIVehicleList::SortFunction VehicleAgeSorter;
+ static GUIVehicleList::SortFunction VehicleProfitThisYearSorter;
++static GUIVehicleList::SortFunction VehicleProfitLifetimeSorter;
+ static GUIVehicleList::SortFunction VehicleProfitLastYearSorter;
+ static GUIVehicleList::SortFunction VehicleCargoSorter;
+ static GUIVehicleList::SortFunction VehicleReliabilitySorter;
+@@ -64,6 +65,7 @@
+ 	&VehicleAgeSorter,
+ 	&VehicleProfitThisYearSorter,
+ 	&VehicleProfitLastYearSorter,
++	&VehicleProfitLifetimeSorter,
+ 	&VehicleCargoSorter,
+ 	&VehicleReliabilitySorter,
+ 	&VehicleMaxSpeedSorter,
+@@ -80,6 +82,7 @@
+ 	STR_SORT_BY_AGE,
+ 	STR_SORT_BY_PROFIT_THIS_YEAR,
+ 	STR_SORT_BY_PROFIT_LAST_YEAR,
++	STR_SORT_BY_PROFIT_LIFETIME,
+ 	STR_SORT_BY_TOTAL_CAPACITY_PER_CARGOTYPE,
+ 	STR_SORT_BY_RELIABILITY,
+ 	STR_SORT_BY_MAX_SPEED,
+@@ -1132,6 +1135,13 @@
+ 	return (r != 0) ? r : VehicleNumberSorter(a, b);
+ }
+ 
++/** Sort vehicles by lifetime profit */
++static int CDECL VehicleProfitLifetimeSorter(const Vehicle * const *a, const Vehicle * const *b)
++{
++	int r = ClampToI32((*a)->GetDisplayProfitLifetime() - (*b)->GetDisplayProfitLifetime());
++	return (r != 0) ? r : VehicleNumberSorter(a, b);
++}
++
+ /** Sort vehicles by their cargo */
+ static int CDECL VehicleCargoSorter(const Vehicle * const *a, const Vehicle * const *b)
+ {
+@@ -2082,6 +2092,7 @@
+ 				/* Draw profit */
+ 				SetDParam(0, v->GetDisplayProfitThisYear());
+ 				SetDParam(1, v->GetDisplayProfitLastYear());
++				SetDParam(2, v->GetDisplayProfitLifetime());
+ 				DrawString(r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, y, STR_VEHICLE_INFO_PROFIT_THIS_YEAR_LAST_YEAR);
+ 				y += FONT_HEIGHT_NORMAL;
+ 

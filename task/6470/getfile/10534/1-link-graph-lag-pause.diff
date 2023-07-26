@@ -1,0 +1,267 @@
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+index aaa794b..3314a2c 100644
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -768,6 +768,7 @@ STR_SMALLMAP_TOOLTIP_ENABLE_ALL_CARGOS                          :{BLACK}Display
+ STR_STATUSBAR_TOOLTIP_SHOW_LAST_NEWS                            :{BLACK}Show last message or news report
+ STR_STATUSBAR_COMPANY_NAME                                      :{SILVER}- -  {COMPANY}  - -
+ STR_STATUSBAR_PAUSED                                            :{YELLOW}*  *  PAUSED  *  *
++STR_STATUSBAR_PAUSED_LINK_GRAPH                                 :{ORANGE}*  *  PAUSED (waiting for link graph update) *  *
+ STR_STATUSBAR_AUTOSAVE                                          :{RED}AUTOSAVE
+ STR_STATUSBAR_SAVING_GAME                                       :{RED}*  *  SAVING GAME  *  *
+ 
+@@ -2172,11 +2173,13 @@ STR_NETWORK_SERVER_MESSAGE_GAME_STILL_PAUSED_1                  :Game still paus
+ STR_NETWORK_SERVER_MESSAGE_GAME_STILL_PAUSED_2                  :Game still paused ({STRING}, {STRING})
+ STR_NETWORK_SERVER_MESSAGE_GAME_STILL_PAUSED_3                  :Game still paused ({STRING}, {STRING}, {STRING})
+ STR_NETWORK_SERVER_MESSAGE_GAME_STILL_PAUSED_4                  :Game still paused ({STRING}, {STRING}, {STRING}, {STRING})
++STR_NETWORK_SERVER_MESSAGE_GAME_STILL_PAUSED_5                  :Game still paused ({STRING}, {STRING}, {STRING}, {STRING}, {STRING})
+ STR_NETWORK_SERVER_MESSAGE_GAME_UNPAUSED                        :Game unpaused ({STRING})
+ STR_NETWORK_SERVER_MESSAGE_GAME_REASON_NOT_ENOUGH_PLAYERS       :number of players
+ STR_NETWORK_SERVER_MESSAGE_GAME_REASON_CONNECTING_CLIENTS       :connecting clients
+ STR_NETWORK_SERVER_MESSAGE_GAME_REASON_MANUAL                   :manual
+ STR_NETWORK_SERVER_MESSAGE_GAME_REASON_GAME_SCRIPT              :game script
++STR_NETWORK_SERVER_MESSAGE_GAME_REASON_LINK_GRAPH               :waiting for link graph update
+ ############ End of leave-in-this-order
+ STR_NETWORK_MESSAGE_CLIENT_LEAVING                              :leaving
+ STR_NETWORK_MESSAGE_CLIENT_JOINED                               :*** {RAW_STRING} has joined the game
+diff --git a/src/linkgraph/linkgraphjob.cpp b/src/linkgraph/linkgraphjob.cpp
+index 20cbf3f..06a4338 100644
+--- a/src/linkgraph/linkgraphjob.cpp
++++ b/src/linkgraph/linkgraphjob.cpp
+@@ -40,7 +40,8 @@ LinkGraphJob::LinkGraphJob(const LinkGraph &orig) :
+ 		link_graph(orig),
+ 		settings(_settings_game.linkgraph),
+ 		thread(NULL),
+-		join_date(_date + _settings_game.linkgraph.recalc_time)
++		join_date(_date + _settings_game.linkgraph.recalc_time),
++		job_completed(false)
+ {
+ }
+ 
+@@ -172,6 +173,20 @@ LinkGraphJob::~LinkGraphJob()
+ }
+ 
+ /**
++ * Check if job has actually finished.
++ * This is allowed to spuriously return an incorrect value.
++ * @return True if job has actually finished.
++ */
++bool LinkGraphJob::IsJobCompleted() const
++{
++#if defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 7))
++	return __atomic_load_n(&job_completed, __ATOMIC_RELAXED);
++#else
++	return job_completed;
++#endif
++}
++
++/**
+  * Initialize the link graph job: Resize nodes and edges and populate them.
+  * This is done after the constructor so that we can do it in the calculation
+  * thread without delaying the main game.
+diff --git a/src/linkgraph/linkgraphjob.h b/src/linkgraph/linkgraphjob.h
+index b4587a7..3c60390 100644
+--- a/src/linkgraph/linkgraphjob.h
++++ b/src/linkgraph/linkgraphjob.h
+@@ -63,6 +63,7 @@ protected:
+ 	Date join_date;                   ///< Date when the job is to be joined.
+ 	NodeAnnotationVector nodes;       ///< Extra node data necessary for link graph calculation.
+ 	EdgeAnnotationMatrix edges;       ///< Extra edge data necessary for link graph calculation.
++	bool job_completed;               ///< Is the job still running. This is accessed by multiple threads and is permitted to be spuriously incorrect.
+ 
+ 	void EraseFlows(NodeID from);
+ 	void JoinThread();
+@@ -267,13 +268,15 @@ public:
+ 	 * settings have to be brutally const-casted in order to populate them.
+ 	 */
+ 	LinkGraphJob() : settings(_settings_game.linkgraph), thread(NULL),
+-			join_date(INVALID_DATE) {}
++			join_date(INVALID_DATE), job_completed(false) {}
+ 
+ 	LinkGraphJob(const LinkGraph &orig);
+ 	~LinkGraphJob();
+ 
+ 	void Init();
+ 
++	bool IsJobCompleted() const;
++
+ 	/**
+ 	 * Check if job is supposed to be finished.
+ 	 * @return True if job should be finished by now, false if not.
+diff --git a/src/linkgraph/linkgraphschedule.cpp b/src/linkgraph/linkgraphschedule.cpp
+index a65783a..3fa3662 100644
+--- a/src/linkgraph/linkgraphschedule.cpp
++++ b/src/linkgraph/linkgraphschedule.cpp
+@@ -15,6 +15,7 @@
+ #include "demands.h"
+ #include "mcf.h"
+ #include "flowmapper.h"
++#include "../command_func.h"
+ 
+ #include "../safeguards.h"
+ 
+@@ -52,6 +53,16 @@ void LinkGraphSchedule::SpawnNext()
+ /**
+  * Join the next finished job, if available.
+  */
++bool LinkGraphSchedule::IsJoinWithUnfinishedJobDue() const
++{
++	if (this->running.empty()) return false;
++	const LinkGraphJob *next = this->running.front();
++	return next->IsFinished() && !next->IsJobCompleted();
++}
++
++/**
++ * Join the next finished job, if available.
++ */
+ void LinkGraphSchedule::JoinNext()
+ {
+ 	if (this->running.empty()) return;
+@@ -78,6 +89,21 @@ void LinkGraphSchedule::JoinNext()
+ 	for (uint i = 0; i < lengthof(instance.handlers); ++i) {
+ 		instance.handlers[i]->Run(*job);
+ 	}
++
++	/*
++	 * Note that this it not guaranteed to be an atomic write and there are no memory barriers or other protections.
++	 * Readers of this variable in another thread may see an out of date value.
++	 * However this is OK as this will only happen just as a job is completing, and the real synchronisation is provided
++	 * by the thread join operation. In the worst case the main thread will be paused for longer than strictly necessary before
++	 * joining.
++	 * This is just a hint variable to avoid performing the join excessively early and blocking the main thread.
++	 */
++
++#if defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 7))
++	__atomic_store_n(&(job->job_completed), true, __ATOMIC_RELAXED);
++#else
++	job->job_completed = true;
++#endif
+ }
+ 
+ /**
+@@ -141,6 +167,29 @@ LinkGraphSchedule::~LinkGraphSchedule()
+ }
+ 
+ /**
++ * Pause the game if on the next _date_fract tick, we would do a join with the next
++ * link graph job, but it is still running.
++ * If we previous paused, unpause if the job is now ready to be joined with
++ */
++void StateGameLoop_LinkGraphPauseControl()
++{
++	if (_pause_mode & PM_PAUSED_LINK_GRAPH) {
++		/* We are paused waiting on a job, check the job every tick */
++		if (!LinkGraphSchedule::instance.IsJoinWithUnfinishedJobDue()) {
++			DoCommandP(0, PM_PAUSED_LINK_GRAPH, 0, CMD_PAUSE);
++		}
++	} else if (_pause_mode == PM_UNPAUSED &&
++			_date_fract == LinkGraphSchedule::SPAWN_JOIN_TICK - 1) {
++		if (_date % _settings_game.linkgraph.recalc_interval == _settings_game.linkgraph.recalc_interval / 2) {
++			/* perform check one _date_fract tick before we would join */
++			if (LinkGraphSchedule::instance.IsJoinWithUnfinishedJobDue()) {
++				DoCommandP(0, PM_PAUSED_LINK_GRAPH, 1, CMD_PAUSE);
++			}
++		}
++	}
++}
++
++/**
+  * Spawn or join a link graph job or compress a link graph if any link graph is
+  * due to do so.
+  */
+diff --git a/src/linkgraph/linkgraphschedule.h b/src/linkgraph/linkgraphschedule.h
+index ec22be3..ab69239 100644
+--- a/src/linkgraph/linkgraphschedule.h
++++ b/src/linkgraph/linkgraphschedule.h
+@@ -57,6 +57,7 @@ public:
+ 	static void Clear();
+ 
+ 	void SpawnNext();
++	bool IsJoinWithUnfinishedJobDue() const;
+ 	void JoinNext();
+ 	void SpawnAll();
+ 	void ShiftDates(int interval);
+diff --git a/src/misc_cmd.cpp b/src/misc_cmd.cpp
+index e7da13c..9cbad4c 100644
+--- a/src/misc_cmd.cpp
++++ b/src/misc_cmd.cpp
+@@ -152,6 +152,7 @@ CommandCost CmdPause(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2,
+ 		case PM_PAUSED_ERROR:
+ 		case PM_PAUSED_NORMAL:
+ 		case PM_PAUSED_GAME_SCRIPT:
++		case PM_PAUSED_LINK_GRAPH:
+ 			break;
+ 
+ #ifdef ENABLE_NETWORK
+diff --git a/src/network/network.cpp b/src/network/network.cpp
+index 0bbdd0d..2f9f8a2 100644
+--- a/src/network/network.cpp
++++ b/src/network/network.cpp
+@@ -353,7 +353,8 @@ void NetworkHandlePauseChange(PauseMode prev_mode, PauseMode changed_mode)
+ 		case PM_PAUSED_NORMAL:
+ 		case PM_PAUSED_JOIN:
+ 		case PM_PAUSED_GAME_SCRIPT:
+-		case PM_PAUSED_ACTIVE_CLIENTS: {
++		case PM_PAUSED_ACTIVE_CLIENTS:
++		case PM_PAUSED_LINK_GRAPH: {
+ 			bool changed = ((_pause_mode == PM_UNPAUSED) != (prev_mode == PM_UNPAUSED));
+ 			bool paused = (_pause_mode != PM_UNPAUSED);
+ 			if (!paused && !changed) return;
+@@ -366,6 +367,7 @@ void NetworkHandlePauseChange(PauseMode prev_mode, PauseMode changed_mode)
+ 				if ((_pause_mode & PM_PAUSED_JOIN) != PM_UNPAUSED)           SetDParam(++i, STR_NETWORK_SERVER_MESSAGE_GAME_REASON_CONNECTING_CLIENTS);
+ 				if ((_pause_mode & PM_PAUSED_GAME_SCRIPT) != PM_UNPAUSED)    SetDParam(++i, STR_NETWORK_SERVER_MESSAGE_GAME_REASON_GAME_SCRIPT);
+ 				if ((_pause_mode & PM_PAUSED_ACTIVE_CLIENTS) != PM_UNPAUSED) SetDParam(++i, STR_NETWORK_SERVER_MESSAGE_GAME_REASON_NOT_ENOUGH_PLAYERS);
++				if ((_pause_mode & PM_PAUSED_LINK_GRAPH) != PM_UNPAUSED)     SetDParam(++i, STR_NETWORK_SERVER_MESSAGE_GAME_REASON_LINK_GRAPH);
+ 				str = STR_NETWORK_SERVER_MESSAGE_GAME_STILL_PAUSED_1 + i;
+ 			} else {
+ 				switch (changed_mode) {
+@@ -373,6 +375,7 @@ void NetworkHandlePauseChange(PauseMode prev_mode, PauseMode changed_mode)
+ 					case PM_PAUSED_JOIN:           SetDParam(0, STR_NETWORK_SERVER_MESSAGE_GAME_REASON_CONNECTING_CLIENTS); break;
+ 					case PM_PAUSED_GAME_SCRIPT:    SetDParam(0, STR_NETWORK_SERVER_MESSAGE_GAME_REASON_GAME_SCRIPT); break;
+ 					case PM_PAUSED_ACTIVE_CLIENTS: SetDParam(0, STR_NETWORK_SERVER_MESSAGE_GAME_REASON_NOT_ENOUGH_PLAYERS); break;
++					case PM_PAUSED_LINK_GRAPH:     SetDParam(0, STR_NETWORK_SERVER_MESSAGE_GAME_REASON_LINK_GRAPH); break;
+ 					default: NOT_REACHED();
+ 				}
+ 				str = paused ? STR_NETWORK_SERVER_MESSAGE_GAME_PAUSED : STR_NETWORK_SERVER_MESSAGE_GAME_UNPAUSED;
+diff --git a/src/openttd.cpp b/src/openttd.cpp
+index c149ebb..224a1c0 100644
+--- a/src/openttd.cpp
++++ b/src/openttd.cpp
+@@ -1339,6 +1339,11 @@ static void CheckCaches()
+  */
+ void StateGameLoop()
+ {
++	if (!_networking || _network_server) {
++		extern void StateGameLoop_LinkGraphPauseControl();
++		StateGameLoop_LinkGraphPauseControl();
++	}
++
+ 	/* don't execute the state loop during pause */
+ 	if (_pause_mode != PM_UNPAUSED) {
+ 		UpdateLandscapingLimits();
+diff --git a/src/openttd.h b/src/openttd.h
+index 5e360d6..ef5c58f 100644
+--- a/src/openttd.h
++++ b/src/openttd.h
+@@ -62,6 +62,7 @@ enum PauseMode {
+ 	PM_PAUSED_ERROR          = 1 << 3, ///< A game paused because a (critical) error
+ 	PM_PAUSED_ACTIVE_CLIENTS = 1 << 4, ///< A game paused for 'min_active_clients'
+ 	PM_PAUSED_GAME_SCRIPT    = 1 << 5, ///< A game paused by a game script
++	PM_PAUSED_LINK_GRAPH     = 1 << 6, ///< A game paused due to the link graph schedule lagging
+ 
+ 	/** Pause mode bits when paused for network reasons. */
+ 	PMB_PAUSED_NETWORK = PM_PAUSED_ACTIVE_CLIENTS | PM_PAUSED_JOIN,
+diff --git a/src/statusbar_gui.cpp b/src/statusbar_gui.cpp
+index 25efa6b..e90b388 100644
+--- a/src/statusbar_gui.cpp
++++ b/src/statusbar_gui.cpp
+@@ -160,7 +160,8 @@ struct StatusBarWindow : Window {
+ 				} else if (_do_autosave) {
+ 					DrawString(r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, r.top + WD_FRAMERECT_TOP, STR_STATUSBAR_AUTOSAVE, TC_FROMSTRING, SA_HOR_CENTER);
+ 				} else if (_pause_mode != PM_UNPAUSED) {
+-					DrawString(r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, r.top + WD_FRAMERECT_TOP, STR_STATUSBAR_PAUSED, TC_FROMSTRING, SA_HOR_CENTER);
++					StringID msg = (_pause_mode & PM_PAUSED_LINK_GRAPH) ? STR_STATUSBAR_PAUSED_LINK_GRAPH : STR_STATUSBAR_PAUSED;
++					DrawString(r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, r.top + WD_FRAMERECT_TOP, msg, TC_FROMSTRING, SA_HOR_CENTER);
+ 				} else if (this->ticker_scroll < TICKER_STOP && FindWindowById(WC_NEWS_WINDOW, 0) == NULL && _statusbar_news_item != NULL && _statusbar_news_item->string_id != 0) {
+ 					/* Draw the scrolling news text */
+ 					if (!DrawScrollingStatusText(_statusbar_news_item, this->ticker_scroll, r.left + WD_FRAMERECT_LEFT, r.right - WD_FRAMERECT_RIGHT, r.top + WD_FRAMERECT_TOP, r.bottom)) {

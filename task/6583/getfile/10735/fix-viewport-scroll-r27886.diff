@@ -1,0 +1,409 @@
+# HG changeset patch
+# User adf88@interia.pl
+# Date 1499662933 -7200
+#      Mon Jul 10 07:02:13 2017 +0200
+# Branch trunk
+# Node ID 9ace1b5aa5cd556478937964a0d54bdb8bc07005
+# Parent  0d78b96563c56d72f798bf6767cf6ca5a2ac00c1
+Fix "jumping" effect when scrolling viewport over bottom edge of the map (viewport should just stop scrolling).
+
+diff -r 0d78b96563c5 -r 9ace1b5aa5cd src/landscape.cpp
+--- a/src/landscape.cpp	Thu Jun 22 17:29:53 2017 +0000
++++ b/src/landscape.cpp	Mon Jul 10 07:02:13 2017 +0200
+@@ -89,6 +89,68 @@
+ static SnowLine *_snow_line = NULL;
+ 
+ /**
++ * Map 2D viewport or smallmap coordinate to 3D world or tile coordinate.
++ * Function takes into account height of tiles and optionally foundations.
++ *
++ * @param x X viewport 2D coordinate.
++ * @param y Y viewport 2D coordinate.
++ * @param with_foundations Whether to include foundations of the tile, otherwise tile will be treated like a clear tile.
++ * @param[in,out] clamp_to_map (In) If not NULL and set to \c true, clamp the coordinate outside of the map to the closest tile within the map.
++ *                             (Out) Whether clamping occured.
++ * @return 3D world coordinate of map point that is visible at the given screen coordinate (3D perspective).
++ *
++ * @note Inverse of #RemapCoords2 function. Smaller values may get rounded.
++ * @see InverseRemapCoords
++ */
++Point InverseRemapCoords2(int x, int y, bool with_foundations, bool *clamp_to_map)
++{
++	const bool want_clamp = (clamp_to_map != NULL) && *clamp_to_map;
++	if (want_clamp) *clamp_to_map = false; // not clamping (yet)
++
++	/* Initial x/y world coordinate is like if the landscape
++	 * was completely flat on height 0. */
++	Point pt = InverseRemapCoords(x, y);
++
++	const uint max_x = MapMaxX() * TILE_SIZE - 1;
++	const uint max_y = MapMaxY() * TILE_SIZE - 1;
++
++	if (want_clamp) {
++		/* Bring the coordinates near to a valid range. This is mostly due to the
++		 * tiles on the north side of the map possibly being drawn too high due to
++		 * the extra height levels. So at the top we allow a number of extra tiles.
++		 * This number is based on the tile height and pixels. */
++		int extra_tiles = CeilDiv(_settings_game.construction.max_heightlevel * TILE_HEIGHT, TILE_PIXELS);
++		Point orig_pt = pt;
++		pt.x = Clamp(pt.x, -extra_tiles * TILE_SIZE, max_x);
++		pt.y = Clamp(pt.y, -extra_tiles * TILE_SIZE, max_y);
++		*clamp_to_map = (pt.x != orig_pt.x) || (pt.y != orig_pt.y);
++	}
++
++	/* Now find the Z-world coordinate by fix point iteration.
++	 * This is a bit tricky because the tile height is non-continuous at foundations.
++	 * The clicked point should be approached from the back, otherwise there are regions that are not clickable.
++	 * (FOUNDATION_HALFTILE_LOWER on SLOPE_STEEP_S hides north halftile completely)
++	 * So give it a z-malus of 4 in the first iterations. */
++	int z = 0;
++	const int min_coord = _settings_game.construction.freeform_edges ? TILE_SIZE : 0;
++
++	for (int i = 0; i < 5; i++) z = GetSlopePixelZ(Clamp(pt.x + max(z, 4) - 4, min_coord, max_x), Clamp(pt.y + max(z, 4) - 4, min_coord, max_y), with_foundations) / 2;
++	for (int m = 3; m > 0; m--) z = GetSlopePixelZ(Clamp(pt.x + max(z, m) - m, min_coord, max_x), Clamp(pt.y + max(z, m) - m, min_coord, max_y), with_foundations) / 2;
++	for (int i = 0; i < 5; i++) z = GetSlopePixelZ(Clamp(pt.x + z,             min_coord, max_x), Clamp(pt.y + z,             min_coord, max_y), with_foundations) / 2;
++
++	pt.x += z;
++	pt.y += z;
++	if (want_clamp) {
++		Point orig_pt = pt;
++		pt.x = Clamp(pt.x, min_coord, max_x);
++		pt.y = Clamp(pt.y, min_coord, max_y);
++		*clamp_to_map = *clamp_to_map || (pt.x != orig_pt.x) || (pt.y != orig_pt.y);
++	}
++
++	return pt;
++}
++
++/**
+  * Applies a foundation to a slope.
+  *
+  * @pre      Foundation and slope must be valid combined.
+@@ -276,11 +338,11 @@
+ 	return z;
+ }
+ 
+-int GetSlopePixelZ(int x, int y)
++int GetSlopePixelZ(int x, int y, bool with_foundations)
+ {
+ 	TileIndex tile = TileVirtXY(x, y);
+ 
+-	return _tile_type_procs[GetTileType(tile)]->get_slope_z_proc(tile, x, y);
++	return _tile_type_procs[with_foundations ? GetTileType(tile) : MP_CLEAR]->get_slope_z_proc(tile, x, y);
+ }
+ 
+ /**
+diff -r 0d78b96563c5 -r 9ace1b5aa5cd src/landscape.h
+--- a/src/landscape.h	Thu Jun 22 17:29:53 2017 +0000
++++ b/src/landscape.h	Mon Jul 10 07:02:13 2017 +0200
+@@ -39,7 +39,7 @@
+ Slope GetFoundationSlope(TileIndex tile, int *z = NULL);
+ 
+ uint GetPartialPixelZ(int x, int y, Slope corners);
+-int GetSlopePixelZ(int x, int y);
++int GetSlopePixelZ(int x, int y, bool with_foundations = true);
+ void GetSlopePixelZOnEdge(Slope tileh, DiagDirection edge, int *z1, int *z2);
+ 
+ /**
+@@ -108,6 +108,7 @@
+  * @param y Y coordinate of the 2D coordinate.
+  * @return X and Y components of equivalent world or tile coordinate.
+  * @note Inverse of #RemapCoords function. Smaller values may get rounded.
++ * @see InverseRemapCoords2
+  */
+ static inline Point InverseRemapCoords(int x, int y)
+ {
+@@ -115,6 +116,8 @@
+ 	return pt;
+ }
+ 
++Point InverseRemapCoords2(int x, int y, bool with_foundations = false, bool *clamp_to_map = NULL);
++
+ uint ApplyFoundationToSlope(Foundation f, Slope *s);
+ /**
+  * Applies a foundation to a slope.
+diff -r 0d78b96563c5 -r 9ace1b5aa5cd src/smallmap_gui.cpp
+--- a/src/smallmap_gui.cpp	Thu Jun 22 17:29:53 2017 +0000
++++ b/src/smallmap_gui.cpp	Mon Jul 10 07:02:13 2017 +0200
+@@ -916,8 +916,8 @@
+ 	/* Find main viewport. */
+ 	const ViewPort *vp = FindWindowById(WC_MAIN_WINDOW, 0)->viewport;
+ 
+-	Point upper_left_smallmap_coord  = TranslateXYToTileCoord(vp, vp->left, vp->top, false);
+-	Point lower_right_smallmap_coord = TranslateXYToTileCoord(vp, vp->left + vp->width - 1, vp->top + vp->height - 1, false);
++	Point upper_left_smallmap_coord  = InverseRemapCoords2(vp->virtual_left, vp->virtual_top);
++	Point lower_right_smallmap_coord = InverseRemapCoords2(vp->virtual_left + vp->virtual_width - 1, vp->virtual_top + vp->virtual_height - 1);
+ 
+ 	Point upper_left = this->RemapTile(upper_left_smallmap_coord.x / (int)TILE_SIZE, upper_left_smallmap_coord.y / (int)TILE_SIZE);
+ 	upper_left.x -= this->subscroll;
+@@ -1629,7 +1629,7 @@
+ void SmallMapWindow::SmallMapCenterOnCurrentPos()
+ {
+ 	const ViewPort *vp = FindWindowById(WC_MAIN_WINDOW, 0)->viewport;
+-	Point viewport_center = TranslateXYToTileCoord(vp, vp->left + vp->width / 2, vp->top + vp->height / 2);
++	Point viewport_center = InverseRemapCoords2(vp->virtual_left + vp->virtual_width / 2, vp->virtual_top + vp->virtual_height / 2);
+ 
+ 	int sub;
+ 	const NWidgetBase *wid = this->GetWidget<NWidgetBase>(WID_SM_MAP);
+diff -r 0d78b96563c5 -r 9ace1b5aa5cd src/viewport.cpp
+--- a/src/viewport.cpp	Thu Jun 22 17:29:53 2017 +0000
++++ b/src/viewport.cpp	Mon Jul 10 07:02:13 2017 +0200
+@@ -395,65 +395,27 @@
+ }
+ 
+ /**
+- * Translate screen coordinate in a viewport to a tile coordinate
++ * Translate global screen coordinate to underlying tile coordinate in a viewport.
++ *
++ * Returns exact point of the map that is visible in the given place
++ * of the viewport (3D perspective), height of tiles and foundations matter.
++ *
+  * @param vp  Viewport that contains the (\a x, \a y) screen coordinate
+- * @param x   Screen x coordinate
+- * @param y   Screen y coordinate
+- * @param clamp_to_map Clamp the coordinate outside of the map to the closest tile within the map.
+- * @return Tile coordinate
++ * @param x   Screen x coordinate, distance in pixels from the left edge of the screen
++ * @param y   Screen y coordinate, distance in pixels from the top edge of the screen
++ * @param clamp_to_map Clamp the coordinate outside of the map to the closest tile within the map
++ * @return Tile coordinate or (-1, -1) if given x or y is not within viewport frame
+  */
+ Point TranslateXYToTileCoord(const ViewPort *vp, int x, int y, bool clamp_to_map)
+ {
+-	Point pt;
+-	int a, b;
+-	int z;
+-
+-	if ( (uint)(x -= vp->left) >= (uint)vp->width ||
+-				(uint)(y -= vp->top) >= (uint)vp->height) {
+-				Point pt = {-1, -1};
+-				return pt;
+-	}
+-
+-	x = (ScaleByZoom(x, vp->zoom) + vp->virtual_left) >> (2 + ZOOM_LVL_SHIFT);
+-	y = (ScaleByZoom(y, vp->zoom) + vp->virtual_top) >> (1 + ZOOM_LVL_SHIFT);
+-
+-	a = y - x;
+-	b = y + x;
+-
+-	if (clamp_to_map) {
+-		/* Bring the coordinates near to a valid range. This is mostly due to the
+-		 * tiles on the north side of the map possibly being drawn too high due to
+-		 * the extra height levels. So at the top we allow a number of extra tiles.
+-		 * This number is based on the tile height and pixels. */
+-		int extra_tiles = CeilDiv(_settings_game.construction.max_heightlevel * TILE_HEIGHT, TILE_PIXELS);
+-		a = Clamp(a, -extra_tiles * TILE_SIZE, MapMaxX() * TILE_SIZE - 1);
+-		b = Clamp(b, -extra_tiles * TILE_SIZE, MapMaxY() * TILE_SIZE - 1);
++	if (!IsInsideBS(x, vp->left, vp->width) || !IsInsideBS(y, vp->top, vp->height)) {
++		Point pt = { -1, -1 };
++		return pt;
+ 	}
+ 
+-	/* (a, b) is the X/Y-world coordinate that belongs to (x,y) if the landscape would be completely flat on height 0.
+-	 * Now find the Z-world coordinate by fix point iteration.
+-	 * This is a bit tricky because the tile height is non-continuous at foundations.
+-	 * The clicked point should be approached from the back, otherwise there are regions that are not clickable.
+-	 * (FOUNDATION_HALFTILE_LOWER on SLOPE_STEEP_S hides north halftile completely)
+-	 * So give it a z-malus of 4 in the first iterations.
+-	 */
+-	z = 0;
+-
+-	int min_coord = _settings_game.construction.freeform_edges ? TILE_SIZE : 0;
+-
+-	for (int i = 0; i < 5; i++) z = GetSlopePixelZ(Clamp(a + max(z, 4) - 4, min_coord, MapMaxX() * TILE_SIZE - 1), Clamp(b + max(z, 4) - 4, min_coord, MapMaxY() * TILE_SIZE - 1)) / 2;
+-	for (int malus = 3; malus > 0; malus--) z = GetSlopePixelZ(Clamp(a + max(z, malus) - malus, min_coord, MapMaxX() * TILE_SIZE - 1), Clamp(b + max(z, malus) - malus, min_coord, MapMaxY() * TILE_SIZE - 1)) / 2;
+-	for (int i = 0; i < 5; i++) z = GetSlopePixelZ(Clamp(a + z, min_coord, MapMaxX() * TILE_SIZE - 1), Clamp(b + z, min_coord, MapMaxY() * TILE_SIZE - 1)) / 2;
+-
+-	if (clamp_to_map) {
+-		pt.x = Clamp(a + z, min_coord, MapMaxX() * TILE_SIZE - 1);
+-		pt.y = Clamp(b + z, min_coord, MapMaxY() * TILE_SIZE - 1);
+-	} else {
+-		pt.x = a + z;
+-		pt.y = b + z;
+-	}
+-
+-	return pt;
++	return InverseRemapCoords2(
++			ScaleByZoom(x - vp->left, vp->zoom) + vp->virtual_left,
++			ScaleByZoom(y - vp->top, vp->zoom) + vp->virtual_top, true, &clamp_to_map);
+ }
+ 
+ /* When used for zooming, check area below current coordinates (x,y)
+@@ -1086,6 +1048,12 @@
+ static int GetViewportY(Point tile)
+ {
+ 	/* Each increment in X or Y direction moves down by half a tile, i.e. TILE_PIXELS / 2. */
++	/* XXX: Seems invalid. Why divide by 2?
++	 *      Each such half of a tile is TILE_PIXELS << ZOOM_LVL_SHIFT units high,
++	 *      entire tile is as twice as high. Each single increment in tile X or Y
++	 *      moves by TILE_PIXELS << ZOOM_LVL_SHIFT, not by half of this distance.
++	 *      This differs from what RemapCoords2 would return for the given tile,
++	 *      proportions seems disturbed here. */
+ 	return (tile.y * (int)(TILE_PIXELS / 2) + tile.x * (int)(TILE_PIXELS / 2) - TilePixelHeightOutsideMap(tile.x, tile.y)) << ZOOM_LVL_SHIFT;
+ }
+ 
+@@ -1663,121 +1631,34 @@
+ }
+ 
+ /**
+- * Continue criteria for the SearchMapEdge function.
+- * @param iter       Value to check.
+- * @param iter_limit Maximum value for the iter
+- * @param sy         Screen y coordinate calculated for the tile at hand
+- * @param sy_limit   Limit to the screen y coordinate
+- * @return True when we should continue searching.
++ * Ensure that a given viewport has valid scroll position within the map.
++ *
++ * There must be a visible piece of map in the center of the viewport.
++ * If there isn't, the viewport will be scrolled to nearest such location.
++ *
++ * @param vp The viewport.
++ * @param[in,out] scroll_x Viewport X scroll.
++ * @param[in,out] scroll_x Viewport Y scroll.
+  */
+-typedef bool ContinueMapEdgeSearch(int iter, int iter_limit, int sy, int sy_limit);
+-
+-/** Continue criteria for searching a no-longer-visible tile in negative direction, starting at some tile. */
+-static inline bool ContinueLowerMapEdgeSearch(int iter, int iter_limit, int sy, int sy_limit) { return iter > 0          && sy > sy_limit; }
+-/** Continue criteria for searching a no-longer-visible tile in positive direction, starting at some tile. */
+-static inline bool ContinueUpperMapEdgeSearch(int iter, int iter_limit, int sy, int sy_limit) { return iter < iter_limit && sy < sy_limit; }
+-
+-/**
+- * Searches, starting at the given tile, by applying the given offset to iter, for a no longer visible tile.
+- * The whole sense of this function is keeping the to-be-written code small, thus it is a little bit abstracted
+- * so the same function can be used for both the X and Y locations. As such a reference to one of the elements
+- * in curr_tile was needed.
+- * @param curr_tile  A tile
+- * @param iter       Reference to either the X or Y of curr_tile.
+- * @param iter_limit Upper search limit for the iter value.
+- * @param offset     Search in steps of this size
+- * @param sy_limit   Search limit to be passed to the criteria
+- * @param continue_criteria Search as long as this criteria is true
+- * @return The final value of iter.
+- */
+-static int SearchMapEdge(Point &curr_tile, int &iter, int iter_limit, int offset, int sy_limit, ContinueMapEdgeSearch continue_criteria)
+-{
+-	int sy;
+-	do {
+-		iter = Clamp(iter + offset, 0, iter_limit);
+-		sy = GetViewportY(curr_tile);
+-	} while (continue_criteria(iter, iter_limit, sy, sy_limit));
+-
+-	return iter;
+-}
+-
+-/**
+- * Determine the clamping of either the X or Y coordinate to the map.
+- * @param curr_tile   A tile
+- * @param iter        Reference to either the X or Y of curr_tile.
+- * @param iter_limit  Upper search limit for the iter value.
+- * @param start       Start value for the iteration.
+- * @param other_ref   Reference to the opposite axis in curr_tile than of iter.
+- * @param other_value Start value for of the opposite axis
+- * @param vp_value    Value of the viewport location in the opposite axis as for iter.
+- * @param other_limit Limit for the other value, so if iter is X, then other_limit is for Y.
+- * @param vp_top      Top of the viewport.
+- * @param vp_bottom   Bottom of the viewport.
+- * @return Clamped version of vp_value.
+- */
+-static inline int ClampXYToMap(Point &curr_tile, int &iter, int iter_limit, int start, int &other_ref, int other_value, int vp_value, int other_limit, int vp_top, int vp_bottom)
++static inline void ClampViewportToMap(const ViewPort *vp, int *scroll_x, int *scroll_y)
+ {
+-	bool upper_edge = other_value < _settings_game.construction.max_heightlevel / 4;
+-
+-	/*
+-	 * First get an estimate of the tiles relevant for us at that edge.  Relevant in the sense
+-	 * "at least close to the visible area". Thus, we don't look at exactly each tile, inspecting
+-	 * e.g. every tenth should be enough. After all, the desired screen limit is set such that
+-	 * the bordermost tiles are painted in the middle of the screen when one hits the limit,
+-	 * i.e. it is no harm if there is some small error in that calculation
+-	 */
+-
+-	other_ref = upper_edge ? 0 : other_limit;
+-	iter = start;
+-	int min_iter = SearchMapEdge(curr_tile, iter, iter_limit, upper_edge ? -10 : +10, vp_top,    upper_edge ? ContinueLowerMapEdgeSearch : ContinueUpperMapEdgeSearch);
+-	iter = start;
+-	int max_iter = SearchMapEdge(curr_tile, iter, iter_limit, upper_edge ? +10 : -10, vp_bottom, upper_edge ? ContinueUpperMapEdgeSearch : ContinueLowerMapEdgeSearch);
+-
+-	max_iter = min(max_iter + _settings_game.construction.max_heightlevel / 4, iter_limit);
+-	min_iter = min(min_iter, max_iter);
+-
+-	/* Now, calculate the highest heightlevel of these tiles. Again just as an estimate. */
+-	int max_heightlevel_at_edge = 0;
+-	for (iter = min_iter; iter <= max_iter; iter += 10) {
+-		max_heightlevel_at_edge = max(max_heightlevel_at_edge, (int)TileHeight(TileXY(curr_tile.x, curr_tile.y)));
++	/* Centre of the viewport is hot spot. */
++	Point pt = {
++		*scroll_x + vp->virtual_width / 2,
++		*scroll_y + vp->virtual_height / 2
++	};
++
++	/* Find nearrest tile that is within map borders. */
++	bool clamp = true;
++	pt = InverseRemapCoords2(pt.x, pt.y, false, &clamp);
++
++	/* Were the coordinates clamped? */
++	if (clamp) {
++		/* Convert back to viewport coordinates and remove centering. */
++		pt = RemapCoords2(pt.x, pt.y);
++		*scroll_x = pt.x - vp->virtual_width / 2;
++		*scroll_y = pt.y - vp->virtual_height / 2;
+ 	}
+-
+-	/* Based on that heightlevel, calculate the limit. For the upper edge a tile with height zero would
+-	 * get a limit of zero, on the other side it depends on the number of tiles along the axis. */
+-	return upper_edge ?
+-			max(vp_value, -max_heightlevel_at_edge * (int)(TILE_HEIGHT * 2 * ZOOM_LVL_BASE)) :
+-			min(vp_value, (other_limit * TILE_SIZE * 4 - max_heightlevel_at_edge * TILE_HEIGHT * 2) * ZOOM_LVL_BASE);
+-}
+-
+-static inline void ClampViewportToMap(const ViewPort *vp, int &x, int &y)
+-{
+-	int original_y = y;
+-
+-	/* Centre of the viewport is hot spot */
+-	x += vp->virtual_width / 2;
+-	y += vp->virtual_height / 2;
+-
+-	/* Convert viewport coordinates to map coordinates
+-	 * Calculation is scaled by 4 to avoid rounding errors */
+-	int vx = -x + y * 2;
+-	int vy =  x + y * 2;
+-
+-	/* Find out which tile corresponds to (vx,vy) if one assumes height zero.  The cast is necessary to prevent C++ from
+-	 * converting the result to an uint, which gives an overflow instead of a negative result... */
+-	int tx = vx / (int)(TILE_SIZE * 4 * ZOOM_LVL_BASE);
+-	int ty = vy / (int)(TILE_SIZE * 4 * ZOOM_LVL_BASE);
+-
+-	Point curr_tile;
+-	vx = ClampXYToMap(curr_tile, curr_tile.y, MapMaxY(), ty, curr_tile.x, tx, vx, MapMaxX(), original_y, original_y + vp->virtual_height);
+-	vy = ClampXYToMap(curr_tile, curr_tile.x, MapMaxX(), tx, curr_tile.y, ty, vy, MapMaxY(), original_y, original_y + vp->virtual_height);
+-
+-	/* Convert map coordinates to viewport coordinates */
+-	x = (-vx + vy) / 2;
+-	y = ( vx + vy) / 4;
+-
+-	/* Remove centering */
+-	x -= vp->virtual_width / 2;
+-	y -= vp->virtual_height / 2;
+ }
+ 
+ /**
+@@ -1797,7 +1678,7 @@
+ 		SetViewportPosition(w, pt.x, pt.y);
+ 	} else {
+ 		/* Ensure the destination location is within the map */
+-		ClampViewportToMap(vp, w->viewport->dest_scrollpos_x, w->viewport->dest_scrollpos_y);
++		ClampViewportToMap(vp, &w->viewport->dest_scrollpos_x, &w->viewport->dest_scrollpos_y);
+ 
+ 		int delta_x = w->viewport->dest_scrollpos_x - w->viewport->scrollpos_x;
+ 		int delta_y = w->viewport->dest_scrollpos_y - w->viewport->scrollpos_y;
+@@ -1817,7 +1698,7 @@
+ 								w->viewport->scrollpos_y == w->viewport->dest_scrollpos_y);
+ 		}
+ 
+-		ClampViewportToMap(vp, w->viewport->scrollpos_x, w->viewport->scrollpos_y);
++		ClampViewportToMap(vp, &w->viewport->scrollpos_x, &w->viewport->scrollpos_y);
+ 
+ 		SetViewportPosition(w, w->viewport->scrollpos_x, w->viewport->scrollpos_y);
+ 		if (update_overlay) RebuildViewportOverlay(w);

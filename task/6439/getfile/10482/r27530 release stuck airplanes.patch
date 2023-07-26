@@ -1,0 +1,206 @@
+# HG changeset patch
+# User HackaLittleBit
+# Date 1460900190 -3600
+#      Sun Apr 17 14:36:30 2016 +0100
+# Branch trunk
+# Node ID 5277b1cdd3672f131c5038878c0894e663a1bb3b
+# Parent  6dee60f442384f92de07fa8c6ae025d7a9644723
+Add: Calculate the distance between landing places.
+Don't leave planes stuck on platform when distance too far but send them to hangar.
+Conditional orders only to airports.
+
+diff -r 6dee60f44238 -r 5277b1cdd367 src/aircraft.h
+--- a/src/aircraft.h	Sat Apr 16 16:59:34 2016 +0100
++++ b/src/aircraft.h	Sun Apr 17 14:36:30 2016 +0100
+@@ -57,6 +57,7 @@
+ void AircraftLeaveHangar(Aircraft *v, Direction exit_dir);
+ void AircraftNextAirportPos_and_Order(Aircraft *v);
+ void SetAircraftPosition(Aircraft *v, int x, int y, int z);
++uint32 AircraftGetFlightDistance(const Aircraft *v, TileIndex cur_tile, Order *order);
+ 
+ void GetAircraftFlightLevelBounds(const Vehicle *v, int *min, int *max);
+ template <class T>
+diff -r 6dee60f44238 -r 5277b1cdd367 src/aircraft_cmd.cpp
+--- a/src/aircraft_cmd.cpp	Sat Apr 16 16:59:34 2016 +0100
++++ b/src/aircraft_cmd.cpp	Sun Apr 17 14:36:30 2016 +0100
+@@ -85,6 +85,7 @@
+ static bool AirportFindFreeTerminal(Aircraft *v, const AirportFTAClass *apc);
+ static bool AirportFindFreeHelipad(Aircraft *v, const AirportFTAClass *apc);
+ static void CrashAirplane(Aircraft *v);
++static bool IsDestinationToFar(Aircraft *v);
+ 
+ static const SpriteID _aircraft_sprite[] = {
+ 	0x0EB5, 0x0EBD, 0x0EC5, 0x0ECD,
+@@ -1463,6 +1464,9 @@
+ 			if (!AirportFindFreeTerminal(v, apc)) return; // airplane
+ 		}
+ 	} else { // Else prepare for launch.
++
++		if (IsDestinationToFar(v)) return;
++
+ 		/* airplane goto state takeoff, helicopter to helitakeoff */
+ 		v->state = (v->subtype == AIR_HELICOPTER) ? HELITAKEOFF : TAKEOFF;
+ 	}
+@@ -1496,6 +1500,10 @@
+ 	/* if the block of the next position is busy, stay put */
+ 	if (AirportHasBlock(v, &apc->layout[v->pos], apc)) return;
+ 
++	/* If too far current order will be freed and code below will send plane to hangar. */
++	if (IsDestinationToFar(v)) {
++		if (!Station::Get(v->targetairport)->airport.HasHangar()) return;
++	}
+ 	/* airport-road is free. We either have to go to another airport, or to the hangar
+ 	 * ---> start moving */
+ 
+@@ -1956,13 +1964,75 @@
+ }
+ 
+ /**
++ * Helper function to add the x and y differences between tiles.
++ * @param cur_tile is startung tile for adding.
++ * @param end_tile is second tile for adding.
++ * @param dx pointer to storage of delta x length.
++ * @param dy pointer to storage of delta y length.
++ * @return the next current tile to investigate.
++ * and x and y absolute differences in dx, dy.
++ */
++TileIndex AddDistance(TileIndex cur_tile, TileIndex end_tile, int *dx, int *dy)
++{
++	*dx += Delta(TileX(cur_tile), TileX(end_tile));
++	*dy += Delta(TileY(cur_tile), TileY(end_tile));
++	return end_tile;
++}
++
++/**
++ * Function to calculate the distance between two valid landing places.
++ * @param order used to determine order location.
++ * @param cur_tile the tile we are at.
++ * @return the squared distance.
++ */
++uint32 AircraftGetFlightDistance(const Aircraft *v, TileIndex cur_tile, Order *order)
++{
++	int dx = 0;
++	int dy = 0;
++
++	for (order = order; order != NULL; order = order->next) {
++		if (order->IsType(OT_CONDITIONAL)) {
++			VehicleOrderID next = ProcessConditionalOrder(order, v);
++			if (next != INVALID_VEH_ORDER_ID) {
++				AddDistance(cur_tile, v->GetOrder(next)->GetLocation(v), &dx, &dy);
++				return (dx * dx + dy * dy);
++			}
++		}
++		if (order->IsType(OT_GOTO_STATION) || order->IsType(OT_GOTO_DEPOT)) {
++			AddDistance(cur_tile, order->GetLocation(v), &dx, &dy);
++			return (dx * dx + dy * dy);
++		}
++	}
++	/* End of order list reached with no result. So we start from the beginning of the list. */
++	for (order = v->GetFirstOrder(); order != NULL; order = order->next) {
++		if (order->IsType(OT_CONDITIONAL)) {
++			VehicleOrderID next = ProcessConditionalOrder(order, v);
++			if (next != INVALID_VEH_ORDER_ID) {
++				AddDistance(cur_tile, v->GetOrder(next)->GetLocation(v), &dx, &dy);
++				return (dx * dx + dy * dy);
++			}
++		}
++		if (order->IsType(OT_GOTO_STATION) || order->IsType(OT_GOTO_DEPOT)) {
++			AddDistance(cur_tile, order->GetLocation(v), &dx, &dy);
++			return (dx * dx + dy * dy);
++		}
++	}
++	return (dx * dx + dy * dy);
++}
++
++/**
+  * Handle the 'dest too far' flag and the corresponding news message for aircraft.
++ * Pre v->tile must be airport tile.
+  * @param v The aircraft.
+- * @param too_far True if the current destination is too far away.
++ * @return true if destination to far and sets VAF_DEST_TOO_FAR flag, otherwise clears VAF_DEST_TOO_FAR flag and returns false.
+  */
+-static void AircraftHandleDestTooFar(Aircraft *v, bool too_far)
++static bool IsDestinationToFar(Aircraft *v)
+ {
++	bool too_far = v->acache.cached_max_range_sqr != 0 ? (AircraftGetFlightDistance(v, BaseStation::GetByTile(v->tile)->xy, &v->current_order) > v->acache.cached_max_range_sqr) : false; 
+ 	if (too_far) {
++		 /* Don't leave planes stuck on platform even after resolving the too far situation. */
++		v->current_order.Free();
++
+ 		if (!HasBit(v->flags, VAF_DEST_TOO_FAR)) {
+ 			SetBit(v->flags, VAF_DEST_TOO_FAR);
+ 			SetWindowWidgetDirty(WC_VEHICLE_VIEW, v->index, WID_VV_START_STOP);
+@@ -1973,7 +2043,7 @@
+ 				AddVehicleAdviceNewsItem(STR_NEWS_AIRCRAFT_DEST_TOO_FAR, v->index);
+ 			}
+ 		}
+-		return;
++		return true;
+ 	}
+ 
+ 	if (HasBit(v->flags, VAF_DEST_TOO_FAR)) {
+@@ -1982,6 +2052,7 @@
+ 		SetWindowWidgetDirty(WC_VEHICLE_VIEW, v->index, WID_VV_START_STOP);
+ 		DeleteVehicleNews(v->index, STR_NEWS_AIRCRAFT_DEST_TOO_FAR);
+ 	}
++	return false;
+ }
+ 
+ static bool AircraftEventHandler(Aircraft *v, int loop)
+@@ -2000,22 +2071,7 @@
+ 
+ 	if (v->current_order.IsType(OT_LOADING) || v->current_order.IsType(OT_LEAVESTATION)) return true;
+ 
+-	if (v->state >= ENDTAKEOFF && v->state <= HELIENDLANDING) {
+-		/* If we are flying, unconditionally clear the 'dest too far' state. */
+-		AircraftHandleDestTooFar(v, false);
+-	} else if (v->acache.cached_max_range_sqr != 0) {
+-		/* Check the distance to the next destination. This code works because the target
+-		 * airport is only updated after take off and not on the ground. */
+-		Station *cur_st = Station::GetIfValid(v->targetairport);
+-		Station *next_st = v->current_order.IsType(OT_GOTO_STATION) || v->current_order.IsType(OT_GOTO_DEPOT) ? Station::GetIfValid(v->current_order.GetDestination()) : NULL;
+-
+-		if (cur_st != NULL && cur_st->airport.tile != INVALID_TILE && next_st != NULL && next_st->airport.tile != INVALID_TILE) {
+-			uint dist = DistanceSquare(cur_st->airport.tile, next_st->airport.tile);
+-			AircraftHandleDestTooFar(v, dist > v->acache.cached_max_range_sqr);
+-		}
+-	}
+-
+-	if (!HasBit(v->flags, VAF_DEST_TOO_FAR)) AirportGoToNextPosition(v);
++	AirportGoToNextPosition(v);
+ 
+ 	return true;
+ }
+diff -r 6dee60f44238 -r 5277b1cdd367 src/order_cmd.cpp
+--- a/src/order_cmd.cpp	Sat Apr 16 16:59:34 2016 +0100
++++ b/src/order_cmd.cpp	Sun Apr 17 14:36:30 2016 +0100
+@@ -862,6 +862,13 @@
+ 
+ 		case OT_CONDITIONAL: {
+ 			VehicleOrderID skip_to = new_order.GetConditionSkipToOrder();
++
++			/* Conditional orders for aircrafts only to airport or hangar. (station) */
++			if (v->type == VEH_AIRCRAFT ) {
++				Order *orderaircraft = v->GetOrder(skip_to);
++				if (!orderaircraft->IsType(OT_GOTO_STATION) && !orderaircraft->IsType(OT_GOTO_DEPOT)) return CMD_ERROR;
++			}
++
+ 			if (skip_to != 0 && skip_to >= v->GetNumOrders()) return CMD_ERROR; // Always allow jumping to the first (even when there is no order).
+ 			if (new_order.GetConditionVariable() >= OCV_END) return CMD_ERROR;
+ 
+diff -r 6dee60f44238 -r 5277b1cdd367 src/order_gui.cpp
+--- a/src/order_gui.cpp	Sat Apr 16 16:59:34 2016 +0100
++++ b/src/order_gui.cpp	Sun Apr 17 14:36:30 2016 +0100
+@@ -237,9 +237,9 @@
+ 	SetDParam(8, STR_EMPTY);
+ 
+ 	/* Check range for aircraft. */
+-	if (v->type == VEH_AIRCRAFT && Aircraft::From(v)->GetRange() > 0 && order->IsGotoOrder()) {
+-		const Order *next = order->next != NULL ? order->next : v->GetFirstOrder();
+-		if (GetOrderDistance(order, next, v) > Aircraft::From(v)->acache.cached_max_range_sqr) SetDParam(8, STR_ORDER_OUT_OF_RANGE);
++	if (v->type == VEH_AIRCRAFT && Aircraft::From(v)->GetRange() > 0 && (order->IsType(OT_GOTO_DEPOT) || order->IsType(OT_GOTO_STATION))) {
++		Order *next = order->next != NULL ? order->next : v->GetFirstOrder();
++		if (AircraftGetFlightDistance(Aircraft::From(v), order->GetLocation(v), next) > Aircraft::From(v)->acache.cached_max_range_sqr) SetDParam(8, STR_ORDER_OUT_OF_RANGE);
+ 	}
+ 
+ 	switch (order->GetType()) {

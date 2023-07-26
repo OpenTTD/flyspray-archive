@@ -1,0 +1,316 @@
+diff -r 0f463595b972 src/economy.cpp
+--- a/src/economy.cpp	Thu Aug 04 16:51:49 2016 +0300
++++ b/src/economy.cpp	Thu Sep 01 16:16:58 2016 +0300
+@@ -1235,6 +1235,12 @@
+ 	/* Handle end of route payment */
+ 	Money profit = DeliverGoods(count, this->ct, this->current_station, cp->SourceStationXY(), cp->DaysInTransit(), this->owner, cp->SourceSubsidyType(), cp->SourceSubsidyID());
+ 	this->route_profit += profit;
++	fprintf(stderr, "%d %d %d %d\n",
++	        cp->DaysInTransit(),
++	        DistanceManhattan(cp->SourceStationXY(), Station::Get(this->current_station)->xy),
++	        this->front->vcache.cached_cargo_age_period,
++	        this->front->vcache.cached_max_speed
++	        );
+ 
+ 	/* The vehicle's profit is whatever route profit there is minus feeder shares. */
+ 	this->visual_profit += profit - cp->FeederShare(count);
+diff -r 0f463595b972 src/saveload/afterload.cpp
+--- a/src/saveload/afterload.cpp	Thu Aug 04 16:51:49 2016 +0300
++++ b/src/saveload/afterload.cpp	Thu Sep 01 16:16:58 2016 +0300
+@@ -68,6 +68,208 @@
+ 
+ extern Company *DoStartupNewCompany(bool is_ai, CompanyID company = INVALID_COMPANY);
+ 
++#include <iostream>
++#include <fstream>
++#include <iomanip>
++
++void WriteHouseSpecFile() {
++	std::ofstream f;
++	f.open("export/cargo-specs.js");
++	const CargoSpec *cs;
++	f << "OPENTTD_CARGOS = ["  << std::endl;
++	char buffer[128];
++	char cargo_label[16];
++	bool first = true;
++	SetDParam(0, 123);
++	FOR_ALL_CARGOSPECS(cs) {
++		for (uint i = 0; i < sizeof(cs->label); i++) {
++			cargo_label[i] = GB(cs->label, (uint8)(sizeof(cs->label) - i - 1) * 8, 8);
++		}
++		cargo_label[sizeof(cs->label)] = '\0';
++		// GetString(buffer, STR_JUST_CARGO_LIST, lastof(buffer));
++		if (!first) f << "," << std::endl;
++		first = false;
++		f << "{" << std::endl;
++		f << "	\"initial_payment\": " << cs->initial_payment << "," << std::endl;
++		f << "	\"transit_days1\": " << (int)cs->transit_days[0] << "," << std::endl;
++		f << "	\"transit_days2\": " << (int)cs->transit_days[1] << "," << std::endl;
++		f << "	\"weight\": " << (int)cs->weight << "," << std::endl;
++		f << "	\"multiplier\": " << (int)cs->multiplier << "," << std::endl;
++		f << "	\"legend_colour\": " << (int)cs->legend_colour << "," << std::endl;
++		f << "	\"rating_colour\": " << (int)cs->rating_colour << "," << std::endl;
++		f << "	\"sprite_id\": " << cs->sprite << "," << std::endl;
++		GetString(buffer, cs->name, lastof(buffer));
++		f << "	\"name\": \"" << buffer << "\", " << std::endl;
++		GetString(buffer, cs->name_single, lastof(buffer));
++		f << "	\"name_single\": \"" << buffer << "\", " << std::endl;
++		GetString(buffer, cs->units_volume, lastof(buffer));
++		f << "	\"units_volume\": \"" << buffer << "\", " << std::endl;
++		GetString(buffer, cs->quantifier, lastof(buffer));
++		f << "	\"quantifier\": \"" << buffer << "\", " << std::endl;
++		GetString(buffer, cs->abbrev, lastof(buffer));
++		f << "	\"abbrev\": \"" << buffer << "\", " << std::endl;
++		f << "	\"label_code\": " << cs->label << ", " << std::endl;
++		f << "	\"label\": \"" << cargo_label << "\", " << std::endl;
++		f << "}";
++	}
++	f << "];" << std::endl;
++	f.close();
++}
++
++#include "../table/palettes.h"
++// extern const Palette _palette;
++void WritePaletteFile() {
++	std::ofstream f;
++	f.open("export/palette.js");
++	f << "OPENTTD_PALETTE = ["  << std::endl;
++	bool first = true;
++	for (uint i = 0; i < 256; i++) {
++		if (!first) f << "," << std::endl;
++		first = false;
++		auto &c = _palette.palette[i];
++		f << "{" << std::endl;
++		f << std::dec;
++		f << "	\"r\": " << (int)c.r << ", " << std::endl;
++		f << "	\"g\": " << (int)c.g << ", " << std::endl;
++		f << "	\"b\": " << (int)c.b << ", " << std::endl;
++		f << "	\"hex\": \"#";
++		f << std::hex << std::setfill('0');
++		f << std::setw(2) << (int)c.r;
++		f << std::setw(2) << (int)c.g;
++		f << std::setw(2) << (int)c.b;
++		f << "\" " << std::endl;
++		f << "}";
++	}
++	f << "];" << std::endl;
++	f.close();
++}
++
++class JsonWriter {
++protected:
++	std::ofstream f;
++	int i = 0;
++	bool no_comma = true;
++	char buffer[128];
++
++public:
++	JsonWriter(const char *fname, const char *varname) {
++		f.open(fname);
++		f << varname << " = [";
++		no_comma = true;
++	}
++	~JsonWriter() {
++		ident(false);
++		f << "];" << std::endl;
++		f.close();
++	}
++	void ident(bool comma=true) {
++		if (comma && !no_comma) f << ",";
++		no_comma = false;
++		f << std::endl;
++		for(int j = 0; j < i; j++) f << "  ";
++	}
++	void key(const char *k) {
++		const char *kn;
++		for (kn = k + strlen(k); kn >= k && *kn != '>' && *kn != '.'; kn--);
++		kn++;
++		ident();
++		f << "\"" << kn << "\": ";
++	}
++	void value(int val) {
++		f << val;
++	}
++	void value(const char *v) {
++		f << "\"" << v << "\"";
++	}
++	template<typename T>
++	void kv(const char *k, T v) {
++		key(k);
++		value(v);
++	}
++	void ks(const char *k, StringID s) {
++		GetString(buffer, s, lastof(buffer));
++		key(k);
++		value(buffer);
++	}
++	void kd(const char *k) {
++		key(k);
++		f << "{";
++		no_comma = true;
++		i++;
++	}
++	void bd() {
++		ident();
++		f << "{";
++		no_comma = true;
++		i++;
++	}
++	void ed() {
++		i--;
++		ident(false);
++		f << "}";
++	}
++};
++
++#define JKV(j, field) j.kv(#field, field)
++
++void WriteEngineInfo() {
++	JsonWriter j("export/engines.js", "OPENTTD_ENGINES");
++	char buffer[128];
++	const Engine *e;
++	FOR_ALL_ENGINES_OF_TYPE(e, VEH_TRAIN) {
++		j.bd();
++		JKV(j, e->index);
++		JKV(j, e->info.cargo_type);
++		j.kv("name", (e->name ? e->name : "null"));
++		JKV(j, e->info.cargo_type);
++		{
++			j.kd("info");
++			JKV(j, e->info.cargo_type);
++			JKV(j, e->info.cargo_age_period);
++			JKV(j, e->info.climates);
++			JKV(j, e->info.base_intro);
++			JKV(j, e->info.lifelength);
++			JKV(j, e->info.base_life);
++			JKV(j, e->info.refit_mask);
++			JKV(j, e->info.refit_cost);
++			JKV(j, e->info.load_amount);
++			j.ks("name", e->info.string_id);
++			j.ed();
++		}
++		{
++			const RailVehicleInfo *rvi = &e->u.rail;
++			j.kd("rail");
++			JKV(j, rvi->image_index);
++			JKV(j, rvi->railveh_type);
++			JKV(j, rvi->max_speed);
++			JKV(j, rvi->power);
++			JKV(j, rvi->weight);
++			JKV(j, rvi->running_cost);
++			JKV(j, rvi->engclass);
++			JKV(j, rvi->tractive_effort);
++			JKV(j, rvi->air_drag);
++			JKV(j, rvi->capacity);
++			j.ed();
++		}
++		j.ed();
++	}
++}
++
++void WriteInfoFiles() {
++	WriteHouseSpecFile();
++	WritePaletteFile();
++	WriteEngineInfo();
++	auto f = fopen("export/controller_log.txt", "w");
++	fclose(f);
++	f = fopen("export/train_pos_log.txt", "w");
++	fclose(f);
++		// fprintf(stderr, "[%d %d %d %d %d] ", this->gcache.cached_power,
++		//     this->gcache.cached_weight,
++		//     this->gcache.cached_max_te,
++	 //        this->gcache.cached_air_drag,
++	 //        this->gcache.cached_axle_resistance);
++}
++
+ /**
+  * Makes a tile canal or water depending on the surroundings.
+  *
+@@ -3035,6 +3237,7 @@
+ 
+ 	AfterLoadLinkGraphs();
+ 	AfterLoadFindBTProCBInfo();
++	WriteInfoFiles();
+ 	return true;
+ }
+ 
+diff -r 0f463595b972 src/train_cmd.cpp
+--- a/src/train_cmd.cpp	Thu Aug 04 16:51:49 2016 +0300
++++ b/src/train_cmd.cpp	Thu Sep 01 16:16:58 2016 +0300
+@@ -309,7 +309,7 @@
+ 			stop = *station_length;
+ 			break;
+ 	}
+-
++	fprintf(stderr, "STOPLOC %d\n", stop - (v->gcache.cached_veh_length + 1) / 2);
+ 	/* Subtract half the front vehicle length of the train so we get the real
+ 	 * stop location of the train. */
+ 	return stop - (v->gcache.cached_veh_length + 1) / 2;
+@@ -431,7 +431,6 @@
+ 			max_speed = min(max_speed, GetBridgeSpec(GetBridgeType(u->tile))->speed);
+ 		}
+ 	}
+-
+ 	max_speed = min(max_speed, this->current_order.GetMaxSpeed());
+ 	return min(max_speed, this->gcache.cached_max_track_speed);
+ }
+@@ -1622,7 +1621,9 @@
+ 		 * This is a little bit redundant way, a->gv_flags will
+ 		 * be (re)set twice, but it reduces code duplication */
+ 		SwapTrainFlags(&a->gv_flags, &a->gv_flags);
++		fprintf(stderr, "SWS %d %d %d %d\n", a->x_pos, a->y_pos, (int)a->direction, (int)a->progress);
+ 		UpdateStatusAfterSwap(a);
++		fprintf(stderr, "SWE %d %d %d %d\n", a->x_pos, a->y_pos, (int)a->direction, (int)a->progress);
+ 	}
+ }
+ 
+@@ -3625,6 +3626,7 @@
+ 	/* slow down */
+ 	v->vehstatus |= VS_TRAIN_SLOWING;
+ 	uint16 break_speed = _breakdown_speeds[x & 0xF];
++	if (break_speed < v->cur_speed) fprintf(stderr, "SLOW LINE END %d\n", break_speed);
+ 	if (break_speed < v->cur_speed) v->cur_speed = break_speed;
+ 
+ 	return true;
+@@ -3702,6 +3704,7 @@
+ 		v->vehstatus |= VS_TRAIN_SLOWING;
+ 
+ 		uint16 break_speed = _breakdown_speeds[GB(~t, 4, 4)];
++		if (break_speed < v->cur_speed) fprintf(stderr, "SLOW BREAKDOWN %d\n", break_speed);
+ 		if (break_speed < v->cur_speed) v->cur_speed = break_speed;
+ 	} else {
+ 		v->vehstatus &= ~VS_TRAIN_SLOWING;
+@@ -3834,7 +3837,16 @@
+ 		return true;
+ 	}
+ 
++	auto f = fopen("export/controller_log.txt", "a");
++	fprintf(f, "[%d, %d, %d, %d, %d, %d, %d, %d, %d, ",
++	        v->x_pos, v->y_pos,
++	        v->cur_speed, (int)v->subspeed, v->GetCurrentMaxSpeed(),
++	        (int)v->vehstatus, (int)v->flags,
++	        v->GetAcceleration(),
++	        v->progress);
+ 	int j = v->UpdateSpeed();
++	fprintf(f, "%d, %d],\n", v->cur_speed, j);
++	fclose(f);
+ 
+ 	/* we need to invalidate the widget if we are stopping from 'Stopping 0 km/h' to 'Stopped' */
+ 	if (v->cur_speed == 0 && (v->vehstatus & VS_STOPPED)) {
+@@ -3922,9 +3934,14 @@
+ 
+ 		this->current_order_time++;
+ 
++		auto f = fopen("export/train_pos_log.txt", "a");
++		fprintf(f, "%d %d %d %d %d\n", this->x_pos, this->y_pos, (int)this->progress, (int)this->GetAdvanceDistance(), (int)this->direction);
+ 		if (!TrainLocoHandler(this, false)) return false;
+-
+-		return TrainLocoHandler(this, true);
++		fprintf(f, "%d %d %d %d %d\n", this->x_pos, this->y_pos, (int)this->progress, (int)this->GetAdvanceDistance(), (int)this->direction);
++		bool res = TrainLocoHandler(this, true);
++		fprintf(f, "%d %d %d %d %d\n", this->x_pos, this->y_pos, (int)this->progress, (int)this->GetAdvanceDistance(), (int)this->direction);
++		fclose(f);
++		return res;
+ 	} else if (this->IsFreeWagon() && (this->vehstatus & VS_CRASHED)) {
+ 		/* Delete flooded standalone wagon chain */
+ 		if (++this->crash_anim_pos >= 4400) {

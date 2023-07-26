@@ -1,0 +1,164 @@
+Index: src/autoreplace_cmd.cpp
+===================================================================
+--- src/autoreplace_cmd.cpp	(revision 27902)
++++ src/autoreplace_cmd.cpp	(working copy)
+@@ -65,9 +65,6 @@
+ 
+ 	switch (type) {
+ 		case VEH_TRAIN: {
+-			/* make sure the railtypes are compatible */
+-			if ((GetRailTypeInfo(e_from->u.rail.railtype)->compatible_railtypes & GetRailTypeInfo(e_to->u.rail.railtype)->compatible_railtypes) == 0) return false;
+-
+ 			/* make sure we do not replace wagons with engines or vice versa */
+ 			if ((e_from->u.rail.railveh_type == RAILVEH_WAGON) != (e_to->u.rail.railveh_type == RAILVEH_WAGON)) return false;
+ 			break;
+@@ -657,6 +654,7 @@
+ /**
+  * Autoreplaces a vehicle
+  * Trains are replaced as a whole chain, free wagons in depot are replaced on their own
++ * They are only replaced if the depot supports them.
+  * @param tile not used
+  * @param flags type of operation
+  * @param p1 Index of vehicle
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(revision 27902)
++++ src/rail_cmd.cpp	(working copy)
+@@ -40,6 +40,9 @@
+ 
+ #include "safeguards.h"
+ 
++#include <vector>
++#include <algorithm>
++
+ /** Helper type for lists/vectors of trains */
+ typedef SmallVector<Train *, 16> TrainList;
+ 
+@@ -1533,7 +1536,64 @@
+ 	return NULL;
+ }
+ 
++/** Temporary data storage for finding a list of trains on a tile. */
++struct TrainListData {
++	TileIndex tile;
++	std::vector<Train*> trains;
++};
++
++
++static Vehicle *FindTrainOnTileEnum(Vehicle *v, void *data)
++{
++	TrainListData* tld = (TrainListData*)data;
++
++	/* if not a train */
++	if (v->type != VEH_TRAIN) return NULL;
++
++	/* get first cart */
++	Train *w = Train::From(v)->First();
++
++	while (w != NULL)
++	{
++		/* check if train is on the tile */
++		if (w->tile == tld->tile)
++		{
++			/* if so add to tld.trains */
++			tld->trains.push_back(w->First());
++			return NULL;
++		}
++
++		/* see next cart */
++		w = w->Next();
++	}
++
++	return NULL;
++}
++
+ /**
++ * Locate all trains on a depot rail tile
++ * @param tile tile to check for trains on
++ * @return an vector of trains on the tile including those in the depot
++ * @pre tile must contain a depot
++ */
++static std::vector<Train*> GrabListOfTrainsOnDepotTile(TileIndex tile)
++{
++	auto tld = TrainListData();
++	tld.tile = tile;
++
++	FindVehicleOnPos(tile, &tld, FindTrainOnTileEnum);
++
++	/* Make the list unique */
++	std::sort(std::begin(tld.trains), std::end(tld.trains));
++	tld.trains.erase (
++			std::unique(std::begin(tld.trains), std::end(tld.trains)),
++			std::end(tld.trains)
++	);
++
++	return tld.trains;
++}
++
++/**
+  * Convert one rail type to the other. You can convert normal rail to
+  * monorail/maglev easily or vice-versa.
+  * @param tile end tile of rail conversion drag
+@@ -1599,6 +1659,9 @@
+ 
+ 		SmallVector<Train *, 2> vehicles_affected;
+ 
++		bool should_upgrade_trains = false;
++		std::vector<Train*> v_list;
++
+ 		/* Vehicle on the tile when not converting Rail <-> ElRail
+ 		 * Tunnels and bridges have special check later */
+ 		if (tt != MP_TUNNELBRIDGE) {
+@@ -1605,8 +1668,26 @@
+ 			if (!IsCompatibleRail(type, totype)) {
+ 				CommandCost ret = IsPlainRailTile(tile) ? EnsureNoTrainOnTrackBits(tile, GetTrackBits(tile)) : EnsureNoVehicleOnGround(tile);
+ 				if (ret.Failed()) {
+-					error = ret;
+-					continue;
++					/* if its not a depot tile */
++					if (GetRailTileType(tile) != RAIL_TILE_DEPOT) {
++						error = ret;
++						continue;
++					} else {
++						/* if it is check if all trains are stopped in depot */
++						v_list = GrabListOfTrainsOnDepotTile(tile);
++						for(auto v : v_list) {
++							/* If one is not then fail */
++							if(!v->IsStoppedInDepot()) {
++								/* Sometimes if we run continue it will still
++								 * upgrade this tile. Just return instead */
++								return ret;
++							}
++						}
++						
++						/* Trains only upgrade if depot supports them, however
++						 * depot hasn't upgraded yet. */
++						should_upgrade_trains = true;
++					}
+ 				}
+ 			}
+ 			if (flags & DC_EXEC) { // we can safely convert, too
+@@ -1637,6 +1718,15 @@
+ 
+ 				SetRailType(tile, totype);
+ 				MarkTileDirtyByTile(tile);
++
++				/* Upgrade trains if we should */
++				if (should_upgrade_trains) {
++					/* if they are all stoped then replace trains */
++					for(auto v : v_list) {
++						ret = DoCommand(0, v->index, 0, flags, CMD_AUTOREPLACE_VEHICLE);
++					}
++				}
++
+ 				/* update power of train on this tile */
+ 				FindVehicleOnPos(tile, &affected_trains, &UpdateTrainPowerProc);
+ 			}
+@@ -2680,7 +2770,6 @@
+ 	}
+ }
+ 
+-
+ static TrackStatus GetTileTrackStatus_Track(TileIndex tile, TransportType mode, uint sub_mode, DiagDirection side)
+ {
+ 	/* Case of half tile slope with water. */

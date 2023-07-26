@@ -1,0 +1,55 @@
+Index: src/industry_cmd.cpp
+===================================================================
+--- src/industry_cmd.cpp	(revision 27171)
++++ src/industry_cmd.cpp	(working copy)
+@@ -1756,8 +1756,13 @@
+ 
+ 			WaterClass wc = (IsWaterTile(cur_tile) ? GetWaterClass(cur_tile) : WATER_CLASS_INVALID);
+ 
++			/* While it's true Industry Tiles don't have any owner, the following
++			DoCommand below is inadvertently setting bit 4 of m1 to 1. To preserve its
++			original value, store it first before executing DoCommand, then restore it
++			before MakeIndustry takes action. */
++			Owner old_owner = GetTileOwner(cur_tile); 
+ 			DoCommand(cur_tile, 0, 0, DC_EXEC | DC_NO_TEST_TOWN_RATING | DC_NO_MODIFY_TOWN_RATING, CMD_LANDSCAPE_CLEAR);
+-
++			SetTileOwner(cur_tile, old_owner);
+ 			MakeIndustry(cur_tile, i->index, it->gfx, Random(), wc);
+ 
+ 			if (_generating_world) {
+Index: src/industry_map.h
+===================================================================
+--- src/industry_map.h	(revision 27171)
++++ src/industry_map.h	(working copy)
+@@ -280,7 +280,7 @@
+ static inline void MakeIndustry(TileIndex t, IndustryID index, IndustryGfx gfx, uint8 random, WaterClass wc)
+ {
+ 	SetTileType(t, MP_INDUSTRY);
+-	_m[t].m1 = 0;
++	_m[t].m1 &= 1<<4; // Make sure bit 4 is unaffected.
+ 	_m[t].m2 = index;
+ 	SetIndustryRandomBits(t, random); // m3
+ 	_m[t].m4 = 0;
+Index: src/saveload/afterload.cpp
+===================================================================
+--- src/saveload/afterload.cpp	(revision 27171)
++++ src/saveload/afterload.cpp	(working copy)
+@@ -2985,6 +2985,18 @@
+ 	ResetSignalHandlers();
+ 
+ 	AfterLoadLinkGraphs();
++
++	/* Convert m1 bit 4 value for all industry tiles */
++	if (IsSavegameVersionBefore(195)) {
++		for (TileIndex t = 0; t < map_size; t++) {
++			/* It's not possible to know who was the original owner of a canal tile built under
++			an Oil Rig tile from an old save game. To preserve savegame backward compatibility,
++			don't do anything about them. Old and new values for a given industry tile can co-exist. */
++			if (IsTileType(t, MP_INDUSTRY) && (GetWaterClass(t) != WATER_CLASS_CANAL)) {
++				SB(_m[t].m1, 4, 1, 1);
++			}
++		}
++	}
+ 	return true;
+ }
+ 

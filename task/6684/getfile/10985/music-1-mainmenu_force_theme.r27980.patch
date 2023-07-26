@@ -1,0 +1,84 @@
+diff --git a/src/base_media_base.h b/src/base_media_base.h
+index d5de6c3..458e1fd 100644
+--- a/src/base_media_base.h
++++ b/src/base_media_base.h
+@@ -286,6 +286,7 @@ struct MusicSet : BaseSet<MusicSet, NUM_SONGS_AVAILABLE, false> {
+ 	char song_name[NUM_SONGS_AVAILABLE][32];
+ 	byte track_nr[NUM_SONGS_AVAILABLE];
+ 	byte num_available;
++	bool has_theme;
+ 
+ 	bool FillSetDetails(struct IniFile *ini, const char *path, const char *full_filename);
+ };
+diff --git a/src/music.cpp b/src/music.cpp
+index 4001e62..bcc9955 100644
+--- a/src/music.cpp
++++ b/src/music.cpp
+@@ -65,6 +65,8 @@ bool MusicSet::FillSetDetails(IniFile *ini, const char *path, const char *full_f
+ 	bool ret = this->BaseSet<MusicSet, NUM_SONGS_AVAILABLE, false>::FillSetDetails(ini, path, full_filename);
+ 	if (ret) {
+ 		this->num_available = 0;
++		this->has_theme = !StrEmpty(this->files[0].filename);
++
+ 		IniGroup *names = ini->GetGroup("names");
+ 		for (uint i = 0, j = 1; i < lengthof(this->song_name); i++) {
+ 			const char *filename = this->files[i].filename;
+diff --git a/src/music_gui.cpp b/src/music_gui.cpp
+index 279f376..da32c79 100644
+--- a/src/music_gui.cpp
++++ b/src/music_gui.cpp
+@@ -243,6 +243,16 @@ static void StopMusic()
+ 
+ static void PlayPlaylistSong()
+ {
++	if (_game_mode == GM_MENU && BaseMusic::GetUsedSet()->has_theme) {
++		/* force first song (theme) on the main menu.
++		 * this is guaranteed to exist, otherwise
++		 * has_theme would not be set. */
++		_music_wnd_cursong = 1;
++		DoPlaySong();
++		_song_is_active = true;
++		return;
++	}
++
+ 	if (_cur_playlist[0] == 0) {
+ 		SelectSongToPlay();
+ 		/* if there is not songs in the playlist, it may indicate
+@@ -268,8 +278,19 @@ void ResetMusic()
+ 	DoPlaySong();
+ }
+ 
++/**
++ * Check music playback status and start/stop/song-finished
++ * Called from main loop.
++ */
+ void MusicLoop()
+ {
++	static GameMode _last_game_mode = GM_BOOTSTRAP;
++	bool force_restart = false;
++	if (_game_mode != _last_game_mode) {
++		force_restart = true;
++		_last_game_mode = _game_mode;
++	}
++
+ 	if (!_settings_client.music.playing && _song_is_active) {
+ 		StopMusic();
+ 	} else if (_settings_client.music.playing && !_song_is_active) {
+@@ -278,13 +299,13 @@ void MusicLoop()
+ 
+ 	if (!_song_is_active) return;
+ 
+-	if (!MusicDriver::GetInstance()->IsSongPlaying()) {
+-		if (_game_mode != GM_MENU) {
++	if (force_restart || !MusicDriver::GetInstance()->IsSongPlaying()) {
++		if (_game_mode == GM_MENU && BaseMusic::GetUsedSet()->has_theme) {
++			ResetMusic();
++		} else {
+ 			StopMusic();
+ 			SkipToNextSong();
+ 			PlayPlaylistSong();
+-		} else {
+-			ResetMusic();
+ 		}
+ 	}
+ }

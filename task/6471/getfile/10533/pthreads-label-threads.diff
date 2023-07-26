@@ -1,0 +1,231 @@
+Index: src/genworld.cpp
+===================================================================
+--- src/genworld.cpp	(revision 27582)
++++ src/genworld.cpp	(working copy)
+@@ -331,7 +331,7 @@
+ 		_gw.thread = NULL;
+ 	}
+ 
+-	if (!VideoDriver::GetInstance()->HasGUI() || !ThreadObject::New(&_GenerateWorld, NULL, &_gw.thread)) {
++	if (!VideoDriver::GetInstance()->HasGUI() || !ThreadObject::New(&_GenerateWorld, NULL, &_gw.thread, "ottd:genworld")) {
+ 		DEBUG(misc, 1, "Cannot create genworld thread, reverting to single-threaded mode");
+ 		_gw.threaded = false;
+ 		_modal_progress_work_mutex->EndCritical();
+Index: src/linkgraph/linkgraphjob.cpp
+===================================================================
+--- src/linkgraph/linkgraphjob.cpp	(revision 27582)
++++ src/linkgraph/linkgraphjob.cpp	(working copy)
+@@ -61,7 +61,7 @@
+  */
+ void LinkGraphJob::SpawnThread()
+ {
+-	if (!ThreadObject::New(&(LinkGraphSchedule::Run), this, &this->thread)) {
++	if (!ThreadObject::New(&(LinkGraphSchedule::Run), this, &this->thread, "ottd:linkgraph")) {
+ 		this->thread = NULL;
+ 		/* Of course this will hang a bit.
+ 		 * On the other hand, if you want to play games which make this hang noticably
+Index: src/network/core/tcp_connect.cpp
+===================================================================
+--- src/network/core/tcp_connect.cpp	(revision 27582)
++++ src/network/core/tcp_connect.cpp	(working copy)
+@@ -35,7 +35,7 @@
+ 	address(address)
+ {
+ 	*_tcp_connecters.Append() = this;
+-	if (!ThreadObject::New(TCPConnecter::ThreadEntry, this, &this->thread)) {
++	if (!ThreadObject::New(TCPConnecter::ThreadEntry, this, &this->thread, "ottd:tcp")) {
+ 		this->Connect();
+ 	}
+ }
+Index: src/network/network_udp.cpp
+===================================================================
+--- src/network/network_udp.cpp	(revision 27582)
++++ src/network/network_udp.cpp	(working copy)
+@@ -109,7 +109,7 @@
+ void NetworkUDPQueryServer(NetworkAddress address, bool manually)
+ {
+ 	NetworkUDPQueryServerInfo *info = new NetworkUDPQueryServerInfo(address, manually);
+-	if (address.IsResolved() || !ThreadObject::New(NetworkUDPQueryServerThread, info)) {
++	if (address.IsResolved() || !ThreadObject::New(NetworkUDPQueryServerThread, info, NULL, "ottd:udp-query")) {
+ 		NetworkUDPQueryServerThread(info);
+ 	}
+ }
+@@ -565,7 +565,7 @@
+ 	/* Check if we are advertising */
+ 	if (!_networking || !_network_server || !_network_udp_server) return;
+ 
+-	if (blocking || !ThreadObject::New(NetworkUDPRemoveAdvertiseThread, NULL)) {
++	if (blocking || !ThreadObject::New(NetworkUDPRemoveAdvertiseThread, NULL, NULL, "ottd:udp-advert")) {
+ 		NetworkUDPRemoveAdvertiseThread(NULL);
+ 	}
+ }
+@@ -648,7 +648,7 @@
+ 	if (_next_advertisement < _last_advertisement) _next_advertisement = UINT32_MAX;
+ 	if (_next_retry         < _last_advertisement) _next_retry         = UINT32_MAX;
+ 
+-	if (!ThreadObject::New(NetworkUDPAdvertiseThread, NULL)) {
++	if (!ThreadObject::New(NetworkUDPAdvertiseThread, NULL, NULL, "ottd:udp-advert")) {
+ 		NetworkUDPAdvertiseThread(NULL);
+ 	}
+ }
+Index: src/newgrf_config.cpp
+===================================================================
+--- src/newgrf_config.cpp	(revision 27582)
++++ src/newgrf_config.cpp	(working copy)
+@@ -786,7 +786,7 @@
+ 	/* Only then can we really start, especially by marking the whole screen dirty. Get those other windows hidden!. */
+ 	MarkWholeScreenDirty();
+ 
+-	if (!VideoDriver::GetInstance()->HasGUI() || !ThreadObject::New(&DoScanNewGRFFiles, callback, NULL)) {
++	if (!VideoDriver::GetInstance()->HasGUI() || !ThreadObject::New(&DoScanNewGRFFiles, callback, NULL, "ottd:newgrf-scan")) {
+ 		_modal_progress_work_mutex->EndCritical();
+ 		_modal_progress_paint_mutex->EndCritical();
+ 		DoScanNewGRFFiles(callback);
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 27582)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -2584,7 +2584,7 @@
+ 	SlSaveChunks();
+ 
+ 	SaveFileStart();
+-	if (!threaded || !ThreadObject::New(&SaveFileToDiskThread, NULL, &_save_thread)) {
++	if (!threaded || !ThreadObject::New(&SaveFileToDiskThread, NULL, &_save_thread, "ottd:savegame")) {
+ 		if (threaded) DEBUG(sl, 1, "Cannot create savegame thread, reverting to single-threaded mode...");
+ 
+ 		SaveOrLoadResult result = SaveFileToDisk(false);
+Index: src/thread/thread.h
+===================================================================
+--- src/thread/thread.h	(revision 27582)
++++ src/thread/thread.h	(working copy)
+@@ -44,9 +44,10 @@
+ 	 * @param proc The procedure to call inside the thread.
+ 	 * @param param The params to give with 'proc'.
+ 	 * @param thread Place to store a pointer to the thread in. May be NULL.
++	 * @param name A name for the thread. May be NULL.
+ 	 * @return True if the thread was started correctly.
+ 	 */
+-	static bool New(OTTDThreadFunc proc, void *param, ThreadObject **thread = NULL);
++	static bool New(OTTDThreadFunc proc, void *param, ThreadObject **thread = NULL, const char *name = NULL);
+ };
+ 
+ /**
+Index: src/thread/thread_morphos.cpp
+===================================================================
+--- src/thread/thread_morphos.cpp	(revision 27582)
++++ src/thread/thread_morphos.cpp	(working copy)
+@@ -193,7 +193,7 @@
+ 	}
+ };
+ 
+-/* static */ bool ThreadObject::New(OTTDThreadFunc proc, void *param, ThreadObject **thread)
++/* static */ bool ThreadObject::New(OTTDThreadFunc proc, void *param, ThreadObject **thread, const char *name)
+ {
+ 	ThreadObject *to = new ThreadObject_MorphOS(proc, param, thread == NULL);
+ 	if (thread != NULL) *thread = to;
+Index: src/thread/thread_none.cpp
+===================================================================
+--- src/thread/thread_none.cpp	(revision 27582)
++++ src/thread/thread_none.cpp	(working copy)
+@@ -14,7 +14,7 @@
+ 
+ #include "../safeguards.h"
+ 
+-/* static */ bool ThreadObject::New(OTTDThreadFunc proc, void *param, ThreadObject **thread)
++/* static */ bool ThreadObject::New(OTTDThreadFunc proc, void *param, ThreadObject **thread, const char *name)
+ {
+ 	if (thread != NULL) *thread = NULL;
+ 	return false;
+Index: src/thread/thread_os2.cpp
+===================================================================
+--- src/thread/thread_os2.cpp	(revision 27582)
++++ src/thread/thread_os2.cpp	(working copy)
+@@ -83,7 +83,7 @@
+ 	}
+ };
+ 
+-/* static */ bool ThreadObject::New(OTTDThreadFunc proc, void *param, ThreadObject **thread)
++/* static */ bool ThreadObject::New(OTTDThreadFunc proc, void *param, ThreadObject **thread, const char *name)
+ {
+ 	ThreadObject *to = new ThreadObject_OS2(proc, param, thread == NULL);
+ 	if (thread != NULL) *thread = to;
+Index: src/thread/thread_pthread.cpp
+===================================================================
+--- src/thread/thread_pthread.cpp	(revision 27582)
++++ src/thread/thread_pthread.cpp	(working copy)
+@@ -25,16 +25,18 @@
+ 	OTTDThreadFunc proc; ///< External thread procedure.
+ 	void *param;         ///< Parameter for the external thread procedure.
+ 	bool self_destruct;  ///< Free ourselves when done?
++	const char *name;    ///< Name for the thread
+ 
+ public:
+ 	/**
+ 	 * Create a pthread and start it, calling proc(param).
+ 	 */
+-	ThreadObject_pthread(OTTDThreadFunc proc, void *param, bool self_destruct) :
++	ThreadObject_pthread(OTTDThreadFunc proc, void *param, bool self_destruct, const char *name) :
+ 		thread(0),
+ 		proc(proc),
+ 		param(param),
+-		self_destruct(self_destruct)
++		self_destruct(self_destruct),
++		name(name)
+ 	{
+ 		pthread_create(&this->thread, NULL, &stThreadProc, this);
+ 	}
+@@ -60,7 +62,15 @@
+ 	 */
+ 	static void *stThreadProc(void *thr)
+ 	{
+-		((ThreadObject_pthread *)thr)->ThreadProc();
++		ThreadObject_pthread *self = (ThreadObject_pthread *) thr;
++#if defined(__GLIBC__)
++#if __GLIBC_PREREQ(2, 12)
++		if (self->name) {
++			pthread_setname_np(pthread_self(), self->name);
++		}
++#endif
++#endif
++		self->ThreadProc();
+ 		pthread_exit(NULL);
+ 	}
+ 
+@@ -85,9 +95,9 @@
+ 	}
+ };
+ 
+-/* static */ bool ThreadObject::New(OTTDThreadFunc proc, void *param, ThreadObject **thread)
++/* static */ bool ThreadObject::New(OTTDThreadFunc proc, void *param, ThreadObject **thread, const char *name)
+ {
+-	ThreadObject *to = new ThreadObject_pthread(proc, param, thread == NULL);
++	ThreadObject *to = new ThreadObject_pthread(proc, param, thread == NULL, name);
+ 	if (thread != NULL) *thread = to;
+ 	return true;
+ }
+Index: src/thread/thread_win32.cpp
+===================================================================
+--- src/thread/thread_win32.cpp	(revision 27582)
++++ src/thread/thread_win32.cpp	(working copy)
+@@ -96,7 +96,7 @@
+ 	}
+ };
+ 
+-/* static */ bool ThreadObject::New(OTTDThreadFunc proc, void *param, ThreadObject **thread)
++/* static */ bool ThreadObject::New(OTTDThreadFunc proc, void *param, ThreadObject **thread, const char *name)
+ {
+ 	ThreadObject *to = new ThreadObject_Win32(proc, param, thread == NULL);
+ 	if (thread != NULL) *thread = to;
+Index: src/video/sdl_v.cpp
+===================================================================
+--- src/video/sdl_v.cpp	(revision 27582)
++++ src/video/sdl_v.cpp	(working copy)
+@@ -687,7 +687,7 @@
+ 			_draw_mutex->BeginCritical();
+ 			_draw_continue = true;
+ 
+-			_draw_threaded = ThreadObject::New(&DrawSurfaceToScreenThread, NULL, &_draw_thread);
++			_draw_threaded = ThreadObject::New(&DrawSurfaceToScreenThread, NULL, &_draw_thread, "ottd:draw-sdl");
+ 
+ 			/* Free the mutex if we won't be able to use it. */
+ 			if (!_draw_threaded) {

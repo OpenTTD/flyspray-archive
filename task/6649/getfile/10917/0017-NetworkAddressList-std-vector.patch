@@ -1,0 +1,165 @@
+From b5117b2af0e07dea0e19179fc6e496126588d14b Mon Sep 17 00:00:00 2001
+From: Henry Wilson <m3henry@googlemail.com>
+Date: Sun, 31 Dec 2017 00:34:50 +0000
+Subject: [PATCH 17/31] NetworkAddressList ~> std::vector
+
+---
+ src/network/core/address.h    |  2 +-
+ src/network/core/host.cpp     | 19 +++++++++++++++----
+ src/network/core/tcp_listen.h |  4 +---
+ src/network/core/udp.cpp      | 12 ++++--------
+ src/network/network.cpp       |  6 ++----
+ src/network/network_udp.cpp   |  8 ++++----
+ 6 files changed, 27 insertions(+), 24 deletions(-)
+
+diff --git a/src/network/core/address.h b/src/network/core/address.h
+index 9fd40eaee..c3058f374 100644
+--- a/src/network/core/address.h
++++ b/src/network/core/address.h
+@@ -20,7 +20,7 @@
+ #ifdef ENABLE_NETWORK
+ 
+ class NetworkAddress;
+-typedef SmallVector<NetworkAddress, 4> NetworkAddressList; ///< Type for a list of addresses.
++using NetworkAddressList = std::vector<NetworkAddress>; ///< Type for a list of addresses.
+ typedef SmallMap<NetworkAddress, SOCKET, 4> SocketList;    ///< Type for a mapping between address and socket.
+ 
+ /**
+diff --git a/src/network/core/host.cpp b/src/network/core/host.cpp
+index cf98239f8..cab22d941 100644
+--- a/src/network/core/host.cpp
++++ b/src/network/core/host.cpp
+@@ -107,7 +107,18 @@ static void NetworkFindBroadcastIPsInternal(NetworkAddressList *broadcast) // GE
+ 		if (ifa->ifa_broadaddr->sa_family != AF_INET) continue;
+ 
+ 		NetworkAddress addr(ifa->ifa_broadaddr, sizeof(sockaddr));
+-		if (!broadcast->Contains(addr)) *broadcast->Append() = addr;
++		//if (!broadcast->Contains(addr)) *broadcast->Append() = addr;
++		//Include(*broadcast, addr);
++		//if (broadcast->end() == Find(*broadcast, addr)) broadcast->push_back(addr);
++		bool found = false;
++		for (const auto& elem : *broadcast) {
++			if (elem == addr) {
++				found = true;
++				break;
++			}
++		}
++		if (not found) broadcast->push_back(addr);
++		// missing operator ==(const&r)const {can't use Include()}
+ 	}
+ 	freeifaddrs(ifap);
+ }
+@@ -207,9 +218,9 @@ void NetworkFindBroadcastIPs(NetworkAddressList *broadcast)
+ 	/* Now display to the debug all the detected ips */
+ 	DEBUG(net, 3, "Detected broadcast addresses:");
+ 	int i = 0;
+-	for (NetworkAddress *addr = broadcast->Begin(); addr != broadcast->End(); addr++) {
+-		addr->SetPort(NETWORK_DEFAULT_PORT);
+-		DEBUG(net, 3, "%d) %s", i++, addr->GetHostname());
++	for (auto &addr : *broadcast) {
++		addr.SetPort(NETWORK_DEFAULT_PORT);
++		DEBUG(net, 3, "%d) %s", i++, addr.GetHostname());
+ 	}
+ }
+ 
+diff --git a/src/network/core/tcp_listen.h b/src/network/core/tcp_listen.h
+index e6b589332..5a737eac9 100644
+--- a/src/network/core/tcp_listen.h
++++ b/src/network/core/tcp_listen.h
+@@ -151,9 +151,7 @@ public:
+ 		NetworkAddressList addresses;
+ 		GetBindAddresses(&addresses, port);
+ 
+-		for (NetworkAddress *address = addresses.Begin(); address != addresses.End(); address++) {
+-			address->Listen(SOCK_STREAM, &sockets);
+-		}
++		for (auto &a : addresses) a.Listen(SOCK_STREAM, &sockets);
+ 
+ 		if (sockets.Length() == 0) {
+ 			DEBUG(net, 0, "[server] could not start network: could not create listening socket");
+diff --git a/src/network/core/udp.cpp b/src/network/core/udp.cpp
+index 20b1ce119..0c35cad03 100644
+--- a/src/network/core/udp.cpp
++++ b/src/network/core/udp.cpp
+@@ -27,15 +27,13 @@
+ NetworkUDPSocketHandler::NetworkUDPSocketHandler(NetworkAddressList *bind)
+ {
+ 	if (bind != NULL) {
+-		for (NetworkAddress *addr = bind->Begin(); addr != bind->End(); addr++) {
+-			*this->bind.Append() = *addr;
+-		}
++		for (auto &addr : *bind) this->bind.push_back(addr);
+ 	} else {
+ 		/* As hostname NULL and port 0/NULL don't go well when
+ 		 * resolving it we need to add an address for each of
+ 		 * the address families we support. */
+-		*this->bind.Append() = NetworkAddress(NULL, 0, AF_INET);
+-		*this->bind.Append() = NetworkAddress(NULL, 0, AF_INET6);
++		this->bind.emplace_back(nullptr, 0, AF_INET);
++		this->bind.emplace_back(nullptr, 0, AF_INET6);
+ 	}
+ }
+ 
+@@ -49,9 +47,7 @@ bool NetworkUDPSocketHandler::Listen()
+ 	/* Make sure socket is closed */
+ 	this->Close();
+ 
+-	for (NetworkAddress *addr = this->bind.Begin(); addr != this->bind.End(); addr++) {
+-		addr->Listen(SOCK_DGRAM, &this->sockets);
+-	}
++	for (auto &addr : this->bind) addr.Listen(SOCK_DGRAM, &this->sockets);
+ 
+ 	return this->sockets.Length() != 0;
+ }
+diff --git a/src/network/network.cpp b/src/network/network.cpp
+index 0bbdd0d06..9ea3b1cd3 100644
+--- a/src/network/network.cpp
++++ b/src/network/network.cpp
+@@ -635,13 +635,11 @@ void NetworkAddServer(const char *b)
+ void GetBindAddresses(NetworkAddressList *addresses, uint16 port)
+ {
+ 	for (char **iter = _network_bind_list.Begin(); iter != _network_bind_list.End(); iter++) {
+-		*addresses->Append() = NetworkAddress(*iter, port);
++		addresses->emplace_back(*iter, port);
+ 	}
+ 
+ 	/* No address, so bind to everything. */
+-	if (addresses->Length() == 0) {
+-		*addresses->Append() = NetworkAddress("", port);
+-	}
++	if (addresses->empty()) addresses->emplace_back("", port);
+ }
+ 
+ /* Generates the list of manually added hosts from NetworkGameList and
+diff --git a/src/network/network_udp.cpp b/src/network/network_udp.cpp
+index 1dc696065..a72622912 100644
+--- a/src/network/network_udp.cpp
++++ b/src/network/network_udp.cpp
+@@ -497,12 +497,12 @@ void ClientNetworkUDPSocketHandler::HandleIncomingNetworkGameInfoGRFConfig(GRFCo
+ /** Broadcast to all ips */
+ static void NetworkUDPBroadCast(NetworkUDPSocketHandler *socket)
+ {
+-	for (NetworkAddress *addr = _broadcast_list.Begin(); addr != _broadcast_list.End(); addr++) {
++	for (auto &addr : _broadcast_list) {
+ 		Packet p(PACKET_UDP_CLIENT_FIND_SERVER);
+ 
+-		DEBUG(net, 4, "[udp] broadcasting to %s", addr->GetHostname());
++		DEBUG(net, 4, "[udp] broadcasting to %s", addr.GetHostname());
+ 
+-		socket->SendPacket(&p, addr, true, true);
++		socket->SendPacket(&p, &addr, true, true);
+ 	}
+ }
+ 
+@@ -670,7 +670,7 @@ void NetworkUDPInitialize()
+ 	GetBindAddresses(&server, _settings_client.network.server_port);
+ 	_udp_server_socket = new ServerNetworkUDPSocketHandler(&server);
+ 
+-	server.Clear();
++	server.clear();
+ 	GetBindAddresses(&server, 0);
+ 	_udp_master_socket = new MasterNetworkUDPSocketHandler(&server);
+ 
+-- 
+2.14.1
+

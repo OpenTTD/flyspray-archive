@@ -1,0 +1,102 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(wersja 27505)
++++ src/lang/english.txt	(kopia robocza)
+@@ -1161,6 +1161,8 @@
+ STR_CONFIG_SETTING_DISASTERS_HELPTEXT                           :Toggle disasters which may occasionally block or destroy vehicles or infrastructure
+ STR_CONFIG_SETTING_CITY_APPROVAL                                :Town council's attitude towards area restructuring: {STRING2}
+ STR_CONFIG_SETTING_CITY_APPROVAL_HELPTEXT                       :Choose how much noise and environmental damage by companies affect their town rating and further construction actions in their area
++STR_CONFIG_SETTING_IGNORE_LOCAL_AUTHORITIES                     :Ignore local authorities opinion
++STR_CONFIG_SETTING_IGNORE_LOCAL_AUTHORITIES_HELPTEXT            :Enable to stop local authorities from prohibiting any actions
+ 
+ STR_CONFIG_SETTING_MAX_HEIGHTLEVEL                              :Maximum map height: {STRING2}
+ STR_CONFIG_SETTING_MAX_HEIGHTLEVEL_HELPTEXT                     :Set the maximum allowed height for mountains on the map
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(wersja 27505)
++++ src/saveload/saveload.cpp	(kopia robocza)
+@@ -262,8 +262,9 @@
+  *  192   26700
+  *  193   26802
+  *  194   26881   1.5.x
++ *  195   27506
+  */
+-extern const uint16 SAVEGAME_VERSION = 194; ///< Current savegame version of OpenTTD.
++extern const uint16 SAVEGAME_VERSION = 195; ///< Current savegame version of OpenTTD.
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(wersja 27505)
++++ src/settings_gui.cpp	(kopia robocza)
+@@ -1682,6 +1682,7 @@
+ 			SettingsPage *authorities = environment->Add(new SettingsPage(STR_CONFIG_SETTING_ENVIRONMENT_AUTHORITIES));
+ 			{
+ 				authorities->Add(new SettingEntry("difficulty.town_council_tolerance"));
++				authorities->Add(new SettingEntry("difficulty.ignore_local_authorities"));
+ 				authorities->Add(new SettingEntry("economy.bribe"));
+ 				authorities->Add(new SettingEntry("economy.exclusive_rights"));
+ 				authorities->Add(new SettingEntry("economy.fund_roads"));
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(wersja 27505)
++++ src/settings_type.h	(kopia robocza)
+@@ -69,6 +69,7 @@
+ 	bool   line_reverse_mode;                ///< reversing at stations or not
+ 	bool   disasters;                        ///< are disasters enabled
+ 	byte   town_council_tolerance;           ///< minimum required town ratings to be allowed to demolish stuff
++	bool   ignore_local_authorities;         ///< ignore local authority opinion
+ };
+ 
+ /** Settings related to the GUI and other stuff that is not saved in the savegame. */
+Index: src/table/settings.ini
+===================================================================
+--- src/table/settings.ini	(wersja 27505)
++++ src/table/settings.ini	(kopia robocza)
+@@ -317,6 +317,14 @@
+ strval   = STR_CITY_APPROVAL_PERMISSIVE
+ proc     = DifficultyNoiseChange
+ 
++[SDT_BOOL]
++base     = GameSettings
++var      = difficulty.ignore_local_authorities
++from     = 195
++def      = false
++str      = STR_CONFIG_SETTING_IGNORE_LOCAL_AUTHORITIES
++strhelp  = STR_CONFIG_SETTING_IGNORE_LOCAL_AUTHORITIES_HELPTEXT
++
+ [SDTG_VAR]
+ name     = ""diff_level""
+ var      = _old_diff_level
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(wersja 27505)
++++ src/town_cmd.cpp	(kopia robocza)
+@@ -560,7 +560,8 @@
+ 	Town *t = Town::GetByTile(tile);
+ 
+ 	if (Company::IsValidID(_current_company)) {
+-		if (rating > t->ratings[_current_company] && !(flags & DC_NO_TEST_TOWN_RATING) && !_cheats.magic_bulldozer.value) {
++		if (rating > t->ratings[_current_company] && !(flags & DC_NO_TEST_TOWN_RATING) && !_cheats.magic_bulldozer.value
++				&& !(_settings_game.difficulty.ignore_local_authorities && rating <= RATING_OUTSTANDING)) {
+ 			SetDParam(0, t->index);
+ 			return_cmd_error(STR_ERROR_LOCAL_AUTHORITY_REFUSES_TO_ALLOW_THIS);
+ 		}
+@@ -3203,6 +3204,7 @@
+ 	Town *t = ClosestTownFromTile(tile, _settings_game.economy.dist_local_authority);
+ 	if (t == NULL) return CommandCost();
+ 
++	if (_settings_game.difficulty.ignore_local_authorities) return CommandCost();
+ 	if (t->ratings[_current_company] > RATING_VERYPOOR) return CommandCost();
+ 
+ 	SetDParam(0, t->index);
+@@ -3380,6 +3382,8 @@
+ 	 */
+ 	int needed = needed_rating[_settings_game.difficulty.town_council_tolerance][type];
+ 
++        if (_settings_game.difficulty.ignore_local_authorities && needed <= RATING_OUTSTANDING) return CommandCost();
++
+ 	if (GetRating(t) < needed) {
+ 		SetDParam(0, t->index);
+ 		return_cmd_error(STR_ERROR_LOCAL_AUTHORITY_REFUSES_TO_ALLOW_THIS);

@@ -1,0 +1,126 @@
+diff -r 08633bf16195 src/rev.cpp
+--- a/src/rev.cpp	Sun Mar 01 00:30:53 2015 +0300
++++ b/src/rev.cpp	Thu Mar 05 03:56:56 2015 +0300
+@@ -1,4 +1,4 @@
+-/* $Id: rev.cpp.in 26440 2014-04-01 18:33:16Z frosch $ */
++/* $Id: rev.cpp.in 26482 2014-04-23 20:13:33Z rubidium $ */
+ 
+ /*
+  * This file is part of OpenTTD.
+@@ -13,6 +13,8 @@
+ #include "core/bitmath_func.hpp"
+ #include "rev.h"
+ 
++#include "safeguards.h"
++
+ /**
+  * Is this version of OpenTTD a release version?
+  * @return True if it is a release version.
+@@ -37,7 +39,7 @@
+  * norev000 is for non-releases that are made on systems without
+  * subversion or sources that are not a checkout of subversion.
+  */
+-const char _openttd_revision[] = "1.4.0";
++const char _openttd_revision[] = "h318731efM-openttd";
+ 
+ /**
+  * The text version of OpenTTD's build date.
+@@ -55,7 +57,7 @@
+  * (compiling from sources without any version control software)
+  * and 2 is for modified revision.
+  */
+-const byte _openttd_revision_modified = 0;
++const byte _openttd_revision_modified = 2;
+ 
+ /**
+  * The NewGRF revision of OTTD:
+@@ -70,11 +72,11 @@
+  * final release will always have a lower version number than the released
+  * version, thus making comparisons on specific revisions easy.
+  */
+-const uint32 _openttd_newgrf_version = 1 << 28 | 4 << 24 | 0 << 20 | 1 << 19 | (26440 & ((1 << 19) - 1));
++const uint32 _openttd_newgrf_version = 1 << 28 | 5 << 24 | 0 << 20 | 0 << 19 | (0 & ((1 << 19) - 1));
+ 
+ #ifdef __MORPHOS__
+ /**
+  * Variable used by MorphOS to show the version.
+  */
+-extern const char morphos_versions_tag[] = "$VER: OpenTTD 1.4.0 (02.04.14) OpenTTD Team [MorphOS, PowerPC]";
++extern const char morphos_versions_tag[] = "$VER: OpenTTD h318731efM-openttd (05.03.15) OpenTTD Team [MorphOS, PowerPC]";
+ #endif
+diff -r 08633bf16195 src/town_cmd.cpp
+--- a/src/town_cmd.cpp	Sun Mar 01 00:30:53 2015 +0300
++++ b/src/town_cmd.cpp	Thu Mar 05 03:56:56 2015 +0300
+@@ -1297,6 +1297,47 @@
+ }
+ 
+ /**
++ * Checks whether it makes sense to go in particular direction for town expansion.
++ * Does a simple test for most obvious and common things only.
++ * @param  tile search is currently at
++ * @param  dir  direction in which it indends to go
++ * @return true if is worth going in that direction
++ */
++static bool CanGrowTownInDirection(TileIndex tile, DiagDirection dir) {
++	TileIndex target_tile = tile + TileOffsByDiagDir(dir);
++	if (HasTileWaterGround(target_tile)) return false;
++	if (!IsValidTile(target_tile)) return false;
++	RoadBits target_rb = GetTownRoadBits(target_tile);
++
++	if (_settings_game.economy.allow_town_roads) {
++		switch (GetTileType(target_tile)) {
++			case MP_ROAD: {
++				if (target_rb == ROAD_NONE) {
++					/* can't build extra roads here (depot, standard station, etc) */
++					return false;
++				}
++				break;
++			}
++			case MP_HOUSE:
++			case MP_STATION:
++			case MP_INDUSTRY:
++			case MP_OBJECT:
++				/* checked for void and water earlier */
++				return false;
++
++			default:;
++		}
++	} else {
++		/* we can't build roads so bailing out if there is no way
++		 * back or it ends with half-road (i.e. back is the only way) */
++		RoadBits back_rb = DiagDirToRoadBits(ReverseDiagDir(dir));
++		if (!(target_rb & back_rb) || !(target_rb & ~back_rb))
++			return false;
++	}
++	return true;
++}
++
++/**
+  * Returns "growth" if a house was built, or no if the build failed.
+  * @param t town to inquiry
+  * @param tile to inquiry
+@@ -1346,9 +1387,21 @@
+ 			/* Only build in the direction away from the tunnel or bridge. */
+ 			target_dir = ReverseDiagDir(GetTunnelBridgeDirection(tile));
+ 		} else {
+-			/* Select a random bit from the blockmask, walk a step
+-			 * and continue the search from there. */
+-			do target_dir = RandomDiagDir(); while (!(cur_rb & DiagDirToRoadBits(target_dir)));
++			/* Select a random bit from the blockmask, and check whether
++			 * we can grow in that direction. */
++			RoadBits dir_rb = ROAD_NONE;
++			do {
++				// excluding direction that failed check
++				cur_rb &= ~dir_rb;
++				if (cur_rb == ROAD_NONE) {
++					return GROWTH_SEARCH_STOPPED;
++				}
++				// selecting random direction
++				do {
++					target_dir = RandomDiagDir();
++					dir_rb = DiagDirToRoadBits(target_dir);
++				} while (!(cur_rb & dir_rb));
++			} while (!CanGrowTownInDirection(tile, target_dir));
+ 		}
+ 		tile = TileAddByDiagDir(tile, target_dir);
+ 

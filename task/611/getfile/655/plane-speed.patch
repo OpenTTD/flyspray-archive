@@ -1,0 +1,224 @@
+diff --git a/src/aircraft_cmd.cpp b/src/aircraft_cmd.cpp
+index 56a0a3f..87a9ee2 100644
+--- a/src/aircraft_cmd.cpp
++++ b/src/aircraft_cmd.cpp
+@@ -864,9 +864,11 @@ enum AircraftSpeedLimits {
+ 
+ // taxiing is true iff the aircraft speed should be limited to taxiing speed
+ // (12 in original)
+-static bool UpdateAircraftSpeed(Vehicle *v, AircraftSpeedLimits speed_limit)
++static int UpdateAircraftSpeed(Vehicle *v, AircraftSpeedLimits speed_limit)
+ {
+-	uint spd = v->acceleration * 2;
++ 	// Adjust the acceleration so the plane accelerates to the same speed
++ 	// on the same distance.
++ 	uint spd = v->acceleration * 2 * _patches.aircraft_speed_coeff;
+ 	byte t = v->subspeed;
+ 	uint16 callback = GetVehicleCallback(CBID_CHANGE_VEHICLE_PROPERTY, 0x0C, 0, v->engine_type, v);
+ 
+@@ -903,13 +905,23 @@ static bool UpdateAircraftSpeed(Vehicle *v, AircraftSpeedLimits speed_limit)
+ 
+ 	if (!(v->direction & 1)) spd = spd * 3 / 4;
+ 
+-	if (spd == 0) return false;
++	if (spd == 0) return 0;
+ 
++	spd *= _patches.aircraft_speed_coeff;
++	/*
+ 	if ((byte)++spd == 0) return true;
+ 
+ 	v->progress = (t = v->progress) - (byte)spd;
+ 
+ 	return t < v->progress;
++	*/
++	/* The original algorithm had progress decremented by speed with
++	 * 0 treated as 256 in the initial step. However since we can
++	 * overflow more than once per step, incrementing is easier and
++	 * (hopefuly) equivalent otherwise. */
++	spd += v->progress;
++	v->progress = (byte)spd; // Keep low byte in progress.
++	return spd >> 8; // And return high byte.
+ }
+ 
+ /**
+@@ -940,6 +952,33 @@ static byte GetAircraftFlyingAltitude(const Vehicle *v)
+ 	return base_altitude;
+ }
+ 
++/**
++ * Extended version of GetNewVehiclePos.
++ *
++ * This is variant of GetNewVehiclePos that handles moving more than one
++ * unit.
++ * @param v Vehicle.
++ * @param[out] gp New coordinates of vehicle.
++ * @param distance Distance moved, in units (1/TILE_SIZE tile).
++ * @return true if staying in the same tile.
++ */
++bool GetNewAircraftPos(Vehicle *v, GetNewVehiclePosResult *gp, int distance)
++{
++	static const int8 _delta_coord[16] = {
++		-1,-1,-1, 0, 1, 1, 1, 0, /* x */
++		-1, 0, 1, 1, 1, 0,-1,-1, /* y */
++	};
++
++	int x = v->x_pos + _delta_coord[v->direction] * distance;
++	int y = v->y_pos + _delta_coord[v->direction + 8] * distance;
++
++	gp->x = x;
++	gp->y = y;
++	gp->old_tile = v->tile;
++	gp->new_tile = TileVirtXY(x, y);
++	return gp->old_tile == gp->new_tile;
++}
++
+ static bool AircraftController(Vehicle *v)
+ {
+ 	Station *st;
+@@ -948,7 +987,7 @@ static bool AircraftController(Vehicle *v)
+ 	Direction newdir;
+ 	GetNewVehiclePosResult gp;
+ 	uint dist;
+-	int x,y;
++	int x, y, moveDist;
+ 
+ 	st = GetStation(v->u.air.targetairport);
+ 
+@@ -1053,7 +1092,7 @@ static bool AircraftController(Vehicle *v)
+ 		return false;
+ 	}
+ 
+-	if (!UpdateAircraftSpeed(v, ((amd->flag & AMED_NOSPDCLAMP) == 0) ? SPEED_LIMIT_TAXI : SPEED_LIMIT_NONE)) return false;
++	if (!(moveDist = UpdateAircraftSpeed(v, ((amd->flag & AMED_NOSPDCLAMP) == 0) ? SPEED_LIMIT_TAXI : SPEED_LIMIT_NONE))) return false;
+ 
+ 	if (v->load_unload_time_rem != 0) v->load_unload_time_rem--;
+ 
+@@ -1070,7 +1109,7 @@ static bool AircraftController(Vehicle *v)
+ 	}
+ 
+ 	// Move vehicle.
+-	GetNewVehiclePos(v, &gp);
++	GetNewAircraftPos(v, &gp, moveDist);
+ 	v->tile = gp.new_tile;
+ 
+ 	// If vehicle is in the air, use tile coordinate 0.
+diff --git a/src/lang/american.txt b/src/lang/american.txt
+index 1852e50..2a5ced0 100644
+--- a/src/lang/american.txt
++++ b/src/lang/american.txt
+@@ -1143,6 +1143,7 @@ STR_CONFIG_PATCHES_SERVICE_INTERVAL_INCOMPATIBLE                :{WHITE}Some or
+ STR_CONFIG_PATCHES_YAPF_SHIPS                                   :{LTBLUE}Use YAPF for ships: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_YAPF_ROAD                                    :{LTBLUE}Use YAPF for roadvehs: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_YAPF_RAIL                                    :{LTBLUE}Use YAPF for trains: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_AIR_COEFF                                    :{LTBLUE}Aircraft speedup (1=TTD default, 4=realistic):{ORANGE} {STRING}
+ 
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+diff --git a/src/lang/czech.txt b/src/lang/czech.txt
+index fcfdab7..1d14a83 100644
+--- a/src/lang/czech.txt
++++ b/src/lang/czech.txt
+@@ -1257,6 +1257,7 @@ STR_CONFIG_PATCHES_SERVICE_INTERVAL_INCOMPATIBLE                :{WHITE}Někter�
+ STR_CONFIG_PATCHES_YAPF_SHIPS                                   :{LTBLUE}Používat YAPF ("opět další pathfinder") pro lodě: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_YAPF_ROAD                                    :{LTBLUE}Používat YAPF pro silniční vozidla: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_YAPF_RAIL                                    :{LTBLUE}Používat YAPF pro vlaky: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_AIR_COEFF                                    :{LTBLUE}Rychlost letadel (1=standard TTD, 4=realistická): {ORANGE}{STRING}
+ 
+ STR_TEMPERATE_LANDSCAPE                                         :krajina mírného pásma
+ STR_SUB_ARCTIC_LANDSCAPE                                        :subarktická krajina
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+index 124b397..013e6bc 100644
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -1143,6 +1143,7 @@ STR_CONFIG_PATCHES_SERVICE_INTERVAL_INCOMPATIBLE                :{WHITE}Some or
+ STR_CONFIG_PATCHES_YAPF_SHIPS                                   :{LTBLUE}Use YAPF for ships: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_YAPF_ROAD                                    :{LTBLUE}Use YAPF for roadvehs: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_YAPF_RAIL                                    :{LTBLUE}Use YAPF for trains: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_AIR_COEFF                                    :{LTBLUE}Aircraft speedup (1=TTD default, 4=realistic):{ORANGE} {STRING}
+ 
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+diff --git a/src/newgrf.cpp b/src/newgrf.cpp
+index 49ad50c..cd8c2d5 100644
+--- a/src/newgrf.cpp
++++ b/src/newgrf.cpp
+@@ -2769,8 +2769,14 @@ static void ParamSet(byte *buf, int len)
+ 		if (GB(data, 0, 8) == 0xFF) {
+ 			if (data == 0x0000FFFF) {
+ 				/* Patch variables */
+-				grfmsg(2, "ParamSet: Reading Patch variables unsupported");
+-				return;
++				switch (src1) {
++				case 0x10:
++					src1 = _patches.aircraft_speed_coeff;
++					break;
++				default:
++					grfmsg(2, "ParamSet: Reading Patch variable 0x%x unsupported", (int)src1);
++					return;
++				}
+ 			} else {
+ 				/* GRF Resource Management */
+ 				if (_cur_stage != GLS_ACTIVATION) {
+@@ -3340,7 +3346,7 @@ static void InitializeGRFSpecial(void)
+ 	                   |                                        (0 << 0x0B)  // enhancedgui
+ 	                   |                                        (0 << 0x0C)  // newagerating
+ 	                   |       ((_patches.build_on_slopes ? 1 : 0) << 0x0D)  // buildonslopes
+-	                   |                                        (0 << 0x0F)  // planespeed
++	                   |                                        (1 << 0x0F)  // planespeed
+ 	                   |                                        (0 << 0x10)  // moreindustriesperclimate - obsolete
+ 	                   |                                        (0 << 0x11)  // moretoylandfeatures
+ 	                   |                                        (1 << 0x12)  // newstations
+diff --git a/src/settings.cpp b/src/settings.cpp
+index a558b61..2bff18d 100644
+--- a/src/settings.cpp
++++ b/src/settings.cpp
+@@ -1327,6 +1327,7 @@ const SettingDesc _patch_settings[] = {
+ 	SDT_BOOL(Patches, wagon_speed_limits,            0, 0,  true,                    STR_CONFIG_PATCHES_WAGONSPEEDLIMITS,     NULL),
+ 	SDT_CONDBOOL(Patches, disable_elrails, 38, SL_MAX_VERSION, 0, 0, false,          STR_CONFIG_PATCHES_DISABLE_ELRAILS,      SettingsDisableElrail),
+ 	SDT_CONDVAR(Patches, freight_trains, SLE_UINT8, 39, SL_MAX_VERSION, 0, 0, 1, 1, 255, 1, STR_CONFIG_PATCHES_FREIGHT_TRAINS, NULL),
++	SDT_VAR(Patches,  aircraft_speed_coeff, SLE_UINT16, 0, 0, 1,    1,     4,0, STR_CONFIG_PATCHES_AIR_COEFF,             NULL),
+ 
+ 	/***************************************************************************/
+ 	/* Station section of the GUI-configure patches window */
+diff --git a/src/settings_gui.cpp b/src/settings_gui.cpp
+index 556b518..524adce 100644
+--- a/src/settings_gui.cpp
++++ b/src/settings_gui.cpp
+@@ -652,6 +652,7 @@ static const char *_patches_vehicles[] = {
+ 	"wagon_speed_limits",
+ 	"disable_elrails",
+ 	"freight_trains",
++	"aircraft_speed_coeff",
+ };
+ 
+ typedef struct PatchEntry {
+@@ -894,7 +895,7 @@ static const Widget _patches_selection_widgets[] = {
+ {   WWT_CLOSEBOX,   RESIZE_NONE,    10,     0,    10,     0,    13, STR_00C5,                        STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    10,    11,   369,     0,    13, STR_CONFIG_PATCHES_CAPTION,      STR_018C_WINDOW_TITLE_DRAG_THIS},
+ {      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    14,    41, 0x0,                             STR_NULL},
+-{      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    42,   370, 0x0,                             STR_NULL},
++{      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    42,   386, 0x0,                             STR_NULL},
+ 
+ {    WWT_TEXTBTN,   RESIZE_NONE,     3,    10,    96,    16,    27, STR_CONFIG_PATCHES_GUI,          STR_NULL},
+ {    WWT_TEXTBTN,   RESIZE_NONE,     3,    97,   183,    16,    27, STR_CONFIG_PATCHES_CONSTRUCTION, STR_NULL},
+@@ -906,7 +907,7 @@ static const Widget _patches_selection_widgets[] = {
+ };
+ 
+ static const WindowDesc _patches_selection_desc = {
+-	WDP_CENTER, WDP_CENTER, 370, 371,
++	WDP_CENTER, WDP_CENTER, 370, 387,
+ 	WC_GAME_OPTIONS, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET,
+ 	_patches_selection_widgets,
+diff --git a/src/variables.h b/src/variables.h
+index fabc3b2..9788904 100644
+--- a/src/variables.h
++++ b/src/variables.h
+@@ -187,6 +187,7 @@ typedef struct Patches {
+ 	bool ainew_active;                  // Is the new AI active?
+ 	bool ai_in_multiplayer;             // Do we allow AIs in multiplayer
+ 
++	uint aircraft_speed_coeff;          // Coeficient of aircraft speed
+ 	/*
+ 	 * New Path Finding
+ 	 */

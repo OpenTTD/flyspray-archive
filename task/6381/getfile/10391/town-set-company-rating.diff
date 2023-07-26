@@ -1,0 +1,154 @@
+diff -r 322f2f20c99a src/command.cpp
+--- a/src/command.cpp	Tue Sep 01 22:52:41 2015 +0300
++++ b/src/command.cpp	Wed Oct 21 01:42:10 2015 +0300
+@@ -134,6 +134,7 @@
+ CommandProc CmdTownSetText;
+ CommandProc CmdExpandTown;
+ CommandProc CmdDeleteTown;
++CommandProc CmdTownSetCompanyRating;
+
+ CommandProc CmdChangeSetting;
+ CommandProc CmdChangeCompanySetting;
+@@ -295,6 +296,7 @@
+ 	DEF_CMD(CmdTownSetText,             CMD_STR_CTRL | CMD_DEITY, CMDT_OTHER_MANAGEMENT      ), // CMD_TOWN_SET_TEXT
+ 	DEF_CMD(CmdExpandTown,                             CMD_DEITY, CMDT_LANDSCAPE_CONSTRUCTION), // CMD_EXPAND_TOWN
+ 	DEF_CMD(CmdDeleteTown,                           CMD_OFFLINE, CMDT_LANDSCAPE_CONSTRUCTION), // CMD_DELETE_TOWN
++	DEF_CMD(CmdTownSetCompanyRating,                   CMD_DEITY, CMDT_OTHER_MANAGEMENT      ), // CMD_TOWN_SET_COMPANY_RATING
+
+ 	DEF_CMD(CmdOrderRefit,                                     0, CMDT_ROUTE_MANAGEMENT      ), // CMD_ORDER_REFIT
+ 	DEF_CMD(CmdCloneOrder,                                     0, CMDT_ROUTE_MANAGEMENT      ), // CMD_CLONE_ORDER
+diff -r 322f2f20c99a src/command_type.h
+--- a/src/command_type.h	Tue Sep 01 22:52:41 2015 +0300
++++ b/src/command_type.h	Wed Oct 21 01:42:10 2015 +0300
+@@ -266,6 +266,7 @@
+ 	CMD_TOWN_SET_TEXT,                ///< set the custom text of a town
+ 	CMD_EXPAND_TOWN,                  ///< expand a town
+ 	CMD_DELETE_TOWN,                  ///< delete a town
++	CMD_TOWN_SET_COMPANY_RATING,      ///< set local authority rating for company
+
+ 	CMD_ORDER_REFIT,                  ///< change the refit information of an order (for "goto depot" )
+ 	CMD_CLONE_ORDER,                  ///< clone (and share) an order
+
+diff -r 322f2f20c99a src/script/api/game/game_town.hpp.sq
+--- a/src/script/api/game/game_town.hpp.sq	Tue Sep 01 22:52:41 2015 +0300
++++ b/src/script/api/game/game_town.hpp.sq	Wed Oct 21 01:42:10 2015 +0300
+@@ -81,6 +81,7 @@
+ 	SQGSTown.DefSQStaticMethod(engine, &ScriptTown::ExpandTown,                        "ExpandTown",                        3, ".ii");
+ 	SQGSTown.DefSQStaticMethod(engine, &ScriptTown::FoundTown,                         "FoundTown",                         6, ".iibi.");
+ 	SQGSTown.DefSQStaticMethod(engine, &ScriptTown::GetRating,                         "GetRating",                         3, ".ii");
++	SQGSTown.DefSQStaticMethod(engine, &ScriptTown::SetRating,                         "SetRating",                         4, ".iii");
+ 	SQGSTown.DefSQStaticMethod(engine, &ScriptTown::GetAllowedNoise,                   "GetAllowedNoise",                   2, ".i");
+ 	SQGSTown.DefSQStaticMethod(engine, &ScriptTown::GetRoadLayout,                     "GetRoadLayout",                     2, ".i");
+
+diff -r 322f2f20c99a src/script/api/script_town.cpp
+--- a/src/script/api/script_town.cpp	Tue Sep 01 22:52:41 2015 +0300
++++ b/src/script/api/script_town.cpp	Wed Oct 21 01:42:10 2015 +0300
+@@ -336,6 +336,43 @@
+ 	}
+ }
+
++/* static */ bool ScriptTown::SetRating(TownID town_id, ScriptCompany::CompanyID company_id, ScriptTown::TownRating rating)
++{
++
++	EnforcePrecondition(false, IsValidTown(town_id));
++	EnforcePrecondition(false, rating != TOWN_RATING_INVALID && rating != TOWN_RATING_NONE);
++	ScriptCompany::CompanyID company = ScriptCompany::ResolveCompanyID(company_id);
++	EnforcePrecondition(false, company != ScriptCompany::COMPANY_INVALID);
++
++	const Town *t = ::Town::Get(town_id);
++	int rating_value;
++
++	switch (rating) {
++		case TOWN_RATING_APPALLING:
++			rating_value = RATING_APPALLING; break;
++		case TOWN_RATING_VERY_POOR:
++			rating_value = RATING_VERYPOOR; break;
++		case TOWN_RATING_POOR:
++			rating_value = RATING_POOR; break;
++		case TOWN_RATING_MEDIOCRE:
++			rating_value = RATING_MEDIOCRE; break;
++		case TOWN_RATING_GOOD:
++			rating_value = RATING_GOOD; break;
++		case TOWN_RATING_VERY_GOOD:
++			rating_value = RATING_VERYGOOD; break;
++		case TOWN_RATING_EXCELLENT:
++			rating_value = RATING_EXCELLENT; break;
++		case TOWN_RATING_OUTSTANDING:
++			rating_value = RATING_OUTSTANDING; break;
++		default:
++			NOT_REACHED();
++	}
++	return ScriptObject::DoCommand(
++	    ::Town::Get(town_id)->xy, town_id,
++	    company | ((rating_value + 1000) << 16),
++	    CMD_TOWN_SET_COMPANY_RATING);
++}
++
+ /* static */ int ScriptTown::GetAllowedNoise(TownID town_id)
+ {
+ 	if (!IsValidTown(town_id)) return -1;
+diff -r 322f2f20c99a src/script/api/script_town.hpp
+--- a/src/script/api/script_town.hpp	Tue Sep 01 22:52:41 2015 +0300
++++ b/src/script/api/script_town.hpp	Wed Oct 21 01:42:10 2015 +0300
+@@ -426,6 +426,19 @@
+ 	static TownRating GetRating(TownID town_id, ScriptCompany::CompanyID company_id);
+
+ 	/**
++	 * Set the rating of a company within a town.
++	 * @param town_id The town to set the rating for.
++	 * @param company_id The company to set the rating for.
++	 * @param rating The rating as shown to humans.
++	 * @pre IsValidTown(town_id).
++	 * @pre ScriptCompany.ResolveCompanyID(company) != ScriptCompany::COMPANY_INVALID.
++	 * @pre rating != TOWN_RATING_INVALID && rating != TOWN_RATING_NONE
++	 * @return True if the action succeeded.
++	 * @api -ai
++	 */
++	static bool SetRating(TownID town_id, ScriptCompany::CompanyID company_id, ScriptTown::TownRating rating);
++
++	/**
+ 	 * Get the maximum level of noise that still can be added by airports
+ 	 *  before the town start to refuse building a new airport.
+ 	 * @param town_id The town to get the allowed noise from.
+diff -r 322f2f20c99a src/town_cmd.cpp
+--- a/src/town_cmd.cpp	Tue Sep 01 22:52:41 2015 +0300
++++ b/src/town_cmd.cpp	Wed Oct 21 01:42:10 2015 +0300
+@@ -2625,6 +2625,38 @@
+ }
+
+ /**
++ * Change local authority rating of company in a town.
++ * @param tile Unused.
++ * @param flags Type of operation.
++ * @param p1 Town ID.
++ * @param p2 various bitstuffed elements
++ * - p2 = (bit  0 - 15) - Company ID to set rating of.
++ * - p2 = (bit 16 - 32) - rating value increased by -RATING_MINIMUM (to be in 0..2000 range instead of -1000..1000).
++ * @param text Unused.
++ * @return Empty cost or an error.
++ */
++
++CommandCost CmdTownSetCompanyRating(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
++{
++	Town *t = Town::GetIfValid(p1);
++	if (t == NULL) return CMD_ERROR;
++
++	uint16 company_id = GB(p2, 0, 16);
++	if (company_id >= MAX_COMPANIES) return CMD_ERROR;
++
++	int rating = (int)GB(p2, 16, 16) + RATING_MINIMUM;
++	if (rating < RATING_MINIMUM || rating > RATING_MAXIMUM) return CMD_ERROR;
++
++	if (flags & DC_EXEC) {
++		t->ratings[company_id] = rating;
++		SetBit(t->have_ratings, company_id);
++		SetWindowDirty(WC_TOWN_AUTHORITY, p1);
++	}
++
++	return CommandCost();
++}
++
++/**
+  * Expand a town (scenario editor only).
+  * @param tile Unused.
+  * @param flags Type of operation.

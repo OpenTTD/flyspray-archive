@@ -1,0 +1,135 @@
+diff --git a/src/group.h b/src/group.h
+index 91ee77e60..d6c787e2a 100644
+--- a/src/group.h
++++ b/src/group.h
+@@ -98,6 +98,9 @@ static inline bool IsAllGroupID(GroupID id_g)
+ 
+ 
+ uint GetGroupNumEngines(CompanyID company, GroupID id_g, EngineID id_e);
++uint GetGroupNumVehicle(CompanyID company, GroupID id_g, VehicleType type);
++uint GetGroupNumProfitVehicle(CompanyID company, GroupID id_g, VehicleType type);
++Money GetGroupProfitLastYear(CompanyID company, GroupID id_g, VehicleType type);
+ 
+ void SetTrainGroupID(Train *v, GroupID grp);
+ void UpdateTrainGroupID(Train *v);
+diff --git a/src/group_cmd.cpp b/src/group_cmd.cpp
+index 12cce41f7..90856ad53 100644
+--- a/src/group_cmd.cpp
++++ b/src/group_cmd.cpp
+@@ -701,6 +701,60 @@ uint GetGroupNumEngines(CompanyID company, GroupID id_g, EngineID id_e)
+ 	return count + GroupStatistics::Get(company, id_g, e->type).num_engines[id_e];
+ }
+ 
++/**
++ * Get the number of vehicles in the group with GroupID
++ * id_g and its sub-groups.
++ * @param company The company the group belongs to
++ * @param id_g The GroupID of the group used
++ * @param type The vehicle type of the group
++ * @return The number of vehicles in the group
++ */
++uint GetGroupNumVehicle(CompanyID company, GroupID id_g, VehicleType type)
++{
++	uint count = 0;
++	const Group *g;
++	FOR_ALL_GROUPS(g) {
++		if (g->parent == id_g) count += GetGroupNumVehicle(company, g->index, type);
++	}
++	return count + GroupStatistics::Get(company, id_g, type).num_vehicle;
++}
++
++/**
++ * Get the number of vehicles above profit minimum age in the group with GroupID
++ * id_g and its sub-groups.
++ * @param company The company the group belongs to
++ * @param id_g The GroupID of the group used
++ * @param type The vehicle type of the group
++ * @return The number of vehicles above profit minimum age in the group
++ */
++uint GetGroupNumProfitVehicle(CompanyID company, GroupID id_g, VehicleType type)
++{
++	uint count = 0;
++	const Group *g;
++	FOR_ALL_GROUPS(g) {
++		if (g->parent == id_g) count += GetGroupNumProfitVehicle(company, g->index, type);
++	}
++	return count + GroupStatistics::Get(company, id_g, type).num_profit_vehicle;
++}
++
++/**
++ * Get last year's profit for the group with GroupID
++ * id_g and its sub-groups.
++ * @param company The company the group belongs to
++ * @param id_g The GroupID of the group used
++ * @param type The vehicle type of the group
++ * @return Last year's profit for the group
++ */
++Money GetGroupProfitLastYear(CompanyID company, GroupID id_g, VehicleType type)
++{
++	Money sum = 0;
++	const Group *g;
++	FOR_ALL_GROUPS(g) {
++		if (g->parent == id_g) sum += GetGroupProfitLastYear(company, g->index, type);
++	}
++	return sum + GroupStatistics::Get(company, id_g, type).profit_last_year;
++}
++
+ void RemoveAllGroupsForCompany(const CompanyID company)
+ {
+ 	Group *g;
+diff --git a/src/group_gui.cpp b/src/group_gui.cpp
+index d3e1eafbb..9f31d8025 100644
+--- a/src/group_gui.cpp
++++ b/src/group_gui.cpp
+@@ -211,7 +211,7 @@ private:
+ 		}
+ 		this->tiny_step_height = max(this->tiny_step_height, this->column_size[VGC_PROFIT].height);
+ 
+-		SetDParamMaxValue(0, GroupStatistics::Get(this->vli.company, ALL_GROUP, this->vli.vtype).num_vehicle, 3, FS_SMALL);
++		SetDParamMaxValue(0, GetGroupNumVehicle(this->vli.company, ALL_GROUP, this->vli.vtype), 3, FS_SMALL);
+ 		this->column_size[VGC_NUMBER] = GetStringBoundingBox(STR_TINY_COMMA);
+ 		this->tiny_step_height = max(this->tiny_step_height, this->column_size[VGC_NUMBER].height);
+ 
+@@ -273,11 +273,13 @@ private:
+ 		/* draw the profit icon */
+ 		x = rtl ? x - 2 - this->column_size[VGC_PROFIT].width : x + 2 + this->column_size[VGC_AUTOREPLACE].width;
+ 		SpriteID spr;
+-		if (stats.num_profit_vehicle == 0) {
++		uint num_profit_vehicle = GetGroupNumProfitVehicle(this->vli.company, g_id, this->vli.vtype);
++		Money profit_last_year = GetGroupProfitLastYear(this->vli.company, g_id, this->vli.vtype);
++		if (num_profit_vehicle == 0) {
+ 			spr = SPR_PROFIT_NA;
+-		} else if (stats.profit_last_year < 0) {
++		} else if (profit_last_year < 0) {
+ 			spr = SPR_PROFIT_NEGATIVE;
+-		} else if (stats.profit_last_year < 10000 * stats.num_profit_vehicle) { // TODO magic number
++		} else if (profit_last_year < (Money) 10000 * num_profit_vehicle) { // TODO magic number
+ 			spr = SPR_PROFIT_SOME;
+ 		} else {
+ 			spr = SPR_PROFIT_LOT;
+@@ -286,7 +288,7 @@ private:
+ 
+ 		/* draw the number of vehicles of the group */
+ 		x = rtl ? x - 2 - this->column_size[VGC_NUMBER].width : x + 2 + this->column_size[VGC_PROFIT].width;
+-		SetDParam(0, stats.num_vehicle);
++		SetDParam(0, GetGroupNumVehicle(this->vli.company, g_id, this->vli.vtype));
+ 		DrawString(x, x + this->column_size[VGC_NUMBER].width - 1, y + (this->tiny_step_height - this->column_size[VGC_NUMBER].height) / 2, STR_TINY_COMMA, colour, SA_RIGHT | SA_FORCE);
+ 	}
+ 
+@@ -460,12 +462,12 @@ public:
+ 					SetDParam(2, this->vehicles.Length());
+ 					SetDParam(3, this->vehicles.Length());
+ 				} else {
+-					const Group *g = Group::Get(this->vli.index);
++					uint num_vehicle = GetGroupNumVehicle(this->vli.company, this->vli.index, this->vli.vtype);
+ 
+ 					SetDParam(0, STR_GROUP_NAME);
+-					SetDParam(1, g->index);
+-					SetDParam(2, g->statistics.num_vehicle);
+-					SetDParam(3, g->statistics.num_vehicle);
++					SetDParam(1, this->vli.index);
++					SetDParam(2, num_vehicle);
++					SetDParam(3, num_vehicle);
+ 				}
+ 				break;
+ 		}

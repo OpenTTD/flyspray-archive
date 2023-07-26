@@ -1,0 +1,175 @@
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(revision 8662)
++++ src/rail_cmd.cpp	(working copy)
+@@ -284,7 +284,7 @@
+ 			}
+ #undef M
+ 
+-			if (!EnsureNoVehicle(tile)) return CMD_ERROR;
++			if (!(flags & DC_QUERY_COST) && !EnsureNoVehicle(tile)) return CMD_ERROR;
+ 
+ 			if (GetRoadTileType(tile) == ROAD_TILE_NORMAL) {
+ 				if (HasRoadWorks(tile)) return_cmd_error(STR_ROAD_WORKS_IN_PROGRESS);
+@@ -844,19 +844,23 @@
+ 	return CmdSignalTrackHelper(tile, flags, p1, SETBIT(p2, 5)); // bit 5 is remove bit
+ }
+ 
+-typedef int32 DoConvertRailProc(TileIndex tile, RailType totype, bool exec);
++typedef int32 DoConvertRailProc(TileIndex tile, RailType totype, bool exec, bool queryCost);
+ 
+-static int32 DoConvertRail(TileIndex tile, RailType totype, bool exec)
++static int32 DoConvertRail(TileIndex tile, RailType totype, bool exec, bool queryCost)
+ {
+ 	if (!CheckTileOwnership(tile)) return CMD_ERROR;
+ 
+-	if (!EnsureNoVehicle(tile) && (!IsCompatibleRail(GetRailType(tile), totype) || IsPlainRailTile(tile))) return CMD_ERROR;
++	if (!queryCost && !EnsureNoVehicle(tile) &&
++	    (!IsCompatibleRail(GetRailType(tile), totype) || IsPlainRailTile(tile)))
++		return CMD_ERROR;
+ 
+ 	// tile is already of requested type?
+ 	if (GetRailType(tile) == totype) return CMD_ERROR;
+ 
+ 	// 'hidden' elrails can't be downgraded to normal rail when elrails are disabled
+-	if (_patches.disable_elrails && totype == RAILTYPE_RAIL && GetRailType(tile) == RAILTYPE_ELECTRIC) return CMD_ERROR;
++	if (_patches.disable_elrails && totype == RAILTYPE_RAIL
++	    && GetRailType(tile) == RAILTYPE_ELECTRIC)
++		return CMD_ERROR;
+ 
+ 	// change type.
+ 	if (exec) {
+@@ -887,9 +891,9 @@
+ 	return _price.build_rail / 2;
+ }
+ 
+-extern int32 DoConvertStationRail(TileIndex tile, RailType totype, bool exec);
+-extern int32 DoConvertStreetRail(TileIndex tile, RailType totype, bool exec);
+-extern int32 DoConvertTunnelBridgeRail(TileIndex tile, RailType totype, bool exec);
++extern int32 DoConvertStationRail(TileIndex tile, RailType totype, bool exec, bool queryCost);
++extern int32 DoConvertStreetRail(TileIndex tile, RailType totype, bool exec, bool queryCost);
++extern int32 DoConvertTunnelBridgeRail(TileIndex tile, RailType totype, bool exec, bool queryCost);
+ 
+ /** Convert one rail type to the other. You can convert normal rail to
+  * monorail/maglev easily or vice-versa.
+@@ -921,6 +925,8 @@
+ 	cost = 0;
+ 	ret = 0;
+ 
++	bool queryCost = (flags & DC_QUERY_COST) && !(flags & DC_EXEC);
++
+ 	for (x = sx; x <= ex; ++x) {
+ 		for (y = sy; y <= ey; ++y) {
+ 			TileIndex tile = TileXY(x, y);
+@@ -934,7 +940,7 @@
+ 				default: continue;
+ 			}
+ 
+-			ret = proc(tile, (RailType)p2, false);
++			ret = proc(tile, (RailType)p2, false, queryCost);
+ 			if (CmdFailed(ret)) continue;
+ 			cost += ret;
+ 
+@@ -944,7 +950,7 @@
+ 					_additional_cash_required = ret;
+ 					return cost - ret;
+ 				}
+-				proc(tile, (RailType)p2, true);
++				proc(tile, (RailType)p2, true, false);
+ 			}
+ 		}
+ 	}
+Index: src/station_cmd.cpp
+===================================================================
+--- src/station_cmd.cpp	(revision 8662)
++++ src/station_cmd.cpp	(working copy)
+@@ -1252,11 +1252,12 @@
+ 	return cost;
+ }
+ 
+-int32 DoConvertStationRail(TileIndex tile, RailType totype, bool exec)
++int32 DoConvertStationRail(TileIndex tile, RailType totype, bool exec, bool queryCost)
+ {
+ 	const Station* st = GetStationByTile(tile);
+ 
+-	if (!CheckOwnership(st->owner) || !EnsureNoVehicle(tile)) return CMD_ERROR;
++	if (!CheckOwnership(st->owner)) return CMD_ERROR;
++	if (!queryCost && !EnsureNoVehicle(tile)) return CMD_ERROR;
+ 
+ 	// tile is not a railroad station?
+ 	if (!IsRailwayStation(tile)) return CMD_ERROR;
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 8662)
++++ src/train_cmd.cpp	(working copy)
+@@ -762,7 +762,9 @@
+ 
+ 	/* Check if depot and new engine uses the same kind of tracks */
+ 	/* We need to see if the engine got power on the tile to avoid eletric engines in non-electric depots */
+-	if (!HasPowerOnRail(rvi->railtype, GetRailType(tile))) return CMD_ERROR;
++	if (!(flags & DC_QUERY_COST)) {
++	    if (!HasPowerOnRail(rvi->railtype, GetRailType(tile))) return CMD_ERROR;
++	}
+ 
+ 	if (rvi->railveh_type == RAILVEH_WAGON) return CmdBuildRailWagon(p1, tile, flags);
+ 
+Index: src/road_cmd.cpp
+===================================================================
+--- src/road_cmd.cpp	(revision 8662)
++++ src/road_cmd.cpp	(working copy)
+@@ -366,13 +366,14 @@
+ 	return cost;
+ }
+ 
+-int32 DoConvertStreetRail(TileIndex tile, RailType totype, bool exec)
++int32 DoConvertStreetRail(TileIndex tile, RailType totype, bool exec, bool queryCost)
+ {
+ 	// not a railroad crossing?
+ 	if (!IsLevelCrossing(tile)) return CMD_ERROR;
+ 
+ 	// not owned by me?
+-	if (!CheckTileOwnership(tile) || !EnsureNoVehicle(tile)) return CMD_ERROR;
++	if (!CheckTileOwnership(tile)) return CMD_ERROR;
++	if (!queryCost && !EnsureNoVehicle(tile)) return CMD_ERROR;
+ 
+ 	if (GetRailTypeCrossing(tile) == totype) return CMD_ERROR;
+ 
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 8662)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -695,7 +695,7 @@
+ 	return CMD_ERROR;
+ }
+ 
+-int32 DoConvertTunnelBridgeRail(TileIndex tile, RailType totype, bool exec)
++int32 DoConvertTunnelBridgeRail(TileIndex tile, RailType totype, bool exec, bool queryCost)
+ {
+ 	TileIndex endtile;
+ 
+@@ -710,7 +710,7 @@
+ 		if (_patches.disable_elrails && totype == RAILTYPE_RAIL && GetRailType(tile) == RAILTYPE_ELECTRIC) return CMD_ERROR;
+ 
+ 		endtile = CheckTunnelBusy(tile, &length);
+-		if (endtile == INVALID_TILE) return CMD_ERROR;
++		if (endtile == INVALID_TILE && !queryCost) return CMD_ERROR;
+ 
+ 		if (exec) {
+ 			Track track;
+@@ -730,10 +730,12 @@
+ 
+ 		endtile = GetOtherBridgeEnd(tile);
+ 
+-		if (!EnsureNoVehicle(tile) ||
+-				!EnsureNoVehicle(endtile) ||
+-				IsVehicleOnBridge(tile, endtile, GetBridgeHeight(tile))) {
+-			return CMD_ERROR;
++		if (!queryCost && (!EnsureNoVehicle(tile) ||
++				   !EnsureNoVehicle(endtile) ||
++				   IsVehicleOnBridge(tile, endtile,
++						     GetBridgeHeight(tile))))
++		{
++		    return CMD_ERROR;
+ 		}
+ 
+ 		if (GetRailType(tile) == totype) return CMD_ERROR;

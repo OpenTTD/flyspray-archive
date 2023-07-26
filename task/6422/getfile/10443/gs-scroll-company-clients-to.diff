@@ -1,0 +1,127 @@
+diff -r f6808a914bb5 src/command.cpp
+--- a/src/command.cpp	Thu Dec 03 00:45:50 2015 +0300
++++ b/src/command.cpp	Thu Feb 18 21:56:53 2016 +0300
+@@ -167,6 +167,7 @@
+ CommandProc CmdShowStoryPage;
+ CommandProc CmdRemoveStoryPage;
+ CommandProc CmdRemoveStoryPageElement;
++CommandProc CmdScrollClientView;
+
+ CommandProc CmdLevelLand;
+
+@@ -322,6 +323,7 @@
+ 	DEF_CMD(CmdShowStoryPage,                          CMD_DEITY, CMDT_OTHER_MANAGEMENT      ), // CMD_SHOW_STORY_PAGE
+ 	DEF_CMD(CmdRemoveStoryPage,                        CMD_DEITY, CMDT_OTHER_MANAGEMENT      ), // CMD_REMOVE_STORY_PAGE
+ 	DEF_CMD(CmdRemoveStoryPageElement,                 CMD_DEITY, CMDT_OTHER_MANAGEMENT      ), // CMD_REMOVE_STORY_ELEMENT_PAGE
++	DEF_CMD(CmdScrollClientView,                       CMD_DEITY, CMDT_OTHER_MANAGEMENT      ), // CMD_SCROLL_CLIENT_VIEW
+
+ 	DEF_CMD(CmdLevelLand, CMD_ALL_TILES | CMD_NO_TEST | CMD_AUTO, CMDT_LANDSCAPE_CONSTRUCTION), // CMD_LEVEL_LAND; test run might clear tiles multiple times, in execution that only happens once
+
+diff -r f6808a914bb5 src/command_type.h
+--- a/src/command_type.h	Thu Dec 03 00:45:50 2015 +0300
++++ b/src/command_type.h	Thu Feb 18 21:56:53 2016 +0300
+@@ -293,6 +293,8 @@
+ 	CMD_SHOW_STORY_PAGE,              ///< show a story page
+ 	CMD_REMOVE_STORY_PAGE,            ///< remove a story page
+ 	CMD_REMOVE_STORY_PAGE_ELEMENT,    ///< remove a story page element
++	CMD_SCROLL_CLIENT_VIEW,           ///< scroll main viewport of clients
++
+ 	CMD_LEVEL_LAND,                   ///< level land
+
+ 	CMD_BUILD_LOCK,                   ///< build a lock
+diff -r f6808a914bb5 src/goal.cpp
+--- a/src/goal.cpp	Thu Dec 03 00:45:50 2015 +0300
++++ b/src/goal.cpp	Thu Feb 18 21:56:53 2016 +0300
+@@ -22,6 +22,7 @@
+ #include "story_base.h"
+ #include "string_func.h"
+ #include "gui.h"
++#include "viewport_func.h"
+ #include "network/network.h"
+
+ #include "safeguards.h"
+@@ -291,3 +292,24 @@
+
+ 	return CommandCost();
+ }
++
++/**
++ * Scroll players main viewport.
++ * @param tile tile to center viewport on
++ * @param flags type of operation
++ * @param p1 unused, should be 0
++ * @param p2 company id which players view to scroll
++ * @param text unused
++ * @return the cost of this operation or an error
++ */
++CommandCost CmdScrollClientView(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
++{
++	if (p1 != 0) return CMD_ERROR;
++	if (_current_company != OWNER_DEITY) return CMD_ERROR;
++	CompanyID company = (CompanyID)p2;
++	if (_local_company != company) return CommandCost();
++	if (flags & DC_EXEC) {
++		ScrollMainWindowToTile(tile);
++	}
++	return CommandCost();
++}
+diff -r f6808a914bb5 src/script/api/game/game_viewport.hpp.sq
+--- a/src/script/api/game/game_viewport.hpp.sq	Thu Dec 03 00:45:50 2015 +0300
++++ b/src/script/api/game/game_viewport.hpp.sq	Thu Feb 18 21:56:53 2016 +0300
+@@ -22,6 +22,7 @@
+ 	SQGSViewport.AddConstructor<void (ScriptViewport::*)(), 1>(engine, "x");
+
+ 	SQGSViewport.DefSQStaticMethod(engine, &ScriptViewport::ScrollTo, "ScrollTo", 2, ".i");
++	SQGSViewport.DefSQStaticMethod(engine, &ScriptViewport::ScrollCompanyClientsTo, "ScrollCompanyClientsTo", 3, ".ii");
+
+ 	SQGSViewport.PostRegister(engine);
+ }
+diff -r f6808a914bb5 src/script/api/script_viewport.cpp
+--- a/src/script/api/script_viewport.cpp	Thu Dec 03 00:45:50 2015 +0300
++++ b/src/script/api/script_viewport.cpp	Thu Feb 18 21:56:53 2016 +0300
+@@ -10,9 +10,11 @@
+ /** @file script_viewport.cpp Implementation of ScriptViewport. */
+
+ #include "../../stdafx.h"
++#include "script_error.hpp"
+ #include "script_viewport.hpp"
+ #include "script_game.hpp"
+ #include "script_map.hpp"
++#include "../script_instance.hpp"
+ #include "../../viewport_func.h"
+
+ #include "../../safeguards.h"
+@@ -24,3 +26,14 @@
+
+ 	ScrollMainWindowToTile(tile);
+ }
++
++/* static */ bool ScriptViewport::ScrollCompanyClientsTo(ScriptCompany::CompanyID company, TileIndex tile)
++{
++	EnforcePrecondition(false, ScriptObject::GetCompany() == OWNER_DEITY);
++	EnforcePrecondition(false, ScriptMap::IsValidTile(tile));
++
++	company = ScriptCompany::ResolveCompanyID(company);
++	EnforcePrecondition(false, company != ScriptCompany::COMPANY_INVALID);
++
++	return ScriptObject::DoCommand(tile, 0,  company, CMD_SCROLL_CLIENT_VIEW);
++}
+diff -r f6808a914bb5 src/script/api/script_viewport.hpp
+--- a/src/script/api/script_viewport.hpp	Thu Dec 03 00:45:50 2015 +0300
++++ b/src/script/api/script_viewport.hpp	Thu Feb 18 21:56:53 2016 +0300
+@@ -13,6 +13,7 @@
+ #define SCRIPT_VIEWPORT_HPP
+
+ #include "script_object.hpp"
++#include "script_company.hpp"
+
+ /**
+  * Class that manipulates the user's viewport.
+@@ -28,6 +29,7 @@
+ 	 * @pre ScriptMap::IsValidTile(tile).
+ 	 */
+ 	static void ScrollTo(TileIndex tile);
++	static bool ScrollCompanyClientsTo(ScriptCompany::CompanyID company, TileIndex tile);
+ };
+
+ #endif /* SCRIPT_ADMIN_HPP */

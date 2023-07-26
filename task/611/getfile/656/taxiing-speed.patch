@@ -1,0 +1,201 @@
+diff --git a/src/aircraft_cmd.cpp b/src/aircraft_cmd.cpp
+index 87a9ee2..654aaac 100644
+--- a/src/aircraft_cmd.cpp
++++ b/src/aircraft_cmd.cpp
+@@ -854,36 +854,59 @@ static void PlayAircraftSound(const Vehicle* v)
+ 	}
+ }
+ 
+-/** Special velocities for aircraft
++static const uint _max_taxi_speed[5] = { 12, 12, 8, 6, 4 };
++
++/** Types of aircraft speed limits
+  */
+ enum AircraftSpeedLimits {
+-	SPEED_LIMIT_NONE   =  0,  ///< No environmental speed limit. Speed limit is type dependent
+-	SPEED_LIMIT_TAXI   = 12,  ///< Maximum speed of an aircraft while taxiing
+-	SPEED_LIMIT_BROKEN = 27,  ///< Maximum speed of an aircraft that is broken
++	SPEED_LIMIT_NONE   =  0, ///< No environmental speed limit. Speed limit is type dependent
++	SPEED_LIMIT_TAXI,	 ///< Limit for aircraft that is taxiing
++	SPEED_LIMIT_BROKEN,      ///< Limit for aircraft that is broken
+ };
+ 
++// Division rounding UP
++#define CDIV(x, y) (((x) + (y) - 1)/(y))
++
+ // taxiing is true iff the aircraft speed should be limited to taxiing speed
+ // (12 in original)
+ static int UpdateAircraftSpeed(Vehicle *v, AircraftSpeedLimits speed_limit)
+ {
+- 	// Adjust the acceleration so the plane accelerates to the same speed
+- 	// on the same distance.
+- 	uint spd = v->acceleration * 2 * _patches.aircraft_speed_coeff;
++	// Adjust the acceleration so the plane accelerates to the same speed
++	// on the same distance.
++	uint spd = v->acceleration * 2 * _patches.aircraft_speed_coeff;
+ 	byte t = v->subspeed;
+ 	uint16 callback = GetVehicleCallback(CBID_CHANGE_VEHICLE_PROPERTY, 0x0C, 0, v->engine_type, v);
+ 
+ 	// Initialize the desired speed from callback
+ 	if (callback == CALLBACK_FAILED) {
+-	    v->u.air.desired_speed = v->max_speed;
++		v->u.air.desired_speed = v->max_speed;
+ 	} else {
+-	    v->u.air.desired_speed = callback;
++		v->u.air.desired_speed = callback;
+ 	}
+-	
+-	// apply desired speed limit
+-	if (speed_limit != SPEED_LIMIT_NONE) v->u.air.desired_speed = min(v->u.air.desired_speed, speed_limit);
+ 
+-	// adjust speed for broken vehicles
+-	if (v->vehstatus & VS_AIRCRAFT_BROKEN) v->u.air.desired_speed = min(v->u.air.desired_speed, SPEED_LIMIT_BROKEN);
++	// apply desired speed limit
++	switch (speed_limit) {
++	case SPEED_LIMIT_NONE:
++		if (!(v->vehstatus & VS_AIRCRAFT_BROKEN))
++			break; // If broken, apply broken limit instead.
++	case SPEED_LIMIT_BROKEN:
++		if (_patches.aircraft_breakdown_speed) {
++			v->u.air.desired_speed = min(v->u.air.desired_speed, (v->max_speed * 5) / 8);
++		} else {
++			v->u.air.desired_speed = min(v->u.air.desired_speed, 27);
++		}
++		break;
++	case SPEED_LIMIT_TAXI:
++		if (_patches.aircraft_taxi_speed) {
++			v->u.air.desired_speed = min(v->u.air.desired_speed, CDIV(v->max_speed, 2 * _patches.aircraft_speed_coeff));
++			v->u.air.desired_speed = min(v->u.air.desired_speed, _max_taxi_speed[_patches.aircraft_speed_coeff]);
++		} else {
++			v->u.air.desired_speed = min(v->u.air.desired_speed, _max_taxi_speed[0]);
++		}
++		break;
++	}
++	// For some reason aircrafts lock up without this.
++	if(v->u.air.desired_speed < 2) v->u.air.desired_speed = 2;
+ 
+ 	// accelerate/decelerate the aircraft as appropriate
+ 	if (v->cur_speed < v->u.air.desired_speed) {
+@@ -899,8 +922,7 @@ static int UpdateAircraftSpeed(Vehicle *v, AircraftSpeedLimits speed_limit)
+ 	//updates statusbar only if speed have changed to save CPU time
+ 	if (spd != v->cur_speed) {
+ 		v->cur_speed = spd;
+-		if (_patches.vehicle_speed)
+-			InvalidateWindowWidget(WC_VEHICLE_VIEW, v->index, STATUS_BAR);
++		if (_patches.vehicle_speed) InvalidateWindowWidget(WC_VEHICLE_VIEW, v->index, STATUS_BAR);
+ 	}
+ 
+ 	if (!(v->direction & 1)) spd = spd * 3 / 4;
+@@ -909,12 +931,12 @@ static int UpdateAircraftSpeed(Vehicle *v, AircraftSpeedLimits speed_limit)
+ 
+ 	spd *= _patches.aircraft_speed_coeff;
+ 	/*
+-	if ((byte)++spd == 0) return true;
++	   if ((byte)++spd == 0) return true;
+ 
+-	v->progress = (t = v->progress) - (byte)spd;
++	   v->progress = (t = v->progress) - (byte)spd;
+ 
+-	return t < v->progress;
+-	*/
++	   return t < v->progress;
++	   */
+ 	/* The original algorithm had progress decremented by speed with
+ 	 * 0 treated as 256 in the initial step. However since we can
+ 	 * overflow more than once per step, incrementing is easier and
+diff --git a/src/lang/american.txt b/src/lang/american.txt
+index 2a5ced0..c74858e 100644
+--- a/src/lang/american.txt
++++ b/src/lang/american.txt
+@@ -1144,6 +1144,8 @@ STR_CONFIG_PATCHES_YAPF_SHIPS                                   :{LTBLUE}Use YAP
+ STR_CONFIG_PATCHES_YAPF_ROAD                                    :{LTBLUE}Use YAPF for roadvehs: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_YAPF_RAIL                                    :{LTBLUE}Use YAPF for trains: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_AIR_COEFF                                    :{LTBLUE}Aircraft speedup (1=TTD default, 4=realistic):{ORANGE} {STRING}
++STR_CONFIG_PATCHES_TAXI_SPEED                                   :{LTBLUE}More realistic aircraft taxiing speed: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_AIR_BREAKDOWN_SPEED                          :{LTBLUE}Aircraft breakdown speed relative to maximum speed: {ORANGE}{STRING1}
+ 
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+diff --git a/src/lang/czech.txt b/src/lang/czech.txt
+index 1d14a83..74fa282 100644
+--- a/src/lang/czech.txt
++++ b/src/lang/czech.txt
+@@ -1258,6 +1258,8 @@ STR_CONFIG_PATCHES_YAPF_SHIPS                                   :{LTBLUE}Použí
+ STR_CONFIG_PATCHES_YAPF_ROAD                                    :{LTBLUE}Používat YAPF pro silniční vozidla: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_YAPF_RAIL                                    :{LTBLUE}Používat YAPF pro vlaky: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_AIR_COEFF                                    :{LTBLUE}Rychlost letadel (1=standard TTD, 4=realistická): {ORANGE}{STRING}
++STR_CONFIG_PATCHES_TAXI_SPEED                                   :{LTBLUE}Realističtější rychlost pojíždění letadel: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_AIR_BREAKDOWN_SPEED                          :{LTBLUE}Rychlost porouchaného letadla odvozená od maximální rychlosti: {ORANGE}{STRING1}
+ 
+ STR_TEMPERATE_LANDSCAPE                                         :krajina mírného pásma
+ STR_SUB_ARCTIC_LANDSCAPE                                        :subarktická krajina
+diff --git a/src/lang/english.txt b/src/lang/english.txt
+index 013e6bc..eb484f3 100644
+--- a/src/lang/english.txt
++++ b/src/lang/english.txt
+@@ -1144,6 +1144,8 @@ STR_CONFIG_PATCHES_YAPF_SHIPS                                   :{LTBLUE}Use YAP
+ STR_CONFIG_PATCHES_YAPF_ROAD                                    :{LTBLUE}Use YAPF for roadvehs: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_YAPF_RAIL                                    :{LTBLUE}Use YAPF for trains: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_AIR_COEFF                                    :{LTBLUE}Aircraft speedup (1=TTD default, 4=realistic):{ORANGE} {STRING}
++STR_CONFIG_PATCHES_TAXI_SPEED                                   :{LTBLUE}More realistic aircraft taxiing speed: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_AIR_BREAKDOWN_SPEED                          :{LTBLUE}Aircraft breakdown speed relative to maximum speed: {ORANGE}{STRING1}
+ 
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+diff --git a/src/settings.cpp b/src/settings.cpp
+index 2bff18d..06ece2b 100644
+--- a/src/settings.cpp
++++ b/src/settings.cpp
+@@ -1328,6 +1328,8 @@ const SettingDesc _patch_settings[] = {
+ 	SDT_CONDBOOL(Patches, disable_elrails, 38, SL_MAX_VERSION, 0, 0, false,          STR_CONFIG_PATCHES_DISABLE_ELRAILS,      SettingsDisableElrail),
+ 	SDT_CONDVAR(Patches, freight_trains, SLE_UINT8, 39, SL_MAX_VERSION, 0, 0, 1, 1, 255, 1, STR_CONFIG_PATCHES_FREIGHT_TRAINS, NULL),
+ 	SDT_VAR(Patches,  aircraft_speed_coeff, SLE_UINT16, 0, 0, 1,    1,     4,0, STR_CONFIG_PATCHES_AIR_COEFF,             NULL),
++	SDT_BOOL(Patches, aircraft_taxi_speed,           0, 0, false,                    STR_CONFIG_PATCHES_TAXI_SPEED,       NULL),
++	SDT_BOOL(Patches, aircraft_breakdown_speed,      0, 0, false,                    STR_CONFIG_PATCHES_AIR_BREAKDOWN_SPEED,  NULL),
+ 
+ 	/***************************************************************************/
+ 	/* Station section of the GUI-configure patches window */
+diff --git a/src/settings_gui.cpp b/src/settings_gui.cpp
+index 524adce..31e3ee2 100644
+--- a/src/settings_gui.cpp
++++ b/src/settings_gui.cpp
+@@ -653,6 +653,8 @@ static const char *_patches_vehicles[] = {
+ 	"disable_elrails",
+ 	"freight_trains",
+ 	"aircraft_speed_coeff",
++	"aircraft_taxi_speed",
++	"aircraft_breakdown_speed",
+ };
+ 
+ typedef struct PatchEntry {
+@@ -895,7 +897,7 @@ static const Widget _patches_selection_widgets[] = {
+ {   WWT_CLOSEBOX,   RESIZE_NONE,    10,     0,    10,     0,    13, STR_00C5,                        STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    10,    11,   369,     0,    13, STR_CONFIG_PATCHES_CAPTION,      STR_018C_WINDOW_TITLE_DRAG_THIS},
+ {      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    14,    41, 0x0,                             STR_NULL},
+-{      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    42,   386, 0x0,                             STR_NULL},
++{      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    42,   402, 0x0,                             STR_NULL},
+ 
+ {    WWT_TEXTBTN,   RESIZE_NONE,     3,    10,    96,    16,    27, STR_CONFIG_PATCHES_GUI,          STR_NULL},
+ {    WWT_TEXTBTN,   RESIZE_NONE,     3,    97,   183,    16,    27, STR_CONFIG_PATCHES_CONSTRUCTION, STR_NULL},
+@@ -907,7 +909,7 @@ static const Widget _patches_selection_widgets[] = {
+ };
+ 
+ static const WindowDesc _patches_selection_desc = {
+-	WDP_CENTER, WDP_CENTER, 370, 387,
++	WDP_CENTER, WDP_CENTER, 370, 403,
+ 	WC_GAME_OPTIONS, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET,
+ 	_patches_selection_widgets,
+diff --git a/src/variables.h b/src/variables.h
+index 9788904..75887fb 100644
+--- a/src/variables.h
++++ b/src/variables.h
+@@ -188,6 +188,8 @@ typedef struct Patches {
+ 	bool ai_in_multiplayer;             // Do we allow AIs in multiplayer
+ 
+ 	uint aircraft_speed_coeff;          // Coeficient of aircraft speed
++	bool aircraft_taxi_speed;           // Use more realistic taxi speed?
++	bool aircraft_breakdown_speed;	    // Set aircraft breakdown speed to fraction of full speed rather than constant?
+ 	/*
+ 	 * New Path Finding
+ 	 */

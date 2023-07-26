@@ -1,0 +1,160 @@
+Index: src/window_gui.h
+===================================================================
+--- src/window_gui.h	(revision 27118)
++++ src/window_gui.h	(working copy)
+@@ -142,7 +142,7 @@
+ 
+ /* widget.cpp */
+ void DrawFrameRect(int left, int top, int right, int bottom, Colours colour, FrameFlags flags);
+-void DrawCaption(const Rect &r, Colours colour, Owner owner, StringID str);
++void DrawCaption(const Rect &r, Colours colour, Owner owner, StringID str, bool focus);
+ 
+ /* window.cpp */
+ extern Window *_z_front_window;
+Index: src/news_gui.cpp
+===================================================================
+--- src/news_gui.cpp	(revision 27118)
++++ src/news_gui.cpp	(working copy)
+@@ -360,7 +360,7 @@
+ 	{
+ 		switch (widget) {
+ 			case WID_N_CAPTION:
+-				DrawCaption(r, COLOUR_LIGHT_BLUE, this->owner, STR_NEWS_MESSAGE_CAPTION);
++				DrawCaption(r, COLOUR_LIGHT_BLUE, this->owner, STR_NEWS_MESSAGE_CAPTION, false);
+ 				break;
+ 
+ 			case WID_N_PANEL:
+Index: src/widget.cpp
+===================================================================
+--- src/widget.cpp	(revision 27118)
++++ src/widget.cpp	(working copy)
+@@ -535,16 +535,19 @@
+  * @param colour Colour of the window.
+  * @param owner  'Owner' of the window.
+  * @param str    Text to draw in the bar.
++ * @param focus  Whether the window is focussed.
+  */
+-void DrawCaption(const Rect &r, Colours colour, Owner owner, StringID str)
++void DrawCaption(const Rect &r, Colours colour, Owner owner, StringID str, bool focus)
+ {
+ 	bool company_owned = owner < MAX_COMPANIES;
+ 
+ 	DrawFrameRect(r.left, r.top, r.right, r.bottom, colour, FR_BORDERONLY);
+-	DrawFrameRect(r.left + 1, r.top + 1, r.right - 1, r.bottom - 1, colour, company_owned ? FR_LOWERED | FR_DARKENED | FR_BORDERONLY : FR_LOWERED | FR_DARKENED);
++	DrawFrameRect(r.left + 1, r.top + 1, r.right - 1, r.bottom - 1, colour,
++			company_owned ? FR_LOWERED | FR_DARKENED | FR_BORDERONLY :
++			focus ? FR_LOWERED : FR_LOWERED | FR_DARKENED);
+ 
+ 	if (company_owned) {
+-		GfxFillRect(r.left + 2, r.top + 2, r.right - 2, r.bottom - 2, _colour_gradient[_company_colours[owner]][4]);
++		GfxFillRect(r.left + 2, r.top + 2, r.right - 2, r.bottom - 2, _colour_gradient[_company_colours[owner]][focus ? 6 : 4]);
+ 	}
+ 
+ 	if (str != STR_NULL) {
+@@ -2462,7 +2465,7 @@
+ 
+ 		case WWT_CAPTION:
+ 			if (this->index >= 0) w->SetStringParameters(this->index);
+-			DrawCaption(r, this->colour, w->owner, this->widget_data);
++			DrawCaption(r, this->colour, w->owner, this->widget_data, _focused_window == w);
+ 			break;
+ 
+ 		case WWT_SHADEBOX:
+Index: src/widgets/dropdown.cpp
+===================================================================
+--- src/widgets/dropdown.cpp	(revision 27118)
++++ src/widgets/dropdown.cpp	(working copy)
+@@ -82,7 +82,7 @@
+ static WindowDesc _dropdown_desc(
+ 	WDP_MANUAL, NULL, 0, 0,
+ 	WC_DROPDOWN_MENU, WC_NONE,
+-	0,
++	WDF_NO_FOCUS,
+ 	_nested_dropdown_menu_widgets, lengthof(_nested_dropdown_menu_widgets)
+ );
+ 
+Index: src/main_gui.cpp
+===================================================================
+--- src/main_gui.cpp	(revision 27118)
++++ src/main_gui.cpp	(working copy)
+@@ -340,7 +340,18 @@
+ 				break;
+ 			}
+ 
+-			case GHK_RESET_OBJECT_TO_PLACE: ResetObjectToPlace(); break;
++			case GHK_RESET_OBJECT_TO_PLACE:
++				if (_thd.place_mode != HT_NONE) {
++					ResetObjectToPlace();
++				} else if (_focused_window != NULL &&
++						_focused_window->window_class != WC_MAIN_WINDOW &&
++						_focused_window->window_class != WC_SELECT_GAME &&
++						_focused_window->window_class != WC_MAIN_TOOLBAR &&
++						_focused_window->window_class != WC_STATUS_BAR &&
++						_focused_window->window_class != WC_TOOLTIPS) {
++					delete _focused_window;
++				}
++				break;
+ 			case GHK_DELETE_WINDOWS: DeleteNonVitalWindows(); break;
+ 			case GHK_DELETE_NONVITAL_WINDOWS: DeleteAllNonVitalWindows(); break;
+ 			case GHK_REFRESH_SCREEN: MarkWholeScreenDirty(); break;
+Index: src/window.cpp
+===================================================================
+--- src/window.cpp	(revision 27118)
++++ src/window.cpp	(working copy)
+@@ -415,7 +415,7 @@
+ 
+ 	/* Invalidate focused widget */
+ 	if (_focused_window != NULL) {
+-		if (_focused_window->nested_focus != NULL) _focused_window->nested_focus->SetDirty(_focused_window);
++		_focused_window->SetDirty();
+ 	}
+ 
+ 	/* Remember which window was previously focused */
+@@ -424,7 +424,10 @@
+ 
+ 	/* So we can inform it that it lost focus */
+ 	if (old_focused != NULL) old_focused->OnFocusLost();
+-	if (_focused_window != NULL) _focused_window->OnFocus();
++	if (_focused_window != NULL) {
++		_focused_window->OnFocus();
++		_focused_window->SetDirty();
++	}
+ }
+ 
+ /**
+@@ -1046,8 +1049,10 @@
+ 
+ 	/* Make sure we don't try to access this window as the focused window when it doesn't exist anymore. */
+ 	if (_focused_window == this) {
+-		this->OnFocusLost();
+-		_focused_window = NULL;
++		Window *p = this->parent;
++		if (p == NULL && this->window_desc->parent_cls != 0) p = FindWindowById(this->window_desc->parent_cls, this->window_number);
++		SetFocusedWindow(p);
++		assert(_focused_window != this);
+ 	}
+ 
+ 	this->DeleteChildWindows();
+@@ -1417,7 +1422,8 @@
+ 	/* Give focus to the opened window unless a text box
+ 	 * of focused window has focus (so we don't interrupt typing). But if the new
+ 	 * window has a text box, then take focus anyway. */
+-	if (!EditBoxInGlobalFocus() || this->nested_root->GetWidgetOfType(WWT_EDITBOX) != NULL) SetFocusedWindow(this);
++	if ((!EditBoxInGlobalFocus() || this->nested_root->GetWidgetOfType(WWT_EDITBOX) != NULL) &&
++			!(this->window_desc->flags & WDF_NO_FOCUS)) SetFocusedWindow(this);
+ 
+ 	/* Insert the window into the correct location in the z-ordering. */
+ 	AddWindowToZOrdering(this);
+Index: src/misc_gui.cpp
+===================================================================
+--- src/misc_gui.cpp	(revision 27118)
++++ src/misc_gui.cpp	(working copy)
+@@ -632,7 +632,7 @@
+ static WindowDesc _tool_tips_desc(
+ 	WDP_MANUAL, NULL, 0, 0, // Coordinates and sizes are not used,
+ 	WC_TOOLTIPS, WC_NONE,
+-	0,
++	WDF_NO_FOCUS,
+ 	_nested_tooltips_widgets, lengthof(_nested_tooltips_widgets)
+ );
+ 

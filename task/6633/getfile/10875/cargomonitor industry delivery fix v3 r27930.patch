@@ -1,0 +1,102 @@
+Index: src/cargomonitor.cpp
+===================================================================
+--- src/cargomonitor.cpp	(revision 27930)
++++ src/cargomonitor.cpp	(working copy)
+@@ -117,8 +117,9 @@
+  * @param src_type type of \a src.
+  * @param src index of source.
+  * @param st station where the cargo is delivered to.
++ * @param dest industry index where the cargo is delivered to.
+  */
+-void AddCargoDelivery(CargoID cargo_type, CompanyID company, uint32 amount, SourceType src_type, SourceID src, const Station *st)
++void AddCargoDelivery(CargoID cargo_type, CompanyID company, uint32 amount, SourceType src_type, SourceID src, const Station *st, IndustryID dest)
+ {
+ 	if (amount == 0) return;
+ 
+@@ -153,7 +154,7 @@
+ 	for (const Industry * const *ip = st->industries_near.Begin(); ip != st->industries_near.End(); ip++) {
+ 		CargoMonitorID num = EncodeCargoIndustryMonitor(company, cargo_type, (*ip)->index);
+ 		CargoMonitorMap::iterator iter = _cargo_deliveries.find(num);
+-		if (iter != _cargo_deliveries.end()) iter->second += amount;
++		if (iter != _cargo_deliveries.end() && (*ip)->index == dest) iter->second += amount;
+ 	}
+ }
+ 
+Index: src/cargomonitor.h
+===================================================================
+--- src/cargomonitor.h	(revision 27930)
++++ src/cargomonitor.h	(working copy)
+@@ -144,6 +144,6 @@
+ void ClearCargoDeliveryMonitoring(CompanyID company = INVALID_OWNER);
+ int32 GetDeliveryAmount(CargoMonitorID monitor, bool keep_monitoring);
+ int32 GetPickupAmount(CargoMonitorID monitor, bool keep_monitoring);
+-void AddCargoDelivery(CargoID cargo_type, CompanyID company, uint32 amount, SourceType src_type, SourceID src, const Station *st);
++void AddCargoDelivery(CargoID cargo_type, CompanyID company, uint32 amount, SourceType src_type, SourceID src, const Station *st, IndustryID dest = INVALID_INDUSTRY);
+ 
+ #endif /* CARGOMONITOR_H */
+Index: src/economy.cpp
+===================================================================
+--- src/economy.cpp	(revision 27930)
++++ src/economy.cpp	(working copy)
+@@ -1030,9 +1030,10 @@
+  * @param cargo_type Type of cargo delivered
+  * @param num_pieces Amount of cargo delivered
+  * @param source The source of the cargo
++ * @param company The company delivering the cargo
+  * @return actually accepted pieces of cargo
+  */
+-static uint DeliverGoodsToIndustry(const Station *st, CargoID cargo_type, uint num_pieces, IndustryID source)
++static uint DeliverGoodsToIndustry(const Station *st, CargoID cargo_type, uint num_pieces, IndustryID source, CompanyID company)
+ {
+ 	/* Find the nearest industrytile to the station sign inside the catchment area, whose industry accepts the cargo.
+ 	 * This fails in three cases:
+@@ -1062,6 +1063,10 @@
+ 
+ 		uint amount = min(num_pieces, 0xFFFFU - ind->incoming_cargo_waiting[cargo_index]);
+ 		ind->incoming_cargo_waiting[cargo_index] += amount;
++
++		/* Update the cargo monitor. */
++		AddCargoDelivery(cargo_type, company, amount, ST_INDUSTRY, source, st, ind->index);
++
+ 		num_pieces -= amount;
+ 		accepted += amount;
+ 	}
+@@ -1089,13 +1094,13 @@
+ 	Station *st = Station::Get(dest);
+ 
+ 	/* Give the goods to the industry. */
+-	uint accepted = DeliverGoodsToIndustry(st, cargo_type, num_pieces, src_type == ST_INDUSTRY ? src : INVALID_INDUSTRY);
++	uint accepted_ind = DeliverGoodsToIndustry(st, cargo_type, num_pieces, src_type == ST_INDUSTRY ? src : INVALID_INDUSTRY, company->index);
+ 
+ 	/* If this cargo type is always accepted, accept all */
+-	if (HasBit(st->always_accepted, cargo_type)) accepted = num_pieces;
++	uint accepted_total = HasBit(st->always_accepted, cargo_type) ? num_pieces : accepted_ind;
+ 
+ 	/* Update station statistics */
+-	if (accepted > 0) {
++	if (accepted_total > 0) {
+ 		SetBit(st->goods[cargo_type].status, GoodsEntry::GES_EVER_ACCEPTED);
+ 		SetBit(st->goods[cargo_type].status, GoodsEntry::GES_CURRENT_MONTH);
+ 		SetBit(st->goods[cargo_type].status, GoodsEntry::GES_ACCEPTED_BIGTICK);
+@@ -1102,17 +1107,17 @@
+ 	}
+ 
+ 	/* Update company statistics */
+-	company->cur_economy.delivered_cargo[cargo_type] += accepted;
++	company->cur_economy.delivered_cargo[cargo_type] += accepted_total;
+ 
+ 	/* Increase town's counter for town effects */
+ 	const CargoSpec *cs = CargoSpec::Get(cargo_type);
+-	st->town->received[cs->town_effect].new_act += accepted;
++	st->town->received[cs->town_effect].new_act += accepted_total;
+ 
+ 	/* Determine profit */
+-	Money profit = GetTransportedGoodsIncome(accepted, DistanceManhattan(source_tile, st->xy), days_in_transit, cargo_type);
++	Money profit = GetTransportedGoodsIncome(accepted_total, DistanceManhattan(source_tile, st->xy), days_in_transit, cargo_type);
+ 
+ 	/* Update the cargo monitor. */
+-	AddCargoDelivery(cargo_type, company->index, accepted, src_type, src, st);
++	AddCargoDelivery(cargo_type, company->index, num_pieces - accepted_ind, src_type, src, st);
+ 
+ 	/* Modify profit if a subsidy is in effect */
+ 	if (CheckSubsidised(cargo_type, company->index, src_type, src, st))  {
