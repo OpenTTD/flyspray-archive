@@ -1,0 +1,156 @@
+From 2d77370ea13ba00710c72117217e7ff2c7199a87 Mon Sep 17 00:00:00 2001
+From: Michael Lutz <michi@icosahedron.de>
+Date: Mon, 11 Aug 2008 21:42:02 +0200
+Subject: -Fix (r14019) [FS#2222]: Redo the check for reserved tracks properly this time. (michi_cc)
+
+---
+ src/yapf/follow_track.hpp   |   55 ++++++++++++++++++++++--------------------
+ src/yapf/yapf_costrail.hpp  |    6 ++--
+ src/yapf/yapf_node_rail.hpp |    3 +-
+ src/yapf/yapf_rail.cpp      |    2 +-
+ 4 files changed, 34 insertions(+), 32 deletions(-)
+
+diff --git a/src/yapf/follow_track.hpp b/src/yapf/follow_track.hpp
+index 677bbcd..7d7fd19 100644
+--- a/src/yapf/follow_track.hpp
++++ b/src/yapf/follow_track.hpp
+@@ -14,8 +14,6 @@
+ template <TransportType Ttr_type_, bool T90deg_turns_allowed_ = true, bool Tmask_reserved_tracks = false>
+ struct CFollowTrackT
+ {
+-	typedef CFollowTrackT<Ttr_type_, T90deg_turns_allowed_, false> BaseNoMask;
+-
+ 	enum ErrorCode {
+ 		EC_NONE,
+ 		EC_OWNER,
+@@ -79,7 +77,7 @@ struct CFollowTrackT
+ 	FORCEINLINE bool IsTram() {return IsRoadTT() && HasBit(m_veh->u.road.compatible_roadtypes, ROADTYPE_TRAM);}
+ 	FORCEINLINE static bool IsRoadTT() {return TT() == TRANSPORT_ROAD;}
+ 	FORCEINLINE static bool Allow90degTurns() {return T90deg_turns_allowed_;}
+-	FORCEINLINE static bool MaskReservedTracks() {return IsRailTT() && Tmask_reserved_tracks;}
++	FORCEINLINE static bool DoTrackMasking() {return IsRailTT() && Tmask_reserved_tracks;}
+ 
+ 	/** Tests if a tile is a road tile with a single tramtrack (tram can reverse) */
+ 	FORCEINLINE DiagDirection GetSingleTramBit(TileIndex tile)
+@@ -124,32 +122,37 @@ struct CFollowTrackT
+ 				return false;
+ 			}
+ 		}
+-		if (MaskReservedTracks()) {
+-			if (m_is_station) {
+-				/* Check skipped station tiles as well. */
+-				TileIndexDiff diff = TileOffsByDiagDir(m_exitdir);
+-				for (TileIndex tile = m_new_tile - diff * m_tiles_skipped; tile != m_new_tile; tile += diff) {
+-					if (GetRailwayStationReservation(tile)) {
+-						m_new_td_bits = TRACKDIR_BIT_NONE;
+-						m_err = EC_RESERVED;
+-						return false;
+-					}
++		return true;
++	}
++
++	inline bool MaskReservedTracks()
++	{
++		if (!DoTrackMasking()) return true;
++
++		if (m_is_station) {
++			/* Check skipped station tiles as well. */
++			TileIndexDiff diff = TileOffsByDiagDir(m_exitdir);
++			for (TileIndex tile = m_new_tile - diff * m_tiles_skipped; tile != m_new_tile; tile += diff) {
++				if (GetRailwayStationReservation(tile)) {
++					m_new_td_bits = TRACKDIR_BIT_NONE;
++					m_err = EC_RESERVED;
++					return false;
+ 				}
+ 			}
++		}
+ 
+-			TrackBits reserved = GetReservedTrackbits(m_new_tile);
+-			/* Mask already reserved trackdirs. */
+-			m_new_td_bits &= ~TrackBitsToTrackdirBits(reserved);
+-			/* Mask out all trackdirs that conflict with the reservation. */
+-			uint bits = (uint)TrackdirBitsToTrackBits(m_new_td_bits);
+-			int i;
+-			FOR_EACH_SET_BIT(i, bits) {
+-				if (TracksOverlap(reserved | TrackToTrackBits((Track)i))) m_new_td_bits &= ~TrackToTrackdirBits((Track)i);
+-			}
+-			if (m_new_td_bits == TRACKDIR_BIT_NONE) {
+-				m_err = EC_RESERVED;
+-				return false;
+-			}
++		TrackBits reserved = GetReservedTrackbits(m_new_tile);
++		/* Mask already reserved trackdirs. */
++		m_new_td_bits &= ~TrackBitsToTrackdirBits(reserved);
++		/* Mask out all trackdirs that conflict with the reservation. */
++		uint bits = (uint)TrackdirBitsToTrackBits(m_new_td_bits);
++		int i;
++		FOR_EACH_SET_BIT(i, bits) {
++			if (TracksOverlap(reserved | TrackToTrackBits((Track)i))) m_new_td_bits &= ~TrackToTrackdirBits((Track)i);
++		}
++		if (m_new_td_bits == TRACKDIR_BIT_NONE) {
++			m_err = EC_RESERVED;
++			return false;
+ 		}
+ 		return true;
+ 	}
+diff --git a/src/yapf/yapf_costrail.hpp b/src/yapf/yapf_costrail.hpp
+index edcb7c7..8259f4b 100644
+--- a/src/yapf/yapf_costrail.hpp
++++ b/src/yapf/yapf_costrail.hpp
+@@ -399,7 +399,7 @@ no_entry_cost: // jump here at the beginning if the node has no parent (it is th
+ 			} else if (cur.tile_type == MP_RAILWAY && IsRailWaypoint(cur.tile)) {
+ 				/* Waypoint is also a good reason to finish. */
+ 				end_segment_reason |= ESRB_WAYPOINT;
+-			} else if (TrackFollower::MaskReservedTracks() && cur.tile_type == MP_RAILWAY) {
++			} else if (TrackFollower::DoTrackMasking() && cur.tile_type == MP_RAILWAY) {
+ 				/* Searching for a safe tile? */
+ 				if (HasSignalOnTrackdir(cur.tile, cur.td) && !IsPbsSignal(GetSignalType(cur.tile, TrackdirToTrack(cur.td)))) {
+ 					end_segment_reason |= ESRB_SAFE_TILE;
+@@ -437,7 +437,7 @@ no_entry_cost: // jump here at the beginning if the node has no parent (it is th
+ 					end_segment_reason |= ESRB_DEAD_END;
+ 				}
+ 
+-				if (TrackFollower::MaskReservedTracks() && tf_local.m_err != TrackFollower::EC_90DEG) {
++				if (TrackFollower::DoTrackMasking() && tf_local.m_err != TrackFollower::EC_90DEG) {
+ 					if (!HasOnewaySignalBlockingTrackdir(cur.tile, cur.td)) end_segment_reason |= ESRB_SAFE_TILE;
+ 				}
+ 				break;
+@@ -453,7 +453,7 @@ no_entry_cost: // jump here at the beginning if the node has no parent (it is th
+ 			/* Gather the next tile/trackdir/tile_type/rail_type. */
+ 			TILE next(tf_local.m_new_tile, (Trackdir)FindFirstBit2x64(tf_local.m_new_td_bits));
+ 
+-			if (TrackFollower::MaskReservedTracks() && HasPbsSignalOnTrackdir(next.tile, next.td)) {
++			if (TrackFollower::DoTrackMasking() && HasPbsSignalOnTrackdir(next.tile, next.td)) {
+ 				/* Possible safe tile. */
+ 				end_segment_reason |= ESRB_SAFE_TILE;
+ 			}
+diff --git a/src/yapf/yapf_node_rail.hpp b/src/yapf/yapf_node_rail.hpp
+index 171a307..192bce2 100644
+--- a/src/yapf/yapf_node_rail.hpp
++++ b/src/yapf/yapf_node_rail.hpp
+@@ -182,8 +182,7 @@ struct CYapfRailNodeT
+ 	template <class Tbase, class Tfunc, class Tpf>
+ 	bool IterateTiles(const Vehicle *v, Tpf &yapf, Tbase &obj, bool (Tfunc::*func)(TileIndex, Trackdir)) const
+ 	{
+-		typedef typename Tbase::TrackFollower TrackFollower;
+-		typename TrackFollower::BaseNoMask ft(v, yapf.GetCompatibleRailTypes());
++		typename Tbase::TrackFollower ft(v, yapf.GetCompatibleRailTypes());
+ 		TileIndex cur = base::GetTile();
+ 		Trackdir  cur_td = base::GetTrackdir();
+ 
+diff --git a/src/yapf/yapf_rail.cpp b/src/yapf/yapf_rail.cpp
+index e4a29d7..88fe70f 100644
+--- a/src/yapf/yapf_rail.cpp
++++ b/src/yapf/yapf_rail.cpp
+@@ -223,7 +223,7 @@ public:
+ 	inline void PfFollowNode(Node& old_node)
+ 	{
+ 		TrackFollower F(Yapf().GetVehicle(), Yapf().GetCompatibleRailTypes());
+-		if (F.Follow(old_node.GetLastTile(), old_node.GetLastTrackdir()))
++		if (F.Follow(old_node.GetLastTile(), old_node.GetLastTrackdir()) && F.MaskReservedTracks())
+ 			Yapf().AddMultipleNodes(&old_node, F);
+ 	}
+ 
+-- 
+1.5.6.4
+

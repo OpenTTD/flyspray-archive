@@ -1,0 +1,223 @@
+diff -r b4bef78a1e24 src/lang/english.txt
+--- a/src/lang/english.txt	Thu Sep 18 15:32:20 2008 +0000
++++ b/src/lang/english.txt	Fri Sep 19 21:11:08 2008 +0200
+@@ -2754,6 +2754,10 @@ STR_GO_TO_NEAREST_DEPOT                 
+ STR_GO_TO_NEAREST_DEPOT                                         :{STRING} {STRING} {STRING}
+ STR_GO_TO_HANGAR                                                :{STRING} {STATION} Hangar
+ 
++STR_ORDER_DROP_GO_ALWAYS_DEPOT                                  :Always go
++STR_ORDER_DROP_SERVICE_DEPOT                                    :Service if needed
++STR_ORDER_DROP_HALT_DEPOT                                       :Stop
++
+ STR_ORDER_CONDITIONAL                                           :Conditional order jump
+ STR_ORDER_CONDITIONAL_VARIABLE_TOOLTIP                          :{BLACK}Vehicle data to base jumping on
+ STR_ORDER_CONDITIONAL_COMPARATOR_TOOLTIP                        :{BLACK}How to compare the vehicle data to the given value
+@@ -2824,6 +2828,8 @@ STR_REFIT                               
+ STR_REFIT                                                       :{BLACK}Refit
+ STR_REFIT_TIP                                                   :{BLACK}Select what cargo type to refit to in this order. Control click to remove refit instruction
+ STR_REFIT_ORDER                                                 :(Refit to {STRING})
++STR_REFIT_STOP_ORDER                                            :(Refit to {STRING} and stop)
++STR_STOP_ORDER                                                  :(Stop)
+ STR_TIMETABLE_VIEW                                              :{BLACK}Timetable
+ STR_TIMETABLE_VIEW_TOOLTIP                                      :{BLACK}Switch to the timetable view
+ STR_ORDER_VIEW                                                  :{BLACK}Orders
+diff -r b4bef78a1e24 src/order_cmd.cpp
+--- a/src/order_cmd.cpp	Thu Sep 18 15:32:20 2008 +0000
++++ b/src/order_cmd.cpp	Fri Sep 19 21:11:08 2008 +0200
+@@ -898,7 +898,7 @@ CommandCost CmdModifyOrder(TileIndex til
+ 			break;
+ 
+ 		case MOF_DEPOT_ACTION:
+-			if (data != 0) return CMD_ERROR;
++			if (data >= DA_END) return CMD_ERROR;
+ 			break;
+ 
+ 		case MOF_COND_VARIABLE:
+@@ -961,9 +961,27 @@ CommandCost CmdModifyOrder(TileIndex til
+ 				}
+ 				break;
+ 
+-			case MOF_DEPOT_ACTION:
+-				order->SetDepotOrderType((OrderDepotTypeFlags)(order->GetDepotOrderType() ^ ODTFB_SERVICE));
+-				break;
++			case MOF_DEPOT_ACTION: {
++				switch (data) {
++					case DA_ALWAYS_GO:
++						order->SetDepotOrderType((OrderDepotTypeFlags)(order->GetDepotOrderType() & ~ODTFB_SERVICE));
++						order->SetDepotActionType((OrderDepotActionFlags)(order->GetDepotActionType() & ~ODATFB_HALT));
++						break;
++
++					case DA_SERVICE:
++						order->SetDepotOrderType((OrderDepotTypeFlags)(order->GetDepotOrderType() | ODTFB_SERVICE));
++						order->SetDepotActionType((OrderDepotActionFlags)(order->GetDepotActionType() & ~ODATFB_HALT));
++						break;
++
++					case DA_STOP:
++						order->SetDepotOrderType((OrderDepotTypeFlags)(order->GetDepotOrderType() & ~ODTFB_SERVICE));
++						order->SetDepotActionType((OrderDepotActionFlags)(order->GetDepotActionType() | ODATFB_HALT));
++						break;
++
++					default:
++						NOT_REACHED();
++				}
++			} break;
+ 
+ 			case MOF_COND_VARIABLE: {
+ 				order->SetConditionVariable((OrderConditionVariable)data);
+diff -r b4bef78a1e24 src/order_gui.cpp
+--- a/src/order_gui.cpp	Thu Sep 18 15:32:20 2008 +0000
++++ b/src/order_gui.cpp	Fri Sep 19 21:11:08 2008 +0200
+@@ -161,6 +161,23 @@ extern uint ConvertSpeedToDisplaySpeed(u
+ extern uint ConvertSpeedToDisplaySpeed(uint speed);
+ extern uint ConvertDisplaySpeedToSpeed(uint speed);
+ 
++static const StringID _order_depot_action_dropdown[] = {
++	STR_ORDER_DROP_GO_ALWAYS_DEPOT,
++	STR_ORDER_DROP_SERVICE_DEPOT,
++	STR_ORDER_DROP_HALT_DEPOT,
++	INVALID_STRING_ID
++};
++
++static int DepotActionStringIndex(const Order *order)
++{
++	if (order->GetDepotActionType() & ODATFB_HALT) {
++		return DA_STOP;
++	} else if (order->GetDepotOrderType() & ODTFB_SERVICE) {
++		return DA_SERVICE;
++	} else {
++		return DA_ALWAYS_GO;
++	}
++}
+ 
+ void DrawOrderString(const Vehicle *v, const Order *order, int order_index, int y, bool selected, bool timetable, int width)
+ {
+@@ -226,8 +243,12 @@ void DrawOrderString(const Vehicle *v, c
+ 				SetDParam(2, (order->GetNonStopType() & ONSF_NO_STOP_AT_INTERMEDIATE_STATIONS) ? STR_ORDER_GO_NON_STOP_TO : STR_ORDER_GO_TO);
+ 			}
+ 
++			if (!timetable && (order->GetDepotActionType() & ODATFB_HALT)) {
++				SetDParam(6, STR_STOP_ORDER);
++			}
++
+ 			if (!timetable && order->IsRefit()) {
+-				SetDParam(6, STR_REFIT_ORDER);
++				SetDParam(6, (order->GetDepotActionType() & ODATFB_HALT) ? STR_REFIT_STOP_ORDER : STR_REFIT_ORDER);
+ 				SetDParam(7, GetCargo(order->GetRefitCargo())->name);
+ 			}
+ 			break;
+@@ -465,7 +486,7 @@ private:
+ 	 */
+ 	static void OrderClick_Service(OrdersWindow *w, int i)
+ 	{
+-		DoCommandP(w->vehicle->tile, w->vehicle->index + (w->OrderGetSel() << 16), MOF_DEPOT_ACTION, NULL, CMD_MODIFY_ORDER | CMD_MSG(STR_8835_CAN_T_MODIFY_THIS_ORDER));
++		DoCommandP(w->vehicle->tile, w->vehicle->index + (w->OrderGetSel() << 16), MOF_DEPOT_ACTION | (i << 4), NULL, CMD_MODIFY_ORDER | CMD_MSG(STR_8835_CAN_T_MODIFY_THIS_ORDER));
+ 	}
+ 
+ 	/**
+@@ -635,6 +656,7 @@ public:
+ 
+ 		if (this->vehicle->owner == _local_player) {
+ 			/* Set the strings for the dropdown boxes. */
++			this->widget[ORDER_WIDGET_SERVICE].data         = _order_depot_action_dropdown[order == NULL ? 0 : DepotActionStringIndex(order)];
+ 			this->widget[ORDER_WIDGET_COND_VARIABLE].data   = _order_conditional_variable[order == NULL ? 0 : order->GetConditionVariable()];
+ 			this->widget[ORDER_WIDGET_COND_COMPARATOR].data = _order_conditional_condition[order == NULL ? 0 : order->GetConditionComparator()];
+ 
+@@ -853,7 +875,7 @@ public:
+ 				break;
+ 
+ 			case ORDER_WIDGET_SERVICE:
+-				OrderClick_Service(this, 0);
++				ShowDropDownMenu(this, _order_depot_action_dropdown, DepotActionStringIndex(GetVehicleOrder(this->vehicle, this->OrderGetSel())), ORDER_WIDGET_SERVICE, 0, 0);
+ 				break;
+ 
+ 			case ORDER_WIDGET_TIMETABLE_VIEW:
+@@ -927,6 +949,10 @@ public:
+ 					case 2: OrderClick_Conditional(this, 0); break;
+ 					default: NOT_REACHED();
+ 				}
++				break;
++
++			case ORDER_WIDGET_SERVICE:
++				OrderClick_Service(this, index);
+ 				break;
+ 
+ 			case ORDER_WIDGET_COND_VARIABLE:
+@@ -1082,7 +1108,7 @@ static const Widget _orders_train_widget
+ 	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,   248,   371,    76,    87, STR_NULL,                STR_ORDER_TOOLTIP_UNLOAD},            // ORDER_WIDGET_UNLOAD_DROPDOWN
+ 	{    WWT_TEXTBTN,   RESIZE_TB,     COLOUR_GREY,   248,   359,    76,    87, STR_ORDER_TOGGLE_UNLOAD, STR_ORDER_TOOLTIP_UNLOAD},            // ORDER_WIDGET_UNLOAD
+ 	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,   124,   247,    76,    87, STR_REFIT,               STR_REFIT_TIP},                       // ORDER_WIDGET_REFIT
+-	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,   248,   371,    76,    87, STR_SERVICE,             STR_SERVICE_HINT},                    // ORDER_WIDGET_SERVICE
++	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,   248,   371,    76,    87, STR_NULL,                STR_SERVICE_HINT},                    // ORDER_WIDGET_SERVICE
+ 
+ 	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,     0,   123,    76,    87, STR_NULL,                STR_ORDER_CONDITIONAL_VARIABLE_TOOLTIP},   // ORDER_WIDGET_COND_VARIABLE
+ 	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,   124,   247,    76,    87, STR_NULL,                STR_ORDER_CONDITIONAL_COMPARATOR_TOOLTIP}, // ORDER_WIDGET_COND_COMPARATOR
+@@ -1125,7 +1151,7 @@ static const Widget _orders_widgets[] = 
+ 	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,   186,   371,    76,    87, STR_NULL,                STR_ORDER_TOOLTIP_UNLOAD},            // ORDER_WIDGET_UNLOAD_DROPDOWN
+ 	{    WWT_TEXTBTN,   RESIZE_TB,     COLOUR_GREY,   186,   359,    76,    87, STR_ORDER_TOGGLE_UNLOAD, STR_ORDER_TOOLTIP_UNLOAD},            // ORDER_WIDGET_UNLOAD
+ 	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,     0,   185,    76,    87, STR_REFIT,               STR_REFIT_TIP},                       // ORDER_WIDGET_REFIT
+-	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,   186,   371,    76,    87, STR_SERVICE,             STR_SERVICE_HINT},                    // ORDER_WIDGET_SERVICE
++	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,   186,   371,    76,    87, STR_NULL,                STR_SERVICE_HINT},                    // ORDER_WIDGET_SERVICE
+ 
+ 	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,     0,   123,    76,    87, STR_NULL,                STR_ORDER_CONDITIONAL_VARIABLE_TOOLTIP},   // ORDER_WIDGET_COND_VARIABLE
+ 	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,   124,   247,    76,    87, STR_NULL,                STR_ORDER_CONDITIONAL_COMPARATOR_TOOLTIP}, // ORDER_WIDGET_COND_COMPARATOR
+diff -r b4bef78a1e24 src/order_type.h
+--- a/src/order_type.h	Thu Sep 18 15:32:20 2008 +0000
++++ b/src/order_type.h	Fri Sep 19 21:11:08 2008 +0200
+@@ -122,12 +122,19 @@ enum ModifyOrderFlags {
+ 	MOF_NON_STOP,        ///< Passes a OrderNonStopFlags.
+ 	MOF_UNLOAD,          ///< Passes an OrderUnloadType.
+ 	MOF_LOAD,            ///< Passes an OrderLoadType
+-	MOF_DEPOT_ACTION,    ///< Toggle the 'service' if needed flag.
++	MOF_DEPOT_ACTION,    ///< Selects the OrderDepotAction
+ 	MOF_COND_VARIABLE,   ///< A conditional variable changes.
+ 	MOF_COND_COMPARATOR, ///< A comparator changes.
+ 	MOF_COND_VALUE,      ///< The value to set the condition to.
+ 	MOF_COND_DESTINATION,///< Change the destination of a conditional order.
+ 	MOF_END
++};
++
++enum OrderDepotAction {
++	DA_ALWAYS_GO, ///< Always go to the depot
++	DA_SERVICE,   ///< Service only if needed
++	DA_STOP,      ///< Go to the depot and stop there
++	DA_END
+ };
+ 
+ 
+diff -r b4bef78a1e24 src/vehicle.cpp
+--- a/src/vehicle.cpp	Thu Sep 18 15:32:20 2008 +0000
++++ b/src/vehicle.cpp	Fri Sep 19 21:11:08 2008 +0200
+@@ -721,9 +721,10 @@ void VehicleEnteredDepotThisTick(Vehicle
+ {
+ 	/* We need to set v->leave_depot_instantly as we have no control of it's contents at this time.
+ 	 * Vehicle should stop in the depot if it was in 'stopping' state - train intered depot while slowing down. */
+-	if (((v->current_order.GetDepotActionType() & ODATFB_HALT) && !(v->current_order.GetDepotOrderType() & ODTFB_PART_OF_ORDERS) && v->current_order.IsType(OT_GOTO_DEPOT)) ||
++	if (((v->current_order.GetDepotActionType() & ODATFB_HALT) && v->current_order.IsType(OT_GOTO_DEPOT)) ||
+ 			(v->vehstatus & VS_STOPPED)) {
+ 		/* we keep the vehicle in the depot since the user ordered it to stay */
++		v->vehstatus |= VS_STOPPED; // needed for refitting
+ 		v->leave_depot_instantly = false;
+ 	} else {
+ 		/* the vehicle do not plan on stopping in the depot, so we stop it to ensure that it will not reserve the path
+@@ -1618,7 +1619,8 @@ void VehicleEnterDepot(Vehicle *v)
+ 			/* Part of orders */
+ 			UpdateVehicleTimetable(v, true);
+ 			v->cur_order_index++;
+-		} else if (t.GetDepotActionType() & ODATFB_HALT) {
++		}
++		if (t.GetDepotActionType() & ODATFB_HALT) {
+ 			/* Force depot visit */
+ 			v->vehstatus |= VS_STOPPED;
+ 			if (v->owner == _local_player) {
+diff -r b4bef78a1e24 src/vehicle_gui.cpp
+--- a/src/vehicle_gui.cpp	Thu Sep 18 15:32:20 2008 +0000
++++ b/src/vehicle_gui.cpp	Fri Sep 19 21:11:08 2008 +0200
+@@ -1912,7 +1912,7 @@ struct VehicleViewWindow : Window {
+ 						SetDParam(0, depot->town_index);
+ 						SetDParam(1, v->GetDisplaySpeed());
+ 					}
+-					if ((v->current_order.GetDepotActionType() & ODATFB_HALT) && !(v->current_order.GetDepotOrderType() & ODTFB_PART_OF_ORDERS)) {
++					if (v->current_order.GetDepotActionType() & ODATFB_HALT) {
+ 						str = _heading_for_depot_strings[v->type] + _settings_client.gui.vehicle_speed;
+ 					} else {
+ 						str = _heading_for_depot_service_strings[v->type] + _settings_client.gui.vehicle_speed;

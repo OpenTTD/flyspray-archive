@@ -1,0 +1,228 @@
+diff -r 13f2a978c6a5 src/os/macosx/macos.mm
+--- a/src/os/macosx/macos.mm	Sun Aug 30 23:01:26 2009 +0200
++++ b/src/os/macosx/macos.mm	Mon Aug 31 00:06:31 2009 +0200
+@@ -11,29 +11,132 @@
+ #include "../../core/bitmath_func.hpp"
+ #include "../../rev.h"
+ 
++#include <sys/sysctl.h>  
++#include <fcntl.h>
++#include <mach-o/arch.h>
++#include <mach/machine.h>
++
++
+ #define Rect  OTTDRect
+ #define Point OTTDPoint
+ #include <AppKit/AppKit.h>
+ #undef Rect
+ #undef Point
+ 
+-#include <mach/mach.h>
+-#include <mach/mach_host.h>
+-#include <mach/host_info.h>
+-#include <mach/machine.h>
+ 
+-#ifndef CPU_SUBTYPE_POWERPC_970
+-#define CPU_SUBTYPE_POWERPC_970 ((cpu_subtype_t) 100)
++/* These are not defined in the 10.4 SDK. */
++#ifndef CPUFAMILY_INTEL_6_23
++#define CPUFAMILY_INTEL_6_23 0x78ea4fbc  /* Penryn */
++#endif
++#ifndef CPUFAMILY_INTEL_6_26
++#define CPUFAMILY_INTEL_6_26 0x6b5a4cd2  /* Nehalem */
+ #endif
+ 
+-/*
+- * This file contains objective C
++
++/**
++* This file contains objective C
+  * Apple uses objective C instead of plain C to interact with OS specific/native functions
+  *
+  * Note: TrueLight's crosscompiler can handle this, but it likely needs a manual modification for each change in this file.
+  * To insure that the crosscompiler still works, let him try any changes before they are committed
+  */
+ 
++
++enum StrLength_MacOSErrormessages {
++	STRLEN_OSVERSION = 40,                                                   ///< Lenght of string containing OS Version identification
++	STRLEN_CPUFAMILY = 100,                                                  ///< Length of string containing processor family information. Must be smaller than STRLEN_PROCESSOR
++	STRLEN_PROCESSOR = 150,                                                  ///< Length of string containing processor information
++	STRLEN_NEWGRFS   = 150,                                                  ///< Length of string containing newgrf information
++	STRLEN_TOTAL     = STRLEN_OSVERSION + STRLEN_PROCESSOR + STRLEN_NEWGRFS, ///< equal the total less the cpufamily 
++};
++
++int _getSysCTLvalue(const char key[], unsigned long * dest)
++{
++	size_t len = 0;
++	/*
++	 * Call with NULL for 'dest' to get the size. If the 'key' doesn't exist, the  
++	 * 'err' returned will be -1, so 0 indicates success. 
++	 */
++	int err = sysctlbyname(key, NULL, &len, NULL, 0);
++	if (err == 0) {
++		assert(len == sizeof(unsigned long));
++		err = sysctlbyname(key, dest, &len, NULL, 0);
++	}
++	return err;
++}
++
++/**
++ * This gives the correct CPU type in some cases, but by far not all; 
++ * e.g. it doesn't work for MacBooks with Core2Duo processors which are
++ * reported as i486 (80486) processors
++ *@param char ret_strg[STRLEN_PROCESSOR] String with processor information
++ */
++void GetProcessorType(char ret_strg[STRLEN_PROCESSOR])
++{
++	unsigned long raw_version;
++	
++	/* Determine CPU Family, Type, and Subtype */
++	int cpufam  = 0;
++	int cputype = 0;
++	int cpusub  = 0;
++	/*
++	 *Most important information: the CPU family as hex value. If everything else
++	 * fails, we still then have a chance to google that.
++	 * Custom code for processor detection adopted from Sean OBrien
++	 * ( http://www.garagegames.com/community/resources/view/17985 )
++	 */
++	char family_str[STRLEN_CPUFAMILY];
++	int err = _getSysCTLvalue("hw.cpufamily", &raw_version);
++	if (!err) {
++		cpufam = (int) raw_version;
++		err = _getSysCTLvalue("hw.cputype", &raw_version);
++		if (!err) {
++			cputype = (int) raw_version;
++			err = _getSysCTLvalue("hw.cpusubtype", &raw_version);
++			if (!err) cpusub = (int) raw_version;
++			/* If we've made it this far... */
++			switch (cpufam) {
++				case CPUFAMILY_POWERPC_G3:
++					sprintf(family_str,"PowerPC G3");
++				case CPUFAMILY_POWERPC_G4:
++					sprintf(family_str,"PowerPC G4");
++				case CPUFAMILY_POWERPC_G5:
++					sprintf(family_str,"PowerPC G5");
++				case CPUFAMILY_INTEL_6_14:
++					sprintf(family_str,"Intel 'Yonam' Core Processor");
++				case CPUFAMILY_INTEL_6_15:
++					sprintf(family_str,"Intel 'Merom' Core Processor");
++				case CPUFAMILY_INTEL_6_23:
++					sprintf(family_str,"Intel 'Penryn' Core Processor");
++				case CPUFAMILY_INTEL_6_26:
++					sprintf(family_str,"Intel 'Nehalem' Core Processor");
++				default:
++					/**
++					 *We want to try MacOS' default method. So fake an error
++					 * for this method
++					 */
++					err = -1;
++			}
++		}
++	}
++	/*
++	 * Though it would be the easiest approach, we don't use this by default 
++	 * as we would miss out on the CPU family information and  and additionally
++	 * as those information are not always up2date and e.g. return for a 
++	 * core2duo also i486 type as 80486 CPU. It gives an indication, but is
++	 * off by quite a bit.
++	 */	
++	if (err) {
++		const NXArchInfo *archinfo = NXGetLocalArchInfo();				
++		if (archinfo != NULL) {
++			sprintf(family_str, "best guestimate is %s: %s", archinfo->name, archinfo->description);
++		} else {
++			sprintf(family_str, "unknown");
++		}
++	}
++	sprintf(ret_strg,"Processor: %s (ID %x, Type %d, Subtype %d)",family_str, cpufam, cputype, cpusub);
++}
++
+ /**
+  * This should give the version correct irrespective of version details
+  * Code adopted from http://www.cocoadev.com/index.pl?DeterminingOSVersion
+@@ -42,7 +145,6 @@
+  * @param return_bugfix bugfix version of the os. This would be 11 in the case of 10.4.11.
+  * A return value of -1 indicates that something went wrong and we don't know.
+  */
+-
+ void GetMacOSVersion(int *return_major, int *return_minor, int *return_bugfix)
+ {
+ 	/* Default value = -1 in case an error occurs */
+@@ -56,7 +158,7 @@
+ 			*return_minor  = GB(systemVersion, 4, 4);
+ 			*return_bugfix = GB(systemVersion, 0, 4);
+ 		} else {
+-			if (Gestalt(gestaltSystemVersionMajor,  &version_major) == noErr) *return_major = (int) version_major; 
++			if (Gestalt(gestaltSystemVersionMajor,  &version_major) == noErr) *return_major = (int) version_major;
+ 			if (Gestalt(gestaltSystemVersionMinor,  &version_minor) == noErr) *return_minor = (int) version_minor;
+ 			if (Gestalt(gestaltSystemVersionBugFix, &version_bugfix) == noErr) *return_bugfix = (int) version_bugfix;
+ 		}
+@@ -67,38 +169,15 @@
+ 
+ static char *GetOSString()
+ {
+-	// get the hardware info
+-	host_basic_info_data_t hostInfo;
+-	mach_msg_type_number_t infoCount;
+-
+-	infoCount = HOST_BASIC_INFO_COUNT;
+-	host_info(
+-		mach_host_self(), HOST_BASIC_INFO, (host_info_t)&hostInfo, &infoCount
+-	);
+-
+-	// replace the hardware info with strings, that tells a bit more than just an int
+-	const char *CPU;
+-	switch (hostInfo.cpu_subtype) {
+-#ifdef __POWERPC__
+-		case CPU_SUBTYPE_POWERPC_750:  CPU = "G3"; break;
+-		case CPU_SUBTYPE_POWERPC_7400:
+-		case CPU_SUBTYPE_POWERPC_7450: CPU = "G4"; break;
+-		case CPU_SUBTYPE_POWERPC_970:  CPU = "G5"; break;
+-		default:                       CPU = "Unknown PPC"; break;
+-#else
+-		/* it looks odd to have a switch for two cases, but it leaves room for easy
+-		 * expansion. Odds are that Apple will some day use newer CPUs than i686
+-		 */
+-		case CPU_SUBTYPE_PENTPRO: CPU = "i686"; break;
+-		default:                  CPU = "Unknown Intel"; break;
+-#endif
+-	}
+-
++	/*s Obtain CPU information */
++	char CPU[STRLEN_PROCESSOR];
++	GetProcessorType(CPU);
++	
+ 	/**
+ 	 * Get the version of OSX
+ 	 * Maximum length of the OS-Version string should not exceed 40 chars.
+ 	 */
+-	char OS[40];
++	char OS[STRLEN_OSVERSION];
+ 	int version_major;
+ 	int version_minor;
+ 	int version_bugfix;
+@@ -110,8 +189,11 @@
+ 		sprintf(OS, "uncertain %d.%d.%d", version_major, version_minor, version_bugfix);
+ 	}
+ 
+-	/* Make a list of used newgrf files */
+-	char newgrf[125];
++	/*
++	 * Make a list of used newgrf files 
++	 * TODO: get a decent list of newgrfs and report them here 
++	 */
++	char newgrf[STRLEN_NEWGRFS];
+ /*	if (_first_grffile != NULL) {
+ 		char *n = newgrf;
+ 		const GRFFile *file;
+@@ -124,7 +206,7 @@
+ 		sprintf(newgrf, "unkown");
+ //	}
+ 
+-	static char buffer[195];
++	static char buffer[STRLEN_TOTAL];
+ 	snprintf(
+ 		buffer, lengthof(buffer),
+ 		"Please add this info: (tip: copy-paste works)\n"

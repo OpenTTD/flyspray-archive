@@ -1,0 +1,380 @@
+Index: src/terraform_gui.h
+===================================================================
+--- src/terraform_gui.h	(revision 18927)
++++ src/terraform_gui.h	(working copy)
+@@ -19,4 +19,7 @@
+ Window *ShowEditorTerraformToolbar();
+ void ShowEditorTerraformToolbarWithTool(uint16 key, uint16 keycode);
+ 
++bool TerraformAddErrorTile(TileIndex tile);
++void TerraformClearErrorTiles();
++bool IsTerraformErrorTile(TileIndex tile);
+ #endif /* GUI_H */
+Index: src/terraform_cmd.cpp
+===================================================================
+--- src/terraform_cmd.cpp	(revision 18927)
++++ src/terraform_cmd.cpp	(working copy)
+@@ -17,6 +17,7 @@
+ #include "variables.h"
+ #include "functions.h"
+ #include "economy_func.h"
++#include "tilehighlight_func.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -54,9 +55,67 @@
+ 	TerraformerHeightMod modheight[TERRAFORMER_MODHEIGHT_SIZE];  ///< Height modifications.
+ };
+ 
+-TileIndex _terraform_err_tile; ///< first tile we couldn't terraform
++TileIndex _terraform_err_tiles[TERRAFORMER_TILE_TABLE_SIZE+1]; ///< the list of tiles that we couldn't terraform
++TileIndex *_terraform_err_max = _terraform_err_tiles;
+ 
+ /**
++ * Adds a tile to the list of errors. Error tiles end up with a red
++ * selection square drawn around them. Duplicates are not removed from
++ * the list, but don't cause any trouble either. If, in the future,
++ * duplicates would cause trouble this function should be updated to
++ * silently prevent them.
++ *
++ * @PARAM tile The tile in question.
++ */
++void TerraformAddErrorTile(TileIndex tile)
++{
++	if (_terraform_err_max - _terraform_err_tiles <= TERRAFORMER_TILE_TABLE_SIZE) {
++		*_terraform_err_max = tile;
++		_terraform_err_max++;
++		*_terraform_err_max = INVALID_TILE;
++		MarkTileDirtyByTile(tile);
++	}
++}
++
++/**
++ * Clears the list of error tiles.
++ */
++void TerraformClearErrorTiles()
++{
++	TileIndex old_redsq = _thd.redsq;
++	_thd.redsq = INVALID_TILE;
++	MarkTileDirtyByTile(old_redsq);
++
++	TileIndex *ptr = _terraform_err_tiles;
++	while (ptr < _terraform_err_max) {
++		MarkTileDirtyByTile(*ptr);
++		ptr++;
++	}
++
++	_terraform_err_max = _terraform_err_tiles;
++	*_terraform_err_max = INVALID_TILE;
++}
++
++/**
++ * Returns true when the tile in question is listed as an error tile.
++ *
++ * @PARAM tile The tile in question.
++ * @RETURN True when the tile is listed as an error tile.
++ */
++bool IsTerraformErrorTile(TileIndex tile)
++{
++	if (tile == INVALID_TILE) return false;
++
++	TileIndex *ptr = _terraform_err_tiles;
++	while (ptr < _terraform_err_max) {
++		if (*ptr == tile) return true;
++		ptr++;
++	}
++
++	return false;
++}
++
++/**
+  * Gets the TileHeight (height of north corner) of a tile as of current terraforming progress.
+  *
+  * @param ts TerraformerState.
+@@ -165,6 +224,8 @@
+ 	 */
+ 	if (height == TerraformGetHeightOfTile(ts, tile)) return CMD_ERROR;
+ 
++	CommandCost total_cost(EXPENSES_CONSTRUCTION);
++
+ 	/* Check "too close to edge of map". Only possible when freeform-edges is off. */
+ 	uint x = TileX(tile);
+ 	uint y = TileY(tile);
+@@ -174,8 +235,8 @@
+ 		 */
+ 		if (x == 1) x = 0;
+ 		if (y == 1) y = 0;
+-		_terraform_err_tile = TileXY(x, y);
+-		return_cmd_error(STR_ERROR_TOO_CLOSE_TO_EDGE_OF_MAP);
++		TerraformAddErrorTile(TileXY(x, y));
++		total_cost.AddCost(CommandCost(STR_ERROR_TOO_CLOSE_TO_EDGE_OF_MAP));
+ 	}
+ 
+ 	/* Mark incident tiles, that are involved in the terraforming */
+@@ -184,8 +245,6 @@
+ 	/* Store the height modification */
+ 	TerraformSetHeightOfTile(ts, tile, height);
+ 
+-	CommandCost total_cost(EXPENSES_CONSTRUCTION);
+-
+ 	/* Increment cost */
+ 	total_cost.AddCost(_price[PR_TERRAFORM]);
+ 
+@@ -218,7 +277,6 @@
+ 				/* Terraform the neighboured corner. The resulting height difference should be 1. */
+ 				height_diff += (height_diff < 0 ? 1 : -1);
+ 				CommandCost cost = TerraformTileHeight(ts, tile, r + height_diff);
+-				if (cost.Failed()) return cost;
+ 				total_cost.AddCost(cost);
+ 			}
+ 		}
+@@ -237,7 +295,7 @@
+  */
+ CommandCost CmdTerraformLand(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text)
+ {
+-	_terraform_err_tile = INVALID_TILE;
++	TerraformClearErrorTiles();
+ 
+ 	CommandCost total_cost(EXPENSES_CONSTRUCTION);
+ 	int direction = (p2 != 0 ? 1 : -1);
+@@ -249,28 +307,24 @@
+ 	if ((p1 & SLOPE_W) != 0 && tile + TileDiffXY(1, 0) < MapSize()) {
+ 		TileIndex t = tile + TileDiffXY(1, 0);
+ 		CommandCost cost = TerraformTileHeight(&ts, t, TileHeight(t) + direction);
+-		if (cost.Failed()) return cost;
+ 		total_cost.AddCost(cost);
+ 	}
+ 
+ 	if ((p1 & SLOPE_S) != 0 && tile + TileDiffXY(1, 1) < MapSize()) {
+ 		TileIndex t = tile + TileDiffXY(1, 1);
+ 		CommandCost cost = TerraformTileHeight(&ts, t, TileHeight(t) + direction);
+-		if (cost.Failed()) return cost;
+ 		total_cost.AddCost(cost);
+ 	}
+ 
+ 	if ((p1 & SLOPE_E) != 0 && tile + TileDiffXY(0, 1) < MapSize()) {
+ 		TileIndex t = tile + TileDiffXY(0, 1);
+ 		CommandCost cost = TerraformTileHeight(&ts, t, TileHeight(t) + direction);
+-		if (cost.Failed()) return cost;
+ 		total_cost.AddCost(cost);
+ 	}
+ 
+ 	if ((p1 & SLOPE_N) != 0) {
+ 		TileIndex t = tile + TileDiffXY(0, 0);
+ 		CommandCost cost = TerraformTileHeight(&ts, t, TileHeight(t) + direction);
+-		if (cost.Failed()) return cost;
+ 		total_cost.AddCost(cost);
+ 	}
+ 
+@@ -306,13 +360,17 @@
+ 			/* Check if bridge would take damage */
+ 			if (direction == 1 && MayHaveBridgeAbove(tile) && IsBridgeAbove(tile) &&
+ 					GetBridgeHeight(GetSouthernBridgeEnd(tile)) <= z_max * TILE_HEIGHT) {
+-				_terraform_err_tile = tile; // highlight the tile under the bridge
+-				return_cmd_error(STR_ERROR_MUST_DEMOLISH_BRIDGE_FIRST);
++				TerraformAddErrorTile(tile);
++				TerraformAddErrorTile(GetNorthernBridgeEnd(tile));
++				TerraformAddErrorTile(GetSouthernBridgeEnd(tile));
++				total_cost.AddCost(CommandCost(STR_ERROR_MUST_DEMOLISH_BRIDGE_FIRST));
+ 			}
+ 			/* Check if tunnel would take damage */
+-			if (direction == -1 && IsTunnelInWay(tile, z_min * TILE_HEIGHT)) {
+-				_terraform_err_tile = tile; // highlight the tile above the tunnel
+-				return_cmd_error(STR_ERROR_EXCAVATION_WOULD_DAMAGE);
++			else if (direction == -1 && IsTunnelInWay(tile, z_min * TILE_HEIGHT)) {
++				TerraformAddErrorTile(tile);
++				TerraformAddErrorTile(GetNorthernTunnelEnd(tile, z_min * TILE_HEIGHT));
++				TerraformAddErrorTile(GetSouthernTunnelEnd(tile, z_min * TILE_HEIGHT));
++				total_cost.AddCost(CommandCost(STR_ERROR_EXCAVATION_WOULD_DAMAGE));
+ 			}
+ 			/* Check tiletype-specific things, and add extra-cost */
+ 			const bool curr_gen = _generating_world;
+@@ -320,14 +378,19 @@
+ 			CommandCost cost = _tile_type_procs[GetTileType(tile)]->terraform_tile_proc(tile, flags | DC_AUTO, z_min * TILE_HEIGHT, tileh);
+ 			_generating_world = curr_gen;
+ 			if (cost.Failed()) {
+-				_terraform_err_tile = tile;
+-				return cost;
++				if (IsBridgeTile(tile)) {
++					TerraformAddErrorTile(GetOtherBridgeEnd(tile));
++				}
++				else if (IsTunnelTile(tile)) {
++					TerraformAddErrorTile(GetOtherTunnelEnd(tile));
++				}
++				TerraformAddErrorTile(tile);
+ 			}
+ 			total_cost.AddCost(cost);
+ 		}
+ 	}
+ 
+-	if (flags & DC_EXEC) {
++	if (flags & DC_EXEC && !total_cost.Failed()) {
+ 		/* change the height */
+ 		{
+ 			int count;
+@@ -366,7 +429,7 @@
+ {
+ 	if (p1 >= MapSize()) return CMD_ERROR;
+ 
+-	_terraform_err_tile = INVALID_TILE;
++	TerraformClearErrorTiles();
+ 
+ 	/* remember level height */
+ 	uint oldh = TileHeight(p1);
+@@ -386,9 +449,8 @@
+ 		uint curh = TileHeight(tile);
+ 		while (curh != h) {
+ 			CommandCost ret = DoCommand(tile, SLOPE_N, (curh > h) ? 0 : 1, flags & ~DC_EXEC, CMD_TERRAFORM_LAND);
+-			if (ret.Failed()) break;
+ 
+-			if (flags & DC_EXEC) {
++			if (flags & DC_EXEC && !ret.Failed()) {
+ 				money -= ret.GetCost();
+ 				if (money < 0) {
+ 					_additional_cash_required = ret.GetCost();
+@@ -397,7 +459,7 @@
+ 				DoCommand(tile, SLOPE_N, (curh > h) ? 0 : 1, flags, CMD_TERRAFORM_LAND);
+ 			}
+ 
+-			cost.AddCost(ret);
++			cost.AddCost(ret.GetCost());
+ 			curh += (curh > h) ? -1 : 1;
+ 		}
+ 	}
+Index: src/terraform_gui.cpp
+===================================================================
+--- src/terraform_gui.cpp	(revision 18927)
++++ src/terraform_gui.cpp	(working copy)
+@@ -38,9 +38,6 @@
+ {
+ 	if (result.Succeeded()) {
+ 		SndPlayTileFx(SND_1F_SPLAT, tile);
+-	} else {
+-		extern TileIndex _terraform_err_tile;
+-		SetRedErrorSquare(_terraform_err_tile);
+ 	}
+ }
+ 
+Index: src/tunnel_map.cpp
+===================================================================
+--- src/tunnel_map.cpp	(revision 18927)
++++ src/tunnel_map.cpp	(working copy)
+@@ -37,15 +37,16 @@
+ 	return tile;
+ }
+ 
+-
+ /**
+- * Is there a tunnel in the way in the given direction?
++ * If there is a tunnel in the way in the given direction, return the
++ * endpoint of the tunnel in that direction.
++ *
+  * @param tile the tile to search from.
+- * @param z    the 'z' to search on.
++ * @param z	   the 'z' to search on.
+  * @param dir  the direction to start searching to.
+- * @return true if and only if there is a tunnel.
++ * @return TileIndex
+  */
+-bool IsTunnelInWayDir(TileIndex tile, uint z, DiagDirection dir)
++TileIndex GetTunnelInWayDir(TileIndex tile, uint z, DiagDirection dir)
+ {
+ 	TileIndexDiff delta = TileOffsByDiagDir(dir);
+ 	uint height;
+@@ -56,13 +57,57 @@
+ 		height = GetTileZ(tile);
+ 	} while (z < height);
+ 
+-	return
+-		z == height &&
+-		IsTunnelTile(tile) &&
+-		GetTunnelBridgeDirection(tile) == dir;
++	if (z == height &&
++			IsTunnelTile(tile) &&
++			GetTunnelBridgeDirection(tile) == dir)
++		return tile;
++	return INVALID_TILE;
+ }
+ 
+ /**
++ * If there is a tunnel here, then return its northernmost endpoint.
++ *
++ * @param tile the tile to search from.
++ * @param z    the 'z' to search on.
++ * @return TilIndex
++ */
++TileIndex GetNorthernTunnelEnd(TileIndex tile, uint z)
++{
++	TileIndex e = GetTunnelInWayDir(tile, z, DIAGDIR_NW);
++	if (e == INVALID_TILE) e = GetTunnelInWayDir(tile, z, DIAGDIR_NE);
++	return e;
++}
++
++/**
++ * If there is a tunnel here, then return its southernmost endpoint.
++ *
++ * @param tile the tile to search from.
++ * @param z	   the 'z' to search on.
++ * @return TilIndex
++ */
++TileIndex GetSouthernTunnelEnd(TileIndex tile, uint z)
++{
++	TileIndex e = GetTunnelInWayDir(tile, z, DIAGDIR_SW);
++	if (e == INVALID_TILE) e = GetTunnelInWayDir(tile, z, DIAGDIR_SE);
++	return e;
++}
++
++/**
++ * Is there a tunnel in the way in the given direction?
++ * @param tile the tile to search from.
++ * @param z	   the 'z' to search on.
++ * @param dir  the direction to start searching to.
++ * @return true if and only if there is a tunnel.
++ */
++bool IsTunnelInWayDir(TileIndex tile, uint z, DiagDirection dir)
++{
++	if (GetTunnelInWayDir(tile, z, dir) == INVALID_TILE) {
++		return false;
++	}
++	return true;
++}
++
++/**
+  * Is there a tunnel in the way in any direction?
+  * @param tile the tile to search from.
+  * @param z the 'z' to search on.
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 18927)
++++ src/viewport.cpp	(working copy)
+@@ -45,6 +45,7 @@
+ #include "window_func.h"
+ #include "tilehighlight_func.h"
+ #include "window_gui.h"
++#include "terraform_gui.h"
+ 
+ #include "table/sprites.h"
+ #include "table/strings.h"
+@@ -930,7 +931,7 @@
+ static void DrawTileSelection(const TileInfo *ti)
+ {
+ 	/* Draw a red error square? */
+-	bool is_redsq = _thd.redsq == ti->tile;
++	bool is_redsq = _thd.redsq == ti->tile || IsTerraformErrorTile(ti->tile);
+ 	if (is_redsq) DrawTileSelectionRect(ti, PALETTE_TILE_RED_PULSATING);
+ 
+ 	/* no selection active? */
+Index: src/tunnel_map.h
+===================================================================
+--- src/tunnel_map.h	(revision 18927)
++++ src/tunnel_map.h	(working copy)
+@@ -40,6 +40,9 @@
+ TileIndex GetOtherTunnelEnd(TileIndex);
+ bool IsTunnelInWay(TileIndex, uint z);
+ bool IsTunnelInWayDir(TileIndex tile, uint z, DiagDirection dir);
++TileIndex GetTunnelInWayDir(TileIndex tile, uint z, DiagDirection dir);
++TileIndex GetNorthernTunnelEnd(TileIndex tile, uint z);
++TileIndex GetSouthernTunnelEnd(TileIndex tile, uint z);
+ 
+ /**
+  * Makes a road tunnel entrance

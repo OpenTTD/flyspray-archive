@@ -1,0 +1,657 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 14173)
++++ src/lang/english.txt	(working copy)
+@@ -2755,13 +2755,22 @@
+ STR_ORDER_CONDITIONAL_VARIABLE_TOOLTIP                          :{BLACK}Vehicle data to base jumping on
+ STR_ORDER_CONDITIONAL_COMPARATOR_TOOLTIP                        :{BLACK}How to compare the vehicle data to the given value
+ STR_ORDER_CONDITIONAL_VALUE_TOOLTIP                             :{BLACK}The value to compare the vehicle data against
++STR_ORDER_CONDITIONAL_CARGO_TOOLTIP                             :{BLACK}The cargo to compare the station data against
+ STR_ORDER_CONDITIONAL_VALUE_CAPT                                :{WHITE}Enter value to compare against
+ STR_ORDER_CONDITIONAL_LOAD_PERCENTAGE                           :Load percentage
+ STR_ORDER_CONDITIONAL_RELIABILITY                               :Reliability
+ STR_ORDER_CONDITIONAL_MAX_SPEED                                 :Maximum speed
+ STR_ORDER_CONDITIONAL_AGE                                       :Vehicle age (years)
+-STR_ORDER_CONDITIONAL_REQUIRES_SERVICE                          :Requires service
++STR_ORDER_CONDITIONAL_REQUIRES_SERVICE                          :Requires service {STRING}
+ STR_ORDER_CONDITIONAL_UNCONDITIONALLY                           :Always
++STR_ORDER_CONDITIONAL_CARGO_WAITING                             :Next station {STRING} {STRING} waiting
++STR_ORDER_CONDITIONAL_ACCEPTANCE                                :Next station {STRING} {STRING}
++STR_ORDER_CONDITIONAL_PERCENT                                   :Percent of times
++STR_ORDER_CONDITIONAL_FREE_PLATFORMS                            :Free platforms
++STR_ORDER_CONDITIONAL_REQUIRES_SERVICE_DROPDOWN                 :Requires service
++STR_ORDER_CONDITIONAL_CARGO_WAITING_DROPDOWN                    :Waiting cargo
++STR_ORDER_CONDITIONAL_ACCEPTANCE_DROPDOWN                       :Accepted cargo
++STR_ORDER_CONDITIONAL_NEXT_STATION                              :Next station
+ STR_ORDER_CONDITIONAL_COMPARATOR_EQUALS                         :is equal to
+ STR_ORDER_CONDITIONAL_COMPARATOR_NOT_EQUALS                     :is not equal to
+ STR_ORDER_CONDITIONAL_COMPARATOR_LESS_THAN                      :is less than
+@@ -2770,10 +2779,20 @@
+ STR_ORDER_CONDITIONAL_COMPARATOR_MORE_EQUALS                    :is more or equal to
+ STR_ORDER_CONDITIONAL_COMPARATOR_IS_TRUE                        :is true
+ STR_ORDER_CONDITIONAL_COMPARATOR_IS_FALSE                       :is false
++STR_ORDER_CONDITIONAL_COMPARATOR_ACCEPTS                        :accepts
++STR_ORDER_CONDITIONAL_COMPARATOR_DOES_NOT_ACCEPT                :does not accept
++STR_ORDER_CONDITIONAL_COMPARATOR_HAS                            :has
++STR_ORDER_CONDITIONAL_COMPARATOR_HAS_NO                         :does not have
++STR_ORDER_CONDITIONAL_COMPARATOR_HAS_LESS_THAN                  :has less than
++STR_ORDER_CONDITIONAL_COMPARATOR_HAS_LESS_EQUALS                :has less than or exactly
++STR_ORDER_CONDITIONAL_COMPARATOR_HAS_MORE_THAN                  :has more than
++STR_ORDER_CONDITIONAL_COMPARATOR_HAS_MORE_EQUALS                :has more than or exactly
+ STR_CONDITIONAL_VALUE                                           :{SKIP}{BLACK}{COMMA}
+ STR_CONDITIONAL_UNCONDITIONAL                                   :Jump to order {COMMA}
+ STR_CONDITIONAL_NUM                                             :Jump to order {COMMA} when {STRING} {STRING} {COMMA}
+-STR_CONDITIONAL_TRUE_FALSE                                      :Jump to order {COMMA} when {STRING} {STRING}
++STR_CONDITIONAL_TRUE_FALSE                                      :Jump to order {COMMA} when {STRING2}
++STR_CONDITIONAL_FREE_PLATFORMS                                  :Jump to order {COMMA} when Next station {STRING} {COMMA} free platform{P "" s}
++STR_CONDITIONAL_PERCENT                                         :Jump to order {COMMA}  {COMMA} percent of times
+ 
+ STR_TIMETABLE_NO_TRAVEL                                         :{SETX 30}No travel
+ STR_TIMETABLE_TRAVEL_NOT_TIMETABLED                             :{SETX 30}Travel (not timetabled)
+Index: src/order_base.h
+===================================================================
+--- src/order_base.h	(revision 14173)
++++ src/order_base.h	(working copy)
+@@ -34,6 +34,8 @@
+ 	CargoID refit_cargo;  ///< Refit CargoID
+ 	byte refit_subtype;   ///< Refit subtype
+ 
++	int8 jump_counter;    ///< Counter for the 'jump xx% of times' option
++
+ public:
+ 	Order *next;          ///< Pointer to next order. If NULL, end of list
+ 
+@@ -166,6 +168,14 @@
+ 	 */
+ 	void SetRefit(CargoID cargo, byte subtype = 0);
+ 
++	/**
++	 * Update the jump_counter of this order.
++	 * @param the jump chance in %.
++	 * @return whether to jump or not.
++	 * @pre IsType(OT_CONDITIONAL) && this->GetConditionVariable() == OCV_PERCENT.
++	 */
++	bool UpdateJumpCounter(uint8 percent);
++
+ 	/** How must the consist be loaded? */
+ 	inline OrderLoadFlags GetLoadType() const { return (OrderLoadFlags)GB(this->flags, 4, 4); }
+ 	/** How must the consist be unloaded? */
+Index: src/order_cmd.cpp
+===================================================================
+--- src/order_cmd.cpp	(revision 14173)
++++ src/order_cmd.cpp	(working copy)
+@@ -27,6 +27,10 @@
+ #include "vehicle_func.h"
+ #include "oldpool_func.h"
+ #include "depot_base.h"
++#include "station_base.h"
++#include "station_map.h"
++#include "station_func.h"
++#include "map_func.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -107,6 +111,16 @@
+ 	this->refit_subtype = subtype;
+ }
+ 
++bool Order::UpdateJumpCounter(byte percent)
++{
++	if(this->jump_counter >= 0) {
++		this->jump_counter += (percent - 100);
++		return true;
++	}
++	this->jump_counter += percent;
++	return false;
++}
++
+ void Order::FreeChain()
+ {
+ 	if (next != NULL) next->FreeChain();
+@@ -148,6 +162,7 @@
+ 	this->refit_subtype = 0;
+ 	this->wait_time     = 0;
+ 	this->travel_time   = 0;
++	this->jump_counter  = 0;
+ }
+ 
+ void Order::ConvertFromOldSavegame()
+@@ -271,6 +286,8 @@
+ 
+ 	this->wait_time   = other.wait_time;
+ 	this->travel_time = other.travel_time;
++
++	this->jump_counter = other.jump_counter;
+ }
+ 
+ 
+@@ -459,6 +476,10 @@
+ 			OrderConditionComparator occ = new_order.GetConditionComparator();
+ 			if (occ > OCC_END) return CMD_ERROR;
+ 			switch (new_order.GetConditionVariable()) {
++				case OCV_CARGO_WAITING:
++				case OCV_CARGO_ACCEPTANCE:
++					if (!GetCargo(new_order.GetConditionValue())->IsValid()) return CMD_ERROR;
++					/* FALL THROUGH */
+ 				case OCV_REQUIRES_SERVICE:
+ 					if (occ != OCC_IS_TRUE && occ != OCC_IS_FALSE) return CMD_ERROR;
+ 					break;
+@@ -468,6 +489,14 @@
+ 					if (new_order.GetConditionValue() != 0) return CMD_ERROR;
+ 					break;
+ 
++				case OCV_FREE_PLATFORMS:
++					if (v->type != VEH_TRAIN) return CMD_ERROR;
++					if (occ == OCC_IS_TRUE || occ == OCC_IS_FALSE) return CMD_ERROR;
++					break;
++
++				case OCV_PERCENT:
++					if (occ != OCC_EQUALS) return CMD_ERROR;
++					/* FALL THROUGH */
+ 				case OCV_LOAD_PERCENTAGE:
+ 				case OCV_RELIABILITY:
+ 					if (new_order.GetConditionValue() > 100) return CMD_ERROR;
+@@ -596,6 +625,22 @@
+ 	return CommandCost();
+ }
+ 
++/**
++ * Get the first cargoID that points to a valid cargo (usually 0)
++ */
++
++static CargoID GetFirstValidCargo()
++{
++	for (CargoID i = 0; i < NUM_CARGO; i++) {
++		if (GetCargo(i)->IsValid()) return i;
++	}
++	/* No cargos defined -> 'Houston, we have a problem!' */
++	assert(0);
++	/* Return something to avoid compiler warning */
++	return 0;
++}
++
++
+ /** Delete an order from the orderlist of a vehicle.
+  * @param tile unused
+  * @param flags operation to perform
+@@ -900,18 +945,26 @@
+ 			break;
+ 
+ 		case MOF_COND_VARIABLE:
++			if (data == OCV_FREE_PLATFORMS && v->type != VEH_TRAIN) return CMD_ERROR;
+ 			if (data >= OCV_END) return CMD_ERROR;
+ 			break;
+ 
+ 		case MOF_COND_COMPARATOR:
+ 			if (data >= OCC_END) return CMD_ERROR;
+ 			switch (order->GetConditionVariable()) {
+-				case OCV_UNCONDITIONALLY: return CMD_ERROR;
++				case OCV_UNCONDITIONALLY:
++				case OCV_PERCENT:
++					return CMD_ERROR;
+ 
+ 				case OCV_REQUIRES_SERVICE:
++				case OCV_CARGO_ACCEPTANCE:
++				case OCV_CARGO_WAITING:
+ 					if (data != OCC_IS_TRUE && data != OCC_IS_FALSE) return CMD_ERROR;
+ 					break;
+ 
++				case OCV_FREE_PLATFORMS:
++					if (v->type != VEH_TRAIN) return CMD_ERROR;
++					/* FALL THROUGH */
+ 				default:
+ 					if (data == OCC_IS_TRUE || data == OCC_IS_FALSE) return CMD_ERROR;
+ 					break;
+@@ -924,9 +977,15 @@
+ 
+ 				case OCV_LOAD_PERCENTAGE:
+ 				case OCV_RELIABILITY:
++				case OCV_PERCENT:
+ 					if (data > 100) return CMD_ERROR;
+ 					break;
+ 
++				case OCV_CARGO_ACCEPTANCE:
++				case OCV_CARGO_WAITING:
++					if (!GetCargo(data)->IsValid()) return CMD_ERROR;
++					break;
++
+ 				default:
+ 					if (data > 2047) return CMD_ERROR;
+ 					break;
+@@ -964,6 +1023,8 @@
+ 				break;
+ 
+ 			case MOF_COND_VARIABLE: {
++				/* Check whether old conditional variable had a cargo as value */
++				bool old_var_was_cargo = (order->GetConditionVariable() == OCV_CARGO_ACCEPTANCE || order->GetConditionVariable() == OCV_CARGO_WAITING);
+ 				order->SetConditionVariable((OrderConditionVariable)data);
+ 
+ 				OrderConditionComparator occ = order->GetConditionComparator();
+@@ -973,15 +1034,26 @@
+ 						order->SetConditionValue(0);
+ 						break;
+ 
++					case OCV_CARGO_ACCEPTANCE:
++					case OCV_CARGO_WAITING:
++						if (!old_var_was_cargo) order->SetConditionValue((uint16) GetFirstValidCargo());
++						if (occ != OCC_IS_TRUE && occ != OCC_IS_FALSE) order->SetConditionComparator(OCC_IS_TRUE);
++						break;
++
+ 					case OCV_REQUIRES_SERVICE:
++						if (old_var_was_cargo) order->SetConditionValue(0);
+ 						if (occ != OCC_IS_TRUE && occ != OCC_IS_FALSE) order->SetConditionComparator(OCC_IS_TRUE);
+ 						break;
+ 
++					case OCV_PERCENT:
++						order->SetConditionComparator(OCC_EQUALS);
++						/* FALL THROUGH */
+ 					case OCV_LOAD_PERCENTAGE:
+ 					case OCV_RELIABILITY:
+ 						if (order->GetConditionValue() > 100) order->SetConditionValue(100);
+ 						/* FALL THROUGH */
+ 					default:
++						if (old_var_was_cargo) order->SetConditionValue(0);
+ 						if (occ == OCC_IS_TRUE || occ == OCC_IS_FALSE) order->SetConditionComparator(OCC_EQUALS);
+ 						break;
+ 				}
+@@ -1556,6 +1628,51 @@
+ 	}
+ }
+ 
++/* Get the number of free (train) platforms in a station.
++ * @param st_id The StationID of the station.
++ * @return The number of free train platforms.
++ */
++static uint16 GetFreeStationPlatforms(StationID st_id)
++{
++	assert(IsValidStationID(st_id));
++	const Station *st = GetStation(st_id);
++	if (!(st->facilities & FACIL_TRAIN)) return 0;
++	bool is_free;
++	TileIndex t2;
++	uint16 counter = 0;
++	BEGIN_TILE_LOOP(t1, st->trainst_w, st->trainst_h, st->train_tile) {
++		if (st->TileBelongsToRailStation(t1)) {
++			/* We only proceed if this tile is a track tile and the north(-east/-west) end of the platform */
++			if (IsCompatibleTrainStationTile(t1 + TileOffsByDiagDir(GetRailStationAxis(t1) == AXIS_X ? DIAGDIR_NE : DIAGDIR_NW), t1) || IsStationTileBlocked(t1)) continue;
++			is_free = true;
++			t2 = t1;
++			do {
++				if (GetRailwayStationReservation(t2)) {
++					is_free = false;
++					break;
++				}
++				t2 += TileOffsByDiagDir(GetRailStationAxis(t1) == AXIS_X ? DIAGDIR_SW : DIAGDIR_SE);
++			} while (IsCompatibleTrainStationTile(t2, t1));
++			if (is_free) counter++;
++		}
++	} END_TILE_LOOP(t1, st->trainst_w, st->trainst_h, st->train_tile)
++	return counter;
++}
++
++/** Gets the next 'real' station in the order list
++ * @param v the vehicle in question
++ * @param order the current (conditional) order
++ * @return the StationID of the next valid station in the order list, or INVALID_STATION if there is none.
++ */
++static StationID GetNextRealStation(const Vehicle *v, const Order *order, int conditional_depth = 0)
++{
++	if (order->IsType(OT_GOTO_STATION)) {
++		if (IsValidStationID(order->GetDestination())) return order->GetDestination();
++	}
++	if (conditional_depth > v->num_orders) return INVALID_STATION;
++	return GetNextRealStation(v, (order->next != NULL) ? order->next : v->orders, ++conditional_depth);
++}
++
+ /**
+  * Process a conditional order and determine the next order.
+  * @param order the order the vehicle currently has
+@@ -1577,6 +1694,27 @@
+ 		case OCV_AGE:              skip_order = OrderConditionCompare(occ, v->age / 366,                      value); break;
+ 		case OCV_REQUIRES_SERVICE: skip_order = OrderConditionCompare(occ, v->NeedsServicing(),               value); break;
+ 		case OCV_UNCONDITIONALLY:  skip_order = true; break;
++		case OCV_CARGO_WAITING: {
++			StationID next_station = GetNextRealStation(v, order);
++			if (IsValidStationID(next_station)) skip_order = OrderConditionCompare(occ, !GetStation(next_station)->goods[value].cargo.Empty(), value);
++				break;
++		}
++		case OCV_CARGO_ACCEPTANCE: {
++			StationID next_station = GetNextRealStation(v, order);
++			if (IsValidStationID(next_station)) skip_order = OrderConditionCompare(occ, HasBit(GetStation(next_station)->goods[value].acceptance_pickup, GoodsEntry::ACCEPTANCE), value);
++			break;
++		}
++		case OCV_FREE_PLATFORMS: {
++			StationID next_station = GetNextRealStation(v, order);
++			if (IsValidStationID(next_station)) skip_order = OrderConditionCompare(occ, GetFreeStationPlatforms(next_station), value);
++			break;
++		}
++		case OCV_PERCENT: {
++			/* get a non-const reference to the current order */
++			Order *ord = (Order *)order;
++			skip_order = ord->UpdateJumpCounter((byte)value);
++			break;
++		}
+ 		default: NOT_REACHED();
+ 	}
+ 
+@@ -1791,6 +1929,7 @@
+ 	SLE_CONDVAR(Order, refit_subtype,  SLE_UINT8,  36, SL_MAX_VERSION),
+ 	SLE_CONDVAR(Order, wait_time,      SLE_UINT16, 67, SL_MAX_VERSION),
+ 	SLE_CONDVAR(Order, travel_time,    SLE_UINT16, 67, SL_MAX_VERSION),
++	SLE_CONDVAR(Order, jump_counter,   SLE_INT8,  101, SL_MAX_VERSION),
+ 
+ 	/* Leftover from the minor savegame version stuff
+ 	 * We will never use those free bytes, but we have to keep this line to allow loading of old savegames */
+Index: src/order_gui.cpp
+===================================================================
+--- src/order_gui.cpp	(revision 14173)
++++ src/order_gui.cpp	(working copy)
+@@ -56,6 +56,7 @@
+ 	ORDER_WIDGET_COND_VARIABLE,
+ 	ORDER_WIDGET_COND_COMPARATOR,
+ 	ORDER_WIDGET_COND_VALUE,
++	ORDER_WIDGET_COND_CARGO,
+ 	ORDER_WIDGET_RESIZE_BAR,
+ 	ORDER_WIDGET_SHARED_ORDER_LIST,
+ 	ORDER_WIDGET_RESIZE,
+@@ -141,8 +142,12 @@
+ 	STR_ORDER_CONDITIONAL_RELIABILITY,
+ 	STR_ORDER_CONDITIONAL_MAX_SPEED,
+ 	STR_ORDER_CONDITIONAL_AGE,
+-	STR_ORDER_CONDITIONAL_REQUIRES_SERVICE,
++	STR_ORDER_CONDITIONAL_REQUIRES_SERVICE_DROPDOWN,
+ 	STR_ORDER_CONDITIONAL_UNCONDITIONALLY,
++	STR_ORDER_CONDITIONAL_CARGO_WAITING_DROPDOWN,
++	STR_ORDER_CONDITIONAL_ACCEPTANCE_DROPDOWN,
++	STR_ORDER_CONDITIONAL_FREE_PLATFORMS,
++	STR_ORDER_CONDITIONAL_PERCENT,
+ 	INVALID_STRING_ID,
+ };
+ 
+@@ -158,6 +163,30 @@
+ 	INVALID_STRING_ID,
+ };
+ 
++static const StringID _order_conditional_condition_has[] = {
++	STR_ORDER_CONDITIONAL_COMPARATOR_HAS,
++	STR_ORDER_CONDITIONAL_COMPARATOR_HAS_NO,
++	STR_ORDER_CONDITIONAL_COMPARATOR_HAS_LESS_THAN,
++	STR_ORDER_CONDITIONAL_COMPARATOR_HAS_LESS_EQUALS,
++	STR_ORDER_CONDITIONAL_COMPARATOR_HAS_MORE_THAN,
++	STR_ORDER_CONDITIONAL_COMPARATOR_HAS_MORE_EQUALS,
++	STR_ORDER_CONDITIONAL_COMPARATOR_HAS,
++	STR_ORDER_CONDITIONAL_COMPARATOR_HAS_NO,
++	INVALID_STRING_ID,
++};
++
++static const StringID _order_conditional_condition_accepts[] = {
++	STR_NULL,
++	STR_NULL,
++	STR_NULL,
++	STR_NULL,
++	STR_NULL,
++	STR_NULL,
++	STR_ORDER_CONDITIONAL_COMPARATOR_ACCEPTS,
++	STR_ORDER_CONDITIONAL_COMPARATOR_DOES_NOT_ACCEPT,
++	INVALID_STRING_ID,
++};
++
+ extern uint ConvertSpeedToDisplaySpeed(uint speed);
+ extern uint ConvertDisplaySpeedToSpeed(uint speed);
+ 
+@@ -237,19 +266,44 @@
+ 			SetDParam(2, order->GetDestination());
+ 			break;
+ 
+-		case OT_CONDITIONAL:
++		case OT_CONDITIONAL: {
+ 			SetDParam(2, order->GetConditionSkipToOrder() + 1);
+-			if (order->GetConditionVariable() == OCV_UNCONDITIONALLY) {
++			const OrderConditionVariable ocv = order->GetConditionVariable();
++			/* handle some non-ordinary cases seperately */
++			if (ocv == OCV_UNCONDITIONALLY) {
+ 				SetDParam(1, STR_CONDITIONAL_UNCONDITIONAL);
++			} else if (ocv == OCV_PERCENT) {
++				SetDParam(1, STR_CONDITIONAL_PERCENT);
++				SetDParam(3, order->GetConditionValue()); 
++			} else if (ocv == OCV_FREE_PLATFORMS) {
++				SetDParam(1, STR_CONDITIONAL_FREE_PLATFORMS);
++				SetDParam(3, STR_ORDER_CONDITIONAL_COMPARATOR_HAS + order->GetConditionComparator());
++				SetDParam(4, order->GetConditionValue());
+ 			} else {
+-				OrderConditionComparator occ = order->GetConditionComparator();
++				const OrderConditionComparator occ = order->GetConditionComparator();
+ 				SetDParam(1, (occ == OCC_IS_TRUE || occ == OCC_IS_FALSE) ? STR_CONDITIONAL_TRUE_FALSE : STR_CONDITIONAL_NUM);
+-				SetDParam(3, STR_ORDER_CONDITIONAL_LOAD_PERCENTAGE + order->GetConditionVariable());
+-				SetDParam(4, STR_ORDER_CONDITIONAL_COMPARATOR_EQUALS + occ);
++				SetDParam(3, STR_ORDER_CONDITIONAL_LOAD_PERCENTAGE + ocv);
+ 
+ 				uint value = order->GetConditionValue();
+-				if (order->GetConditionVariable() == OCV_MAX_SPEED) value = ConvertSpeedToDisplaySpeed(value);
+-				SetDParam(5, value);
++				switch (ocv) {
++					case OCV_CARGO_ACCEPTANCE:
++						SetDParam(4, STR_ORDER_CONDITIONAL_COMPARATOR_ACCEPTS + occ - OCC_IS_TRUE);
++						SetDParam(5, GetCargo(value)->name);
++						break;
++					case OCV_CARGO_WAITING:
++						SetDParam(4, STR_ORDER_CONDITIONAL_COMPARATOR_HAS + occ - OCC_IS_TRUE);
++						SetDParam(5, GetCargo(value)->name);
++						break;
++					case OCV_REQUIRES_SERVICE:
++						SetDParam(4, STR_ORDER_CONDITIONAL_COMPARATOR_EQUALS + occ);
++						break;
++					case OCV_MAX_SPEED:
++						value = ConvertSpeedToDisplaySpeed(value);
++						/* FALL THROUGH */
++					default:
++						SetDParam(4, STR_ORDER_CONDITIONAL_COMPARATOR_EQUALS + occ);
++						SetDParam(5, value);
++				}
+ 			}
+ 
+ 			if (timetable && order->wait_time > 0) {
+@@ -258,7 +312,7 @@
+ 			} else {
+ 				SetDParam(6, STR_EMPTY);
+ 			}
+-			break;
++		} break;
+ 
+ 		default: NOT_REACHED();
+ 	}
+@@ -363,6 +417,9 @@
+ 	OrderPlaceObjectState goto_type;
+ 	const Vehicle *vehicle;
+ 
++	StringID cargo_names_list[NUM_CARGO + 1];
++	uint32 cargo_bitmask;
++
+ 	/**
+ 	 * Return the memorised selected order.
+ 	 * @return the memorised order if it is a vaild one
+@@ -423,6 +480,23 @@
+ 	}
+ 
+ 	/**
++	 * Determine which strings should be displayed in the conditional comparator dropdown
++	 *
++	 * @param order the order to evaluate
++	 * @return the StringIDs to display
++	 */
++	static const StringID *GetComparatorStrings(const Order *order)
++	{
++		if (order == NULL) return _order_conditional_condition;
++		switch (order->GetConditionVariable()) {
++			case OCV_FREE_PLATFORMS:   //fall through
++			case OCV_CARGO_WAITING:    return _order_conditional_condition_has;     break;
++			case OCV_CARGO_ACCEPTANCE: return _order_conditional_condition_accepts; break;
++			default:                   return _order_conditional_condition;         break;
++		}
++	}
++
++	/**
+ 	 * Handle the click on the goto button.
+ 	 *
+ 	 * @param w current window
+@@ -617,6 +691,18 @@
+ 			this->HideWidget(ORDER_WIDGET_TIMETABLE_VIEW);
+ 		}
+ 		this->FindWindowPlacementAndResize(desc);
++
++		/* Create cargo bitmask */
++		assert_compile(NUM_CARGO <= 32);
++		for (CargoID c = 0; c < NUM_CARGO; c++) {
++			if (GetCargo(c)->IsValid()) {
++				cargo_names_list[c] = GetCargo(c)->name;
++			} else {
++				cargo_names_list[c] = STR_NULL;
++				SetBit(cargo_bitmask, c);
++			}
++		}
++		cargo_names_list[NUM_CARGO] = INVALID_STRING_ID;
+ 	}
+ 
+ 	virtual void OnInvalidateData(int data = 0)
+@@ -635,10 +721,12 @@
+ 		const Order *order = GetVehicleOrder(this->vehicle, sel);
+ 
+ 		if (this->vehicle->owner == _local_player) {
+-			/* Set the strings for the dropdown boxes. */
+-			this->widget[ORDER_WIDGET_COND_VARIABLE].data   = _order_conditional_variable[order == NULL ? 0 : order->GetConditionVariable()];
+-			this->widget[ORDER_WIDGET_COND_COMPARATOR].data = _order_conditional_condition[order == NULL ? 0 : order->GetConditionComparator()];
+ 
++			OrderConditionVariable ocv = (order == NULL) ? OCV_LOAD_PERCENTAGE : order->GetConditionVariable();
++			this->widget[ORDER_WIDGET_COND_VARIABLE].data = (ocv == OCV_CARGO_ACCEPTANCE || ocv == OCV_CARGO_WAITING || ocv == OCV_FREE_PLATFORMS) ? STR_ORDER_CONDITIONAL_NEXT_STATION : _order_conditional_variable[ocv];
++			this->widget[ORDER_WIDGET_COND_COMPARATOR].data = GetComparatorStrings(order)[order == NULL ? 0 : order->GetConditionComparator()];
++			this->widget[ORDER_WIDGET_COND_CARGO].data      = cargo_names_list[order == NULL ? 0 : order->GetConditionValue()];
++
+ 			/* skip */
+ 			this->SetWidgetDisabledState(ORDER_WIDGET_SKIP, this->vehicle->num_orders <= 1);
+ 
+@@ -663,6 +751,7 @@
+ 			this->HideWidget(ORDER_WIDGET_COND_VARIABLE);
+ 			this->HideWidget(ORDER_WIDGET_COND_COMPARATOR);
+ 			this->HideWidget(ORDER_WIDGET_COND_VALUE);
++			this->HideWidget(ORDER_WIDGET_COND_CARGO);
+ 		}
+ 
+ 		this->ShowWidget(ORDER_WIDGET_NON_STOP_DROPDOWN);
+@@ -714,11 +803,17 @@
+ 					this->HideWidget(ORDER_WIDGET_FULL_LOAD_DROPDOWN);
+ 					this->ShowWidget(ORDER_WIDGET_COND_VARIABLE);
+ 					this->ShowWidget(ORDER_WIDGET_COND_COMPARATOR);
+-					this->ShowWidget(ORDER_WIDGET_COND_VALUE);
+ 
+ 					OrderConditionVariable ocv = order->GetConditionVariable();
+-					this->SetWidgetDisabledState(ORDER_WIDGET_COND_COMPARATOR, ocv == OCV_UNCONDITIONALLY);
++					this->SetWidgetDisabledState(ORDER_WIDGET_COND_COMPARATOR, ocv == OCV_UNCONDITIONALLY || ocv == OCV_PERCENT);
+ 					this->SetWidgetDisabledState(ORDER_WIDGET_COND_VALUE, ocv == OCV_REQUIRES_SERVICE || ocv == OCV_UNCONDITIONALLY);
++					if (ocv == OCV_CARGO_ACCEPTANCE || ocv == OCV_CARGO_WAITING) {
++						this->ShowWidget(ORDER_WIDGET_COND_CARGO);
++						this->HideWidget(ORDER_WIDGET_COND_VALUE);
++					} else {
++						this->HideWidget(ORDER_WIDGET_COND_CARGO);
++						this->ShowWidget(ORDER_WIDGET_COND_VALUE);
++					}
+ 
+ 					uint value = order->GetConditionValue();
+ 					if (order->GetConditionVariable() == OCV_MAX_SPEED) value = ConvertSpeedToDisplaySpeed(value);
+@@ -862,12 +957,12 @@
+ 				break;
+ 
+ 			case ORDER_WIDGET_COND_VARIABLE:
+-				ShowDropDownMenu(this, _order_conditional_variable, GetVehicleOrder(this->vehicle, this->OrderGetSel())->GetConditionVariable(), ORDER_WIDGET_COND_VARIABLE, 0, 0);
++				ShowDropDownMenu(this, _order_conditional_variable, GetVehicleOrder(this->vehicle, this->OrderGetSel())->GetConditionVariable(), ORDER_WIDGET_COND_VARIABLE, 0, (this->vehicle->type == VEH_TRAIN) ? 0 : 1 << 8);
+ 				break;
+ 
+ 			case ORDER_WIDGET_COND_COMPARATOR: {
+ 				const Order *o = GetVehicleOrder(this->vehicle, this->OrderGetSel());
+-				ShowDropDownMenu(this, _order_conditional_condition, o->GetConditionComparator(), ORDER_WIDGET_COND_COMPARATOR, 0, (o->GetConditionVariable() == OCV_REQUIRES_SERVICE) ? 0x3F : 0xC0);
++				ShowDropDownMenu(this, GetComparatorStrings(o), o->GetConditionComparator(), ORDER_WIDGET_COND_COMPARATOR, 0, (o->GetConditionVariable() == OCV_REQUIRES_SERVICE || o->GetConditionVariable() == OCV_CARGO_ACCEPTANCE || o->GetConditionVariable() == OCV_CARGO_WAITING) ? 0x3F : 0xC0);
+ 			} break;
+ 
+ 			case ORDER_WIDGET_COND_VALUE: {
+@@ -878,6 +973,11 @@
+ 				ShowQueryString(STR_CONFIG_PATCHES_INT32, STR_ORDER_CONDITIONAL_VALUE_CAPT, 5, 100, this, CS_NUMERAL);
+ 			} break;
+ 
++			case ORDER_WIDGET_COND_CARGO: {
++				uint value = GetVehicleOrder(this->vehicle, this->OrderGetSel())->GetConditionValue();
++				ShowDropDownMenu(this, cargo_names_list, value, ORDER_WIDGET_COND_CARGO, 0, cargo_bitmask);
++			} break;
++
+ 			case ORDER_WIDGET_SHARED_ORDER_LIST:
+ 				ShowVehicleListWindow(this->vehicle);
+ 				break;
+@@ -895,6 +995,7 @@
+ 					value = ConvertDisplaySpeedToSpeed(value);
+ 					break;
+ 
++				case OCV_PERCENT:
+ 				case OCV_RELIABILITY:
+ 				case OCV_LOAD_PERCENTAGE:
+ 					value = Clamp(value, 0, 100);
+@@ -937,6 +1038,10 @@
+ 			case ORDER_WIDGET_COND_COMPARATOR:
+ 				DoCommandP(this->vehicle->tile, this->vehicle->index + (this->OrderGetSel() << 16), MOF_COND_COMPARATOR | index << 4,  NULL, CMD_MODIFY_ORDER | CMD_MSG(STR_8835_CAN_T_MODIFY_THIS_ORDER));
+ 				break;
++
++			case ORDER_WIDGET_COND_CARGO:
++				DoCommandP(this->vehicle->tile, this->vehicle->index + (this->OrderGetSel() << 16), MOF_COND_VALUE | index << 4, NULL, CMD_MODIFY_ORDER | CMD_MSG(STR_8835_CAN_T_MODIFY_THIS_ORDER));
++				break;
+ 		}
+ 	}
+ 
+@@ -1088,6 +1193,7 @@
+ 	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,     0,   123,    76,    87, STR_NULL,                STR_ORDER_CONDITIONAL_VARIABLE_TOOLTIP},   // ORDER_WIDGET_COND_VARIABLE
+ 	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,   124,   247,    76,    87, STR_NULL,                STR_ORDER_CONDITIONAL_COMPARATOR_TOOLTIP}, // ORDER_WIDGET_COND_COMPARATOR
+ 	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,   248,   371,    76,    87, STR_CONDITIONAL_VALUE,   STR_ORDER_CONDITIONAL_VALUE_TOOLTIP},      // ORDER_WIDGET_COND_VALUE
++	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,	  248,   371,    76,    87, STR_NULL,                STR_ORDER_CONDITIONAL_CARGO_TOOLTIP},      // ORDER_WIDGET_COND_CARGO
+ 
+ 	{      WWT_PANEL,   RESIZE_RTB,    COLOUR_GREY,   372,   373,    76,    99, 0x0,                     STR_NULL},                            // ORDER_WIDGET_RESIZE_BAR
+ 	{ WWT_PUSHIMGBTN,   RESIZE_LRTB,   COLOUR_GREY,   372,   385,    76,    87, SPR_SHARED_ORDERS_ICON,  STR_VEH_WITH_SHARED_ORDERS_LIST_TIP}, // ORDER_WIDGET_SHARED_ORDER_LIST
+@@ -1131,6 +1237,7 @@
+ 	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,     0,   123,    76,    87, STR_NULL,                STR_ORDER_CONDITIONAL_VARIABLE_TOOLTIP},   // ORDER_WIDGET_COND_VARIABLE
+ 	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,   124,   247,    76,    87, STR_NULL,                STR_ORDER_CONDITIONAL_COMPARATOR_TOOLTIP}, // ORDER_WIDGET_COND_COMPARATOR
+ 	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,   248,   371,    76,    87, STR_CONDITIONAL_VALUE,   STR_ORDER_CONDITIONAL_VALUE_TOOLTIP},      // ORDER_WIDGET_COND_VALUE
++	{   WWT_DROPDOWN,   RESIZE_TB,     COLOUR_GREY,	  248,   371,    76,    87, STR_NULL,                STR_ORDER_CONDITIONAL_CARGO_TOOLTIP},      // ORDER_WIDGET_COND_CARGO
+ 
+ 	{      WWT_PANEL,   RESIZE_RTB,    COLOUR_GREY,   372,   373,    76,    99, 0x0,                     STR_NULL},                            // ORDER_WIDGET_RESIZE_BAR
+ 	{ WWT_PUSHIMGBTN,   RESIZE_LRTB,   COLOUR_GREY,   372,   385,    76,    87, SPR_SHARED_ORDERS_ICON,  STR_VEH_WITH_SHARED_ORDERS_LIST_TIP}, // ORDER_WIDGET_SHARED_ORDER_LIST
+@@ -1174,6 +1281,7 @@
+ 	{      WWT_EMPTY,   RESIZE_NONE,   COLOUR_GREY,     0,     0,    76,    87, 0x0,                STR_NULL},                            // ORDER_WIDGET_COND_VARIABLE
+ 	{      WWT_EMPTY,   RESIZE_NONE,   COLOUR_GREY,     0,     0,    76,    87, 0x0,                STR_NULL},                            // ORDER_WIDGET_COND_COMPARATOR
+ 	{      WWT_EMPTY,   RESIZE_NONE,   COLOUR_GREY,     0,     0,    76,    87, 0x0,                STR_NULL},                            // ORDER_WIDGET_COND_VALUE
++	{      WWT_EMPTY,   RESIZE_NONE,   COLOUR_GREY,     0,     0,    76,    87, 0x0,                STR_NULL},                            // ORDER_WIDGET_COND_CARGO
+ 
+ 	{      WWT_PANEL,   RESIZE_RTB,    COLOUR_GREY,     0,   373,    76,    87, 0x0,                STR_NULL},                            // ORDER_WIDGET_RESIZE_BAR
+ 	{      WWT_EMPTY,   RESIZE_TB,     COLOUR_GREY,     0,     0,    76,    87, 0x0,                STR_NULL},                            // ORDER_WIDGET_SHARED_ORDER_LIST
+Index: src/order_type.h
+===================================================================
+--- src/order_type.h	(revision 14173)
++++ src/order_type.h	(working copy)
+@@ -96,6 +96,10 @@
+ 	OCV_AGE,              ///< Skip based on the age
+ 	OCV_REQUIRES_SERVICE, ///< Skip when the vehicle requires service
+ 	OCV_UNCONDITIONALLY,  ///< Always skip
++	OCV_CARGO_WAITING,    ///< Skip if specified cargo is waiting at next station
++	OCV_CARGO_ACCEPTANCE, ///< Skip if specified cargo is accepted at next station
++	OCV_FREE_PLATFORMS,   ///< Skip based on free platforms at next station
++	OCV_PERCENT,          ///< Skip xx percent of times
+ 	OCV_END
+ };
+ 
+Index: src/saveload.cpp
+===================================================================
+--- src/saveload.cpp	(revision 14173)
++++ src/saveload.cpp	(working copy)
+@@ -36,7 +36,7 @@
+ 
+ #include "table/strings.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 100;
++extern const uint16 SAVEGAME_VERSION = 101;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 

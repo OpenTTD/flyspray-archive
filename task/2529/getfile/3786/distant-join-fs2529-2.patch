@@ -1,0 +1,94 @@
+diff -r 487e6b6103fb src/settings.cpp
+--- a/src/settings.cpp	Mon Jan 12 00:06:22 2009 +0000
++++ b/src/settings.cpp	Mon Jan 12 13:55:03 2009 +0100
+@@ -889,6 +889,12 @@ static int32 InvalidateTownViewWindow(in
+ 	return 0;
+ }
+ 
++static int32 DeleteSelectStationWindow(int32 p1)
++{
++	DeleteWindowById(WC_SELECT_STATION, 0);
++	return 0;
++}
++
+ static int32 UpdateConsists(int32 p1)
+ {
+ 	Vehicle *v;
+@@ -1304,7 +1310,7 @@ const SettingDesc _patch_settings[] = {
+ 	SDT_CONDBOOL(GameSettings, construction.road_stop_on_town_road,             47, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_PATCHES_STOP_ON_TOWN_ROAD,      NULL),
+ 	SDT_CONDBOOL(GameSettings, station.adjacent_stations,                       62, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_PATCHES_ADJACENT_STATIONS,      NULL),
+ 	SDT_CONDBOOL(GameSettings, economy.station_noise_level,                     96, SL_MAX_VERSION, 0, 0, false,                    STR_CONFIG_PATCHES_NOISE_LEVEL,            InvalidateTownViewWindow),
+-	SDT_CONDBOOL(GameSettings, station.distant_join_stations,                  106, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_PATCHES_DISTANT_JOIN_STATIONS,  NULL),
++	SDT_CONDBOOL(GameSettings, station.distant_join_stations,                  106, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_PATCHES_DISTANT_JOIN_STATIONS,  DeleteSelectStationWindow),
+ 
+ 	    SDT_BOOL(GameSettings, economy.inflation,                                                   0, 0,  true,                    STR_CONFIG_PATCHES_INFLATION,              NULL),
+ 	     SDT_VAR(GameSettings, construction.raw_industry_construction, SLE_UINT8,                   0,MS,     0,     0,       2, 0, STR_CONFIG_PATCHES_RAW_INDUSTRY_CONSTRUCTION_METHOD, InvalidateBuildIndustryWindow),
+diff -r 487e6b6103fb src/station_gui.cpp
+--- a/src/station_gui.cpp	Mon Jan 12 00:06:22 2009 +0000
++++ b/src/station_gui.cpp	Mon Jan 12 13:55:03 2009 +0100
+@@ -1196,6 +1196,7 @@ static const WindowDesc _select_station_
+ 	_select_station_widgets,
+ };
+ 
++void UpdateTileSelection();
+ 
+ /**
+  * Check whether we need to show the station selection window.
+@@ -1206,27 +1207,30 @@ static const WindowDesc _select_station_
+  */
+ static bool StationJoinerNeeded(CommandContainer cmd, int w, int h)
+ {
+-	if (CmdFailed(DoCommand(&cmd, DC_NO_WATER | DC_AUTO))) return false;
+-
+ 	/* Only show selection if distant join is enabled in the settings */
+ 	if (!_settings_game.station.distant_join_stations) return false;
+ 
+-	/* If a window is already opened, we always return true */
+-	if (FindWindowById(WC_SELECT_STATION, 0) != NULL) return true;
++	/* If a window is already opened and we didn't ctrl-click on another tile,
++	 * we return true without checking for valid place again */
++	Window *win = NULL;
++	if ((win = FindWindowById(WC_SELECT_STATION, 0)) != NULL) {
++		if (!_ctrl_pressed || cmd.tile == TileVirtXY(_thd.pos.x, _thd.pos.y)) return true;
++
++		delete win;
++		UpdateTileSelection();
++	}
++
++	/* Flags get send to the DoCommand */
++	uint32 flags = 0;
++	/* Command flags are used internally */
++	uint cmd_flags = GetCommandFlags(cmd.cmd);
++	if (cmd_flags & CMD_NO_WATER) flags |= DC_NO_WATER;
++	if (cmd_flags & CMD_AUTO) flags |= DC_AUTO;
++
++	if (CmdFailed(DoCommand(&cmd, flags))) return false;
+ 
+ 	/* only show the popup, if we press ctrl */
+-	if (!_ctrl_pressed) return false;
+-
+-	/* First test for adjacent station */
+-	FindStationsNearby(cmd.tile, w, h, false);
+-	int neighbour_station_count = _stations_nearby_list.Length();
+-	/* Now test for stations fully within station spread */
+-	const Station *st = FindStationsNearby(cmd.tile, w, h, true);
+-	if (_settings_game.station.adjacent_stations) {
+-		return (neighbour_station_count == 0 || _stations_nearby_list.Length() > 1) && st == NULL;
+-	} else {
+-		return neighbour_station_count == 0 && _stations_nearby_list.Length() > 0 && st == NULL;
+-	}
++	return _ctrl_pressed;
+ }
+ 
+ /**
+diff -r 487e6b6103fb src/viewport.cpp
+--- a/src/viewport.cpp	Mon Jan 12 00:06:22 2009 +0000
++++ b/src/viewport.cpp	Mon Jan 12 13:55:03 2009 +0100
+@@ -2116,7 +2116,6 @@ static HighLightStyle GetAutorailHT(int 
+  * Also drawstyle is determined. Uses _thd.new.* as a buffer and calls SetSelectionTilesDirty() twice,
+  * Once for the old and once for the new selection.
+  * _thd is TileHighlightData, found in viewport.h
+- * Called by MouseLoop() in windows.cpp
+  */
+ void UpdateTileSelection()
+ {

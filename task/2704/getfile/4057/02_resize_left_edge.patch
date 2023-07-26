@@ -1,0 +1,87 @@
+diff -r 896250d050e9 src/window.cpp
+--- a/src/window.cpp	Thu Mar 05 20:45:54 2009 +0100
++++ b/src/window.cpp	Thu Mar 05 20:48:05 2009 +0100
+@@ -27,6 +27,7 @@
+ #include "table/sprites.h"
+ 
+ static Point _drag_delta; ///< delta between mouse cursor and upper left corner of dragged window
++static bool _resize_left_edge; ///< Left edge of the window is being resized.
+ static Window *_mouseover_last_w = NULL; ///< Window of the last MOUSEOVER event
+ 
+ /** List of windows opened at the screen sorted from the front. */
+@@ -211,7 +212,7 @@
+ }
+ 
+ static void StartWindowDrag(Window *w);
+-static void StartWindowSizing(Window *w);
++static void StartWindowSizing(Window *w, bool leftedge);
+ 
+ /**
+  * Dispatch left mouse-button (possibly double) click in window.
+@@ -305,7 +306,7 @@
+ 		}
+ 
+ 		if (w->desc_flags & WDF_RESIZABLE && wi->type == WWT_RESIZEBOX) {
+-			StartWindowSizing(w);
++			StartWindowSizing(w, (wi->left < 10)); // less than 10 -> resize-box is connected to left-edge
+ 			w->InvalidateWidget(widget);
+ 			return;
+ 		}
+@@ -1497,7 +1498,14 @@
+ 				break;
+ 			}
+ 
+-			x = _cursor.pos.x - _drag_delta.x;
++			/* Compute difference in pixels between cursor position and reference point in the window.
++			 * If resizing the left edge of the window, moving to the left makes the window bigger not smaller.
++			 */
++			if (_resize_left_edge) {
++				x = _drag_delta.x - _cursor.pos.x;
++			} else {
++				x = _cursor.pos.x - _drag_delta.x;
++			}
+ 			y = _cursor.pos.y - _drag_delta.y;
+ 
+ 			/* X and Y has to go by step.. calculate it.
+@@ -1518,9 +1526,18 @@
+ 
+ 			/* Now find the new cursor pos.. this is NOT _cursor, because
+ 			    we move in steps. */
+-			_drag_delta.x += x;
++			if (_resize_left_edge) {
++				_drag_delta.x -= x; // x>0 -> window gets longer -> left-edge moves to left -> subtract x to get new position.
++			} else {
++				_drag_delta.x += x;
++			}
+ 			_drag_delta.y += y;
+ 
++			if (_resize_left_edge && x != 0) {
++				w->SetDirty();
++				w->left -= x;  // If dragging left edge, move left window edge in opposite direction by the same amount.
++				/* ResizeWindow() below ensures marking new position as dirty. */
++			}
+ 			/* ResizeWindow sets both pre- and after-size to dirty for redrawal */
+ 			ResizeWindow(w, x, y);
+ 
+@@ -1556,16 +1573,18 @@
+ }
+ 
+ /**
+- * Start resizing a window
+- * @param w Window to start resizing
++ * Start resizing a window.
++ * @param w        Window to start resizing.
++ * @param leftedge Left edge of the window is being dragged.
+  */
+-static void StartWindowSizing(Window *w)
++static void StartWindowSizing(Window *w, bool leftedge)
+ {
+ 	w->flags4 |= WF_SIZING;
+ 	_dragging_window = true;
+ 
+ 	_drag_delta.x = _cursor.pos.x;
+ 	_drag_delta.y = _cursor.pos.y;
++	_resize_left_edge = leftedge;
+ 
+ 	BringWindowToFront(w);
+ 	DeleteWindowById(WC_DROPDOWN_MENU, 0);

@@ -1,0 +1,1586 @@
+Index: network.c
+===================================================================
+--- network.c	(revision 6134)
++++ network.c	(working copy)
+@@ -990,6 +990,28 @@
+ 
+ 	_network_game_info.use_password = (_network_server_password[0] != '\0');
+ 
++	if (_network_dedicated)
++	{
++		_network_game_info.server_lang = NETLANG_OTHER;
++		if (strcmp(_network_server_language, "") != 0)
++		{
++			int n;
++			for (n = 0 ; n < _dynlang.num ; n ++)
++				if (strcmp(_dynlang.ent[n].file, _network_server_language) == 0)
++				{
++					strcpy(_network_game_info.server_lang_isocode, _dynlang.ent[n].isocode);
++				}
++
++			if (strcmp(_network_game_info.server_lang_isocode, "") == 0)
++			{
++				DEBUG(net, 0)("[NET] Cannot find language %s!", _network_server_language);
++				assert(0);
++			}
++		}
++		else
++			strcpy(_network_game_info.server_lang_isocode, "");
++	}
++	
+ 	// We use _network_client_info[MAX_CLIENT_INFO - 1] to store the server-data in it
+ 	//  The index is NETWORK_SERVER_INDEX ( = 1)
+ 	ci = &_network_client_info[MAX_CLIENT_INFO - 1];
+Index: network.h
+===================================================================
+--- network.h	(revision 6134)
++++ network.h	(working copy)
+@@ -53,37 +53,39 @@
+ 	NETWORK_PLAYERS_LENGTH     = 200,
+ 	NETWORK_CLIENT_NAME_LENGTH =  25,
+ 	NETWORK_RCONCOMMAND_LENGTH = 500,
++	NETWORK_LANGUAGE_LENGTH    = 16,
+ 
+-	NETWORK_NUM_LANGUAGES      =   4,
++	NETWORK_NUM_LANGUAGES      = 5,
+ };
+ 
+ // This is the struct used by both client and server
+ //  some fields will be empty on the client (like game_password) by default
+ //  and only filled with data a player enters.
+ typedef struct NetworkGameInfo {
+-	char server_name[NETWORK_NAME_LENGTH];          // Server name
+-	char hostname[NETWORK_HOSTNAME_LENGTH];         // Hostname of the server (if any)
+-	char server_revision[NETWORK_REVISION_LENGTH];  // The SVN version number the server is using (e.g.: 'r304')
+-	                                                //  It even shows a SVN version in release-version, so
+-	                                                //  it is easy to compare if a server is of the correct version
+-	bool compatible;                                // Can we connect to this server or not? (based on server_revision)
+-	byte server_lang;                               // Language of the server (we should make a nice table for this)
+-	byte use_password;                              // Is set to != 0 if it uses a password
+-	char server_password[NETWORK_PASSWORD_LENGTH];  // On the server: the game password, on the client: != "" if server has password
+-	byte clients_max;                               // Max clients allowed on server
+-	byte clients_on;                                // Current count of clients on server
+-	byte companies_max;                             // Max companies allowed on server
+-	byte companies_on;                              // How many started companies do we have (XXX - disabled for server atm, use ActivePlayerCount())
+-	byte spectators_max;                            // Max spectators allowed on server
+-	byte spectators_on;                             // How many spectators do we have? (XXX - disabled for server atm, use NetworkSpectatorCount())
+-	Date game_date;                                 // Current date
+-	Date start_date;                                // When the game started
+-	char map_name[NETWORK_NAME_LENGTH];             // Map which is played ["random" for a randomized map]
+-	uint16 map_width;                               // Map width
+-	uint16 map_height;                              // Map height
+-	byte map_set;                                   // Graphical set
+-	bool dedicated;                                 // Is this a dedicated server?
+-	char rcon_password[NETWORK_PASSWORD_LENGTH];    // RCon password for the server. "" if rcon is disabled
++	char server_name[NETWORK_NAME_LENGTH];              // Server name
++	char hostname[NETWORK_HOSTNAME_LENGTH];             // Hostname of the server (if any)
++	char server_revision[NETWORK_REVISION_LENGTH];      // The SVN version number the server is using (e.g.: 'r304')
++                                                          //  It even shows a SVN version in release-version, so
++                                                          //  it is easy to compare if a server is of the correct version
++	bool compatible;                                    // Can we connect to this server or not? (based on server_revision)
++	byte server_lang;                                   // Language of the server - Obsolete: Use server_lang_isocode instead, and server_lang must be set to 4 (NETLANG_OTHER)
++	byte use_password;                                  // Is set to != 0 if it uses a password
++	char server_password[NETWORK_PASSWORD_LENGTH];      // On the server: the game password, on the client: != "" if server has password
++	byte clients_max;                                   // Max clients allowed on server
++	byte clients_on;                                    // Current count of clients on server
++	byte companies_max;                                 // Max companies allowed on server
++	byte companies_on;                                  // How many started companies do we have (XXX - disabled for server atm, use ActivePlayerCount())
++	byte spectators_max;                                // Max spectators allowed on server
++	byte spectators_on;                                 // How many spectators do we have? (XXX - disabled for server atm, use NetworkSpectatorCount())
++	Date game_date;                                     // Current date
++	Date start_date;                                    // When the game started
++	char map_name[NETWORK_NAME_LENGTH];                 // Map which is played ["random" for a randomized map]
++	uint16 map_width;                                   // Map width
++	uint16 map_height;                                  // Map height
++	byte map_set;                                       // Graphical set
++	bool dedicated;                                     // Is this a dedicated server?
++	char server_lang_isocode[NETWORK_LANGUAGE_LENGTH];  // New server languages variable. server_lang must be set to 4 (NETLANG_OTHER).
++	char rcon_password[NETWORK_PASSWORD_LENGTH];        // RCon password for the server. "" if rcon is disabled
+ } NetworkGameInfo;
+ 
+ typedef struct NetworkPlayerInfo {
+@@ -137,8 +139,19 @@
+ 	NETLANG_ENGLISH = 1,
+ 	NETLANG_GERMAN  = 2,
+ 	NETLANG_FRENCH  = 3,
++	NETLANG_OTHER = 4,
+ } NetworkLanguage;
+ 
++typedef struct NetworkGameFilter
++{
++	byte flags;
++	int age;
++	uint32 languages;
++	byte landscapes;
++	int mapsize; // index value. to get real size: pow(2, mapsize + 6)
++    byte mapway;
++} NetworkGameFilter;
++
+ VARDEF NetworkGameList *_network_game_list;
+ 
+ VARDEF NetworkGameInfo _network_game_info;
+@@ -169,6 +182,7 @@
+ VARDEF char _network_server_name[NETWORK_NAME_LENGTH];
+ VARDEF char _network_server_password[NETWORK_PASSWORD_LENGTH];
+ VARDEF char _network_rcon_password[NETWORK_PASSWORD_LENGTH];
++VARDEF char _network_server_language[NETWORK_LANGUAGE_LENGTH];
+ 
+ VARDEF uint16 _network_max_join_time;             ///< Time a client can max take to join
+ VARDEF bool _network_pause_on_join;               ///< Pause the game when a client tries to join (more chance of succeeding join)
+@@ -197,6 +211,8 @@
+ 
+ VARDEF byte _network_lan_internet;
+ 
++VARDEF NetworkGameFilter _ng_filter;
++
+ VARDEF bool _network_advertise;
+ VARDEF bool _network_need_advertise;
+ VARDEF uint32 _network_last_advertise_frame;
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 6134)
++++ lang/english.txt	(working copy)
+@@ -741,6 +741,7 @@
+ STR_02BB_TOWN_DIRECTORY                                         :Town directory
+ STR_02BC_VEHICLE_DESIGN_NAMES                                   :{BLACK}Vehicle design names
+ STR_02BD                                                        :{BLACK}{STRING}
++STR_02BD_NUM							:{BLACK}{NUM}
+ STR_02BE_DEFAULT                                                :Default
+ STR_02BF_CUSTOM                                                 :Custom
+ STR_02C0_SAVE_CUSTOM_NAMES                                      :{BLACK}Save custom names
+@@ -1270,6 +1271,7 @@
+ STR_NETWORK_GAME_NAME_TIP                                       :{BLACK}Name of the game
+ STR_NETWORK_INFO_ICONS_TIP                                      :{BLACK}Language, server version, etc.
+ STR_NETWORK_CLICK_GAME_TO_SELECT                                :{BLACK}Click a game from the list to select it
++STR_NETWORK_GAME_AGE						:{BLACK}Age
+ 
+ STR_NETWORK_FIND_SERVER                                         :{BLACK}Find server
+ STR_NETWORK_FIND_SERVER_TIP                                     :{BLACK}Search network for a server
+@@ -1284,6 +1286,8 @@
+ STR_ORANGE                                                      :{ORANGE}{STRING}
+ STR_NETWORK_CLIENTS                                             :{SILVER}Clients:  {WHITE}{COMMA} / {COMMA} - {COMMA} / {COMMA}
+ STR_NETWORK_LANGUAGE                                            :{SILVER}Language:  {WHITE}{STRING}
++STR_NETWORK_LANGUAGE_UNKNOWN                                    :{WHITE}Unknown
++STR_NETWORK_LANGUAGE_OLD_VERSION                                :{WHITE}Unknown - Old Version
+ STR_NETWORK_TILESET                                             :{SILVER}Tileset:  {WHITE}{STRING}
+ STR_NETWORK_MAP_SIZE                                            :{SILVER}Map size:  {WHITE}{COMMA}x{COMMA}
+ STR_NETWORK_SERVER_VERSION                                      :{SILVER}Server version:  {WHITE}{STRING}
+@@ -1338,6 +1342,51 @@
+ STR_NETWORK_START_GAME_TIP                                      :{BLACK}Start a new network game from a random map, or scenario
+ STR_NETWORK_LOAD_GAME                                           :{BLACK}Load Game
+ STR_NETWORK_LOAD_GAME_TIP                                       :{BLACK}Resume an earlier saved multiplayer game (be sure to connect as the correct player)
++STR_NETWORK_FILTER						:{BLACK}Filters
++STR_NETWORK_FILTER_TIP						:{BLACK}Change server filters.
++STR_NETWORK_FILTER_WINDOW					:{BLACK}Network Filters
++STR_NETWORK_FILTER_BASIC					:{BLACK}Basic
++STR_NETWORK_FILTER_GAME						:{BLACK}Game
++STR_NETWORK_FILTER_LANGUAGE					:{BLACK}Languages
++STR_NETWORK_FILTER_ADVANCED					:{BLACK}Advanced
++STR_NETWORK_FILTER_DESC						:{BLACK}Display only servers with these conditions:
++STR_NETWORK_FILTER_NOLOCKED					:{BLACK}Not password protected
++STR_NETWORK_FILTER_NOTFULL					:{BLACK}Is not full
++STR_NETWORK_FILTER_NOTEMPTY					:{BLACK}Has people playing
++STR_NETWORK_FILTER_AGE						:{BLACK}max (in game age)
++STR_NETWORK_FILTER_AGES_0					:5 years
++STR_NETWORK_FILTER_AGES_1                                       :10 years
++STR_NETWORK_FILTER_AGES_2					:15 years
++STR_NETWORK_FILTER_AGES_3                                       :20 years
++STR_NETWORK_FILTER_AGES_4					:25 years
++STR_NETWORK_FILTER_AGES_5                                       :30 years
++STR_NETWORK_FILTER_AGES_6					:35 years
++STR_NETWORK_FILTER_AGES_7                                       :40 years
++STR_NETWORK_FILTER_AGES_8					:45 years
++STR_NETWORK_FILTER_AGES_9                                       :50 years
++STR_NETWORK_FILTER_VERSION					:{BLACK}Running same version as you
++STR_NETWORK_FILTER_ONLINE					:{BLACK}Is online
++STR_NETWORK_FILTER_SELECT_LANDSCAPE				:{BLACK}Only these landscapes:
++STR_NETWORK_FILTER_LANDSCAPE_TEMPERATE				:{BLACK}Temperate
++STR_NETWORK_FILTER_LANDSCAPE_SUBARCTIC				:{BLACK}Sub-arctic
++STR_NETWORK_FILTER_LANDSCAPE_SUBTROPICAL			:{BLACK}Sub-tropical
++STR_NETWORK_FILTER_LANDSCAPE_TOYLAND				:{BLACK}Toyland
++STR_NETWORK_FILTER_ENABLED					:{BLACK}Enable
++STR_NETWORK_FILTER_DISABLED					:{BLACK}Disable
++STR_NETWORK_FILTER_MIN						:Min
++STR_NETWORK_FILTER_MAX						:Max
++STR_NETWORK_FILTER_MAPSIZE					:{BLACK}map size
++STR_NETWORK_FILTER_PING						:{BLACK}max (ping time)
++STR_NETWORK_FILTER_PING_0					:20 ms
++STR_NETWORK_FILTER_PING_1                                       :40 ms
++STR_NETWORK_FILTER_PING_2                                       :60 ms
++STR_NETWORK_FILTER_PING_3                                       :80 ms
++STR_NETWORK_FILTER_PING_4                                       :100 ms
++STR_NETWORK_FILTER_PING_5                                       :150 ms
++STR_NETWORK_FILTER_PING_6                                       :200 ms
++STR_NETWORK_FILTER_PING_7                                       :250 ms
++STR_NETWORK_FILTER_PING_8                                       :300 ms
++STR_NETWORK_FILTER_PING_9                                       :350 ms
+ 
+ ############ Leave those lines in this order!!
+ STR_NETWORK_LANG_ANY                                            :Any
+Index: network_udp.c
+===================================================================
+--- network_udp.c	(revision 6134)
++++ network_udp.c	(working copy)
+@@ -85,6 +85,7 @@
+ 	NetworkSend_uint16(packet, _network_game_info.map_height);
+ 	NetworkSend_uint8 (packet, _network_game_info.map_set);
+ 	NetworkSend_uint8 (packet, _network_game_info.dedicated);
++	NetworkSend_string(packet, _network_game_info.server_lang_isocode);
+ 
+ 	// Let the client know that we are here
+ 	NetworkSendUDP_Packet(_udp_server_socket, packet, client_addr);
+@@ -143,6 +144,10 @@
+ 			item->info.map_set       = NetworkRecv_uint8(&_udp_cs, p);
+ 			item->info.dedicated     = NetworkRecv_uint8(&_udp_cs, p);
+ 
++            // This ensures backwards compatibility
++			if (item->info.server_lang == NETLANG_OTHER)
++				NetworkRecv_string(&_udp_cs, p, item->info.server_lang_isocode, sizeof(item->info.server_lang_isocode));
++
+ 			if (item->info.server_lang >= NETWORK_NUM_LANGUAGES) item->info.server_lang = 0;
+ 			if (item->info.map_set >= NUM_LANDSCAPE ) item->info.map_set = 0;
+ 
+Index: table/sprites.h
+===================================================================
+--- table/sprites.h	(revision 6134)
++++ table/sprites.h	(working copy)
+@@ -78,7 +78,6 @@
+ 	/* Network GUI sprites */
+ 	SPR_SQUARE = SPR_OPENTTD_BASE + 20,     // colored square (used for newgrf compatibility)
+ 	SPR_LOCK = SPR_OPENTTD_BASE + 19,       // lock icon (for password protected servers)
+-	SPR_FLAGS_BASE = SPR_OPENTTD_BASE + 83, // start of the flags block (in same order as enum NetworkLanguage)
+ 
+ 	SPR_AIRPORTX_BASE = SPR_OPENTTD_BASE + 95, // The sprites used for other airport angles
+ 	SPR_NEWAIRPORT_TARMAC = SPR_AIRPORTX_BASE,
+@@ -105,6 +104,10 @@
+ 
+ 	/* Shadow cell */
+ 	SPR_SHADOW_CELL = 1004,
++	
++	/* flags */
++	SPR_FLAGS_BASE = SPR_OPENTTD_BASE + 110,
++	SPR_FLAGS_ANY = SPR_FLAGS_BASE,
+ 
+ 	/* Sliced view shadow cells */
+ 	/* Maybe we have different ones in the future */
+Index: gfxinit.c
+===================================================================
+--- gfxinit.c	(revision 6134)
++++ gfxinit.c	(working copy)
+@@ -368,6 +368,9 @@
+ 	assert(load_index == SPR_AIRPORTX_BASE);
+ 	load_index += LoadGrfFile("airports.grf", load_index, i++);
+ 
++	assert(load_index == SPR_FLAGS_BASE);
++	load_index += LoadGrfFile("flags.grf", load_index, i++);
++
+ 	LoadNewGRF(load_index, i);
+ }
+ 
+Index: settings.c
+===================================================================
+--- settings.c	(revision 6134)
++++ settings.c	(working copy)
+@@ -1201,6 +1201,7 @@
+ 	 SDTG_STR("server_password",       SLE_STRB, S, 0, _network_server_password,      NULL,        STR_NULL, NULL),
+ 	 SDTG_STR("rcon_password",         SLE_STRB, S, 0, _network_rcon_password,        NULL,        STR_NULL, NULL),
+ 	 SDTG_STR("server_name",           SLE_STRB, S, 0, _network_server_name,          NULL,        STR_NULL, NULL),
++	 SDTG_STR("server_language",       SLE_STRB, S, 0, _network_server_language,      NULL,        STR_NULL, NULL),
+ 	 SDTG_STR("connect_to_ip",         SLE_STRB, S, 0, _network_default_ip,           NULL,        STR_NULL, NULL),
+ 	 SDTG_STR("network_id",            SLE_STRB, S, 0, _network_unique_id,            NULL,        STR_NULL, NULL),
+ 	SDTG_BOOL("autoclean_companies",             S, 0, _network_autoclean_companies,  false,       STR_NULL, NULL),
+Index: variables.h
+===================================================================
+--- variables.h	(revision 6134)
++++ variables.h	(working copy)
+@@ -327,6 +327,8 @@
+ 	struct {
+ 		char *name;
+ 		char *file;
++		uint32 sprite;
++		char *isocode;
+ 	} ent[32];
+ } DynamicLanguages;
+ 
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 6134)
++++ openttd.h	(working copy)
+@@ -339,86 +339,91 @@
+ 
+ 
+ enum {
+-	WC_MAIN_WINDOW              = 0x00,
+-	WC_MAIN_TOOLBAR             = 0x01,
+-	WC_STATUS_BAR               = 0x02,
+-	WC_BUILD_TOOLBAR            = 0x03,
+-	WC_NEWS_WINDOW              = 0x04,
+-	WC_TOWN_DIRECTORY           = 0x05,
+-	WC_STATION_LIST             = 0x06,
+-	WC_TOWN_VIEW                = 0x07,
+-	WC_SMALLMAP                 = 0x08,
+-	WC_TRAINS_LIST              = 0x09,
+-	WC_ROADVEH_LIST             = 0x0A,
+-	WC_SHIPS_LIST               = 0x0B,
+-	WC_AIRCRAFT_LIST            = 0x0C,
+-	WC_VEHICLE_VIEW             = 0x0D,
+-	WC_VEHICLE_DETAILS          = 0x0E,
+-	WC_VEHICLE_REFIT            = 0x0F,
+-	WC_VEHICLE_ORDERS           = 0x10,
+-	WC_STATION_VIEW             = 0x11,
+-	WC_VEHICLE_DEPOT            = 0x12,
+-	WC_BUILD_VEHICLE            = 0x13,
+-	WC_BUILD_BRIDGE             = 0x14,
+-	WC_ERRMSG                   = 0x15,
+-	WC_ASK_ABANDON_GAME         = 0x16,
+-	WC_QUIT_GAME                = 0x17,
+-	WC_BUILD_STATION            = 0x18,
+-	WC_BUS_STATION              = 0x19,
+-	WC_TRUCK_STATION            = 0x1A,
+-	WC_BUILD_DEPOT              = 0x1B,
+-	WC_COMPANY                  = 0x1D,
+-	WC_FINANCES                 = 0x1E,
+-	WC_PLAYER_COLOR             = 0x1F,
+-	WC_QUERY_STRING             = 0x20,
+-	WC_SAVELOAD                 = 0x21,
+-	WC_SELECT_GAME              = 0x22,
+-	WC_TOOLBAR_MENU             = 0x24,
+-	WC_INCOME_GRAPH             = 0x25,
+-	WC_OPERATING_PROFIT         = 0x26,
+-	WC_TOOLTIPS                 = 0x27,
+-	WC_INDUSTRY_VIEW            = 0x28,
+-	WC_PLAYER_FACE              = 0x29,
+-	WC_LAND_INFO                = 0x2A,
+-	WC_TOWN_AUTHORITY           = 0x2B,
+-	WC_SUBSIDIES_LIST           = 0x2C,
+-	WC_GRAPH_LEGEND             = 0x2D,
+-	WC_DELIVERED_CARGO          = 0x2E,
+-	WC_PERFORMANCE_HISTORY      = 0x2F,
+-	WC_COMPANY_VALUE            = 0x30,
+-	WC_COMPANY_LEAGUE           = 0x31,
+-	WC_BUY_COMPANY              = 0x32,
+-	WC_PAYMENT_RATES            = 0x33,
+-	WC_ENGINE_PREVIEW           = 0x35,
+-	WC_MUSIC_WINDOW             = 0x36,
+-	WC_MUSIC_TRACK_SELECTION    = 0x37,
+-	WC_SCEN_LAND_GEN            = 0x38, // also used for landscaping toolbar
+-	WC_ASK_RESET_LANDSCAPE      = 0x39,
+-	WC_SCEN_TOWN_GEN            = 0x3A,
+-	WC_SCEN_INDUSTRY            = 0x3B,
+-	WC_SCEN_BUILD_ROAD          = 0x3C,
+-	WC_BUILD_TREES              = 0x3D,
+-	WC_SEND_NETWORK_MSG         = 0x3E,
+-	WC_DROPDOWN_MENU            = 0x3F,
+-	WC_BUILD_INDUSTRY           = 0x40,
+-	WC_GAME_OPTIONS             = 0x41,
+-	WC_NETWORK_WINDOW           = 0x42,
+-	WC_INDUSTRY_DIRECTORY       = 0x43,
+-	WC_MESSAGE_HISTORY          = 0x44,
+-	WC_CHEATS                   = 0x45,
+-	WC_PERFORMANCE_DETAIL       = 0x46,
+-	WC_CONSOLE                  = 0x47,
+-	WC_EXTRA_VIEW_PORT          = 0x48,
+-	WC_CLIENT_LIST              = 0x49,
+-	WC_NETWORK_STATUS_WINDOW    = 0x4A,
+-	WC_CUSTOM_CURRENCY          = 0x4B,
+-	WC_REPLACE_VEHICLE          = 0x4C,
+-	WC_HIGHSCORE                = 0x4D,
+-	WC_ENDSCREEN                = 0x4E,
+-	WC_SIGN_LIST                = 0x4F,
+-	WC_GENERATE_LANDSCAPE       = 0x50,
+-	WC_GENERATE_PROGRESS_WINDOW = 0x51,
+-	WC_OK_CANCEL_QUERY          = 0x52,
++	WC_MAIN_WINDOW                   = 0x00,
++	WC_MAIN_TOOLBAR                  = 0x01,
++	WC_STATUS_BAR                    = 0x02,
++	WC_BUILD_TOOLBAR                 = 0x03,
++	WC_NEWS_WINDOW                   = 0x04,
++	WC_TOWN_DIRECTORY                = 0x05,
++	WC_STATION_LIST                  = 0x06,
++	WC_TOWN_VIEW                     = 0x07,
++	WC_SMALLMAP                      = 0x08,
++	WC_TRAINS_LIST                   = 0x09,
++	WC_ROADVEH_LIST                  = 0x0A,
++	WC_SHIPS_LIST                    = 0x0B,
++	WC_AIRCRAFT_LIST                 = 0x0C,
++	WC_VEHICLE_VIEW                  = 0x0D,
++	WC_VEHICLE_DETAILS               = 0x0E,
++	WC_VEHICLE_REFIT                 = 0x0F,
++	WC_VEHICLE_ORDERS                = 0x10,
++	WC_STATION_VIEW                  = 0x11,
++	WC_VEHICLE_DEPOT                 = 0x12,
++	WC_BUILD_VEHICLE                 = 0x13,
++	WC_BUILD_BRIDGE                  = 0x14,
++	WC_ERRMSG                        = 0x15,
++	WC_ASK_ABANDON_GAME              = 0x16,
++	WC_QUIT_GAME                     = 0x17,
++	WC_BUILD_STATION                 = 0x18,
++	WC_BUS_STATION                   = 0x19,
++	WC_TRUCK_STATION                 = 0x1A,
++	WC_BUILD_DEPOT                   = 0x1B,
++	WC_COMPANY                       = 0x1D,
++	WC_FINANCES                      = 0x1E,
++	WC_PLAYER_COLOR                  = 0x1F,
++	WC_QUERY_STRING                  = 0x20,
++	WC_SAVELOAD                      = 0x21,
++	WC_SELECT_GAME                   = 0x22,
++	WC_TOOLBAR_MENU                  = 0x24,
++	WC_INCOME_GRAPH                  = 0x25,
++	WC_OPERATING_PROFIT              = 0x26,
++	WC_TOOLTIPS                      = 0x27,
++	WC_INDUSTRY_VIEW                 = 0x28,
++	WC_PLAYER_FACE                   = 0x29,
++	WC_LAND_INFO                     = 0x2A,
++	WC_TOWN_AUTHORITY                = 0x2B,
++	WC_SUBSIDIES_LIST                = 0x2C,
++	WC_GRAPH_LEGEND                  = 0x2D,
++	WC_DELIVERED_CARGO               = 0x2E,
++	WC_PERFORMANCE_HISTORY           = 0x2F,
++	WC_COMPANY_VALUE                 = 0x30,
++	WC_COMPANY_LEAGUE                = 0x31,
++	WC_BUY_COMPANY                   = 0x32,
++	WC_PAYMENT_RATES                 = 0x33,
++	WC_ENGINE_PREVIEW                = 0x35,
++	WC_MUSIC_WINDOW                  = 0x36,
++	WC_MUSIC_TRACK_SELECTION         = 0x37,
++	WC_SCEN_LAND_GEN                 = 0x38, // also used for landscaping toolbar
++	WC_ASK_RESET_LANDSCAPE           = 0x39,
++	WC_SCEN_TOWN_GEN                 = 0x3A,
++	WC_SCEN_INDUSTRY                 = 0x3B,
++	WC_SCEN_BUILD_ROAD               = 0x3C,
++	WC_BUILD_TREES                   = 0x3D,
++	WC_SEND_NETWORK_MSG              = 0x3E,
++	WC_DROPDOWN_MENU                 = 0x3F,
++	WC_BUILD_INDUSTRY                = 0x40,
++	WC_GAME_OPTIONS                  = 0x41,
++	WC_NETWORK_WINDOW                = 0x42,
++	WC_INDUSTRY_DIRECTORY            = 0x43,
++	WC_MESSAGE_HISTORY               = 0x44,
++	WC_CHEATS                        = 0x45,
++	WC_PERFORMANCE_DETAIL            = 0x46,
++	WC_CONSOLE                       = 0x47,
++	WC_EXTRA_VIEW_PORT               = 0x48,
++	WC_CLIENT_LIST                   = 0x49,
++	WC_NETWORK_STATUS_WINDOW         = 0x4A,
++	WC_CUSTOM_CURRENCY               = 0x4B,
++	WC_REPLACE_VEHICLE               = 0x4C,
++	WC_HIGHSCORE                     = 0x4D,
++	WC_ENDSCREEN                     = 0x4E,
++	WC_SIGN_LIST                     = 0x4F,
++	WC_GENERATE_LANDSCAPE            = 0x50,
++	WC_GENERATE_PROGRESS_WINDOW      = 0x51,
++	WC_OK_CANCEL_QUERY               = 0x52,
++ 	WC_NETWORK_FILTER_WINDOW         = 0x53,
++ 	WC_NETWORK_FILTER_PANEL_BASIC    = 0x54,
++ 	WC_NETWORK_FILTER_PANEL_TERRAIN  = 0x55,
++ 	WC_NETWORK_FILTER_PANEL_LANGUAGE = 0x56,
++ 	WC_NETWORK_FILTER_PANEL_ADVANCED = 0x57,
+ };
+ 
+ 
+Index: strings.c
+===================================================================
+--- strings.c	(revision 6134)
++++ strings.c	(working copy)
+@@ -20,6 +20,7 @@
+ #include "table/landscape_const.h"
+ #include "music.h"
+ #include "date.h"
++#include "table/sprites.h"
+ 
+ #ifdef WIN32
+ /* for opendir/readdir/closedir */
+@@ -1248,6 +1249,8 @@
+ 
+ 		dl->ent[m].file = files[i];
+ 		dl->ent[m].name = strdup(hdr.name);
++		dl->ent[m].sprite = SPR_FLAGS_BASE + m + 1;
++		dl->ent[m].isocode = strdup(hdr.isocode);
+ 
+ 		if (strcmp(hdr.name, "English") == 0) fallback = m;
+ 		if (strcmp(hdr.isocode, lang) == 0) def = m;
+Index: network_gui.c
+===================================================================
+--- network_gui.c	(revision 6134)
++++ network_gui.c	(working copy)
+@@ -32,10 +32,11 @@
+ #define BTC 15
+ 
+ typedef struct network_d {
+-	PlayerID company;        // select company in network lobby
+-	byte field;              // select text-field in start-server and game-listing
+-	NetworkGameList *server; // selected server in lobby and game-listing
+-	FiosItem *map;           // selected map in start-server
++	PlayerID company;            // select company in network lobby
++	byte field;                  // select text-field in start-server and game-listing
++	NetworkGameList *server;     // selected server in lobby and game-listing
++	FiosItem *map;               // selected map in start-server
++	StringID *language_dropdown; // Used by auto-generated drop down language list in server start window
+ } network_d;
+ assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(network_d));
+ 
+@@ -49,7 +50,7 @@
+ 
+ typedef struct NetworkGameSorting {
+ 	bool order;    // Ascending / Descending
+-	byte criteria; // Sorted by name/clients/connectivity
++	byte criteria; // Sorted by name/clients/age/connectivity
+ } NetworkGameSorting;
+ 
+ /* Global to remember sorting after window has been closed */
+@@ -61,6 +62,8 @@
+ static void ShowNetworkStartServerWindow(void);
+ static void ShowNetworkLobbyWindow(NetworkGameList *ngl);
+ extern void SwitchMode(int new_mode);
++static int ToggleNetworkFilterWindow(void);
++static bool FilterOut(const NetworkGameList *item);
+ 
+ static const StringID _connection_types_dropdown[] = {
+ 	STR_NETWORK_LAN_INTERNET,
+@@ -143,6 +146,16 @@
+ 	return (_internal_sort_order & 1) ? -r : r;
+ }
+ 
++static int CDECL NGameAgeSorter(const void *a, const void *b)
++{
++	const NetworkGameList *cmp1 = *(const NetworkGameList**)a;
++	const NetworkGameList *cmp2 = *(const NetworkGameList**)b;
++	
++	int r = (cmp1->info.game_date - cmp1->info.start_date) - (cmp2->info.game_date - cmp2->info.start_date);
++	
++	return r;
++}
++
+ /** Qsort function to sort by joinability. If both servers are the
+  * same, prefer the non-passworded server first. */
+ static int CDECL NGameAllowedSorter(const void *a, const void *b)
+@@ -192,6 +205,7 @@
+ 	static NGameNameSortFunction * const ngame_sorter[] = {
+ 		&NGameNameSorter,
+ 		&NGameClientSorter,
++		&NGameAgeSorter,
+ 		&NGameAllowedSorter
+ 	};
+ 
+@@ -217,6 +231,78 @@
+ 	nqld->l.flags &= ~VL_RESORT;
+ }
+ 
++static bool FilterOut(const NetworkGameList *item)
++{
++	bool apply = false;
++	
++	if (item->online)
++	{
++		if (HASBIT(_ng_filter.flags, 4) && // Is password protected
++			item->info.use_password == 1) apply = true;
++		if (HASBIT(_ng_filter.flags, 5) && // Has age limit
++			item->info.game_date - item->info.start_date >= ((_ng_filter.age + 1) * 5) * 365) apply = true;
++		if (HASBIT(_ng_filter.flags, 6) && // Is full
++			(item->info.clients_on == item->info.clients_max ||
++			item->info.companies_on == item->info.companies_max)) apply = true;
++		if (HASBIT(_ng_filter.flags, 7) && // Has people playing
++			item->info.clients_on == 0) apply = true;
++		if (HASBIT(_ng_filter.flags, 0) && // Has server version
++			!item->info.compatible) apply = true;
++		if (HASBIT(_ng_filter.flags, 2) && // Map size limit
++			(
++                (
++                    _ng_filter.mapway == 1 &&
++                    (
++                        item->info.map_width > pow(2, _ng_filter.mapsize + 6) ||
++                        item->info.map_height > pow(2, _ng_filter.mapsize + 6)
++                    )
++                ) || (
++                    _ng_filter.mapway == 0 &&            
++                    (
++                        item->info.map_width < pow(2, _ng_filter.mapsize + 6) ||
++                        item->info.map_height < pow(2, _ng_filter.mapsize + 6)
++                    )
++                )
++            )
++            ) apply = true;
++		if (HASBIT(_ng_filter.flags, 3) && // Has landscape
++			!HASBIT(_ng_filter.landscapes, item->info.map_set)) apply = true;
++        if (strcmp(item->info.server_lang_isocode, "") != 0) // Process languages if server is anything but "Any"
++        {
++            int x;
++            for (x = 0 ; x < _dynlang.num ; x++) // Search for current servers language
++            {
++                if (strcmp(_dynlang.ent[x].isocode, item->info.server_lang_isocode) == 0)
++                {
++                    if (!HASBIT(_ng_filter.languages, x)) apply = true;
++                    break;
++                }
++            }
++        }
++	}
++	else
++	{
++		if (HASBIT(_ng_filter.flags, 1))
++			apply = true;
++	}
++	
++	return apply;
++}
++
++static int GetServerCountFiltered()
++{
++	int ret = 0;
++	NetworkGameList *cur_item = _network_game_list;
++	while (cur_item != NULL)
++	{
++		if (!FilterOut(cur_item))
++			ret++;
++		cur_item = cur_item->next;
++	}
++	
++	return ret;
++}
++
+ /* Uses network_ql_d (network_d, querystr_d and list_d) WP macro */
+ static void NetworkGameWindowWndProc(Window *w, WindowEvent *e)
+ {
+@@ -228,9 +314,18 @@
+ 		nd->field = 3;
+ 		nd->server = NULL;
+ 
++		// Set default filters
++		_ng_filter.flags = 1 | 1 << 1 | 1 << 6; // Enable not full, same version, online
++		_ng_filter.languages = 0xFFFFFFFF; // Enable all languages
++
+ 		WP(w, network_ql_d).sort_list = NULL;
+ 		ld->flags = VL_REBUILD | (_ng_sorting.order << (VL_DESC - 1));
+ 		ld->sort_type = _ng_sorting.criteria;
++		
++		// Locate at center screen
++		w->left = (_cur_resolution[0] - w->width) / 2;
++		w->top = (_cur_resolution[1] - w->height) / 2;
++		
+ 		break;
+ 
+ 	case WE_PAINT: {
+@@ -239,21 +334,21 @@
+ 
+ 		if (ld->flags & VL_REBUILD) {
+ 			BuildNetworkGameList(&WP(w, network_ql_d));
+-			SetVScrollCount(w, ld->list_length);
++			SetVScrollCount(w, GetServerCountFiltered());
+ 		}
+ 		if (ld->flags & VL_RESORT) SortNetworkGameList(&WP(w, network_ql_d));
+ 
+ 		w->disabled_state = 0;
+ 
+ 		if (sel == NULL) {
+-			SETBIT(w->disabled_state, 16); SETBIT(w->disabled_state, 17);
++			SETBIT(w->disabled_state, 17); SETBIT(w->disabled_state, 18);
+ 		} else if (!sel->online) {
+-			SETBIT(w->disabled_state, 16); // Server offline, join button disabled
++			SETBIT(w->disabled_state, 17); // Server offline, join button disabled
+ 		} else if (sel->info.clients_on >= sel->info.clients_max) {
+-			SETBIT(w->disabled_state, 16); // Server full, join button disabled
++			SETBIT(w->disabled_state, 17); // Server full, join button disabled
+ 		} else if (!sel->info.compatible) {
+ 			// revisions don't match, check if server has no revision; then allow connection
+-			SETBIT(w->disabled_state, 16); // Revision mismatch, join button disabled
++			SETBIT(w->disabled_state, 17); // Revision mismatch, join button disabled
+ 		}
+ 
+ 		SetDParam(0, 0x00);
+@@ -280,38 +375,66 @@
+ 			const NetworkGameList *cur_item = _network_game_list;
+ 
+ 			while (pos > 0 && cur_item != NULL) {
+-				pos--;
++				if (!FilterOut(cur_item))
++					pos--;
+ 				cur_item = cur_item->next;
+ 			}
+ 
+ 			while (cur_item != NULL) {
+-				// show highlighted item with a different colour
+-				if (cur_item == sel) GfxFillRect(w->widget[6].left + 1, y - 2, w->widget[8].right - 1, y + 9, 10);
++				if (!FilterOut(cur_item))
++				{
++					// show highlighted item with a different colour
++					if (cur_item == sel) GfxFillRect(w->widget[6].left + 1, y - 2, w->widget[9].right - 1, y + 9, 10);
+ 
+-				SetDParamStr(0, cur_item->info.server_name);
+-				DrawStringTruncated(w->widget[6].left + 5, y, STR_02BD, 16, max_name_width);
++					SetDParamStr(0, cur_item->info.server_name);
++					DrawStringTruncated(w->widget[6].left + 5, y, STR_02BD, 16, max_name_width);
+ 
+-				SetDParam(0, cur_item->info.clients_on);
+-				SetDParam(1, cur_item->info.clients_max);
+-				SetDParam(2, cur_item->info.companies_on);
+-				SetDParam(3, cur_item->info.companies_max);
+-				DrawStringCentered(210, y, STR_NETWORK_GENERAL_ONLINE, 2);
++					SetDParam(0, cur_item->info.clients_on);
++					SetDParam(1, cur_item->info.clients_max);
++					SetDParam(2, cur_item->info.companies_on);
++					SetDParam(3, cur_item->info.companies_max);
++					DrawStringCentered(183, y, STR_NETWORK_GENERAL_ONLINE, 2);
+ 
+-				// only draw icons if the server is online
+-				if (cur_item->online) {
+-					// draw a lock if the server is password protected.
+-					if (cur_item->info.use_password) DrawSprite(SPR_LOCK, w->widget[8].left + 5, y - 1);
++					SetDParam(0, floor(cur_item->info.game_date - cur_item->info.start_date) / 365);
++					DrawStringCentered(230, y, STR_02BD_NUM, 35);
+ 
+-					// draw red or green icon, depending on compatibility with server.
+-					DrawSprite(SPR_BLOT | (cur_item->info.compatible ? PALETTE_TO_GREEN : PALETTE_TO_RED), w->widget[8].left + 15, y);
++					// only draw icons if the server is online
++					if (cur_item->online) {
++						// draw a lock if the server is password protected.
++						if (cur_item->info.use_password) DrawSprite(SPR_LOCK, w->widget[9].left + 5, y - 1);
+ 
+-					// draw flag according to server language
+-					DrawSprite(SPR_FLAGS_BASE + cur_item->info.server_lang, w->widget[8].left + 25, y);
++						// draw red or green icon, depending on compatibility with server.
++						DrawSprite(SPR_BLOT | (cur_item->info.compatible ? PALETTE_TO_GREEN : PALETTE_TO_RED), w->widget[9].left + 15, y);
++
++						// draw flag according to server language
++						if (cur_item->info.server_lang == NETLANG_OTHER)
++						{
++							if (strcmp(cur_item->info.server_lang_isocode, "") == 0) // Any language is accepted
++								DrawSprite(SPR_FLAGS_ANY, w->widget[9].left + 25, y);
++							else // Find the right flag and draw it
++							{
++								int n;
++								for	(n = 1 ; n < _dynlang.num ; n++) // Find the flag
++								{
++									if (strcmp(_dynlang.ent[n].isocode, cur_item->info.server_lang_isocode) == 0)
++									{
++										DrawSprite(_dynlang.ent[n].sprite, w->widget[9].left + 25, y);
++										break;
++									}
++								}
++							}
++						}
++					}
++
++					y += NET_PRC__SIZE_OF_ROW;
++					if (++n == w->vscroll.cap) break; // max number of games in the window
+ 				}
+-
++				else
++				{
++					if (nd->server == cur_item)
++						nd->server = NULL;
++				}
+ 				cur_item = cur_item->next;
+-				y += NET_PRC__SIZE_OF_ROW;
+-				if (++n == w->vscroll.cap) break; // max number of games in the window
+ 			}
+ 		}
+ 
+@@ -326,16 +449,16 @@
+ 			DrawStringMultiCenter(425, 132, STR_NETWORK_SERVER_OFFLINE, 2); // server offline
+ 		} else { // show game info
+ 			uint16 y = 100;
+-			const uint16 x = w->widget[15].left + 5;
++			const uint16 x = w->widget[16].left + 5;
+ 
+ 			DrawStringMultiCenter(425, 48, STR_NETWORK_GAME_INFO, 0);
+ 
+ 
+ 			SetDParamStr(0, sel->info.server_name);
+-			DrawStringCenteredTruncated(w->widget[15].left, w->widget[15].right, 62, STR_ORANGE, 16); // game name
++			DrawStringCenteredTruncated(w->widget[16].left, w->widget[16].right, 62, STR_ORANGE, 16); // game name
+ 
+ 			SetDParamStr(0, sel->info.map_name);
+-			DrawStringCenteredTruncated(w->widget[15].left, w->widget[15].right, 74, STR_02BD, 16); // map name
++			DrawStringCenteredTruncated(w->widget[16].left, w->widget[16].right, 74, STR_02BD, 16); // map name
+ 
+ 			SetDParam(0, sel->info.clients_on);
+ 			SetDParam(1, sel->info.clients_max);
+@@ -344,7 +467,30 @@
+ 			DrawString(x, y, STR_NETWORK_CLIENTS, 2);
+ 			y += 10;
+ 
+-			SetDParam(0, _language_dropdown[sel->info.server_lang]);
++			if (sel->info.server_lang == NETLANG_OTHER)
++			{
++				if (strcmp(sel->info.server_lang_isocode, "") == 0) // any lang
++					SetDParam(0, STR_NETWORK_LANG_ANY);
++				else
++				{
++					int n, f = 0; // f = found
++					for (n = 0 ; n < _dynlang.num ; n ++)
++					{
++						if (strcmp(sel->info.server_lang_isocode, _dynlang.ent[n].isocode) == 0)
++						{
++							SetDParamStr(0, _dynlang.ent[n].name);
++							f = 1;
++							break;
++						}
++					}
++					
++					if (!f) // if no language found, language is not installed
++						SetDParam(0, STR_NETWORK_LANGUAGE_UNKNOWN);
++				}
++			}
++			else // old language system
++				SetDParam(0, STR_NETWORK_LANGUAGE_OLD_VERSION);
++			
+ 			DrawString(x, y, STR_NETWORK_LANGUAGE, 2); // server language
+ 			y += 10;
+ 
+@@ -392,7 +538,7 @@
+ 	case WE_CLICK:
+ 		nd->field = e->click.widget;
+ 		switch (e->click.widget) {
+-		case 0: case 14: /* Close 'X' | Cancel button */
++		case 0: case 15: /* Close 'X' | Cancel button */
+ 			DeleteWindowById(WC_NETWORK_WINDOW, 0);
+ 			break;
+ 		case 4: case 5:
+@@ -400,7 +546,8 @@
+ 			break;
+ 		case 6: /* Sort by name */
+ 		case 7: /* Sort by connected clients */
+-		case 8: /* Connectivity (green dot) */
++		case 8: /* Sort by age */
++		case 9: /* Connectivity (green dot) */
+ 			if (ld->sort_type == e->click.widget - 6) ld->flags ^= VL_DESC;
+ 			ld->flags |= VL_RESORT;
+ 			ld->sort_type = e->click.widget - 6;
+@@ -409,7 +556,7 @@
+ 			_ng_sorting.criteria = ld->sort_type;
+ 			SetWindowDirty(w);
+ 			break;
+-		case 9: { /* Matrix to show networkgames */
++		case 10: { /* Matrix to show networkgames */
+ 			NetworkGameList *cur_item;
+ 			uint32 id_v = (e->click.pt.y - NET_PRC__OFFSET_TOP_WIDGET) / NET_PRC__SIZE_OF_ROW;
+ 
+@@ -417,18 +564,23 @@
+ 			id_v += w->vscroll.pos;
+ 
+ 			cur_item = _network_game_list;
+-			for (; id_v > 0 && cur_item != NULL; id_v--) cur_item = cur_item->next;
++			if (cur_item != NULL && FilterOut(cur_item)) id_v++; // If not on list, rause id_v again
++			for (; id_v > 0 && cur_item != NULL; id_v--)
++			{
++				cur_item = cur_item->next;
++				if (cur_item != NULL && FilterOut(cur_item)) id_v++; // If not on list, rause id_v again
++			}
+ 
+ 			nd->server = cur_item;
+ 			SetWindowDirty(w);
+ 		} break;
+-		case 11: /* Find server automatically */
++		case 12: /* Find server automatically */
+ 			switch (_network_lan_internet) {
+ 				case 0: NetworkUDPSearchGame(); break;
+ 				case 1: NetworkUDPQueryMasterServer(); break;
+ 			}
+ 			break;
+-		case 12: { // Add a server
++		case 13: { // Add a server
+ 				ShowQueryString(
+ 				BindCString(_network_default_ip),
+ 				STR_NETWORK_ENTER_IP,
+@@ -437,22 +589,28 @@
+ 				w->window_class,
+ 				w->window_number, CS_ALPHANUMERAL);
+ 		} break;
+-		case 13: /* Start server */
++		case 14: /* Start server */
+ 			ShowNetworkStartServerWindow();
+ 			break;
+-		case 16: /* Join Game */
++		case 17: /* Join Game */
+ 			if (nd->server != NULL) {
+ 				snprintf(_network_last_host, sizeof(_network_last_host), "%s", inet_ntoa(*(struct in_addr *)&nd->server->ip));
+ 				_network_last_port = nd->server->port;
+ 				ShowNetworkLobbyWindow(nd->server);
+ 			}
+ 			break;
+-		case 17: // Refresh
++		case 18: // Refresh
+ 			if (nd->server != NULL)
+ 				NetworkQueryServer(nd->server->info.hostname, nd->server->port, true);
+ 			break;
++		
++		case 19: // Filters
++			w->click_state ^= ToggleNetworkFilterWindow() << 19;
++			return; // Make sure we don't destroy window immediately after creating, by code below this.
+ 
+-	}	break;
++	}
++	
++	break;
+ 
+ 	case WE_DROPDOWN_SELECT: /* we have selected a dropdown item in the list */
+ 		switch (e->dropdown.button) {
+@@ -464,6 +622,11 @@
+ 		SetWindowDirty(w);
+ 		break;
+ 
++	case WE_TIMEOUT:
++		// Unclick all except filter button.
++		UnclickSomeWindowButtons(w, 1 << 6 ^ 1 << 7 ^ 1 << 8 ^ 1 << 9 ^ 1 << 12 ^ 1 << 13 ^ 1 << 17 ^ 1 << 18);
++		break;
++
+ 	case WE_MOUSELOOP:
+ 		if (nd->field == 3) HandleEditBox(w, &WP(w, network_ql_d).q, 3);
+ 		break;
+@@ -502,6 +665,8 @@
+ 		break;
+ 
+ 	case WE_DESTROY: /* Nicely clean up the sort-list */
++		if (FindWindowById(WC_NETWORK_FILTER_WINDOW, 0))
++			DeleteWindowById(WC_NETWORK_FILTER_WINDOW, 0);
+ 		free(WP(w, network_ql_d).sort_list);
+ 		break;
+ 	}
+@@ -518,15 +683,16 @@
+ {          WWT_6,   RESIZE_NONE,   BGC,    90,   181,    22,    33, STR_NETWORK_COMBO1,          STR_NETWORK_CONNECTION_TIP},
+ {    WWT_TEXTBTN,   RESIZE_NONE,   BGC,   170,   180,    23,    32, STR_0225,                    STR_NETWORK_CONNECTION_TIP},
+ 
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,    10,   170,    42,    53, STR_NETWORK_GAME_NAME,       STR_NETWORK_GAME_NAME_TIP},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,   171,   250,    42,    53, STR_NETWORK_CLIENTS_CAPTION, STR_NETWORK_CLIENTS_CAPTION_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,    10,   155,    42,    53, STR_NETWORK_GAME_NAME,       STR_NETWORK_GAME_NAME_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,   156,   210,    42,    53, STR_NETWORK_CLIENTS_CAPTION, STR_NETWORK_CLIENTS_CAPTION_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,   211,   250,    42,    53, STR_NETWORK_GAME_AGE,        STR_NULL},
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,   251,   290,    42,    53, STR_EMPTY,                   STR_NETWORK_INFO_ICONS_TIP},
+ 
+ {     WWT_MATRIX,   RESIZE_NONE,   BGC,    10,   290,    54,   222, (12 << 8) + 1,               STR_NETWORK_CLICK_GAME_TO_SELECT},
+ {  WWT_SCROLLBAR,   RESIZE_NONE,   BGC,   291,   302,    42,   222, STR_NULL,                    STR_0190_SCROLL_BAR_SCROLLS_LIST},
+ 
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,    30,   130,   232,   243, STR_NETWORK_FIND_SERVER,     STR_NETWORK_FIND_SERVER_TIP},
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,   180,   280,   232,   243, STR_NETWORK_ADD_SERVER,      STR_NETWORK_ADD_SERVER_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,    35,   105,   232,   243, STR_NETWORK_FIND_SERVER,     STR_NETWORK_FIND_SERVER_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,   195,   265,   232,   243, STR_NETWORK_ADD_SERVER,      STR_NETWORK_ADD_SERVER_TIP},
+ 
+ /* RIGHT SIDE */
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,   315,   415,   232,   243, STR_NETWORK_START_SERVER,    STR_NETWORK_START_SERVER_TIP},
+@@ -537,13 +703,14 @@
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,   315,   415,   201,   212, STR_NETWORK_JOIN_GAME,       STR_NULL},
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,   430,   535,   201,   212, STR_NETWORK_REFRESH,         STR_NETWORK_REFRESH_TIP},
+ 
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,   115,   185,   232,   243, STR_NETWORK_FILTER,          STR_NETWORK_FILTER_TIP},
+ {   WIDGETS_END},
+ };
+ 
+ static const WindowDesc _network_game_window_desc = {
+-	WDP_CENTER, WDP_CENTER, 550, 250,
+-	WC_NETWORK_WINDOW,0,
+-	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS,
++	0, 0, 550, 250,
++	WC_NETWORK_WINDOW, 0,
++	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET,
+ 	_network_game_window_widgets,
+ 	NetworkGameWindowWndProc,
+ };
+@@ -564,7 +731,7 @@
+ 			NetworkAddServer(*srv);
+ 		}
+ 
+-		_ng_sorting.criteria = 2; // sort default by collectivity (green-dots on top)
++		_ng_sorting.criteria = 3; // sort default by collectivity (green-dots on top)
+ 		_ng_sorting.order = 0;    // sort ascending by default
+ 	}
+ 
+@@ -590,6 +757,8 @@
+ 	NSSWND_ROWSIZE = 12
+ };
+ 
++static int _network_language = 0;
++
+ /* Uses network_ql_d (network_d, querystr_d and list_d) WP macro */
+ static void NetworkStartServerWindowWndProc(Window *w, WindowEvent *e)
+ {
+@@ -597,10 +766,14 @@
+ 
+ 	switch (e->event) {
+ 	case WE_CREATE: /* focus input box */
++    {
+ 		nd->field = 3;
+ 		_network_game_info.use_password = (_network_server_password[0] != '\0');
++        nd->language_dropdown = (StringID*) malloc(sizeof(_dynlang.dropdown) + sizeof(StringID));
++        nd->language_dropdown[0] = STR_NETWORK_LANG_ANY;
++        memcpy(&nd->language_dropdown[1], _dynlang.dropdown, sizeof(_dynlang.dropdown));
+ 		break;
+-
++    }
+ 	case WE_PAINT: {
+ 		int y = NSSWND_START, pos;
+ 		const FiosItem *item;
+@@ -609,7 +782,7 @@
+ 		SetDParam( 9, _players_dropdown[_network_game_info.clients_max]);
+ 		SetDParam(11, _players_dropdown[_network_game_info.companies_max]);
+ 		SetDParam(13, _players_dropdown[_network_game_info.spectators_max]);
+-		SetDParam(15, _language_dropdown[_network_game_info.server_lang]);
++		SetDParam(15, nd->language_dropdown[_network_language]);
+ 		DrawWindowWidgets(w);
+ 
+ 		GfxFillRect(11, 63, 258, 215, 0xD7);
+@@ -681,10 +854,16 @@
+ 			ShowDropDownMenu(w, _players_dropdown, _network_game_info.spectators_max, 14, 0, 0);
+ 			break;
+ 		case 15: case 16: /* Language */
+-			ShowDropDownMenu(w, _language_dropdown, _network_game_info.server_lang, 16, 0, 0);
++			ShowDropDownMenu(w, nd->language_dropdown, _network_language, 16, 0, 0);
+ 			break;
+ 		case 17: /* Start game */
+ 			_is_network_server = true;
++			
++            if (_network_language > 0) // use 1 based array (any is added)
++                strcpy(_network_game_info.server_lang_isocode, _dynlang.ent[_network_language - 1].isocode);
++            else
++                strcpy(_network_game_info.server_lang_isocode, "");
++			_network_game_info.server_lang = NETLANG_OTHER;
+ 
+ 			if (nd->map == NULL) { // start random new game
+ 				ShowGenerateLandscape();
+@@ -716,7 +895,7 @@
+ 			case 10: _network_game_info.clients_max = e->dropdown.index; break;
+ 			case 12: _network_game_info.companies_max = e->dropdown.index; break;
+ 			case 14: _network_game_info.spectators_max = e->dropdown.index; break;
+-			case 16: _network_game_info.server_lang = e->dropdown.index; break;
++			case 16: _network_language = e->dropdown.index; break;
+ 		}
+ 
+ 		SetWindowDirty(w);
+@@ -740,6 +919,9 @@
+ 		_network_game_info.use_password = (_network_server_password[0] != '\0');
+ 		SetWindowDirty(w);
+ 	} break;
++    case WE_DESTROY:
++        free(nd->language_dropdown);
++        break;
+ 	}
+ }
+ 
+@@ -1711,6 +1893,499 @@
+ 	UpdateTextBufferSize(&WP(w, querystr_d).text);
+ }
+ 
++static const StringID _network_filter_ages_types_dropdown[] = {
++	STR_NETWORK_FILTER_AGES_0,
++	STR_NETWORK_FILTER_AGES_1,
++	STR_NETWORK_FILTER_AGES_2,
++	STR_NETWORK_FILTER_AGES_3,
++	STR_NETWORK_FILTER_AGES_4,
++	STR_NETWORK_FILTER_AGES_5,
++	STR_NETWORK_FILTER_AGES_6,
++	STR_NETWORK_FILTER_AGES_7,
++	STR_NETWORK_FILTER_AGES_8,
++	STR_NETWORK_FILTER_AGES_9,
++	INVALID_STRING_ID
++};
++
++static const StringID _network_filter_mapsizes_types_dropdown[] = {
++	STR_64,
++	STR_128,
++	STR_256,
++	STR_512,
++	STR_1024,
++	STR_2048,
++	INVALID_STRING_ID
++};
++
++static const StringID _network_filter_mapway_types_dropdown[] = {
++    STR_NETWORK_FILTER_MIN,
++    STR_NETWORK_FILTER_MAX,
++    INVALID_STRING_ID
++};
++
++static int _network_filter_age = 0;
++static int _network_filter_map = 2;
++static int _network_filter_map_way = 1;
++static int sel_lang = -1;
++
++static void ShowPanel(int n);
++static void BringPanelToFront();
++static void SetPanelDirty();
++static void DeletePanel();
++static int cur_panel = -1;
++static const WindowDesc _network_filter_panels_desc[]; // prototype
++
++static void ApplyFilter()
++{
++	UpdateNetworkGameWindow(false);
++    SetWindowDirty(FindWindowById(WC_NETWORK_WINDOW, 0));
++}
++
++static void NetworkFilterWindowWndProc(Window *w, WindowEvent *e)
++{
++	Window *n;
++	switch (e->event)
++	{
++		case WE_CREATE:
++			n = FindWindowById(WC_NETWORK_WINDOW, 0);
++			n->top = (_cur_resolution[1] - (n->height + 112)) >> 1;
++			w->left = ((n->width - w->width) >> 1) + n->left;
++			w->top = n->top + n->height + 100;
++			SetWindowDirty(n);
++			SetWindowDirty(w);
++			break;
++	
++		case WE_CLICK:
++		
++			BringPanelToFront();
++			
++			switch (e->click.widget)
++			{
++				case 0:
++				case 1:
++				case 2:
++				case 3:
++					ShowPanel(e->click.widget);
++					SetWindowDirty(w);
++					break;
++			}
++		
++			break;
++
++		case WE_PAINT:
++			DrawWindowWidgets(w);
++			SetPanelDirty();
++			break;
++		case WE_MESSAGE:
++			if (e->message.wparam == 1) // We are asked by window.c to reposition the windows
++			{
++				Window *nl; // network window
++				Window *nf; // network filter window
++				Window *pn; // current panel;
++				
++				nl = FindWindowById(WC_NETWORK_WINDOW, 0);
++				nf = FindWindowById(WC_NETWORK_FILTER_WINDOW, 0);
++				pn = FindWindowById(_network_filter_panels_desc[cur_panel].cls, 0);
++				
++				if (nl != NULL && nf != NULL && pn != NULL)
++				{
++					int fh = nl->height + nf->height + pn->height; // total height of all windows combined
++					nl->left = nf->left = pn->left = (_cur_resolution[0] - nl->width) >> 1; // horizontal
++					nl->top = (_cur_resolution[1] - fh) >> 1; // vertical
++					pn->top = nl->top + nl->height;
++					nf->top = pn->top + pn->height;
++					SetWindowDirty(nl);
++					SetWindowDirty(nf);
++					SetWindowDirty(pn);
++				}
++			}
++			break;
++		case WE_DESTROY:
++			DeletePanel();
++			n = FindWindowById(WC_NETWORK_WINDOW, 0);
++			n->top = (_cur_resolution[1] - n->height) >> 1;
++			MarkWholeScreenDirty();
++			break;
++	}
++}
++
++static void NetworkFilterPanelsBasicWndProc(Window *w, WindowEvent *e)
++{
++	switch (e->event)
++	{
++		case WE_CREATE:
++			_network_filter_age = _ng_filter.age;
++			break;
++	
++		case WE_CLICK:
++		
++			switch (e->click.widget)
++			{
++				case 2:
++				case 3:
++					ShowDropDownMenu(w, _network_filter_ages_types_dropdown, _network_filter_age, 3, 0, 0);
++					break;
++				case 4:
++				case 5:
++				case 6:
++				case 7:
++					TOGGLEBIT(_ng_filter.flags, e->click.widget);
++					ApplyFilter();
++					SetWindowDirty(w);
++					break;
++			}
++		
++			break;
++		
++		case WE_DROPDOWN_SELECT: /* we have selected a dropdown item in the list */
++			switch (e->dropdown.button) {
++				case 3:
++					_ng_filter.age = _network_filter_age = e->dropdown.index;
++					break;
++			}
++
++			ApplyFilter();
++			SetWindowDirty(w);
++			break;
++
++		case WE_PAINT:
++        {
++			SB(w->click_state, 4, 4, GB(_ng_filter.flags, 4, 4));
++            int x;
++            for (x = 4 ; x < 8 ; x++)
++                w->widget[x].color = HASBIT(_ng_filter.flags, x) ? BTC : BGC ;
++			SetDParam(0, 0x00);
++			SetDParam(0, _network_filter_ages_types_dropdown[_network_filter_age]);
++			DrawWindowWidgets(w);
++			
++			DrawString(10, 8, STR_NETWORK_FILTER_DESC, 0);
++			DrawString(30, 24, STR_NETWORK_FILTER_NOLOCKED, 0);
++			DrawString(93, 38, STR_NETWORK_FILTER_AGE, 0);
++			DrawString(30, 52, STR_NETWORK_FILTER_NOTFULL, 0);
++			DrawString(30, 66, STR_NETWORK_FILTER_NOTEMPTY, 0);
++
++		} break;
++	}
++}
++
++static void NetworkFilterPanelsGameWndProc(Window *w, WindowEvent *e)
++{
++	switch (e->event)
++	{
++		case WE_CREATE:
++			break;
++		case WE_CLICK:
++		{
++			switch (e->click.widget)
++			{
++				case 2:
++				case 3:
++					ShowDropDownMenu(w, _network_filter_mapsizes_types_dropdown, _network_filter_map, 3, 0, 0);
++					break;
++                case 4:
++                case 5:
++					ShowDropDownMenu(w, _network_filter_mapway_types_dropdown, _network_filter_map_way, 5, 0, 0);
++                    break;
++				case 6:
++				case 7:
++					TOGGLEBIT(_ng_filter.flags, e->click.widget - 4);
++					ApplyFilter();
++					SetWindowDirty(w);
++					break;
++				case 8:
++				case 9:
++				case 10:
++				case 11:
++					TOGGLEBIT(_ng_filter.landscapes, e->click.widget - 8);
++					ApplyFilter();
++					SetWindowDirty(w);
++					break;
++			}
++			break;
++		}
++		break;
++		case WE_DROPDOWN_SELECT: /* we have selected a dropdown item in the list */
++			switch (e->dropdown.button) {
++				case 3:
++					_ng_filter.mapsize = _network_filter_map = e->dropdown.index;
++					ApplyFilter();
++					break;
++                case 5:
++					_ng_filter.mapway = _network_filter_map_way = e->dropdown.index;
++                    ApplyFilter();
++                    break;
++			}
++			SetWindowDirty(w);
++			break;
++		case WE_PAINT:
++        {
++			SB(w->click_state, 6, 2, GB(_ng_filter.flags, 2, 2));
++			SB(w->click_state, 8, 4, _ng_filter.landscapes);
++            int x;
++            for (x = 6 ; x < 8 ; x++)
++                w->widget[x].color = HASBIT(_ng_filter.flags, x - 4) ? BTC : BGC ;
++            for (x = 8 ; x < 12 ; x++)
++                w->widget[x].color = HASBIT(_ng_filter.landscapes, x - 8) ? BTC : BGC ;
++			SetDParam(0, 0x00);
++			SetDParam(0, _network_filter_mapsizes_types_dropdown[_network_filter_map]);
++			SetDParam(1, _network_filter_mapway_types_dropdown[_network_filter_map_way]);
++			DrawWindowWidgets(w);
++			
++			DrawString(10, 8, STR_NETWORK_FILTER_DESC, 0);
++			DrawString(130, 24, STR_NETWORK_FILTER_MAPSIZE, 0);
++			DrawString(30, 38, STR_NETWORK_FILTER_SELECT_LANDSCAPE, 0);
++			DrawString(45, 52, STR_NETWORK_FILTER_LANDSCAPE_TEMPERATE, 0);
++			DrawString(45, 66, STR_NETWORK_FILTER_LANDSCAPE_SUBARCTIC, 0);
++			DrawString(125, 52, STR_NETWORK_FILTER_LANDSCAPE_SUBTROPICAL, 0);
++			DrawString(125, 66, STR_NETWORK_FILTER_LANDSCAPE_TOYLAND, 0);
++		} break;
++	}
++}
++
++static void NetworkFilterPanelsLanguageWndProc(Window *w, WindowEvent *e)
++{
++	switch (e->event)
++	{
++		case WE_CREATE:
++			w->vscroll.cap = 5;
++			sel_lang = -1;
++			break;
++		case WE_CLICK:
++			switch (e->click.widget)
++			{
++				case 4: // Matrix
++				{
++					int nsel = (e->click.pt.y - 23) / 13;
++					if (nsel > w->vscroll.cap) break;
++					if (nsel == sel_lang) sel_lang = -1;
++					else sel_lang = nsel + w->vscroll.pos;
++					SetWindowDirty(w);
++					break;
++				}
++				case 6: // Enable
++					TOGGLEBIT(_ng_filter.languages, sel_lang);
++                    ApplyFilter();
++					SetWindowDirty(w);
++					break;
++				case 7: // Enable all
++					_ng_filter.languages = 0xFFFFFFFF;
++                    ApplyFilter();
++					SetWindowDirty(w);
++					break;
++				case 8: // Disable all
++					_ng_filter.languages = 0x00000000;
++                    ApplyFilter();
++					SetWindowDirty(w);
++					break;
++			}
++			break;
++		case WE_PAINT:
++		{
++			int cl;
++			w->disabled_state = 0;
++			CLRBIT(w->click_state, 6);
++			
++			if (sel_lang > -1)
++			{
++				if (HASBIT(_ng_filter.languages, sel_lang))
++					SETBIT(w->click_state, 6);
++			}
++			else
++				SETBIT(w->disabled_state, 6);
++			SetVScrollCount(w, _dynlang.num);
++			DrawWindowWidgets(w);
++			
++			for (cl = 0 ; cl < w->vscroll.cap ; cl ++)
++			{
++				if (cl + w->vscroll.pos == sel_lang) GfxFillRect(w->widget[2].left + 1, 24 + (cl * 13), w->widget[3].right - 1, 34 + (cl * 13), 10);
++				DrawSprite(_dynlang.ent[cl + w->vscroll.pos].sprite, 13, 25 + (cl * 13));
++				DrawStringTruncated(26, 25 + (cl * 13), _dynlang.dropdown[cl + w->vscroll.pos], 16, 110);
++				DrawSprite(SPR_BLOT | (HASBIT(_ng_filter.languages, cl + w->vscroll.pos) ? PALETTE_TO_GREEN : PALETTE_TO_RED), 137, 25 + (cl * 13));
++			}
++			
++			break;
++		}
++		case WE_TIMEOUT:
++			UnclickSomeWindowButtons(w, 1 << 7 ^ 1 << 8);
++			break;
++	}
++}
++
++static void NetworkFilterPanelsAdvancedWndProc(Window *w, WindowEvent *e)
++{
++	switch (e->event)
++	{
++		case WE_CLICK:
++		{
++			switch (e->click.widget)
++			{
++				case 2:
++				case 3:
++					TOGGLEBIT(_ng_filter.flags, e->click.widget - 2);
++					ApplyFilter();
++					SetWindowDirty(w);
++					break;
++			}
++			break;
++		}
++		case WE_PAINT:
++        {
++			SB(w->click_state, 2, 2, GB(_ng_filter.flags, 0, 2));
++            int x;
++            for (x = 2 ; x < 4 ; x++)
++                w->widget[x].color = HASBIT(_ng_filter.flags, x - 2) ? BTC : BGC ;
++			DrawWindowWidgets(w);
++			DrawString(10, 8, STR_NETWORK_FILTER_DESC, 0);
++			DrawString(30, 24, STR_NETWORK_FILTER_VERSION, 0);
++			DrawString(30, 38, STR_NETWORK_FILTER_ONLINE, 0);
++		} break;
++	}
++}
++
++static const Widget _network_filter_widgets[] = {
++{     WWT_TEXTBTN,   RESIZE_NONE,    BGC,     0,    83,    0,    11, STR_NETWORK_FILTER_BASIC,      STR_NULL},
++{     WWT_TEXTBTN,   RESIZE_NONE,    BGC,    84,   166,    0,    11, STR_NETWORK_FILTER_GAME,    STR_NULL},
++{     WWT_TEXTBTN,   RESIZE_NONE,    BGC,   167,   248,    0,    11, STR_NETWORK_FILTER_LANGUAGE,   STR_NULL},
++{     WWT_TEXTBTN,   RESIZE_NONE,    BGC,   249,   330,    0,    11, STR_NETWORK_FILTER_ADVANCED,   STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BGC,   331,   549,    0,    11, STR_NULL,                      STR_NULL},
++{      WIDGETS_END}
++};
++
++static const Widget _network_filter_panel_basic_widgets[] = {
++{      WWT_IMGBTN,   RESIZE_NONE,    BGC,     0,   248,     0,    99, STR_NULL,                  STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BGC,   249,   549,     0,    99, STR_NULL,                  STR_NULL},
++{           WWT_6,   RESIZE_NONE,    BGC,    30,    90,    37,    48, STR_02BD,                  STR_NULL},
++{     WWT_TEXTBTN,   RESIZE_NONE,    BGC,    79,    89,    38,    47, STR_0225,                  STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BTC,    15,    23,    24,    32, STR_NULL,                  STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BTC,    15,    23,    38,    46, STR_NULL,                  STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BTC,    15,    23,    52,    60, STR_NULL,                  STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BTC,    15,    23,    66,    74, STR_NULL,                  STR_NULL},
++{      WIDGETS_END}
++};
++
++static const Widget _network_filter_panel_game_widgets[] = {
++{      WWT_IMGBTN,   RESIZE_NONE,    BGC,     0,   248,     0,    99, STR_NULL,                  STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BGC,   249,   549,     0,    99, STR_NULL,                  STR_NULL},
++{           WWT_6,   RESIZE_NONE,    BGC,    80,   125,    23,    34, STR_02BD,                  STR_NULL},
++{     WWT_TEXTBTN,   RESIZE_NONE,    BGC,   114,   124,    24,    33, STR_0225,                  STR_NULL},
++{           WWT_6,   RESIZE_NONE,    BGC,    30,    75,    23,    34, STR_02E1,                  STR_NULL},
++{     WWT_TEXTBTN,   RESIZE_NONE,    BGC,    64,    74,    24,    33, STR_0225,                  STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BTC,    15,    23,    24,    32, STR_NULL,                  STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BTC,    15,    23,    38,    46, STR_NULL,                  STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BTC,    30,    38,    52,    60, STR_NULL,                  STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BTC,    30,    38,    66,    74, STR_NULL,                  STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BTC,   110,   118,    52,    60, STR_NULL,                  STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BTC,   110,   118,    66,    74, STR_NULL,                  STR_NULL},
++{      WIDGETS_END}
++};
++
++static const Widget _network_filter_panel_languages_widgets[] = {
++{      WWT_IMGBTN,   RESIZE_NONE,    BGC,     0,   248,     0,    99, STR_NULL,                   STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BGC,   249,   549,     0,    99, STR_NULL,                   STR_NULL},
++{     WWT_TEXTBTN,   RESIZE_NONE,    BTC,    10,   135,    11,    22, STR_OPTIONS_LANG,           STR_NULL},
++{     WWT_TEXTBTN,   RESIZE_NONE,    BTC,   136,   147,    11,    22, STR_EMPTY,                  STR_NULL},
++{      WWT_MATRIX,   RESIZE_NONE,    BGC,    10,   147,    23,    87, (5 << 8) + 1,               STR_NULL},
++{   WWT_SCROLLBAR,   RESIZE_NONE,    BGC,   148,   159,    11,    87, STR_NULL,                   STR_NULL},
++{  WWT_PUSHTXTBTN,   RESIZE_NONE,    BTC,   168,   238,    11,    22, STR_NETWORK_FILTER_ENABLED, STR_NULL},
++{  WWT_PUSHTXTBTN,   RESIZE_NONE,    BTC,   168,   238,    61,    72, STR_MESSAGES_ENABLE_ALL,    STR_NULL},
++{  WWT_PUSHTXTBTN,   RESIZE_NONE,    BTC,   168,   238,    76,    87, STR_MESSAGES_DISABLE_ALL,   STR_NULL},
++{      WIDGETS_END}
++};
++
++static const Widget _network_filter_panel_advanced_widgets[] = {
++{      WWT_IMGBTN,   RESIZE_NONE,    BGC,     0,   248,     0,    99, STR_NULL,                   STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BGC,   249,   549,     0,    99, STR_NULL,                   STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BTC,    15,    23,    24,    32, STR_NULL,                  STR_NULL},
++{      WWT_IMGBTN,   RESIZE_NONE,    BTC,    15,    23,    38,    46, STR_NULL,                  STR_NULL},
++//{      WWT_IMGBTN,   RESIZE_NONE,    BTC,    15,    23,    52,    60, STR_NULL,                  STR_NULL},//
++{      WIDGETS_END}
++};
++
++static const WindowDesc _network_filter_window_desc = {
++	0, 0, 550, 12,
++	WC_NETWORK_FILTER_WINDOW, 0,
++	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET,
++	_network_filter_widgets,
++	NetworkFilterWindowWndProc
++};
++
++static const WindowDesc _network_filter_panels_desc[] = {
++	{
++		0, 0, 550, 100,
++		WC_NETWORK_FILTER_PANEL_BASIC, 0,
++		WDF_DEF_WIDGET,
++		_network_filter_panel_basic_widgets,
++		NetworkFilterPanelsBasicWndProc
++	},
++	{
++		0, 0, 550, 100,
++		WC_NETWORK_FILTER_PANEL_TERRAIN, 0,
++		WDF_DEF_WIDGET,
++		_network_filter_panel_game_widgets,
++		NetworkFilterPanelsGameWndProc
++	},
++	{
++		0, 0, 550, 100,
++		WC_NETWORK_FILTER_PANEL_LANGUAGE, 0,
++		WDF_DEF_WIDGET,
++		_network_filter_panel_languages_widgets,
++		NetworkFilterPanelsLanguageWndProc
++	},
++	{
++		0, 0, 550, 100,
++		WC_NETWORK_FILTER_PANEL_ADVANCED, 0,
++		WDF_DEF_WIDGET,
++		_network_filter_panel_advanced_widgets,
++		NetworkFilterPanelsAdvancedWndProc
++	}
++};
++
++static int ToggleNetworkFilterWindow(void)
++{
++	if (FindWindowById(WC_NETWORK_FILTER_WINDOW, 0) != NULL)
++		DeleteWindowById(WC_NETWORK_FILTER_WINDOW, 0);
++	else
++	{
++		AllocateWindowDesc(&_network_filter_window_desc);
++		ShowPanel(0);
++		return 0;
++	}
++	
++	return 1;
++}
++
++static void BringPanelToFront()
++{
++	if (cur_panel > -1)
++		BringWindowToFrontById(_network_filter_panels_desc[cur_panel].cls, 0);
++}
++
++static void SetPanelDirty()
++{
++	if (cur_panel > -1)
++		SetWindowDirty(FindWindowById(_network_filter_panels_desc[cur_panel].cls, 0));
++}
++
++static void DeletePanel()
++{
++	if (cur_panel > -1)
++		DeleteWindowById(_network_filter_panels_desc[cur_panel].cls, 0);
++	cur_panel = -1;
++}
++
++static void ShowPanel(int n)
++{
++	Window *w = FindWindowById(WC_NETWORK_FILTER_WINDOW, 0);
++	if (cur_panel > -1)
++		DeleteWindowById(_network_filter_panels_desc[cur_panel].cls, 0);
++	w->click_state = 0 ^ 0 << 1 ^ 0 << 2;
++	w->click_state ^= 1 << n;
++	Window *panel = AllocateWindowDesc(&_network_filter_panels_desc[n]);
++	panel->left = w->left;
++	panel->top = w->top - 100;
++	cur_panel = n;
++}
++
+ #else
+ void ShowJoinStatusWindowAfterJoin(void) {}
+ #endif /* ENABLE_NETWORK */
+Index: window.c
+===================================================================
+--- window.c	(revision 6134)
++++ window.c	(working copy)
+@@ -1626,9 +1626,21 @@
+ 			case WC_SELECT_GAME:
+ 			case WC_GAME_OPTIONS:
+ 			case WC_NETWORK_WINDOW:
+-				top = (newh - w->height) >> 1;
+-				left = (neww - w->width) >> 1;
+-				break;
++			{
++				if (FindWindowById(WC_NETWORK_FILTER_WINDOW, 0) != NULL)
++				{
++					SendWindowMessage(WC_NETWORK_FILTER_WINDOW, 0, WE_MESSAGE, 1, 0); // Make the filter window reposition the windows.
++					                                                                  // This has to be messaged to the filter window,
++																					  // because this file doesn't know which panel er open.
++					top = w->top;
++					left = w->left;
++				}
++				else
++				{
++					top = (newh - w->height) >> 1;
++					left = (neww - w->width) >> 1;
++				}
++			} break;
+ 
+ 			case WC_NEWS_WINDOW:
+ 				top = newh - w->height;

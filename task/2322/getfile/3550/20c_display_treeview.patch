@@ -1,0 +1,223 @@
+diff -r 3e14d8df1369 src/settings_gui.cpp
+--- a/src/settings_gui.cpp	Sun Nov 02 14:59:40 2008 +0100
++++ b/src/settings_gui.cpp	Sun Nov 02 15:17:07 2008 +0100
+@@ -1221,34 +1221,6 @@
+ 						_treeview_fields,
+ 						lengthof(_treeview_fields));
+ 
+-/** Data structure describing a single patch in a tab */
+-struct PatchEntry {
+-	const SettingDesc *setting; ///< Setting description of the patch
+-	uint index;                 ///< Index of the setting in the settings table
+-};
+-
+-/**
+- * Data structure describing one page of patches in the patch settings window.
+- *
+- * The names of the patches to display are statically defined, and from this
+- * information, a dynamic array (with length \a num) of PatchEntry entries is
+- * constructed.
+- */
+-struct PatchPage {
+-	const char **names;  ///< Static list of strings with patch names that are settable from the tab
+-	PatchEntry *entries; ///< Array of patch entries of the page. Initially \c NULL, filled in at run time
+-	byte num;            ///< Number of entries on the page (statically filled).
+-};
+-
+-/** Array of pages (tabs), where each page holds a number of advanced settings. */
+-static PatchPage _patches_page[] = {
+-	{_patches_ui,           NULL, lengthof(_patches_ui)},
+-	{_patches_construction, NULL, lengthof(_patches_construction)},
+-	{_patches_vehicles,     NULL, lengthof(_patches_vehicles)},
+-	{_patches_stations,     NULL, lengthof(_patches_stations)},
+-	{_patches_economy,      NULL, lengthof(_patches_economy)},
+-	{_patches_ai,           NULL, lengthof(_patches_ai)},
+-};
+ 
+ /** Widget numbers of config patches window */
+ enum PatchesSelectionWidgets {
+@@ -1287,22 +1259,8 @@
+ 
+ 		/* Build up the dynamic settings-array only once per OpenTTD session */
+ 		if (first_time) {
+-			PatchPage *page;
+-			for (page = &_patches_page[0]; page != endof(_patches_page); page++) {
+-				uint i;
+-
+-				if (patches_max < page->num) patches_max = page->num;
+-
+-				page->entries = MallocT<PatchEntry>(page->num);
+-				for (i = 0; i != page->num; i++) {
+-					uint index;
+-					const SettingDesc *sd = GetPatchFromName(page->names[i], &index);
+-					assert(sd != NULL);
+-
+-					page->entries[i].setting = sd;
+-					page->entries[i].index = index;
+-				}
+-			}
++			_treeview.Init();
++			patches_max = 15; // Some nice number so the window has non-zero size, will be removed later
+ 			first_time = false;
+ 		}
+ 
+@@ -1319,67 +1277,16 @@
+ 
+ 	virtual void OnPaint()
+ 	{
+-		const PatchPage *page = &_patches_page[this->page];
+-		uint i;
+-
+-		/* Set up selected category */
+ 		this->DrawWidgets();
+ 
+ 		int x = SETTINGTREE_LEFT_OFFSET;
+ 		int y = SETTINGTREE_TOP_OFFSET;
+-		for (i = 0; i != page->num; i++) {
+-			const SettingDesc *sd = page->entries[i].setting;
+-			DrawPatch(patches_ptr, sd, x, y, this->click - (i * 2));
+-			y += SETTING_HEIGHT;
+-		}
+-	}
+-
+-	void DrawPatch(GameSettings *patches_ptr, const SettingDesc *sd, int x, int y, int state)
+-	{
+-		const SettingDescBase *sdb = &sd->desc;
+-		const void *var = GetVariableAddress(patches_ptr, &sd->save);
+-		bool editable = true;
+-		bool disabled = false;
+-
+-		// We do not allow changes of some items when we are a client in a networkgame
+-		if (!(sd->save.conv & SLF_NETWORK_NO) && _networking && !_network_server) editable = false;
+-		if ((sdb->flags & SGF_NETWORK_ONLY) && !_networking) editable = false;
+-		if ((sdb->flags & SGF_NO_NETWORK) && _networking) editable = false;
+-
+-		if (sdb->cmd == SDT_BOOLX) {
+-			static const int _bool_ctabs[2][2] = {{9, 4}, {7, 6}};
+-			/* Draw checkbox for boolean-value either on/off */
+-			bool on = (*(bool*)var);
+-
+-			DrawFrameRect(x, y, x + 19, y + 8, _bool_ctabs[!!on][!!editable], on ? FR_LOWERED : FR_NONE);
+-			SetDParam(0, on ? STR_CONFIG_PATCHES_ON : STR_CONFIG_PATCHES_OFF);
+-		} else {
+-			int32 value;
+-
+-			value = (int32)ReadValue(var, sd->save.conv);
+-
+-			/* Draw [<][>] boxes for settings of an integer-type */
+-			DrawArrowButtons(x, y, COLOUR_YELLOW, state, (editable && value != sdb->min), (editable && value != sdb->max));
+-
+-			disabled = (value == 0) && (sdb->flags & SGF_0ISDISABLED);
+-			if (disabled) {
+-				SetDParam(0, STR_CONFIG_PATCHES_DISABLED);
+-			} else {
+-				if (sdb->flags & SGF_CURRENCY) {
+-					SetDParam(0, STR_CONFIG_PATCHES_CURRENCY);
+-				} else if (sdb->flags & SGF_MULTISTRING) {
+-					SetDParam(0, sdb->str + value + 1);
+-				} else {
+-					SetDParam(0, (sdb->flags & SGF_NOCOMMA) ? STR_CONFIG_PATCHES_INT32 : STR_7024);
+-				}
+-				SetDParam(1, value);
+-			}
+-		}
+-		DrawString(x + 25, y, (sdb->str) + disabled, TC_FROMSTRING);
++		_treeview.DrawRows(patches_ptr, x, y, 0, 0 + patches_max);
+ 	}
+ 
+ 	virtual void OnClick(Point pt, int widget)
+ 	{
++/* TEMPORARY COMMENT TO MAKE IT BUILDABLE AGAIN
+ 		switch (widget) {
+ 			case PATCHSEL_OPTIONSPANEL: {
+ 				const PatchPage *page = &_patches_page[this->page];
+@@ -1401,7 +1308,7 @@
+ 
+ 				sd = page->entries[btn].setting;
+ 
+-				/* return if action is only active in network, or only settable by server */
++				/-* return if action is only active in network, or only settable by server *-/
+ 				if (!(sd->save.conv & SLF_NETWORK_NO) && _networking && !_network_server) return;
+ 				if ((sd->desc.flags & SGF_NETWORK_ONLY) && !_networking) return;
+ 				if ((sd->desc.flags & SGF_NO_NETWORK) && _networking) return;
+@@ -1409,7 +1316,7 @@
+ 				var = GetVariableAddress(patches_ptr, &sd->save);
+ 				value = (int32)ReadValue(var, sd->save.conv);
+ 
+-				/* clicked on the icon on the left side. Either scroller or bool on/off */
++				/-* clicked on the icon on the left side. Either scroller or bool on/off *-/
+ 				if (x < 21) {
+ 					const SettingDescBase *sdb = &sd->desc;
+ 					int32 oldvalue = value;
+@@ -1417,20 +1324,20 @@
+ 					switch (sdb->cmd) {
+ 					case SDT_BOOLX: value ^= 1; break;
+ 					case SDT_NUMX: {
+-						/* Add a dynamic step-size to the scroller. In a maximum of
++						/-* Add a dynamic step-size to the scroller. In a maximum of
+ 							* 50-steps you should be able to get from min to max,
+ 							* unless specified otherwise in the 'interval' variable
+-							* of the current patch. */
++							* of the current patch. *-/
+ 						uint32 step = (sdb->interval == 0) ? ((sdb->max - sdb->min) / 50) : sdb->interval;
+ 						if (step == 0) step = 1;
+ 
+-						/* don't allow too fast scrolling */
++						/-* don't allow too fast scrolling *-/
+ 						if ((this->flags4 & WF_TIMEOUT_MASK) > WF_TIMEOUT_TRIGGER) {
+ 							_left_button_clicked = false;
+ 							return;
+ 						}
+ 
+-						/* Increase or decrease the value and clamp it to extremes */
++						/-* Increase or decrease the value and clamp it to extremes *-/
+ 						if (x >= 10) {
+ 							value += step;
+ 							if (value > sdb->max) value = sdb->max;
+@@ -1439,7 +1346,7 @@
+ 							if (value < sdb->min) value = (sdb->flags & SGF_0ISDISABLED) ? 0 : sdb->min;
+ 						}
+ 
+-						/* Set up scroller timeout for numeric values */
++						/-* Set up scroller timeout for numeric values *-/
+ 						if (value != oldvalue && !(sd->desc.flags & SGF_MULTISTRING)) {
+ 							this->click = btn * 2 + 1 + ((x >= 10) ? 1 : 0);
+ 							this->flags4 |= WF_TIMEOUT_BEGIN;
+@@ -1454,9 +1361,9 @@
+ 						this->SetDirty();
+ 					}
+ 				} else {
+-					/* only open editbox for types that its sensible for */
++					/-* only open editbox for types that its sensible for *-/
+ 					if (sd->desc.cmd != SDT_BOOLX && !(sd->desc.flags & SGF_MULTISTRING)) {
+-						/* Show the correct currency-translated value */
++						/-* Show the correct currency-translated value *-/
+ 						if (sd->desc.flags & SGF_CURRENCY) value *= _currency->rate;
+ 
+ 						this->entry = btn;
+@@ -1475,6 +1382,7 @@
+ 				this->SetDirty();
+ 				break;
+ 		}
++*/
+ 	}
+ 
+ 	virtual void OnTimeout()
+@@ -1486,14 +1394,16 @@
+ 	virtual void OnQueryTextFinished(char *str)
+ 	{
+ 		if (!StrEmpty(str)) {
++/* TEMPORARY COMMENT TO MAKE IT BUILDABLE AGAIN
+ 			const PatchEntry *pe = &_patches_page[this->page].entries[this->entry];
+ 			const SettingDesc *sd = pe->setting;
+ 			int32 value = atoi(str);
+ 
+-			/* Save the correct currency-translated value */
++			/-* Save the correct currency-translated value *-/
+ 			if (sd->desc.flags & SGF_CURRENCY) value /= _currency->rate;
+ 
+ 			SetPatchValue(pe->index, value);
++*/
+ 			this->SetDirty();
+ 		}
+ 	}

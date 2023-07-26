@@ -1,0 +1,228 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 15075)
++++ src/lang/english.txt	(working copy)
+@@ -2738,6 +2738,8 @@
+ STR_ORDER_DROP_FULL_LOAD_ALL                                    :Full load all cargo
+ STR_ORDER_DROP_FULL_LOAD_ANY                                    :Full load any cargo
+ STR_ORDER_DROP_NO_LOADING                                       :No loading
++STR_ORDER_DROP_LOAD_AND_LEAVE                                   :Load available & leave
++STR_ORDER_DROP_LOAD_TIMETABLE                                   :Leave on time
+ STR_ORDER_TOGGLE_UNLOAD                                         :{BLACK}Unload all
+ STR_ORDER_DROP_UNLOAD_IF_ACCEPTED                               :Unload if accepted
+ STR_ORDER_DROP_UNLOAD                                           :Unload all
+@@ -2746,17 +2748,25 @@
+ STR_ORDER_FULL_LOAD                                             :(Full load)
+ STR_ORDER_FULL_LOAD_ANY                                         :(Full load any cargo)
+ STR_ORDER_NO_LOAD                                               :(No loading)
++STR_ORDER_LOAD_AND_LEAVE                                        :(Load available & leave)
++STR_ORDER_LOAD_TIMETABLE                                        :(Leave on time)
+ STR_ORDER_UNLOAD                                                :(Unload and take cargo)
+ STR_ORDER_UNLOAD_FULL_LOAD                                      :(Unload and wait for full load)
+ STR_ORDER_UNLOAD_FULL_LOAD_ANY                                  :(Unload and wait for any full load)
+ STR_ORDER_UNLOAD_NO_LOAD                                        :(Unload and leave empty)
++STR_ORDER_UNLOAD_LOAD_AND_LEAVE                                 :(Unload and load available & leave)
++STR_ORDER_UNLOAD_LOAD_TIMETABLE                                 :(Unload and leave on time)
+ STR_ORDER_TRANSFER                                              :(Transfer and take cargo)
+ STR_ORDER_TRANSFER_FULL_LOAD                                    :(Transfer and wait for full load)
+ STR_ORDER_TRANSFER_FULL_LOAD_ANY                                :(Transfer and wait for any full load)
+ STR_ORDER_TRANSFER_NO_LOAD                                      :(Transfer and leave empty)
++STR_ORDER_TRANSFER_LOAD_AND_LEAVE                               :(Transfer and load available & leave)
++STR_ORDER_TRANSFER_LOAD_TIMETABLE                               :(Transfer and leave on time)
+ STR_ORDER_NO_UNLOAD                                             :(No unload and take cargo)
+ STR_ORDER_NO_UNLOAD_FULL_LOAD                                   :(No unload and wait for full load)
+ STR_ORDER_NO_UNLOAD_FULL_LOAD_ANY                               :(No unload and wait for any full load)
++STR_ORDER_NO_UNLOAD_LOAD_AND_LEAVE                              :(No unload and load available & leave)
++STR_ORDER_NO_UNLOAD_LOAD_TIMETABLE                              :(No unload and leave on time)
+ STR_ORDER_TOOLTIP_NON_STOP                                      :{BLACK}Change the stopping behaviour of the highlighted order
+ STR_ORDER_TOOLTIP_FULL_LOAD                                     :{BLACK}Change the loading behaviour of the highlighted order
+ STR_ORDER_TOOLTIP_UNLOAD                                        :{BLACK}Change the unloading behaviour of the highlighted order
+Index: src/order_type.h
+===================================================================
+--- src/order_type.h	(revision 15075)
++++ src/order_type.h	(working copy)
+@@ -58,6 +58,9 @@
+ 	OLFB_FULL_LOAD       = 1 << 1, ///< Full load the complete the consist.
+ 	OLF_FULL_LOAD_ANY    = 3,      ///< Full load the a single cargo of the consist.
+ 	OLFB_NO_LOAD         = 4,      ///< Do not load anything.
++	OLFB_LOAD_AND_LEAVE  = 8,      ///< Leave as soon as cargo that was available at the start of loading (cycle) has loaded
++	OLFB_LOAD_TIMETABLE  = 9,      ///< Try to leave on time
++	OLFB_END
+ };
+ 
+ /**
+Index: src/order_cmd.cpp
+===================================================================
+--- src/order_cmd.cpp	(revision 15075)
++++ src/order_cmd.cpp	(working copy)
+@@ -453,7 +453,7 @@
+ 
+ 			/* Filter invalid load/unload types. */
+ 			switch (new_order.GetLoadType()) {
+-				case OLF_LOAD_IF_POSSIBLE: case OLFB_FULL_LOAD: case OLF_FULL_LOAD_ANY: case OLFB_NO_LOAD: break;
++				case OLF_LOAD_IF_POSSIBLE: case OLFB_FULL_LOAD: case OLF_FULL_LOAD_ANY: case OLFB_NO_LOAD: case OLFB_LOAD_AND_LEAVE: case OLFB_LOAD_TIMETABLE: break;
+ 				default: return CMD_ERROR;
+ 			}
+ 			switch (new_order.GetUnloadType()) {
+@@ -892,7 +892,7 @@
+ 			break;
+ 
+ 		case MOF_LOAD:
+-			if (data > OLFB_NO_LOAD || data == 1) return CMD_ERROR;
++			if (data >= OLFB_END || data == 1) return CMD_ERROR;
+ 			if (data == order->GetLoadType()) return CMD_ERROR;
+ 			break;
+ 
+Index: src/order_gui.cpp
+===================================================================
+--- src/order_gui.cpp	(revision 15075)
++++ src/order_gui.cpp	(working copy)
+@@ -64,37 +64,63 @@
+ };
+ 
+ /** Order load types that could be given to station orders. */
+-static const StringID _station_load_types[][5] = {
++static const StringID _station_load_types[][10] = {
+ 	{
+ 		STR_EMPTY,
+ 		INVALID_STRING_ID,
+ 		STR_ORDER_FULL_LOAD,
+ 		STR_ORDER_FULL_LOAD_ANY,
+ 		STR_ORDER_NO_LOAD,
++		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		STR_ORDER_LOAD_AND_LEAVE,
++		STR_ORDER_LOAD_TIMETABLE,
+ 	}, {
+ 		STR_ORDER_UNLOAD,
+ 		INVALID_STRING_ID,
+ 		STR_ORDER_UNLOAD_FULL_LOAD,
+ 		STR_ORDER_UNLOAD_FULL_LOAD_ANY,
+ 		STR_ORDER_UNLOAD_NO_LOAD,
++		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		STR_ORDER_UNLOAD_LOAD_AND_LEAVE,
++		STR_ORDER_UNLOAD_LOAD_TIMETABLE,
+ 	}, {
+ 		STR_ORDER_TRANSFER,
+ 		INVALID_STRING_ID,
+ 		STR_ORDER_TRANSFER_FULL_LOAD,
+ 		STR_ORDER_TRANSFER_FULL_LOAD_ANY,
+ 		STR_ORDER_TRANSFER_NO_LOAD,
++		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		STR_ORDER_TRANSFER_LOAD_AND_LEAVE,
++		STR_ORDER_TRANSFER_LOAD_TIMETABLE,
+ 	}, {
+ 		/* Unload and transfer do not work together. */
+ 		INVALID_STRING_ID,
+ 		INVALID_STRING_ID,
+ 		INVALID_STRING_ID,
+ 		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		INVALID_STRING_ID,
+ 	}, {
+ 		STR_ORDER_NO_UNLOAD,
+ 		INVALID_STRING_ID,
+ 		STR_ORDER_NO_UNLOAD_FULL_LOAD,
+ 		STR_ORDER_NO_UNLOAD_FULL_LOAD_ANY,
+ 		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		INVALID_STRING_ID,
++		STR_ORDER_NO_UNLOAD_LOAD_AND_LEAVE,
++		STR_ORDER_NO_UNLOAD_LOAD_TIMETABLE,
+ 	}
+ };
+ 
+@@ -112,6 +138,11 @@
+ 	STR_ORDER_DROP_FULL_LOAD_ALL,
+ 	STR_ORDER_DROP_FULL_LOAD_ANY,
+ 	STR_ORDER_DROP_NO_LOADING,
++	STR_EMPTY,
++	STR_EMPTY,
++	STR_EMPTY,
++	STR_ORDER_DROP_LOAD_AND_LEAVE,
++	STR_ORDER_DROP_LOAD_TIMETABLE,
+ 	INVALID_STRING_ID
+ };
+ 
+@@ -922,7 +953,7 @@
+ 				break;
+ 
+ 			case ORDER_WIDGET_FULL_LOAD_DROPDOWN:
+-				ShowDropDownMenu(this, _order_full_load_drowdown, GetVehicleOrder(this->vehicle, this->OrderGetSel())->GetLoadType(), ORDER_WIDGET_FULL_LOAD_DROPDOWN, 0, 2);
++				ShowDropDownMenu(this, _order_full_load_drowdown, GetVehicleOrder(this->vehicle, this->OrderGetSel())->GetLoadType(), ORDER_WIDGET_FULL_LOAD_DROPDOWN, 0, ((_settings_game.order.gradual_loading && _settings_game.order.timetabling) ? 226 : 738));
+ 				break;
+ 
+ 			case ORDER_WIDGET_UNLOAD:
+Index: src/economy.cpp
+===================================================================
+--- src/economy.cpp	(revision 15075)
++++ src/economy.cpp	(working copy)
+@@ -1459,6 +1459,9 @@
+ 	industry_set.Clear();
+ 
+ 	for (Vehicle *v = front_v; v != NULL; v = v->Next()) {
++		/* this could be a nice place to clear the almost finished flag */
++		ClrBit(v->vehicle_flags, VF_LOADING_ALMOST_FINISHED);
++		
+ 		/* No cargo to unload */
+ 		if (v->cargo_cap == 0 || v->cargo.Empty() || front_v->current_order.GetUnloadType() & OUFB_NO_UNLOAD) continue;
+ 
+@@ -1584,6 +1587,9 @@
+ 	for (; v != NULL; v = v->Next()) {
+ 		if (v->cargo_cap == 0) continue;
+ 
++		/* ignore any newly available cargo when we already got everything that was available on the previous check */
++		if (HasBit(v->vehicle_flags, VF_LOADING_ALMOST_FINISHED)) continue;
++		
+ 		byte load_amount = EngInfo(v->engine_type)->load_amount;
+ 
+ 		/* The default loadamount for mail is 1/4 of the load amount for passengers */
+@@ -1650,10 +1656,24 @@
+ 		ge->last_age = _cur_year - u->build_year;
+ 		ge->days_since_pickup = 0;
+ 
++		cap = v->cargo_cap - v->cargo.Count();
++		
++		/* Make this vehicle leave when we got all available cargo and/or when it is time to leave,
++		 * ignoring new cargo arriving at the station during loading */
++		if ((((u->current_order.GetLoadType() == OLFB_LOAD_TIMETABLE) &&
++					_settings_game.order.timetabling &&
++					(u->current_order.wait_time > 0)) ||
++				((u->current_order.GetLoadType() & OLFB_LOAD_AND_LEAVE) &&
++					(cap > ge->cargo.Count()) &&
++					(!_settings_game.order.gradual_loading ||
++						(load_amount > ge->cargo.Count())))) &&
++			(!_settings_game.order.timetabling ||
++				(u->current_order_time >= (uint) max(u->current_order.wait_time - u->lateness_counter, 0))))
++			SetBit(v->vehicle_flags, VF_LOADING_ALMOST_FINISHED);
++
+ 		/* If there's goods waiting at the station, and the vehicle
+ 		 * has capacity for it, load it on the vehicle. */
+-		if (!ge->cargo.Empty() &&
+-				(cap = v->cargo_cap - v->cargo.Count()) != 0) {
++		if (!ge->cargo.Empty() && cap != 0) {
+ 			uint count = ge->cargo.Count();
+ 
+ 			/* Skip loading this vehicle if another train/vehicle is already handling
+Index: src/vehicle_base.h
+===================================================================
+--- src/vehicle_base.h	(revision 15075)
++++ src/vehicle_base.h	(working copy)
+@@ -78,6 +78,7 @@
+ 	VF_TIMETABLE_STARTED,       ///< Whether the vehicle has started running on the timetable yet.
+ 	VF_AUTOFILL_TIMETABLE,      ///< Whether the vehicle should fill in the timetable automatically.
+ 	VF_AUTOFILL_PRES_WAIT_TIME, ///< Whether non-destructive auto-fill should preserve waiting times
++	VF_LOADING_ALMOST_FINISHED, ///< Whether we should leave when the currently loading cargo has loaded.
+ };
+ 
+ struct VehicleRail {

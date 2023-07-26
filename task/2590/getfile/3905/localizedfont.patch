@@ -1,0 +1,77 @@
+Index: fontcache.cpp
+===================================================================
+--- fontcache.cpp	(revision 15313)
++++ fontcache.cpp	(working copy)
+@@ -9,6 +9,7 @@
+ #include "gfx_func.h"
+ #include "core/alloc_func.hpp"
+ #include "core/math_func.hpp"
++#include "core/endian_func.hpp"
+ 
+ #include "table/sprites.h"
+ #include "table/control_codes.h"
+@@ -17,6 +18,7 @@
+ #include <ft2build.h>
+ #include FT_FREETYPE_H
+ #include FT_GLYPH_H
++#include FT_SFNT_NAMES_H
+ 
+ #ifdef WITH_FONTCONFIG
+ #include <fontconfig/fontconfig.h>
+@@ -133,16 +135,55 @@
+ 	ttd_strlcat(font_path, "\\", MAX_PATH * sizeof(TCHAR));
+ 	ttd_strlcat(font_path, WIDE_TO_MB(dbuffer), MAX_PATH * sizeof(TCHAR));
+ 	index = 0;
++	char *font_name_buf = MallocT<char>(MAX_PATH * sizeof(char));
++	TCHAR *font_name_bufp = MallocT<TCHAR>(MAX_PATH * sizeof(TCHAR));
+ 	do {
++		FT_SfntName aname;
++		uint i;
++
+ 		err = FT_New_Face(_library, font_path, index, face);
+ 		if (err != FT_Err_Ok) break;
+ 
+ 		if (strncasecmp(font_name, (*face)->family_name, strlen((*face)->family_name)) == 0) break;
++
+ 		err = FT_Err_Cannot_Open_Resource;
++		//search for localized font name.
++		for(i = 0; i < FT_Get_Sfnt_Name_Count(*face); i ++) {
++			uint j;
+ 
++			FT_Get_Sfnt_Name(*face, i, &aname);
++
++			//some font's name is saved in reversed byte order.
++			memcpy(font_name_bufp, aname.string, aname.string_len);
++			font_name_bufp[aname.string_len / 2] = 0;
++			for(j = 0; j < aname.string_len / 2; j ++) {
++				font_name_bufp[j] = BSWAP16(font_name_bufp[j]);
++			}
++			//TODO:should convert encoding using aname.encoding
++			WIDE_TO_MB_BUFFER(font_name_bufp, font_name_buf, MAX_PATH * sizeof(char));
++			if (strncasecmp(font_name_buf, font_name, aname.string_len) == 0) {
++				err = FT_Err_Ok;
++				break;
++			}
++			
++			//Or normal byte order
++			memcpy(font_name_bufp, aname.string, aname.string_len);
++			font_name_bufp[aname.string_len / 2] = 0;
++			//TODO:should convert encoding using aname.encoding
++			WIDE_TO_MB_BUFFER(font_name_bufp, font_name_buf, MAX_PATH * sizeof(char));
++			if (strncasecmp(font_name_buf, font_name, aname.string_len) == 0) {
++				err = FT_Err_Ok;
++				break;
++			}
++		}
++		if(err == FT_Err_Ok)
++			break;
++
++		FT_Done_Face(*face);
+ 	} while ((FT_Long)++index != (*face)->num_faces);
++	free(font_name_buf);
++	free(font_name_bufp);
+ 
+-
+ folder_error:
+ registry_no_font_found:
+ #if defined(UNICODE)

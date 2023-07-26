@@ -1,0 +1,343 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 15302)
++++ src/lang/english.txt	(working copy)
+@@ -3756,6 +3756,8 @@
+ STR_CONTENT_SELECT_UPDATES_CAPTION_TIP                          :{BLACK}Mark all content that is an upgrade for existing content to be downloaded
+ STR_CONTENT_UNSELECT_ALL_CAPTION                                :{BLACK}Unselect all
+ STR_CONTENT_UNSELECT_ALL_CAPTION_TIP                            :{BLACK}Mark all content to be not downloaded
++STR_CONTENT_FILTER_OSKTITLE                                     :{BLACK}Enter filter string
++STR_CONTENT_FILTER_TIP                                          :{BLACK}Enter a keyword to filter the list for
+ STR_CONTENT_DOWNLOAD_CAPTION                                    :{BLACK}Download
+ STR_CONTENT_DOWNLOAD_CAPTION_TIP                                :{BLACK}Start downloading the selected content
+ STR_CONTENT_TOTAL_DOWNLOAD_SIZE                                 :{SILVER}Total download size: {WHITE}{BYTES}
+Index: src/network/network_content_gui.cpp
+===================================================================
+--- src/network/network_content_gui.cpp	(revision 15302)
++++ src/network/network_content_gui.cpp	(working copy)
+@@ -13,6 +13,7 @@
+ #include "../ai/ai.hpp"
+ #include "../gfxinit.h"
+ #include "../sortlist_type.h"
++#include "../querystring_gui.h"
+ #include  "network_content.h"
+ 
+ #include "table/strings.h"
+@@ -157,7 +158,7 @@
+ };
+ 
+ /** Window that lists the content that's at the content server */
+-class NetworkContentListWindow : public Window, ContentCallback {
++class NetworkContentListWindow : public QueryStringBaseWindow, ContentCallback {
+ 	typedef GUIList<const ContentInfo*> GUIContentList;
+ 
+ 	/** All widgets used */
+@@ -178,21 +179,31 @@
+ 		NCLWW_SELECT_ALL,    ///< 'Select all' button
+ 		NCLWW_SELECT_UPDATE, ///< 'Select updates' button
+ 		NCLWW_UNSELECT,      ///< 'Unselect all' button
++		NCLWW_FILTER,        ///< Filter editbox
+ 		NCLWW_CANCEL,        ///< 'Cancel' button
+ 		NCLWW_DOWNLOAD,      ///< 'Download' button
+ 
+ 		NCLWW_RESIZE,        ///< Resize button
+ 	};
+ 
++	enum {
++		EDITBOX_MAX_SIZE = 50,
++		EDITBOX_MAX_LENGTH = 300,
++	};
++
+ 	/** Runtime saved values */
+ 	static Listing last_sorting;
++	static Filter last_filtering;
+ 	/** The sorter functions */
+ 	static GUIContentList::SortFunction * const sorter_funcs[];
+-	GUIContentList content;      ///< List with content
++	static GUIContentList::FilterFunction * const filter_funcs[];
++	GUIContentList content;                  ///< List with content
+ 
+-	const ContentInfo *selected; ///< The selected content info
+-	int list_pos;                ///< Our position in the list
++	const ContentInfo *selected;             ///< The selected content info
++	int list_pos;                            ///< Our position in the list
+ 
++	NetworkContentListWindow::Widgets field; ///< Selected widget
++
+ 	/**
+ 	 * (Re)build the network game list as its amount has changed because
+ 	 * an item has been added or deleted for example
+@@ -208,6 +219,8 @@
+ 			*this->content.Append() = *iter;
+ 		}
+ 
++		this->FilterContentList();
++//		this->list_pos
+ 		this->content.Compact();
+ 		this->content.RebuildDone();
+ 	}
+@@ -254,6 +267,33 @@
+ 		}
+ 	}
+ 
++	/** Filter content by tags */
++	static bool CDECL TagFilter(const ContentInfo * const *a, const char *filter_string)
++	{
++		size_t length = strlen(filter_string);
++		bool found = false;
++		for (int i = 0; i < (*a)->tag_count; i++) {
++			if (strncmp((*a)->tags[i], filter_string, length) == 0) found = true;
++		}
++		return found;
++	}
++
++	/** Filter the content list */
++	void FilterContentList()
++	{
++		if (!this->content.Filter(this->edit_str_buf)) return;
++
++		this->selected = NULL;
++		this->list_pos = 0;
++
++		for (ConstContentIterator iter = this->content.Begin(); iter != this->content.End(); iter++) {
++			if (*iter == this->selected) {
++				this->list_pos = iter - this->content.Begin();
++				break;
++			}
++		}
++	}
++
+ 	/** Make sure that the currently selected content info is within the visible part of the matrix */
+ 	void ScrollToSelected()
+ 	{
+@@ -273,18 +313,25 @@
+ 	 * Create the content list window.
+ 	 * @param desc the window description to pass to Window's constructor.
+ 	 */
+-	NetworkContentListWindow(const WindowDesc *desc, bool select_all) : Window(desc, 1), selected(NULL), list_pos(0)
++	NetworkContentListWindow(const WindowDesc *desc, bool select_all) : QueryStringBaseWindow(EDITBOX_MAX_SIZE, desc), selected(NULL), list_pos(0)
+ 	{
++		ttd_strlcpy(this->edit_str_buf, "", this->edit_str_size);
++		this->afilter = CS_ALPHANUMERAL;
++		InitializeTextBuffer(&this->text, this->edit_str_buf, this->edit_str_size, EDITBOX_MAX_LENGTH);
++
+ 		this->vscroll.cap = 14;
+ 		this->resize.step_height = 14;
+ 		this->resize.step_width = 2;
++		this->field = NCLWW_FILTER;
+ 
+ 		_network_content_client.AddCallback(this);
+ 		this->HideWidget(select_all ? NCLWW_SELECT_UPDATE : NCLWW_SELECT_ALL);
+ 
+ 		this->content.SetListing(this->last_sorting);
+ 		this->content.SetSortFuncs(this->sorter_funcs);
++		this->content.SetFilterFuncs(this->filter_funcs);
+ 		this->content.ForceRebuild();
++		this->FilterContentList();
+ 		this->SortContentList();
+ 
+ 		SetVScrollCount(this, this->content.Length());
+@@ -336,6 +383,9 @@
+ 
+ 		this->DrawWidgets();
+ 
++		/* Edit box to filter for keywords */
++		this->DrawEditBox(NCLWW_FILTER);
++
+ 		switch (this->content.SortType()) {
+ 			case NCLWW_CHECKBOX - NCLWW_CHECKBOX: this->DrawSortButtonState(NCLWW_CHECKBOX, arrow); break;
+ 			case NCLWW_TYPE     - NCLWW_CHECKBOX: this->DrawSortButtonState(NCLWW_TYPE,     arrow); break;
+@@ -481,6 +531,7 @@
+ 
+ 	virtual void OnClick(Point pt, int widget)
+ 	{
++		this->field = (NetworkContentListWindow::Widgets) widget;
+ 		switch (widget) {
+ 			case NCLWW_MATRIX: {
+ 				uint32 id_v = (pt.y - this->widget[NCLWW_MATRIX].top) / this->resize.step_height;
+@@ -488,7 +539,7 @@
+ 				if (id_v >= this->vscroll.cap) return; // click out of bounds
+ 				id_v += this->vscroll.pos;
+ 
+-				if (id_v >= _network_content_client.Length()) return; // click out of bounds
++				if (id_v >= this->content.Length()) return; // click out of bounds
+ 
+ 				this->selected = *this->content.Get(id_v);
+ 				this->list_pos = id_v;
+@@ -541,55 +592,74 @@
+ 		}
+ 	}
+ 
++	virtual void OnMouseLoop()
++	{
++		this->HandleEditBox(NCLWW_FILTER);
++	}
++
+ 	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+ 	{
+-		if (_network_content_client.Length() == 0) return ES_HANDLED;
++		/* handle up, down, pageup, pagedown, home and end */
++		if (keycode == WKC_UP || keycode == WKC_DOWN || keycode == WKC_PAGEUP || keycode == WKC_PAGEDOWN || keycode == WKC_HOME || keycode == WKC_END) {
++			if (this->content.Length() == 0) return ES_HANDLED;
+ 
+-		switch (keycode) {
+-			case WKC_UP:
+-				/* scroll up by one */
+-				if (this->list_pos > 0) this->list_pos--;
+-				break;
+-			case WKC_DOWN:
+-				/* scroll down by one */
+-				if (this->list_pos < (int)this->content.Length() - 1) this->list_pos++;
+-				break;
+-			case WKC_PAGEUP:
+-				/* scroll up a page */
+-				this->list_pos = (this->list_pos < this->vscroll.cap) ? 0 : this->list_pos - this->vscroll.cap;
+-				break;
+-			case WKC_PAGEDOWN:
+-				/* scroll down a page */
+-				this->list_pos = min(this->list_pos + this->vscroll.cap, (int)this->content.Length() - 1);
+-				break;
+-			case WKC_HOME:
+-				/* jump to beginning */
+-				this->list_pos = 0;
+-				break;
+-			case WKC_END:
+-				/* jump to end */
+-				this->list_pos = this->content.Length() - 1;
+-				break;
++			switch (keycode) {
++				case WKC_UP:
++					/* scroll up by one */
++					if (this->list_pos > 0) this->list_pos--;
++					break;
++				case WKC_DOWN:
++					/* scroll down by one */
++					if (this->list_pos < (int)this->content.Length() - 1) this->list_pos++;
++					break;
++				case WKC_PAGEUP:
++					/* scroll up a page */
++					this->list_pos = (this->list_pos < this->vscroll.cap) ? 0 : this->list_pos - this->vscroll.cap;
++					break;
++				case WKC_PAGEDOWN:
++					/* scroll down a page */
++					this->list_pos = min(this->list_pos + this->vscroll.cap, (int)this->content.Length() - 1);
++					break;
++				case WKC_HOME:
++					/* jump to beginning */
++					this->list_pos = 0;
++					break;
++				case WKC_END:
++					/* jump to end */
++					this->list_pos = this->content.Length() - 1;
++					break;
++				default: NOT_REACHED();
++			}
+ 
+-			case WKC_SPACE:
+-				if (this->selected != NULL) {
+-					_network_content_client.ToggleSelectedState(this->selected);
+-					this->content.ForceResort();
+-					this->SetDirty();
+-				}
+-				return ES_HANDLED;
++			this->selected = *this->content.Get(this->list_pos);
+ 
+-			default: return ES_NOT_HANDLED;
++			/* scroll to the new selected item if it is outside the current range */
++			this->ScrollToSelected();
++
++			/* redraw window */
++			this->SetDirty();
++			return ES_HANDLED;
+ 		}
+ 
+-		this->selected = *this->content.Get(this->list_pos);
++		/* Toggle selected item with return */
++		if (keycode == WKC_RETURN) {
++			if (this->selected != NULL) {
++				_network_content_client.ToggleSelectedState(this->selected);
++				this->content.ForceResort();
++				this->SetDirty();
++			}
++			return ES_HANDLED;
++		}
+ 
+-		/* scroll to the new server if it is outside the current range */
+-		this->ScrollToSelected();
++		/* Handle editbox input */
++		EventState state = ES_NOT_HANDLED;
++		if (this->HandleEditBoxKey(NCLWW_FILTER, key, keycode, state) == HEBR_EDITING) {
++			this->content.SetFilterState(*this->edit_str_buf != 0);
++			this->content.ForceRebuild();
++			this->SetDirty();
++		}
+ 
+-		/* redraw window */
+-		this->SetDirty();
+-		return ES_HANDLED;
++		return state;
+ 	}
+ 
+ 	virtual void OnResize(Point new_size, Point delta)
+@@ -633,45 +703,51 @@
+ };
+ 
+ Listing NetworkContentListWindow::last_sorting = {false, 1};
++Filter NetworkContentListWindow::last_filtering = {false, 0};
++
+ NetworkContentListWindow::GUIContentList::SortFunction * const NetworkContentListWindow::sorter_funcs[] = {
+ 	&StateSorter,
+ 	&TypeSorter,
+ 	&NameSorter,
+ };
++NetworkContentListWindow::GUIContentList::FilterFunction * const NetworkContentListWindow::filter_funcs[] = {
++	&TagFilter,
++};
+ 
+ /** Widgets used for the content list */
+ static const Widget _network_content_list_widgets[] = {
+ /* TOP */
+ {   WWT_CLOSEBOX,   RESIZE_NONE,   COLOUR_LIGHT_BLUE,     0,    10,     0,    13, STR_00C5,                           STR_018B_CLOSE_WINDOW},                  // NCLWW_CLOSE
+-{    WWT_CAPTION,   RESIZE_RIGHT,  COLOUR_LIGHT_BLUE,    11,   449,     0,    13, STR_CONTENT_TITLE,                  STR_NULL},                               // NCLWW_CAPTION
+-{      WWT_PANEL,   RESIZE_RB,     COLOUR_LIGHT_BLUE,     0,   449,    14,   263, 0x0,                                STR_NULL},                               // NCLWW_BACKGROUND
++{    WWT_CAPTION,   RESIZE_RIGHT,  COLOUR_LIGHT_BLUE,    11,   557,     0,    13, STR_CONTENT_TITLE,                  STR_NULL},                               // NCLWW_CAPTION
++{      WWT_PANEL,   RESIZE_RB,     COLOUR_LIGHT_BLUE,     0,   557,    14,   263, 0x0,                                STR_NULL},                               // NCLWW_BACKGROUND
+ 
+ /* LEFT SIDE */
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,   COLOUR_WHITE,          8,    20,    22,    33, STR_EMPTY,                          STR_NULL},                               // NCLWW_CHECKBOX
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,   COLOUR_WHITE,         21,   110,    22,    33, STR_CONTENT_TYPE_CAPTION,           STR_CONTENT_TYPE_CAPTION_TIP},           // NCLWW_TYPE
+-{ WWT_PUSHTXTBTN,   RESIZE_RIGHT,  COLOUR_WHITE,        111,   191,    22,    33, STR_CONTENT_NAME_CAPTION,           STR_CONTENT_NAME_CAPTION_TIP},           // NCLWW_NAME
++{ WWT_PUSHTXTBTN,   RESIZE_RIGHT,  COLOUR_WHITE,        111,   244,    22,    33, STR_CONTENT_NAME_CAPTION,           STR_CONTENT_NAME_CAPTION_TIP},           // NCLWW_NAME
+ 
+-{     WWT_MATRIX,   RESIZE_RB,     COLOUR_LIGHT_BLUE,     8,   190,    34,   230, (14 << 8) | 1,                      STR_CONTENT_MATRIX_TIP},                 // NCLWW_MATRIX
+-{  WWT_SCROLLBAR,   RESIZE_LRB,    COLOUR_LIGHT_BLUE,   191,   202,    22,   230, 0x0,                                STR_0190_SCROLL_BAR_SCROLLS_LIST},       // NCLWW_SCROLLBAR
++{     WWT_MATRIX,   RESIZE_RB,     COLOUR_LIGHT_BLUE,     8,   244,    34,   230, (14 << 8) | 1,                      STR_CONTENT_MATRIX_TIP},                 // NCLWW_MATRIX
++{  WWT_SCROLLBAR,   RESIZE_LRB,    COLOUR_LIGHT_BLUE,   245,   256,    22,   230, 0x0,                                STR_0190_SCROLL_BAR_SCROLLS_LIST},       // NCLWW_SCROLLBAR
+ 
+ /* RIGHT SIDE */
+-{      WWT_PANEL,   RESIZE_LRB,    COLOUR_LIGHT_BLUE,   210,   440,    22,   230, 0x0,                                STR_NULL},                               // NCLWW_DETAILS
++{      WWT_PANEL,   RESIZE_LRB,    COLOUR_LIGHT_BLUE,   264,   548,    22,   230, 0x0,                                STR_NULL},                               // NCLWW_DETAILS
+ 
+ /* BOTTOM */
+ { WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_WHITE,         10,   110,   238,   249, STR_CONTENT_SELECT_ALL_CAPTION,     STR_CONTENT_SELECT_ALL_CAPTION_TIP},     // NCLWW_SELECT_ALL
+ { WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_WHITE,         10,   110,   238,   249, STR_CONTENT_SELECT_UPDATES_CAPTION, STR_CONTENT_SELECT_UPDATES_CAPTION_TIP}, // NCLWW_SELECT_UPDATES
+ { WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_WHITE,        118,   218,   238,   249, STR_CONTENT_UNSELECT_ALL_CAPTION,   STR_CONTENT_UNSELECT_ALL_CAPTION_TIP},   // NCLWW_UNSELECT
+-{ WWT_PUSHTXTBTN,   RESIZE_LRTB,   COLOUR_WHITE,        226,   326,   238,   249, STR_012E_CANCEL,                    STR_NULL},                               // NCLWW_CANCEL
+-{ WWT_PUSHTXTBTN,   RESIZE_LRTB,   COLOUR_WHITE,        334,   434,   238,   249, STR_CONTENT_DOWNLOAD_CAPTION,       STR_CONTENT_DOWNLOAD_CAPTION_TIP},       // NCLWW_DOWNLOAD
++{    WWT_EDITBOX,   RESIZE_RTB,    COLOUR_LIGHT_BLUE,   226,   326,   238,   249, STR_CONTENT_FILTER_OSKTITLE,        STR_CONTENT_FILTER_TIP},                 // NCLWW_FILTER
++{ WWT_PUSHTXTBTN,   RESIZE_LRTB,   COLOUR_WHITE,        334,   434,   238,   249, STR_012E_CANCEL,                    STR_NULL},                               // NCLWW_CANCEL
++{ WWT_PUSHTXTBTN,   RESIZE_LRTB,   COLOUR_WHITE,        442,   542,   238,   249, STR_CONTENT_DOWNLOAD_CAPTION,       STR_CONTENT_DOWNLOAD_CAPTION_TIP},       // NCLWW_DOWNLOAD
+ 
+-{  WWT_RESIZEBOX,   RESIZE_LRTB,   COLOUR_LIGHT_BLUE,   438,   449,   252,   263, 0x0,                                STR_RESIZE_BUTTON },                     // NCLWW_RESIZE
++{  WWT_RESIZEBOX,   RESIZE_LRTB,   COLOUR_LIGHT_BLUE,   546,   557,   252,   263, 0x0,                                STR_RESIZE_BUTTON },                     // NCLWW_RESIZE
+ 
+ {   WIDGETS_END},
+ };
+ 
+ /** Window description of the content list */
+ static const WindowDesc _network_content_list_desc = {
+-	WDP_CENTER, WDP_CENTER, 450, 264, 630, 460,
++	WDP_CENTER, WDP_CENTER, 558, 264, 630, 460,
+ 	WC_NETWORK_WINDOW, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET | WDF_STD_BTN | WDF_UNCLICK_BUTTONS | WDF_RESIZABLE,
+ 	_network_content_list_widgets,

@@ -1,0 +1,206 @@
+Index: src/date.cpp
+===================================================================
+--- src/date.cpp	(revision 15401)
++++ src/date.cpp	(working copy)
+@@ -158,6 +158,7 @@
+ extern void EnginesDailyLoop();
+ extern void DisasterDailyLoop();
+ extern void IndustryDailyLoop();
++extern void WaypointsMonthlyLoop();
+ extern void CompaniesMonthlyLoop();
+ extern void EnginesMonthlyLoop();
+ extern void TownsMonthlyLoop();
+@@ -251,6 +252,7 @@
+ 		}
+ 
+ 		InvalidateWindowClasses(WC_CHEATS);
++		WaypointsMonthlyLoop();
+ 		CompaniesMonthlyLoop();
+ 		EnginesMonthlyLoop();
+ 		TownsMonthlyLoop();
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 15401)
++++ src/lang/english.txt	(working copy)
+@@ -1306,6 +1306,10 @@
+ STR_WAYPOINT_RAW                                                :{WAYPOINT}
+ STR_EDIT_WAYPOINT_NAME                                          :{WHITE}Edit waypoint name
+ 
++STR_WAYPOINT_TRAINS_PASSED_THIS_MONTH                           :{BLACK}Trains passed this month: {GOLD}{COMMA}
++STR_WAYPOINT_TRAINS_PASSED_LAST_MONTH                           :{BLACK}Trains passed last month: {GOLD}{COMMA}
++STR_WAYPOINT_MOST_TRAINS_PASSED_COUNT                           :{BLACK}Most trains in one month: {GOLD}{COMMA}
++
+ STR_CANT_CHANGE_WAYPOINT_NAME                                   :{WHITE}Can't change waypoint name...
+ STR_CONVERT_RAIL_TO_WAYPOINT_TIP                                :{BLACK}Convert rail to waypoint
+ STR_CANT_BUILD_TRAIN_WAYPOINT                                   :{WHITE}Can't build train waypoint here...
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(revision 15401)
++++ src/rail_cmd.cpp	(working copy)
+@@ -2453,6 +2453,13 @@
+ 	DiagDirection dir;
+ 	int length;
+ 
++	/* if train passes a waypoint, update the waypoint's statistics */
++	if (IsFrontEngine(v) && IsRailWaypoint(tile) && v->tile != tile) {// XXX - wtf?
++		Waypoint *wp = GetWaypointByTile(tile);
++		wp->passed_trains_this_month++;
++		InvalidateWindow(WC_WAYPOINT_VIEW, wp->index);
++	}
++
+ 	/* this routine applies only to trains in depot tiles */
+ 	if (v->type != VEH_TRAIN || !IsRailDepotTile(tile)) return VETSB_CONTINUE;
+ 
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 15401)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -38,7 +38,7 @@
+ 
+ #include "saveload_internal.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 113;
++extern const uint16 SAVEGAME_VERSION = 114;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/saveload/waypoint_sl.cpp
+===================================================================
+--- src/saveload/waypoint_sl.cpp	(revision 15401)
++++ src/saveload/waypoint_sl.cpp	(working copy)
+@@ -68,6 +68,10 @@
+ 	SLE_CONDVAR(Waypoint, grfid,      SLE_UINT32,                 17, SL_MAX_VERSION),
+ 	SLE_CONDVAR(Waypoint, owner,      SLE_UINT8,                 101, SL_MAX_VERSION),
+ 
++	SLE_CONDVAR(Waypoint, passed_trains_this_month, SLE_UINT8,   114, SL_MAX_VERSION),
++	SLE_CONDVAR(Waypoint, passed_trains_last_month, SLE_UINT8,   114, SL_MAX_VERSION),
++	SLE_CONDVAR(Waypoint, passed_trains_highest,    SLE_UINT8,   114, SL_MAX_VERSION),
++
+ 	SLE_END()
+ };
+ 
+Index: src/waypoint.cpp
+===================================================================
+--- src/waypoint.cpp	(revision 15401)
++++ src/waypoint.cpp	(working copy)
+@@ -264,6 +264,22 @@
+ }
+ 
+ /**
++ * Monthly loop for waypoints
++ */
++void WaypointsMonthlyLoop()
++{
++	Waypoint *wp;
++
++	/* Reset waypoint statistics */
++	FOR_ALL_WAYPOINTS(wp) {
++		wp->passed_trains_last_month = wp->passed_trains_this_month;
++		wp->passed_trains_highest = max(wp->passed_trains_highest, wp->passed_trains_this_month);
++		wp->passed_trains_this_month = 0;
++	}
++	InvalidateWindowClasses(WC_WAYPOINT_VIEW);
++}
++
++/**
+  * Remove a waypoint
+  * @param tile from which to remove waypoint
+  * @param flags type of operation
+Index: src/waypoint.h
+===================================================================
+--- src/waypoint.h	(revision 15401)
++++ src/waypoint.h	(working copy)
+@@ -17,23 +17,27 @@
+ DECLARE_OLD_POOL(Waypoint, Waypoint, 3, 8000)
+ 
+ struct Waypoint : PoolItem<Waypoint, WaypointID, &_Waypoint_pool> {
+-	TileIndex xy;      ///< Tile of waypoint
++	TileIndex xy;                   ///< Tile of waypoint
+ 
+-	TownID town_index; ///< Town associated with the waypoint
+-	uint16 town_cn;    ///< The Nth waypoint for this town (consecutive number)
+-	StringID string;   ///< C000-C03F have special meaning in old games
+-	char *name;        ///< Custom name. If not set, town + town_cn is used for naming
++	TownID town_index;              ///< Town associated with the waypoint
++	uint16 town_cn;                 ///< The Nth waypoint for this town (consecutive number)
++	StringID string;                ///< C000-C03F have special meaning in old games
++	char *name;                     ///< Custom name. If not set, town + town_cn is used for naming
+ 
+-	ViewportSign sign; ///< Dimensions of sign (not saved)
+-	Date build_date;   ///< Date of construction
+-	OwnerByte owner;   ///< Whom this waypoint belongs to
++	ViewportSign sign;              ///< Dimensions of sign (not saved)
++	Date build_date;                ///< Date of construction
++	OwnerByte owner;                ///< Whom this waypoint belongs to
+ 
+-	byte stat_id;      ///< ID of waypoint within the waypoint class (not saved)
+-	uint32 grfid;      ///< ID of GRF file
+-	byte localidx;     ///< Index of station within GRF file
++	byte stat_id;                   ///< ID of waypoint within the waypoint class (not saved)
++	uint32 grfid;                   ///< ID of GRF file
++	byte localidx;                  ///< Index of station within GRF file
+ 
+-	byte deleted;      ///< Delete counter. If greater than 0 then it is decremented until it reaches 0; the waypoint is then is deleted.
++	byte deleted;                   ///< Delete counter. If greater than 0 then it is decremented until it reaches 0; the waypoint is then is deleted.
+ 
++	uint8 passed_trains_this_month; ///< Number of trains that passed this waypoint this month
++	uint8 passed_trains_last_month; ///< Number of trains that passed this waypoint last month
++	uint8 passed_trains_highest;    ///< Maximum number of trains that have passed the waypoint during one month
++
+ 	Waypoint(TileIndex tile = INVALID_TILE);
+ 	~Waypoint();
+ 
+Index: src/waypoint_gui.cpp
+===================================================================
+--- src/waypoint_gui.cpp	(revision 15401)
++++ src/waypoint_gui.cpp	(working copy)
+@@ -32,6 +32,18 @@
+ 		WAYPVW_SHOW_TRAINS,
+ 	};
+ 
++	void DrawStats()
++	{
++		SetDParam(0, this->wp->passed_trains_this_month);
++		DrawString(2, 105, STR_WAYPOINT_TRAINS_PASSED_THIS_MONTH, TC_FROMSTRING);
++
++		SetDParam(0, this->wp->passed_trains_last_month);
++		DrawString(2, 115, STR_WAYPOINT_TRAINS_PASSED_LAST_MONTH, TC_FROMSTRING);
++
++		SetDParam(0, this->wp->passed_trains_highest);
++		DrawString(2, 125, STR_WAYPOINT_MOST_TRAINS_PASSED_COUNT, TC_FROMSTRING);
++	}
++
+ public:
+ 	WaypointWindow(const WindowDesc *desc, WindowNumber window_number) : Window(desc, window_number)
+ 	{
+@@ -57,6 +69,8 @@
+ 		this->DrawWidgets();
+ 
+ 		this->DrawViewport();
++
++		this->DrawStats();
+ 	}
+ 
+ 	virtual void OnClick(Point pt, int widget)
+@@ -101,16 +115,16 @@
+ {   WWT_CLOSEBOX,   RESIZE_NONE,  COLOUR_GREY,     0,    10,     0,    13, STR_00C5,              STR_018B_CLOSE_WINDOW},                 // WAYPVW_CLOSEBOX
+ {    WWT_CAPTION,   RESIZE_NONE,  COLOUR_GREY,    11,   247,     0,    13, STR_WAYPOINT_VIEWPORT, STR_018C_WINDOW_TITLE_DRAG_THIS},       // WAYPVW_CAPTION
+ {  WWT_STICKYBOX,   RESIZE_NONE,  COLOUR_GREY,   248,   259,     0,    13, 0x0,                   STR_STICKY_BUTTON},                     // WAYPVW_STICKY
+-{      WWT_PANEL,   RESIZE_NONE,  COLOUR_GREY,     0,   259,    14,   105, 0x0,                   STR_NULL},                              // WAYPVW_VIEWPORTPANEL
++{      WWT_PANEL,   RESIZE_NONE,  COLOUR_GREY,     0,   259,    14,   135, 0x0,                   STR_NULL},                              // WAYPVW_VIEWPORTPANEL
+ {      WWT_INSET,   RESIZE_NONE,  COLOUR_GREY,     2,   257,    16,   103, 0x0,                   STR_NULL},                              // WAYPVW_SPACER
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,  COLOUR_GREY,     0,   121,   106,   117, STR_00E4_LOCATION,     STR_3053_CENTER_MAIN_VIEW_ON_STATION},  // WAYPVW_CENTERVIEW
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,  COLOUR_GREY,   122,   244,   106,   117, STR_0130_RENAME,       STR_CHANGE_WAYPOINT_NAME},              // WAYPVW_RENAME
+-{ WWT_PUSHTXTBTN,   RESIZE_NONE,  COLOUR_GREY,   245,   259,   106,   117, STR_TRAIN,             STR_SCHEDULED_TRAINS_TIP },             // WAYPVW_SHOW_TRAINS
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,  COLOUR_GREY,     0,   121,   136,   147, STR_00E4_LOCATION,     STR_3053_CENTER_MAIN_VIEW_ON_STATION},  // WAYPVW_CENTERVIEW
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,  COLOUR_GREY,   122,   244,   136,   147, STR_0130_RENAME,       STR_CHANGE_WAYPOINT_NAME},              // WAYPVW_RENAME
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,  COLOUR_GREY,   245,   259,   136,   147, STR_TRAIN,             STR_SCHEDULED_TRAINS_TIP },             // WAYPVW_SHOW_TRAINS
+ {   WIDGETS_END},
+ };
+ 
+ static const WindowDesc _waypoint_view_desc = {
+-	WDP_AUTO, WDP_AUTO, 260, 118, 260, 118,
++	WDP_AUTO, WDP_AUTO, 260, 148, 260, 148,
+ 	WC_WAYPOINT_VIEW, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON,
+ 	_waypoint_view_widgets,

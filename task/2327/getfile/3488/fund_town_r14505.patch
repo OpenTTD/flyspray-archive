@@ -1,0 +1,279 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 14505)
++++ src/lang/english.txt	(working copy)
+@@ -775,6 +775,7 @@
+ STR_02C0_SAVE_CUSTOM_NAMES                                      :{BLACK}Save custom names
+ STR_02C1_VEHICLE_DESIGN_NAMES_SELECTION                         :{BLACK}Vehicle design names selection
+ STR_02C2_SAVE_CUSTOMIZED_VEHICLE                                :{BLACK}Save customised vehicle design names
++STR_02C3_FUND_TOWN                                              :Fund new town
+ 
+ STR_CHECKMARK                                                   :{CHECKMARK}
+ ############ range for menu starts
+@@ -1211,6 +1212,7 @@
+ STR_CONFIG_PATCHES_LARGER_TOWNS_DISABLED                        :{LTBLUE}Proportion of towns that will become cities: {ORANGE}None
+ STR_CONFIG_PATCHES_CITY_SIZE_MULTIPLIER                         :{LTBLUE}Initial city size multiplier: {ORANGE}{STRING1}
+ STR_CONFIG_MODIFIED_ROAD_REBUILD                                :{LTBLUE}Remove absurd road-elements during the road construction
++STR_CONFIG_PATCHES_TOWN_BUILD_NEW                               :{LTBLUE}Allow building new towns
+ 
+ STR_CONFIG_PATCHES_GUI                                          :{BLACK}Interface
+ STR_CONFIG_PATCHES_CONSTRUCTION                                 :{BLACK}Construction
+Index: src/saveload.cpp
+===================================================================
+--- src/saveload.cpp	(revision 14505)
++++ src/saveload.cpp	(working copy)
+@@ -37,7 +37,7 @@
+ 
+ #include "table/strings.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 102;
++extern const uint16 SAVEGAME_VERSION = 103;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 14505)
++++ src/settings.cpp	(working copy)
+@@ -1329,6 +1329,7 @@
+ 	 SDT_CONDVAR(GameSettings, economy.larger_towns,                 SLE_UINT8, 54, SL_MAX_VERSION, 0, D0,    4,     0,     255, 1, STR_CONFIG_PATCHES_LARGER_TOWNS,           NULL),
+ 	 SDT_CONDVAR(GameSettings, economy.initial_city_size,            SLE_UINT8, 56, SL_MAX_VERSION, 0, 0,     2,     1,      10, 1, STR_CONFIG_PATCHES_CITY_SIZE_MULTIPLIER,   NULL),
+ 	SDT_CONDBOOL(GameSettings, economy.mod_road_rebuild,                        77, SL_MAX_VERSION, 0, 0, false,                    STR_CONFIG_MODIFIED_ROAD_REBUILD,          NULL),
++	SDT_CONDBOOL(GameSettings, construction.build_new_towns,                   103, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_PATCHES_TOWN_BUILD_NEW,         NULL),
+ 
+ 	    SDT_BOOL(GameSettings, ai.ainew_active,                                                     0, 0, false,                    STR_CONFIG_PATCHES_AINEW_ACTIVE,           AiNew_PatchActive_Warning),
+ 	    SDT_BOOL(GameSettings, ai.ai_in_multiplayer,                                                0, 0, false,                    STR_CONFIG_PATCHES_AI_IN_MULTIPLAYER,      Ai_In_Multiplayer_Warning),
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 14505)
++++ src/settings_gui.cpp	(working copy)
+@@ -663,6 +663,7 @@
+ 	"economy.town_growth_rate",
+ 	"economy.larger_towns",
+ 	"economy.initial_city_size",
++	"construction.build_new_towns",
+ };
+ 
+ static const char *_patches_ai[] = {
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 14505)
++++ src/settings_type.h	(working copy)
+@@ -158,6 +158,7 @@
+ 	bool   extra_dynamite;                   ///< extra dynamite
+ 	bool   road_stop_on_town_road;           ///< allow building of drive-through road stops on town owned roads
+ 	uint8  raw_industry_construction;        ///< type of (raw) industry construction (none, "normal", prospecting)
++	bool   build_new_towns;                  ///< allow new towns to be built
+ };
+ 
+ /** Settings related to the AI. */
+Index: src/toolbar_gui.cpp
+===================================================================
+--- src/toolbar_gui.cpp	(revision 14505)
++++ src/toolbar_gui.cpp	(working copy)
+@@ -394,12 +394,22 @@
+ 
+ static void ToolbarTownClick(Window *w)
+ {
+-	PopupMainToolbMenu(w, TBN_TOWNDIRECTORY, STR_02BB_TOWN_DIRECTORY, 1);
++	DropDownList *list = new DropDownList();
++	list->push_back(new DropDownListStringItem(STR_02BB_TOWN_DIRECTORY, 0, false));
++
++	if (_settings_game.construction.build_new_towns)
++		list->push_back(new DropDownListStringItem(STR_02C3_FUND_TOWN, 1, false));
++
++	ShowDropDownList(w, list, 0, TBN_TOWNDIRECTORY, 140, true, true);
++	SndPlayFx(SND_15_BEEP);
+ }
+ 
+ static void MenuClickTown(int index)
+ {
+-	ShowTownDirectory();
++	switch (index) {
++		case 0: ShowTownDirectory();   break;
++		case 1: ShowBuildTownWindow(); break;
++	}
+ }
+ 
+ /* --- Subidies button menu --- */
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revision 14505)
++++ src/town_cmd.cpp	(working copy)
+@@ -1517,6 +1517,11 @@
+ 	UpdateTownMaxPass(t);
+ }
+ 
++int GetNewTownConstructionCost(uint32 size)
++{
++	return 5000 * (((size+1) << 8) + 1);
++};
++
+ /** Create a new town.
+  * This obviously only works in the scenario editor. Function not removed
+  * as it might be possible in the future to fund your own town :)
+@@ -1527,8 +1532,6 @@
+  */
+ CommandCost CmdBuildTown(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+-	/* Only in the scenario editor */
+-	if (_game_mode != GM_EDITOR) return CMD_ERROR;
+ 	if (p2 > TSM_CITY) return CMD_ERROR;
+ 
+ 	/* Check if too close to the edge of map */
+@@ -1560,7 +1563,10 @@
+ 		DoCreateTown(t, tile, townnameparts, (TownSizeMode)p2, p1);
+ 		_generating_world = false;
+ 	}
+-	return CommandCost();
++	if (_game_mode == GM_EDITOR )
++		return CommandCost();
++	else
++		return CommandCost(EXPENSES_OTHER, GetNewTownConstructionCost(p1));
+ }
+ 
+ Town *CreateRandomTown(uint attempts, TownSizeMode mode, uint size)
+Index: src/town_gui.cpp
+===================================================================
+--- src/town_gui.cpp	(revision 14505)
++++ src/town_gui.cpp	(working copy)
+@@ -25,6 +25,7 @@
+ #include "tilehighlight_func.h"
+ #include "string_func.h"
+ #include "sortlist_type.h"
++#include "functions.h"
+ 
+ #include "table/sprites.h"
+ #include "table/strings.h"
+@@ -666,22 +667,26 @@
+ {
+ 	uint32 size = min(_scengen_town_size, (int)TSM_CITY);
+ 	uint32 mode = _scengen_town_size > TSM_CITY ? TSM_CITY : TSM_FIXED;
+-	DoCommandP(tile, size, mode, CcBuildTown, CMD_BUILD_TOWN | CMD_MSG(STR_0236_CAN_T_BUILD_TOWN_HERE));
++	
++	if (_game_mode == GM_EDITOR || _settings_game.construction.build_new_towns )
++		DoCommandP(tile, size, mode, CcBuildTown, CMD_BUILD_TOWN | CMD_MSG(STR_0236_CAN_T_BUILD_TOWN_HERE));
+ }
+ 
+ static const Widget _scen_edit_town_gen_widgets[] = {
+ {   WWT_CLOSEBOX,   RESIZE_NONE,  COLOUR_DARK_GREEN,    0,    10,     0,    13, STR_00C5,                 STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,  COLOUR_DARK_GREEN,   11,   147,     0,    13, STR_0233_TOWN_GENERATION, STR_018C_WINDOW_TITLE_DRAG_THIS},
+ {  WWT_STICKYBOX,   RESIZE_NONE,  COLOUR_DARK_GREEN,  148,   159,     0,    13, 0x0,                      STR_STICKY_BUTTON},
+-{      WWT_PANEL,   RESIZE_NONE,  COLOUR_DARK_GREEN,    0,   159,    14,    94, 0x0,                      STR_NULL},
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,          2,   157,    16,    27, STR_0234_NEW_TOWN,        STR_0235_CONSTRUCT_NEW_TOWN},
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,          2,   157,    29,    40, STR_023D_RANDOM_TOWN,     STR_023E_BUILD_TOWN_IN_RANDOM_LOCATION},
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,          2,   157,    42,    53, STR_MANY_RANDOM_TOWNS,    STR_RANDOM_TOWNS_TIP},
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,          2,    53,    68,    79, STR_02A1_SMALL,           STR_02A4_SELECT_TOWN_SIZE},
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,         54,   105,    68,    79, STR_02A2_MEDIUM,          STR_02A4_SELECT_TOWN_SIZE},
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,        106,   157,    68,    79, STR_02A3_LARGE,           STR_02A4_SELECT_TOWN_SIZE},
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,          2,   157,    81,    92, STR_SCENARIO_EDITOR_CITY, STR_02A4_SELECT_TOWN_SIZE},
+-{      WWT_LABEL,   RESIZE_NONE,  COLOUR_DARK_GREEN,    0,   147,    54,    67, STR_02A5_TOWN_SIZE,       STR_NULL},
++{      WWT_PANEL,   RESIZE_NONE,  COLOUR_DARK_GREEN,    0,   159,    14,    94, 0x0,                      STR_NULL},                               // TSEW_MAINPANEL
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,          2,   157,    16,    27, STR_0234_NEW_TOWN,        STR_0235_CONSTRUCT_NEW_TOWN},            // TSEW_NEWTOWN
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,          2,   157,    29,    40, STR_023D_RANDOM_TOWN,     STR_023E_BUILD_TOWN_IN_RANDOM_LOCATION}, // TSEW_RANDOMTOWN
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,          2,   157,    42,    53, STR_MANY_RANDOM_TOWNS,    STR_RANDOM_TOWNS_TIP},                   // TSEW_MANYRANDOMTOWNS
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,          2,    53,    68,    79, STR_02A1_SMALL,           STR_02A4_SELECT_TOWN_SIZE},              // TSEW_SMALLTOWN
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,         54,   105,    68,    79, STR_02A2_MEDIUM,          STR_02A4_SELECT_TOWN_SIZE},              // TSEW_MEDIUMTOWN
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,        106,   157,    68,    79, STR_02A3_LARGE,           STR_02A4_SELECT_TOWN_SIZE},              // TSEW_LARGETOWN
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_GREY,          2,   157,    81,    92, STR_SCENARIO_EDITOR_CITY, STR_02A4_SELECT_TOWN_SIZE},              // TSEW_CITY
++{      WWT_LABEL,   RESIZE_NONE,  COLOUR_DARK_GREEN,    0,   147,    54,    67, STR_02A5_TOWN_SIZE,       STR_NULL},                               // TSEW_TOWN_SIZE
++{      WWT_PANEL,   RESIZE_NONE,  COLOUR_DARK_GREEN,    0,   159,    94,   106, 0x0,                      STR_NULL},                               // TSEW_INFOPANEL
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_DARK_GREEN,    0,   159,   106,   117, STR_FUND_NEW_INDUSTRY,    STR_NULL},                               // TSEW_FUND_WIDGET
+ {   WIDGETS_END},
+ };
+ 
+@@ -689,18 +694,51 @@
+ {
+ private:
+ 	enum TownScenarioEditorWidget {
+-		TSEW_NEWTOWN = 4,
++		TSEW_MAINPANEL = 3,
++		TSEW_NEWTOWN,
+ 		TSEW_RANDOMTOWN,
+ 		TSEW_MANYRANDOMTOWNS,
+ 		TSEW_SMALLTOWN,
+ 		TSEW_MEDIUMTOWN,
+ 		TSEW_LARGETOWN,
+ 		TSEW_CITY,
++		TSEW_TOWN_SIZE,
++		TSEW_INFOPANEL,
++		TSEW_FUND_WIDGET
+ 	};
+ 
+ public:
+ 	ScenarioEditorTownGenerationWindow(const WindowDesc *desc, WindowNumber window_number) : Window(desc, window_number)
+ 	{
++		if (_game_mode == GM_EDITOR) {
++			this->HideWidget(TSEW_INFOPANEL);
++			this->HideWidget(TSEW_FUND_WIDGET);
++			this->height = 95;
++			
++			this->ShowWidget(TSEW_NEWTOWN);
++			this->ShowWidget(TSEW_RANDOMTOWN);
++			this->ShowWidget(TSEW_MANYRANDOMTOWNS);
++			this->ShowWidget(TSEW_CITY);
++		} else {
++			this->ShowWidget(TSEW_INFOPANEL);
++			this->ShowWidget(TSEW_FUND_WIDGET);
++			this->height = 70;
++
++			this->HideWidget(TSEW_NEWTOWN);
++			this->HideWidget(TSEW_RANDOMTOWN);
++			this->HideWidget(TSEW_MANYRANDOMTOWNS);
++			this->HideWidget(TSEW_CITY);
++		
++			this->widget[TSEW_TOWN_SIZE].top = 16;   this->widget[TSEW_TOWN_SIZE].bottom = 29;
++			this->widget[TSEW_SMALLTOWN].top = 30;   this->widget[TSEW_SMALLTOWN].bottom = 41;
++			this->widget[TSEW_MEDIUMTOWN].top = 30;  this->widget[TSEW_MEDIUMTOWN].bottom = 41;
++			this->widget[TSEW_LARGETOWN].top = 30;   this->widget[TSEW_LARGETOWN].bottom = 41;
++		
++			this->widget[TSEW_MAINPANEL].bottom = 43;
++		
++			this->widget[TSEW_INFOPANEL].top = 43;   this->widget[TSEW_INFOPANEL].bottom = 56;
++			this->widget[TSEW_FUND_WIDGET].top = 56; this->widget[TSEW_FUND_WIDGET].bottom = 69;
++		}
+ 		this->LowerWidget(_scengen_town_size + TSEW_SMALLTOWN);
+ 		this->FindWindowPlacementAndResize(desc);
+ 	}
+@@ -708,11 +746,27 @@
+ 	virtual void OnPaint()
+ 	{
+ 		this->DrawWidgets();
++		if (_game_mode != GM_EDITOR) {
++			int x_str = this->widget[TSEW_INFOPANEL].left + 3;
++			int y_str = this->widget[TSEW_INFOPANEL].top + 3;
++			const Widget *wi = &this->widget[TSEW_INFOPANEL];
++			int max_width = wi->right - wi->left - 4;
++			extern int GetNewTownConstructionCost(uint32 size);
++
++			SetDParam(0, GetNewTownConstructionCost(_scengen_town_size));
++			DrawStringTruncated(x_str, y_str, STR_482F_COST, TC_FROMSTRING, max_width);
++			y_str += 11;
++		}
+ 	}
+ 
+ 	virtual void OnClick(Point pt, int widget)
+ 	{
+ 		switch (widget) {
++			case TSEW_FUND_WIDGET:
++				if (_settings_game.construction.build_new_towns)
++					HandlePlacePushButton(this, TSEW_FUND_WIDGET, SPR_CURSOR_TOWN, VHM_RECT, PlaceProc_Town);
++				break;
++			
+ 			case TSEW_NEWTOWN:
+ 				HandlePlacePushButton(this, TSEW_NEWTOWN, SPR_CURSOR_TOWN, VHM_RECT, PlaceProc_Town);
+ 				break;
+@@ -772,7 +826,7 @@
+ };
+ 
+ static const WindowDesc _scen_edit_town_gen_desc = {
+-	WDP_AUTO, WDP_AUTO, 160, 95, 160, 95,
++	WDP_AUTO, WDP_AUTO, 160, 118, 160, 118,
+ 	WC_SCEN_TOWN_GEN, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_STICKY_BUTTON,
+ 	_scen_edit_town_gen_widgets,
+@@ -784,3 +838,4 @@
+ 	AllocateWindowDescFront<ScenarioEditorTownGenerationWindow>(&_scen_edit_town_gen_desc, 0);
+ }
+ 
++

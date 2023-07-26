@@ -1,0 +1,110 @@
+Index: src/terraform_cmd.cpp
+===================================================================
+--- src/terraform_cmd.cpp	(revision 15496)
++++ src/terraform_cmd.cpp	(working copy)
+@@ -303,9 +303,10 @@
+ 				return_cmd_error(STR_5007_MUST_DEMOLISH_BRIDGE_FIRST);
+ 			}
+ 			/* Check if tunnel would take damage */
+-			if (direction == -1 && IsTunnelInWay(tile, z_min * TILE_HEIGHT)) {
++			if (IsTunnelInWay(tile, z_min * TILE_HEIGHT)) {
+ 				_terraform_err_tile = tile; // highlight the tile above the tunnel
+-				return_cmd_error(STR_1002_EXCAVATION_WOULD_DAMAGE);
++				if (direction == -1) return_cmd_error(STR_1002_EXCAVATION_WOULD_DAMAGE);
++				if (direction == 1) return_cmd_error(STR_5006_MUST_DEMOLISH_TUNNEL_FIRST);
+ 			}
+ 			/* Check tiletype-specific things, and add extra-cost */
+ 			const bool curr_gen = _generating_world;
+Index: src/tunnel_map.cpp
+===================================================================
+--- src/tunnel_map.cpp	(revision 15496)
++++ src/tunnel_map.cpp	(working copy)
+@@ -41,18 +41,14 @@
+ bool IsTunnelInWayDir(TileIndex tile, uint z, DiagDirection dir)
+ {
+ 	TileIndexDiff delta = TileOffsByDiagDir(dir);
+-	uint height;
+-
+-	do {
++	for (;;) {
+ 		tile -= delta;
+ 		if (!IsValidTile(tile)) return false;
+-		height = GetTileZ(tile);
+-	} while (z < height);
+-
+-	return
+-		z == height &&
+-		IsTunnelTile(tile) &&
+-		GetTunnelBridgeDirection(tile) == dir;
++		if (GetTileZ(tile) != z) continue;
++		if (!IsTunnelTile(tile)) continue;
++		if(dir == GetTunnelBridgeDirection(tile)) return true;
++		return false;
++	}
+ }
+ 
+ /**
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 15496)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -506,6 +506,10 @@
+ 		tunnel_in_way_dir = (TileY(start_tile) < (MapMaxX() / 2)) ? DIAGDIR_SE : DIAGDIR_NW;
+ 	}
+ 
++	if (!_cheats.crossing_tunnels.value && IsTunnelInWayDir(start_tile, start_z, tunnel_in_way_dir)) {
++			return_cmd_error(STR_5003_ANOTHER_TUNNEL_IN_THE_WAY);
++	}
++
+ 	end_tile = start_tile;
+ 
+ 	/** Tile shift coeficient. Will decrease for very long tunnels to avoid exponential growth of price*/
+@@ -514,18 +518,33 @@
+ 	int tiles = 0;
+ 	/** Number of tiles at which the cost increase coefficient per tile is halved */
+ 	int tiles_bump = 25;
++	/** Tunnel under water flag */
++	bool passing_water = false;
+ 
+ 	for (;;) {
+ 		end_tile += delta;
+ 		if (!IsValidTile(end_tile)) return_cmd_error(STR_TUNNEL_THROUGH_MAP_BORDER);
+ 		end_tileh = GetTileSlope(end_tile, &end_z);
+ 
+-		if (start_z == end_z) break;
++		if (start_z == end_z && IsTunnelTile(end_tile)) return_cmd_error(STR_5003_ANOTHER_TUNNEL_IN_THE_WAY);
+ 
++		if (end_z > start_z || end_tileh == InclinedSlope(ReverseDiagDir(direction))) passing_water = false;
++
++		if (IsTileType(end_tile + delta, MP_WATER) && !IsWaterTile(start_tile - delta) && end_z == 0) {
++			if (GetWaterTileType(end_tile + delta) == WATER_TILE_CLEAR ||
++				GetWaterTileType(end_tile + delta) == WATER_TILE_COAST) passing_water = true;
++		}
++
+ 		if (!_cheats.crossing_tunnels.value && IsTunnelInWayDir(end_tile, start_z, tunnel_in_way_dir)) {
+ 			return_cmd_error(STR_5003_ANOTHER_TUNNEL_IN_THE_WAY);
+ 		}
+ 
++		if (start_z == end_z && !passing_water) {
++			/* Don't allow tunnel inbetween existing tunnel */
++			if (IsTunnelInWayDir(end_tile, start_z, direction)) return_cmd_error(STR_5003_ANOTHER_TUNNEL_IN_THE_WAY);
++			break;
++		}
++
+ 		tiles++;
+ 		if (tiles == tiles_bump) {
+ 			tiles_coef++;
+Index: src/water_cmd.cpp
+===================================================================
+--- src/water_cmd.cpp	(revision 15496)
++++ src/water_cmd.cpp	(working copy)
+@@ -355,6 +355,9 @@
+ 				return_cmd_error(STR_0002_TOO_CLOSE_TO_EDGE_OF_MAP);
+ 			}
+ 
++			/* Don't allow water to be cleared above underwater tunnels */
++			if (IsTunnelInWay(tile, 0)) return_cmd_error(STR_5003_ANOTHER_TUNNEL_IN_THE_WAY);
++
+ 			/* Make sure no vehicle is on the tile */
+ 			if (!EnsureNoVehicleOnGround(tile)) return CMD_ERROR;
+ 

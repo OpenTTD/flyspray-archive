@@ -1,0 +1,231 @@
+Index: src/console_gui.cpp
+===================================================================
+--- src/console_gui.cpp	(revision 14265)
++++ src/console_gui.cpp	(working copy)
+@@ -165,6 +165,11 @@
+ 		ClrBit(_no_scroll, SCROLL_CON);
+ 	}
+ 
++	virtual bool IsQueryWindow()
++	{
++		return true;
++	}
++
+ 	virtual void OnPaint()
+ 	{
+ 		int max = (this->height / ICON_LINE_HEIGHT) - 1;
+Index: src/genworld_gui.cpp
+===================================================================
+--- src/genworld_gui.cpp	(revision 14265)
++++ src/genworld_gui.cpp	(working copy)
+@@ -265,6 +265,11 @@
+ 		this->FindWindowPlacementAndResize(desc);
+ 	}
+ 
++	virtual bool IsQueryWindow()
++	{
++		return true;
++	}
++
+ 	virtual void OnPaint()
+ 	{
+ 		/* You can't select smoothness if not terragenesis */
+Index: src/misc_gui.cpp
+===================================================================
+--- src/misc_gui.cpp	(revision 14265)
++++ src/misc_gui.cpp	(working copy)
+@@ -1164,8 +1164,7 @@
+ {
+ 	uint realmaxlen = maxlen & ~0x1000;
+ 
+-	DeleteWindowById(WC_QUERY_STRING, 0);
+-	DeleteWindowById(WC_SAVELOAD, 0);
++	DeleteAllQueryWindows();
+ 
+ 	QueryStringWindow *w = new QueryStringWindow(realmaxlen + 1, &_query_string_desc, parent);
+ 
+@@ -1487,6 +1486,11 @@
+ 		ClrBit(_no_scroll, SCROLL_SAVE);
+ 	}
+ 
++	virtual bool IsQueryWindow()
++	{
++		return true;
++	}
++
+ 	virtual void OnPaint()
+ 	{
+ 		int y;
+@@ -1682,8 +1686,7 @@
+ 
+ void ShowSaveLoadDialog(SaveLoadDialogMode mode)
+ {
+-	DeleteWindowById(WC_QUERY_STRING, 0);
+-	DeleteWindowById(WC_SAVELOAD, 0);
++	DeleteAllQueryWindows();
+ 
+ 	const WindowDesc *sld;
+ 	switch (mode) {
+Index: src/network/network_chat_gui.cpp
+===================================================================
+--- src/network/network_chat_gui.cpp	(revision 14265)
++++ src/network/network_chat_gui.cpp	(working copy)
+@@ -425,6 +425,11 @@
+ 		free(pre_buf);
+ 	}
+ 
++	virtual bool IsQueryWindow()
++	{
++		return true;
++	}
++
+ 	virtual void OnPaint()
+ 	{
+ 		static const StringID chat_captions[] = {
+Index: src/network/network_gui.cpp
+===================================================================
+--- src/network/network_gui.cpp	(revision 14265)
++++ src/network/network_gui.cpp	(working copy)
+@@ -1767,6 +1767,11 @@
+ 		this->FindWindowPlacementAndResize(desc);
+ 	}
+ 
++	virtual bool IsQueryWindow()
++	{
++		return true;
++	}
++
+ 	void OnOk()
+ 	{
+ 		if (this->IsWidgetLowered(NCPWW_SAVE_AS_DEFAULT_PASSWORD)) {
+Index: src/signs_gui.cpp
+===================================================================
+--- src/signs_gui.cpp	(revision 14265)
++++ src/signs_gui.cpp	(working copy)
+@@ -224,6 +224,11 @@
+ 		this->InvalidateWidget(QUERY_EDIT_SIGN_WIDGET_TEXT);
+ 	}
+ 
++	virtual bool IsQueryWindow()
++	{
++		return true;
++	}
++
+ 	virtual void OnPaint()
+ 	{
+ 		SetDParam(0, this->caption);
+@@ -353,8 +358,7 @@
+ void ShowRenameSignWindow(const Sign *si)
+ {
+ 	/* Delete all other edit windows and the save window */
+-	DeleteWindowById(WC_QUERY_STRING, 0);
+-	DeleteWindowById(WC_SAVELOAD, 0);
++	DeleteAllQueryWindows();
+ 
+ 	new SignWindow(&_query_sign_edit_desc, si);
+ }
+Index: src/window.cpp
+===================================================================
+--- src/window.cpp	(revision 14265)
++++ src/window.cpp	(working copy)
+@@ -1654,27 +1654,21 @@
+ 	if (key == 0 && keycode == 0) return;
+ 
+ 	/* check if we have a query string window open before allowing hotkeys */
+-	if (FindWindowById(WC_QUERY_STRING,            0) != NULL ||
+-			FindWindowById(WC_SEND_NETWORK_MSG,        0) != NULL ||
+-			FindWindowById(WC_GENERATE_LANDSCAPE,      0) != NULL ||
+-			FindWindowById(WC_CONSOLE,                 0) != NULL ||
+-			FindWindowById(WC_SAVELOAD,                0) != NULL ||
+-			FindWindowById(WC_COMPANY_PASSWORD_WINDOW, 0) != NULL) {
+-		query_open = true;
++	Window* const *wz;
++	FOR_ALL_WINDOWS(wz) {
++		Window *w = *wz;
++		if (w->IsQueryWindow()) {
++			query_open = true;
++			break;
++		}		
+ 	}
+ 
+ 	/* Call the event, start with the uppermost window. */
+-	for (Window* const *wz = _last_z_window; wz != _z_windows;) {
++	for (wz = _last_z_window; wz != _z_windows;) {
+ 		Window *w = *--wz;
+ 
+ 		/* if a query window is open, only call the event for certain window types */
+-		if (query_open &&
+-				w->window_class != WC_QUERY_STRING &&
+-				w->window_class != WC_SEND_NETWORK_MSG &&
+-				w->window_class != WC_GENERATE_LANDSCAPE &&
+-				w->window_class != WC_CONSOLE &&
+-				w->window_class != WC_SAVELOAD &&
+-				w->window_class != WC_COMPANY_PASSWORD_WINDOW) {
++		if (query_open && !w->IsQueryWindow()) {
+ 			continue;
+ 		}
+ 		if (w->OnKeyPress(key, keycode) == Window::ES_HANDLED) return;
+@@ -2143,7 +2137,30 @@
+ 		}
+ 	}
+ }
++/** 
++ * Delete all query windows. When you open a query window you want to
++ * delete all open query windows before. 
++ */
++void DeleteAllQueryWindows()
++{
++	Window* const *wz;
+ 
++restart_search:
++	/* When we find the window to delete, we need to restart the search
++	 * as deleting this window could cascade in deleting (many) others
++	 * anywhere in the z-array */
++	FOR_ALL_WINDOWS(wz) {
++		Window *w = *wz;
++		if (w->IsQueryWindow() &&
++				w->window_class != WC_CONSOLE &&
++				w->window_class != WC_SEND_NETWORK_MSG) {
++
++			delete w;
++			goto restart_search;
++		}
++	}
++}
++
+ /** Delete all always on-top windows to get an empty screen */
+ void HideVitalWindows()
+ {
+Index: src/window_func.h
+===================================================================
+--- src/window_func.h	(revision 14265)
++++ src/window_func.h	(working copy)
+@@ -28,6 +28,7 @@
+ 
+ void DeleteNonVitalWindows();
+ void DeleteAllNonVitalWindows();
++void DeleteAllQueryWindows();
+ void HideVitalWindows();
+ void ShowVitalWindows();
+ 
+Index: src/window_gui.h
+===================================================================
+--- src/window_gui.h	(revision 14265)
++++ src/window_gui.h	(working copy)
+@@ -256,6 +256,16 @@
+ 	/*** Event handling ***/
+ 
+ 	/**
++	 * Tell key input loop if we are a query window or not. Query
++	 * windows get all keyboard input events so that not other
++	 * windows can steal them such as the main toolbar etc.
++	 * @return true if the window wants to steal key inptut focus, 
++	 *         false if the window don't want to steal key input focus.
++	 */
++	virtual bool IsQueryWindow() { return false; }
++
++
++	/**
+ 	 * This window is currently being repainted.
+ 	 */
+ 	virtual void OnPaint() {}

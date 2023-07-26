@@ -1,0 +1,790 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 14393)
++++ src/settings.cpp	(working copy)
+@@ -1311,6 +1311,7 @@
+ 	SDT_CONDBOOL(GameSettings, construction.road_stop_on_town_road,             47, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_PATCHES_STOP_ON_TOWN_ROAD,      NULL),
+ 	SDT_CONDBOOL(GameSettings, station.adjacent_stations,                       62, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_PATCHES_ADJACENT_STATIONS,      NULL),
+ 	SDT_CONDBOOL(GameSettings, economy.station_noise_level,                     96, SL_MAX_VERSION, 0, 0, false,                    STR_CONFIG_PATCHES_NOISE_LEVEL,            InvalidateTownViewWindow),
++	SDT_CONDBOOL(GameSettings, station.distant_join_stations,                  103, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_PATCHES_DISTANT_JOIN_STATIONS,  NULL),
+ 
+ 	    SDT_BOOL(GameSettings, economy.inflation,                                                   0, 0,  true,                    STR_CONFIG_PATCHES_INFLATION,              NULL),
+ 	     SDT_VAR(GameSettings, construction.raw_industry_construction, SLE_UINT8,                   0,MS,     0,     0,       2, 0, STR_CONFIG_PATCHES_RAW_INDUSTRY_CONSTRUCTION_METHOD, InvalidateBuildIndustryWindow),
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 14393)
++++ src/lang/english.txt	(working copy)
+@@ -1038,6 +1038,7 @@
+ STR_CONFIG_PATCHES_REALISTICACCEL                               :{LTBLUE}Enable realistic acceleration for trains: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_FORBID_90_DEG                                :{LTBLUE}Forbid trains and ships to make 90 deg turns: {ORANGE}{STRING1} {LTBLUE} (not with NTP)
+ STR_CONFIG_PATCHES_JOINSTATIONS                                 :{LTBLUE}Join train stations built next to each other: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_DISTANT_JOIN_STATIONS                        :{LTBLUE}Allow to join stations not directly adjacent: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_IMPROVEDLOAD                                 :{LTBLUE}Use improved loading algorithm: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_GRADUAL_LOADING                              :{LTBLUE}Load vehicles gradually: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_INFLATION                                    :{LTBLUE}Inflation: {ORANGE}{STRING1}
+@@ -1711,6 +1712,8 @@
+ STR_RAILROAD_TRACK_WITH_COMBO_NOENTRYSIGNALS                    :Railway track with combo- and one-way advanced signals
+ STR_RAILROAD_TRACK_WITH_PBS_NOENTRYSIGNALS                      :Railway track with advanced and one-way advanced signals
+ STR_MUST_REMOVE_RAILWAY_STATION_FIRST                           :{WHITE}Must remove railway station first
++STR_CREATE_SPLITTED_STATION                                     :{YELLOW}Build a separate Station
++STR_SELECT_STATION_TO_JOIN                                      :{BLACK}Join Station
+ 
+ 
+ 
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 14393)
++++ src/settings_gui.cpp	(working copy)
+@@ -643,6 +643,7 @@
+ 	"order.gradual_loading",
+ 	"construction.road_stop_on_town_road",
+ 	"station.adjacent_stations",
++	"station.distant_join_stations",
+ 	"economy.station_noise_level",
+ };
+ 
+Index: src/saveload.cpp
+===================================================================
+--- src/saveload.cpp	(revision 14393)
++++ src/saveload.cpp	(working copy)
+@@ -37,7 +37,7 @@
+ 
+ #include "table/strings.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 102;
++extern const uint16 SAVEGAME_VERSION = 103;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/station_gui.h
+===================================================================
+--- src/station_gui.h	(revision 14393)
++++ src/station_gui.h	(working copy)
+@@ -5,6 +5,9 @@
+ #ifndef STATION_GUI_H
+ #define STATION_GUI_H
+ 
++#include "command_type.h"
++#include "station_type.h"
++
+ /** Enum for PlayerStations, referring to _player_stations_widgets */
+ enum StationListWidgets {
+ 	SLW_CLOSEBOX       =  0, ///< Close 'X' button
+@@ -59,4 +62,7 @@
+ 
+ extern bool _station_show_coverage;
+ 
++void ShowSelectStation(CommandContainer cmd, StationType stationType, bool lockPos, bool lockSize);
++bool StationJoinerNeeded(TileIndex tile, int w, int h);
++
+ #endif /* STATION_GUI_H */
+Index: src/station_cmd.cpp
+===================================================================
+--- src/station_cmd.cpp	(revision 14393)
++++ src/station_cmd.cpp	(working copy)
+@@ -856,23 +856,24 @@
+  * @param tile_org starting position of station dragging/placement
+  * @param flags operation to perform
+  * @param p1 various bitstuffed elements
+- * - p1 = (bit  0)    - orientation (Axis)
++ * - p1 = (bit  0- 3) - railtype (p2 & 0xF)
++ * - p1 = (bit  4)    - orientation (Axis)
+  * - p1 = (bit  8-15) - number of tracks
+  * - p1 = (bit 16-23) - platform length
+  * - p1 = (bit 24)    - allow stations directly adjacent to other stations.
+  * @param p2 various bitstuffed elements
+- * - p2 = (bit  0- 3) - railtype (p2 & 0xF)
+- * - p2 = (bit  8-15) - custom station class
+- * - p2 = (bit 16-23) - custom station id
++ * - p2 = (bit  0- 7) - custom station class
++ * - p2 = (bit  8-15) - custom station id
++ * - p2 = (bit 16-31) - station ID to join (INVALID_STATION if build new one)
+  */
+ CommandCost CmdBuildRailroadStation(TileIndex tile_org, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	/* Does the authority allow this? */
+ 	if (!(flags & DC_NO_TOWN_RATING) && !CheckIfAuthorityAllows(tile_org)) return CMD_ERROR;
+-	if (!ValParamRailtype((RailType)(p2 & 0xF))) return CMD_ERROR;
++	if (!ValParamRailtype((RailType)(p1 & 0xF))) return CMD_ERROR;
+ 
+ 	/* unpack parameters */
+-	Axis axis = Extract<Axis, 0>(p1);
++	Axis axis = Extract<Axis, 4>(p1);
+ 	uint numtracks = GB(p1,  8, 8);
+ 	uint plat_len  = GB(p1, 16, 8);
+ 
+@@ -885,6 +886,11 @@
+ 		w_org = numtracks;
+ 	}
+ 
++	StationID station_to_join = GB(p2, 16, 16);
++	bool distant_join = !(GetPlayer(_current_player)->is_ai) && (station_to_join != INVALID_STATION);
++
++	if (distant_join && !_settings_game.station.distant_join_stations) return CMD_ERROR;
++
+ 	if (h_org > _settings_game.station.station_spread || w_org > _settings_game.station.station_spread) return CMD_ERROR;
+ 
+ 	/* these values are those that will be stored in train_tile and station_platforms */
+@@ -907,7 +913,7 @@
+ 
+ 	if (_settings_game.station.adjacent_stations) {
+ 		if (est != INVALID_STATION) {
+-			if (HasBit(p1, 24)) {
++			if (HasBit(p1, 24) && (est != station_to_join)) {
+ 				/* You can't build an adjacent station over the top of one that
+ 				 * already exists. */
+ 				return_cmd_error(STR_MUST_REMOVE_RAILWAY_STATION_FIRST);
+@@ -930,6 +936,11 @@
+ 		if (st == CHECK_STATIONS_ERR) return CMD_ERROR;
+ 	}
+ 
++	/* Distant join */
++	if ((st == NULL) && (distant_join)) {
++		st = GetStation(station_to_join);
++	}
++
+ 	/* See if there is a deleted station close to us. */
+ 	if (st == NULL) st = GetClosestStationFromTile(tile_org);
+ 
+@@ -965,10 +976,10 @@
+ 	}
+ 
+ 	/* Check if the given station class is valid */
+-	if (GB(p2, 8, 8) >= GetNumStationClasses()) return CMD_ERROR;
++	if (GB(p2, 0, 8) >= GetNumStationClasses()) return CMD_ERROR;
+ 
+ 	/* Check if we can allocate a custom stationspec to this station */
+-	const StationSpec *statspec = GetCustomStationSpec((StationClassID)GB(p2, 8, 8), GB(p2, 16, 8));
++	const StationSpec *statspec = GetCustomStationSpec((StationClassID)GB(p2, 0, 8), GB(p2, 8, 8));
+ 	int specindex = AllocateSpecToStation(statspec, st, flags & DC_EXEC);
+ 	if (specindex == -1) return CMD_ERROR;
+ 
+@@ -1038,7 +1049,7 @@
+ 					}
+ 				}
+ 
+-				MakeRailStation(tile, st->owner, st->index, axis, layout & ~1, (RailType)GB(p2, 0, 4));
++				MakeRailStation(tile, st->owner, st->index, axis, layout & ~1, (RailType)GB(p1, 0, 4));
+ 				SetCustomStationSpecIndex(tile, specindex);
+ 				SetStationTileRandomBits(tile, GB(Random(), 0, 4));
+ 				SetStationAnimationFrame(tile, 0);
+@@ -1345,6 +1356,7 @@
+  *           bit 1: 0 for normal, 1 for drive-through
+  *           bit 2..4: the roadtypes
+  *           bit 5: allow stations directly adjacent to other stations.
++ *           bit 16-31: station ID to join (INVALID_STATION if build new one)
+  */
+ CommandCost CmdBuildRoadStop(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+@@ -1353,7 +1365,11 @@
+ 	bool build_over_road  = is_drive_through && IsNormalRoadTile(tile);
+ 	bool town_owned_road  = false;
+ 	RoadTypes rts = (RoadTypes)GB(p2, 2, 3);
++	StationID station_to_join = GB(p2, 16, 16);
++	bool distant_join = !(GetPlayer(_current_player)->is_ai) && (station_to_join != INVALID_STATION);
+ 
++	if (distant_join && !_settings_game.station.distant_join_stations) return CMD_ERROR;
++
+ 	if (!AreValidRoadTypes(rts) || !HasRoadTypesAvail(_current_player, rts)) return CMD_ERROR;
+ 
+ 	/* Trams only have drive through stops */
+@@ -1410,6 +1426,11 @@
+ 		if (st == CHECK_STATIONS_ERR) return CMD_ERROR;
+ 	}
+ 
++	/* Distant join */
++	if ((st == NULL) && (distant_join)) {
++		st = GetStation(station_to_join);
++	}
++
+ 	/* Find a station close to us */
+ 	if (st == NULL) st = GetClosestStationFromTile(tile);
+ 
+@@ -1755,11 +1776,16 @@
+  * @param flags operation to perform
+  * @param p1 airport type, @see airport.h
+  * @param p2 (bit 0) - allow airports directly adjacent to other airports.
++ * @param p2 - bit 16-31: station ID to join (INVALID_STATION if build new one)
+  */
+ CommandCost CmdBuildAirport(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	bool airport_upgrade = true;
++	StationID station_to_join = GB(p2, 16, 16);
++	bool distant_join = !(GetPlayer(_current_player)->is_ai) && (station_to_join != INVALID_STATION);
+ 
++	if (distant_join && !_settings_game.station.distant_join_stations) return CMD_ERROR;
++
+ 	/* Check if a valid, buildable airport was chosen for construction */
+ 	if (p1 > lengthof(_airport_sections) || !HasBit(GetValidAirports(), p1)) return CMD_ERROR;
+ 
+@@ -1811,6 +1837,11 @@
+ 		st = NULL;
+ 	}
+ 
++	/* Distant join */
++	if ((st == NULL) && (distant_join)) {
++		st = GetStation(station_to_join);
++	}
++
+ 	/* Find a station close to us */
+ 	if (st == NULL) st = GetClosestStationFromTile(tile);
+ 
+@@ -2061,10 +2092,15 @@
+  * @param tile tile where dock will be built
+  * @param flags operation to perform
+  * @param p1 (bit 0) - allow docks directly adjacent to other docks.
+- * @param p2 unused
++ * @param p2 bit 16-31: station ID to join (INVALID_STATION if build new one)
+  */
+ CommandCost CmdBuildDock(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
++	StationID station_to_join = GB(p2, 16, 16);
++	bool distant_join = !(GetPlayer(_current_player)->is_ai) && (station_to_join != INVALID_STATION);
++
++	if (distant_join && !_settings_game.station.distant_join_stations) return CMD_ERROR;
++
+ 	DiagDirection direction = GetInclinedSlopeDirection(GetTileSlope(tile, NULL));
+ 	if (direction == INVALID_DIAGDIR) return_cmd_error(STR_304B_SITE_UNSUITABLE);
+ 	direction = ReverseDiagDir(direction);
+@@ -2106,6 +2142,11 @@
+ 		if (st == CHECK_STATIONS_ERR) return CMD_ERROR;
+ 	}
+ 
++	/* Distant join */
++	if ((st == NULL) && (distant_join)) {
++		st = GetStation(station_to_join);
++	}
++
+ 	/* Find a station close to us */
+ 	if (st == NULL) st = GetClosestStationFromTile(tile);
+ 
+Index: src/airport_gui.cpp
+===================================================================
+--- src/airport_gui.cpp	(revision 14393)
++++ src/airport_gui.cpp	(working copy)
+@@ -40,7 +40,15 @@
+ 
+ static void PlaceAirport(TileIndex tile)
+ {
+-	DoCommandP(tile, _selected_airport_type, _ctrl_pressed, CcBuildAirport, CMD_BUILD_AIRPORT | CMD_NO_WATER | CMD_MSG(STR_A001_CAN_T_BUILD_AIRPORT_HERE));
++	uint32 p2 = _ctrl_pressed;
++	SB(p2, 16, 16, INVALID_STATION); // no station to join
++
++	if (StationJoinerNeeded(tile, _thd.size.x / TILE_SIZE, _thd.size.y / TILE_SIZE)) {
++		CommandContainer cmd = {tile, _selected_airport_type, p2, CcBuildAirport, CMD_BUILD_AIRPORT | CMD_NO_WATER | CMD_MSG(STR_A001_CAN_T_BUILD_AIRPORT_HERE)};
++		ShowSelectStation(cmd, STATION_AIRPORT, true, true);
++	} else {
++		DoCommandP(tile, _selected_airport_type, p2, CcBuildAirport, CMD_BUILD_AIRPORT | CMD_NO_WATER | CMD_MSG(STR_A001_CAN_T_BUILD_AIRPORT_HERE));
++	}
+ }
+ 
+ 
+@@ -124,6 +132,7 @@
+ 		this->RaiseButtons();
+ 
+ 		delete FindWindowById(WC_BUILD_STATION, 0);
++		delete FindWindowById(WC_SELECT_STATION, 0);
+ 	}
+ };
+ 
+Index: src/window_type.h
+===================================================================
+--- src/window_type.h	(revision 14393)
++++ src/window_type.h	(working copy)
+@@ -95,6 +95,7 @@
+ 	WC_COMPANY_PASSWORD_WINDOW,
+ 	WC_OSK,
+ 	WC_WAYPOINT_VIEW,
++	WC_SELECT_STATION,
+ 
+ 	WC_INVALID = 0xFFFF
+ };
+Index: src/rail_gui.cpp
+===================================================================
+--- src/rail_gui.cpp	(revision 14393)
++++ src/rail_gui.cpp	(working copy)
+@@ -189,10 +189,21 @@
+ 		VpStartPlaceSizing(tile, VPM_X_AND_Y_LIMITED, DDSP_BUILD_STATION);
+ 		VpSetPlaceSizingLimit(_settings_game.station.station_spread);
+ 	} else {
+-		DoCommandP(tile,
+-				_railstation.orientation | (_railstation.numtracks << 8) | (_railstation.platlength << 16) | (_ctrl_pressed << 24),
+-				_cur_railtype | (_railstation.station_class << 8) | (_railstation.station_type << 16), CcStation,
+-				CMD_BUILD_RAILROAD_STATION | CMD_NO_WATER | CMD_MSG(STR_100F_CAN_T_BUILD_RAILROAD_STATION));
++		int w = _railstation.numtracks;
++		int h = _railstation.platlength;
++		if (!_railstation.orientation) Swap(w, h);
++
++		uint32 p1 = _cur_railtype | (_railstation.orientation << 4) | (_railstation.numtracks << 8) | (_railstation.platlength << 16) | (_ctrl_pressed << 24);
++		uint32 p2 = _railstation.station_class | (_railstation.station_type << 8) | (INVALID_STATION << 16);
++
++		if (StationJoinerNeeded(tile, w, h)) {
++			CommandContainer cmd = {tile, p1, p2, CcStation,
++			                        CMD_BUILD_RAILROAD_STATION | CMD_NO_WATER | CMD_MSG(STR_100F_CAN_T_BUILD_RAILROAD_STATION)};
++			ShowSelectStation(cmd, STATION_RAIL, true, true);
++		} else {
++			DoCommandP(tile, p1, p2, CcStation,
++			           CMD_BUILD_RAILROAD_STATION | CMD_NO_WATER | CMD_MSG(STR_100F_CAN_T_BUILD_RAILROAD_STATION));
++		}
+ 	}
+ }
+ 
+@@ -756,6 +767,7 @@
+ 		delete FindWindowById(WC_BUILD_SIGNAL, 0);
+ 		delete FindWindowById(WC_BUILD_STATION, 0);
+ 		delete FindWindowById(WC_BUILD_DEPOT, 0);
++		delete FindWindowById(WC_SELECT_STATION, 0);
+ 	}
+ 
+ 	virtual void OnPlacePresize(Point pt, TileIndex tile)
+@@ -876,12 +888,21 @@
+ 	if (sy > ey) Swap(sy, ey);
+ 	w = ex - sx + 1;
+ 	h = ey - sy + 1;
+-	if (_railstation.orientation == AXIS_X) Swap(w, h);
+ 
+-	DoCommandP(TileXY(sx, sy),
+-			_railstation.orientation | (w << 8) | (h << 16) | (_ctrl_pressed << 24),
+-			_cur_railtype | (_railstation.station_class << 8) | (_railstation.station_type << 16), CcStation,
+-			CMD_BUILD_RAILROAD_STATION | CMD_NO_WATER | CMD_MSG(STR_100F_CAN_T_BUILD_RAILROAD_STATION));
++	uint32 p1 = _cur_railtype | (_railstation.orientation << 4) | (_ctrl_pressed << 24);
++	uint32 p2 = _railstation.station_class | (_railstation.station_type << 8) | (INVALID_STATION << 16);
++
++	if (StationJoinerNeeded(TileXY(sx, sy), w, h)) {
++		if (_railstation.orientation == AXIS_X) Swap(w, h);
++		CommandContainer cmd = {TileXY(sx, sy), p1 | (w << 8) | (h << 16), p2,
++		                        CcStation,
++		                        CMD_BUILD_RAILROAD_STATION | CMD_NO_WATER | CMD_MSG(STR_100F_CAN_T_BUILD_RAILROAD_STATION)};
++		ShowSelectStation(cmd, STATION_RAIL, true, true);
++	} else {
++		if (_railstation.orientation == AXIS_X) Swap(w, h);
++		DoCommandP(TileXY(sx, sy), p1 | (w << 8) | (h << 16), p2, CcStation,
++		           CMD_BUILD_RAILROAD_STATION | CMD_NO_WATER | CMD_MSG(STR_100F_CAN_T_BUILD_RAILROAD_STATION));
++	}
+ }
+ 
+ struct BuildRailStationWindow : public PickerWindowBase {
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 14393)
++++ src/settings_type.h	(working copy)
+@@ -320,6 +320,7 @@
+ 	bool   join_stations;                    ///< allow joining of train stations
+ 	bool   nonuniform_stations;              ///< allow nonuniform train stations
+ 	bool   adjacent_stations;                ///< allow stations to be built directly adjacent to other stations
++	bool   distant_join_stations;            ///< allow to join non-adjacent stations
+ 	bool   always_small_airport;             ///< always allow small airports
+ 	byte   station_spread;                   ///< amount a station may spread
+ };
+Index: src/command_type.h
+===================================================================
+--- src/command_type.h	(revision 14393)
++++ src/command_type.h	(working copy)
+@@ -386,4 +386,15 @@
+  */
+ typedef void CommandCallback(bool success, TileIndex tile, uint32 p1, uint32 p2);
+ 
++/**
++ * Structure for buffering the build command when selecting a station to join.
++ */
++struct CommandContainer {
++	TileIndex tile;
++	uint32 p1;
++	uint32 p2;
++	CommandCallback *callback;
++	uint32 cmd;
++};
++
+ #endif /* COMMAND_TYPE_H */
+Index: src/station_gui.cpp
+===================================================================
+--- src/station_gui.cpp	(revision 14393)
++++ src/station_gui.cpp	(working copy)
+@@ -25,6 +25,11 @@
+ #include "gfx_func.h"
+ #include "widgets/dropdown_func.h"
+ #include "newgrf_cargo.h"
++#include "map_func.h"
++#include "settings_type.h"
++#include "tile_map.h"
++#include "station_map.h"
++#include "tilehighlight_func.h"
+ #include "string_func.h"
+ #include "player_base.h"
+ #include "sortlist_type.h"
+@@ -977,3 +982,247 @@
+ {
+ 	AllocateWindowDescFront<StationViewWindow>(&_station_view_desc, station);
+ }
++
++static CommandContainer _selectStationCommand;
++static StationType _stationType;
++
++static void AddStationID(StationID st)
++{
++	for (int i = 0; i < _stations_Nearby_Count; i++) {
++		if (_stations_Nearby_List[i] == st) return;
++	}
++
++	if ((_stations_Nearby_Count < sizeof(_stations_Nearby_List)/sizeof(_stations_Nearby_List[0])) &&
++	    (GetStation(st)->owner == _current_player)) {
++		_stations_Nearby_List[_stations_Nearby_Count] = st;
++		_stations_Nearby_Count++;
++	}
++}
++
++/* This doesn't check wrapping! */
++static bool InsideMap(TileIndex t)
++{
++	return (t < MapSize());
++}
++
++
++/**
++ * This approach (while not nice and correct) has some benefits:
++ * -stations appear nearly in order of distance
++ * -no sorting needed
++ * -no need to retrieve all stations within range, and discard the far away ones
++**/
++static Station* FindStationsNearby(TileIndex tile, int w, int h, bool distant_join)
++{
++	/* We start "above" supplied tile, then move in circles around w/h */
++	TileIndex tile_cur = tile;
++	int32 count;
++	int32 dist = 0;
++	int32 max_dist = distant_join ? _settings_game.station.station_spread : 1;
++
++	_stations_Nearby_Count = 0;
++
++	while (dist < max_dist) {
++		/* Move one up, one right */
++		tile_cur += TileDiffXY(-1, -1);
++
++		/* move down: */
++		count = h + (dist * 2) + 1;
++		while (count > 0) {
++			tile_cur += TileDiffXY(0, 1);
++
++			/* Check this tile for a station: */
++			if (InsideMap(tile_cur)) {
++				if (IsTileType(tile_cur, MP_STATION)) {
++					AddStationID(GetStationIndex(tile_cur));
++				}
++			}
++			count--;
++		}
++		/* move left: */
++		count = w + (dist * 2) + 1;
++		while (count > 0) {
++			tile_cur += TileDiffXY(1, 0);
++
++			/* Check this tile for a station: */
++			if (InsideMap(tile_cur)) {
++				if (IsTileType(tile_cur, MP_STATION)) {
++					AddStationID(GetStationIndex(tile_cur));
++				}
++			}
++			count--;
++		}
++		/* move up: */
++		count = h + (dist * 2) + 1;
++		while (count > 0) {
++			tile_cur += TileDiffXY(0, -1);
++
++			/* Check this tile for a station: */
++			if (InsideMap(tile_cur)) {
++				if (IsTileType(tile_cur, MP_STATION)) {
++					AddStationID(GetStationIndex(tile_cur));
++				}
++			}
++			count--;
++		}
++		/* move right: */
++		count = w + (dist * 2) + 1;
++		while (count > 0) {
++			tile_cur += TileDiffXY(-1, 0);
++
++			/* Check this tile for a station: */
++			if (InsideMap(tile_cur)) {
++				if (IsTileType(tile_cur, MP_STATION)) {
++					AddStationID(GetStationIndex(tile_cur));
++				}
++			}
++			count--;
++		}
++		dist++;
++	}
++
++	/* Now we check the inside, to return, if we sit on another station
++	 * correct: we need to check inside + 1 around.
++	 */
++	{
++		int x;
++		int y;
++		Station *st = NULL;
++		tile_cur = tile;
++		for (y = 0; y < h; y++) {
++			for (x = 0; x < w; x++) {
++				if (InsideMap(tile_cur)) {
++					if (IsTileType(tile_cur, MP_STATION)) {
++						st = GetStationByTile(tile_cur);
++					}
++				}
++				tile_cur += TileDiffXY(1, 0);
++			}
++			tile_cur += TileDiffXY(-w, 1);
++		}
++		/* Empty list, if ontop of another station */
++		if (st != NULL) _stations_Nearby_Count = 0;
++		return st;
++	}
++}
++
++enum JoinStationWidgets {
++	JSW_WIDGET_CLOSEBOX = 0,
++	JSW_WIDGET_CAPTION,
++	JSW_PANEL,
++};
++
++static const Widget _select_station_widgets[] = {
++{   WWT_CLOSEBOX,   RESIZE_NONE,    7,     0,    10,     0,    13, STR_00C5,                        STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,   RESIZE_NONE,    7,    11,   199,     0,    13, STR_SELECT_STATION_TO_JOIN,      STR_018C_WINDOW_TITLE_DRAG_THIS},
++{      WWT_PANEL,   RESIZE_NONE,    7,     0,   199,    14,   179, 0x0,                             STR_NULL},
++
++{   WIDGETS_END},
++};
++
++struct SelectStationWindow : Window {
++	SelectStationWindow(const WindowDesc *desc, WindowNumber window_number = 0) : Window(desc, window_number)
++	{
++		FindStationsNearby(TileVirtXY(_thd.pos.x, _thd.pos.y), _thd.size.x / TILE_SIZE, _thd.size.y / TILE_SIZE, true);
++	}
++
++	~SelectStationWindow()
++	{
++		_thd.lockPos = false;
++		_thd.lockSize = false;
++	}
++
++	virtual void OnPaint()
++	{
++		int y = 17;
++		int i = 0;
++		Station *st;
++
++		this->DrawWidgets();
++
++		DrawString(3, y, STR_CREATE_SPLITTED_STATION, 0);
++		y+= 10;
++		while (i < _stations_Nearby_Count) {
++			st = GetStation(_stations_Nearby_List[i]);
++			SetDParam(0, st->index);
++			SetDParam(1, st->facilities);
++			DrawString(3, y, STR_3049_0, 0);
++
++			i++;
++			y+= 10;
++		}
++	}
++
++	virtual void OnClick(Point pt, int widget)
++	{
++		if (widget == JSW_PANEL) {
++			uint32 st_index = (pt.y - 16) / 10;
++			bool distant_join = (st_index > 0);
++			if (distant_join) st_index--;
++			if ((st_index < _stations_Nearby_Count) || (!distant_join)) {
++
++				/* Insert station to be joined into stored command */
++				SB(_selectStationCommand.p2, 16, 16,
++				   (distant_join ? _stations_Nearby_List[st_index] : INVALID_STATION));
++
++				/* Execute stored Command */
++				DoCommandP(_selectStationCommand.tile,
++				           _selectStationCommand.p1, _selectStationCommand.p2,
++				           _selectStationCommand.callback, _selectStationCommand.cmd);
++
++				/* Close Window. */
++				DeleteWindowByClass(WC_SELECT_STATION);
++			}
++		}
++	}
++
++	virtual void OnTick()
++	{
++		if (_thd.dirty & 2) {
++			_thd.dirty &= ~2;
++			this->SetDirty();
++		}
++	}
++};
++
++static const WindowDesc _select_station_desc = {
++	WDP_AUTO, WDP_AUTO, 200, 180, 200, 180,
++	WC_SELECT_STATION, WC_NONE,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET,
++	_select_station_widgets,
++};
++
++void ShowSelectStation(CommandContainer cmd, StationType stationType, bool lockPos, bool lockSize)
++{
++	Window *w = FindWindowById(WC_SELECT_STATION, 0);
++	if (w == NULL) {
++		_thd.lockPos = lockPos;
++		_thd.lockSize = lockSize;
++		_selectStationCommand = cmd;
++		_stationType = stationType;
++		new SelectStationWindow(&_select_station_desc);
++	}
++}
++
++bool StationJoinerNeeded(TileIndex tile, int w, int h)
++{
++	/* Only show selection if distant join is enabled in the settings */
++	if (!_settings_game.station.distant_join_stations) return false;
++
++	/* If a window is already opened, we always return true */
++	Window *window = FindWindowById(WC_SELECT_STATION, 0);
++	if (window != NULL) return true;
++
++	/* only show the popup, if we press ctrl */
++	if (!_ctrl_pressed) return false;
++
++	/* Test if a station joiner is needed: */
++	FindStationsNearby(tile, w, h, false);
++	int neighbourStationCount = _stations_Nearby_Count;
++	Station *st = FindStationsNearby(tile, w, h, true);
++	if (_settings_game.station.adjacent_stations) {
++		return (neighbourStationCount == 0 || _stations_Nearby_Count > 1) && (st == NULL);
++	} else {
++		return (neighbourStationCount == 0) && (_stations_Nearby_Count > 0) && (st == NULL);
++	}
++}
+Index: src/variables.h
+===================================================================
+--- src/variables.h	(revision 14393)
++++ src/variables.h	(working copy)
+@@ -69,6 +69,10 @@
+ /* landscape.cpp */
+ extern const byte _tileh_to_sprite[32];
+ 
++/* station_gui.c */
++VARDEF uint16 _stations_Nearby_List[15];
++VARDEF uint8 _stations_Nearby_Count;
++
+ /* misc */
+ VARDEF char _screenshot_name[128];
+ VARDEF byte _vehicle_design_names;
+Index: src/dock_gui.cpp
+===================================================================
+--- src/dock_gui.cpp	(revision 14393)
++++ src/dock_gui.cpp	(working copy)
+@@ -47,7 +47,15 @@
+ 
+ static void PlaceDocks_Dock(TileIndex tile)
+ {
+-	DoCommandP(tile, _ctrl_pressed, 0, CcBuildDocks, CMD_BUILD_DOCK | CMD_MSG(STR_9802_CAN_T_BUILD_DOCK_HERE));
++	uint32 p2 = (INVALID_STATION << 16); // no station to join
++
++	/* tile is always the land tile, so need to evaluate _thd.pos */
++	if (StationJoinerNeeded(TileXY(_thd.pos.x / TILE_SIZE, _thd.pos.y / TILE_SIZE), _thd.size.x / TILE_SIZE, _thd.size.y / TILE_SIZE)) {
++		CommandContainer cmd = {tile, _ctrl_pressed, p2, CcBuildDocks, CMD_BUILD_DOCK | CMD_MSG(STR_9802_CAN_T_BUILD_DOCK_HERE)};
++		ShowSelectStation(cmd, STATION_DOCK, true, true);
++	} else {
++		DoCommandP(tile, _ctrl_pressed, p2, CcBuildDocks, CMD_BUILD_DOCK | CMD_MSG(STR_9802_CAN_T_BUILD_DOCK_HERE));
++	}
+ }
+ 
+ static void PlaceDocks_Depot(TileIndex tile)
+@@ -240,6 +248,7 @@
+ 
+ 		delete FindWindowById(WC_BUILD_STATION, 0);
+ 		delete FindWindowById(WC_BUILD_DEPOT, 0);
++		delete FindWindowById(WC_SELECT_STATION, 0);
+ 	}
+ 
+ 	virtual void OnPlacePresize(Point pt, TileIndex tile_from)
+Index: src/road_gui.cpp
+===================================================================
+--- src/road_gui.cpp	(revision 14393)
++++ src/road_gui.cpp	(working copy)
+@@ -206,12 +206,18 @@
+ static void PlaceRoadStop(TileIndex tile, uint32 p2, uint32 cmd)
+ {
+ 	uint32 p1 = _road_station_picker_orientation;
++	SB(p2, 16, 16, INVALID_STATION); // no station to join
+ 
+ 	if (p1 >= DIAGDIR_END) {
+ 		SetBit(p2, 1); // It's a drive-through stop
+ 		p1 -= DIAGDIR_END; // Adjust picker result to actual direction
+ 	}
+-	DoCommandP(tile, p1, p2, CcRoadDepot, cmd);
++	if (StationJoinerNeeded(tile, 1, 1)) {
++		CommandContainer cmdcont = {tile, p1, p2, CcRoadDepot, cmd};
++		ShowSelectStation(cmdcont, STATION_BUS, true, true);
++	} else {
++		DoCommandP(tile, p1, p2, CcRoadDepot, cmd);
++	}
+ }
+ 
+ static void PlaceRoad_BusStation(TileIndex tile)
+@@ -528,6 +534,7 @@
+ 		delete FindWindowById(WC_BUS_STATION, 0);
+ 		delete FindWindowById(WC_TRUCK_STATION, 0);
+ 		delete FindWindowById(WC_BUILD_DEPOT, 0);
++		delete FindWindowById(WC_SELECT_STATION, 0);
+ 	}
+ 
+ 	virtual void OnPlaceDrag(ViewportPlaceMethod select_method, ViewportDragDropSelectionProcess select_proc, Point pt)
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 14393)
++++ src/viewport.cpp	(working copy)
+@@ -2191,12 +2191,17 @@
+ 		/* clear the old selection? */
+ 		if (_thd.drawstyle) SetSelectionTilesDirty();
+ 
+-		_thd.drawstyle = _thd.new_drawstyle;
+-		_thd.pos = _thd.new_pos;
+-		_thd.size = _thd.new_size;
+-		_thd.outersize = _thd.new_outersize;
+-		_thd.dirty = 0xff;
++		if (!_thd.lockPos) {
++			_thd.pos = _thd.new_pos;
++			_thd.drawstyle = _thd.new_drawstyle;
++		}
+ 
++		if (!_thd.lockSize) {
++			_thd.size = _thd.new_size;
++			_thd.outersize = _thd.new_outersize;
++			_thd.dirty = 0xff;
++		}
++
+ 		/* draw the new selection? */
+ 		if (_thd.new_drawstyle) SetSelectionTilesDirty();
+ 	}
+@@ -2729,6 +2734,10 @@
+ 
+ void SetObjectToPlace(CursorID icon, SpriteID pal, ViewportHighlightMode mode, WindowClass window_class, WindowNumber window_num)
+ {
++	/* unlock position and size */
++	_thd.lockPos = false;
++	_thd.lockSize = false;
++
+ 	/* undo clicking on button and drag & drop */
+ 	if (_thd.place_mode != VHM_NONE || _special_mouse_mode == WSM_DRAGDROP) {
+ 		Window *w = FindWindowById(_thd.window_class, _thd.window_number);
+Index: src/tilehighlight_type.h
+===================================================================
+--- src/tilehighlight_type.h	(revision 14393)
++++ src/tilehighlight_type.h	(working copy)
+@@ -70,6 +70,9 @@
+ 
+ 	ViewportPlaceMethod select_method;
+ 	ViewportDragDropSelectionProcess select_proc;
++	
++	bool lockPos;  //if position changes are taken, or not
++	bool lockSize; //if size changes are taken, or not
+ 
+ 	TileIndex redsq;
+ };

@@ -1,0 +1,200 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 5301)
++++ lang/english.txt	(working copy)
+@@ -2462,6 +2462,9 @@
+ STR_882D_VALUE                                                  :{LTBLUE}{STRING}{BLACK}   Value: {LTBLUE}{CURRENCY}
+ STR_882E                                                        :{WHITE}{VEHICLE}
+ STR_882F_LOADING_UNLOADING                                      :{LTBLUE}Loading / Unloading
++STR_VEHICLE_LOADING                                             :{LTBLUE}Loading {NUM}%
++STR_VEHICLE_UNLOADING                                           :{LTBLUE}Unloading
++STR_VEHICLE_DEPARTING                                           :{LTBLUE}Departing
+ STR_TRAIN_MUST_BE_STOPPED                                       :{WHITE}Train must be stopped inside a depot
+ STR_8830_CAN_T_SEND_TRAIN_TO_DEPOT                              :{WHITE}Can't send train to depot...
+ STR_8831_NO_MORE_SPACE_FOR_ORDERS                               :{WHITE}No more space for orders
+Index: aircraft_gui.c
+===================================================================
+--- aircraft_gui.c	(revision 5301)
++++ aircraft_gui.c	(working copy)
+@@ -530,10 +530,34 @@
+ 				str = STR_HEADING_FOR_HANGAR + _patches.vehicle_speed;
+ 			} break;
+ 
+-			case OT_LOADING:
+-				str = STR_882F_LOADING_UNLOADING;
+-				break;
++			case OT_LOADING: {
++				// Vehicle window displays the amount loaded and total capacity while loading in a station
++                                const Vehicle *u;
++                                uint16 cargo_count=0, cargo_cap=0;
+ 
++                                u = v->next;
++
++				cargo_count = v->cargo_count + u->cargo_count;
++				cargo_cap = v->cargo_cap + u->cargo_cap;
++
++                                if (cargo_count == 0 && !(v->current_order.flags & OF_FULL_LOAD)) {
++                                        // Total cargo = 0 and order for current station is not Full Load means we're unloading
++                                        str = STR_VEHICLE_UNLOADING;
++                                } else {
++                                        str = STR_VEHICLE_LOADING;
++                                        if (cargo_count > 0) {
++                                                // common notation (cargo_count/cargo_cap)*100 won't work because uint16/uint16 returns a uint16
++                                                // making the display show either 0% or 100%
++                                                SetDParam(0, ((cargo_count*100)/cargo_cap));
++                                        } else {
++                                                // Can't divide by zero. This shouldn't happen, but in case it does...  display 0%
++                                                // if total capacity is 0.
++                                                SetDParam(0, 0);
++                                        }
++                                }
++                                break;
++                        }
++
+ 			default:
+ 				if (v->num_orders == 0) {
+ 					str = STR_NO_ORDERS + _patches.vehicle_speed;
+Index: roadveh_gui.c
+===================================================================
+--- roadveh_gui.c	(revision 5301)
++++ roadveh_gui.c	(working copy)
+@@ -343,11 +343,36 @@
+ 				str = STR_HEADING_FOR_ROAD_DEPOT + _patches.vehicle_speed;
+ 			} break;
+ 
+-			case OT_LOADING:
+-			case OT_LEAVESTATION:
+-				str = STR_882F_LOADING_UNLOADING;
+-				break;
++                        case OT_LOADING: {
++                                // Vehicle window displays the amount loaded and total capacity while loading in a station
++                                uint16 cargo_count=0, cargo_cap=0;
+ 
++                                cargo_count = v->cargo_count;
++                                cargo_cap = v->cargo_cap;
++
++                                if (cargo_count == 0 && !(v->current_order.flags & OF_FULL_LOAD)) {
++                                        // Total cargo = 0 and order for current station is not Full Load means we're unloading
++                                        str = STR_VEHICLE_UNLOADING;
++                                } else {
++                                        str = STR_VEHICLE_LOADING;
++                                        if (cargo_count > 0) {
++                                                // common notation (cargo_count/cargo_cap)*100 won't work because uint16/uint16 returns a uint16
++                                                // making the display show either 0% or 100%
++                                                SetDParam(0, ((cargo_count*100)/cargo_cap));
++                                        } else {
++                                                // Can't divide by zero. This should never happen, but incase it does anyway... display 0%
++                                                // if total capacity is 0.
++                                                SetDParam(0, 0);
++                                        }
++                                }
++                                break;
++                        }
++
++                        case OT_LEAVESTATION: {
++                                str = STR_VEHICLE_DEPARTING;
++                                break;
++                        }
++
+ 			default:
+ 				if (v->num_orders == 0) {
+ 					str = STR_NO_ORDERS + _patches.vehicle_speed;
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 5301)
++++ train_gui.c	(working copy)
+@@ -965,11 +965,46 @@
+ 				SetDParam(1, v->u.rail.last_speed);
+ 			} break;
+ 
+-			case OT_LOADING:
+-			case OT_LEAVESTATION:
+-				str = STR_882F_LOADING_UNLOADING;
++			case OT_LOADING: {
++				// Vehicle window displays the amount loaded and total capacity while loading in a station
++				// Todo-list:
++				// - Expand this functionality to the other transport types (Road, Boats, Planes)
++				const Vehicle *u;
++				uint16 cargo_count=0, cargo_cap=0;
++
++				u = v;
++				
++				do {
++					// cycle through all wagons, add currently loaded amount to cargo_count and wagon capacity
++					// to cargo_cap
++					cargo_count += u->cargo_count;
++					cargo_cap += u->cargo_cap;
++				} while ((u = GetNextVehicle(u)) != NULL);
++				
++				if (cargo_count == 0 && !(v->current_order.flags & OF_FULL_LOAD)) {
++					// Total cargo = 0 and order for current station is not Full Load means we're unloading
++					str = STR_VEHICLE_UNLOADING;
++				} else {
++					str = STR_VEHICLE_LOADING;
++					if (cargo_count > 0) {
++						// common notation (cargo_count/cargo_cap)*100 won't work because uint16/uint16 returns a uint16
++						// making the display show either 0% or 100%
++						SetDParam(0, ((cargo_count*100)/cargo_cap));
++					} else {
++						// Can't divide by zero (in case an engine with no cars is set to full load), so display 0%
++						// if total capacity is 0.
++						SetDParam(0, 0);
++					}
++				}
+ 				break;
++			}
+ 
++			case OT_LEAVESTATION: {
++				str = STR_VEHICLE_DEPARTING;
++				SetDParam(0, v->current_order.station);
++				break;
++			}
++
+ 			case OT_GOTO_WAYPOINT: {
+ 				SetDParam(0, v->current_order.station);
+ 				str = STR_HEADING_FOR_WAYPOINT + _patches.vehicle_speed;
+Index: ship_gui.c
+===================================================================
+--- ship_gui.c	(revision 5301)
++++ ship_gui.c	(working copy)
+@@ -488,11 +488,36 @@
+ 						str = STR_HEADING_FOR_SHIP_DEPOT + _patches.vehicle_speed;
+ 					} break;
+ 
+-					case OT_LOADING:
+-					case OT_LEAVESTATION:
+-						str = STR_882F_LOADING_UNLOADING;
+-						break;
++                        case OT_LOADING: {
++                                // Vehicle window displays the amount loaded and total capacity while loading in a station
++                                uint16 cargo_count=0, cargo_cap=0;
+ 
++                                cargo_count = v->cargo_count;
++                                cargo_cap = v->cargo_cap;
++
++                                if (cargo_count == 0 && !(v->current_order.flags & OF_FULL_LOAD)) {
++                                        // Total cargo = 0 and order for current station is not Full Load means we're unloading
++                                        str = STR_VEHICLE_UNLOADING;
++                                } else {
++                                        str = STR_VEHICLE_LOADING;
++                                        if (cargo_count > 0) {
++                                                // common notation (cargo_count/cargo_cap)*100 won't work because uint16/uint16 returns a uint16
++                                                // making the display show either 0% or 100%
++                                                SetDParam(0, ((cargo_count*100)/cargo_cap));
++                                        } else {
++                                                // Can't divide by zero. This shouldn't happen, but in case it does anyway... display 0%
++                                                // if total capacity is 0.
++                                                SetDParam(0, 0);
++                                        }
++                                }
++                                break;
++                        }
++
++                        case OT_LEAVESTATION: {
++                                str = STR_VEHICLE_DEPARTING;
++                                break;
++                        }
++
+ 					default:
+ 						if (v->num_orders == 0) {
+ 							str = STR_NO_ORDERS + _patches.vehicle_speed;

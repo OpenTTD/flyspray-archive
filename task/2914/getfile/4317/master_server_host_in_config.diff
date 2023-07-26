@@ -1,0 +1,115 @@
+diff -r 22edbd05c877 src/network/core/config.h
+--- a/src/network/core/config.h	Sat May 23 22:40:14 2009 +0000
++++ b/src/network/core/config.h	Sun May 24 10:20:37 2009 +0200
+@@ -8,15 +8,15 @@
+ #define NETWORK_CORE_CONFIG_H
+ 
+ /** DNS hostname of the masterserver */
+-#define NETWORK_MASTER_SERVER_HOST "master.openttd.org"
++#define NETWORK_DEFAULT_MASTER_SERVER_HOST "master.openttd.org"
+ /** DNS hostname of the content server */
+-#define NETWORK_CONTENT_SERVER_HOST "content.openttd.org"
++#define NETWORK_DEFAULT_CONTENT_SERVER_HOST "content.openttd.org"
+ /** Message sent to the masterserver to 'identify' this client as OpenTTD */
+ #define NETWORK_MASTER_SERVER_WELCOME_MESSAGE "OpenTTDRegister"
+ 
+ enum {
+-	NETWORK_MASTER_SERVER_PORT    = 3978, ///< The default port of the master server (UDP)
+-	NETWORK_CONTENT_SERVER_PORT   = 3978, ///< The default port of the content server (TCP)
++	NETWORK_DEFAULT_MASTER_SERVER_PORT  = 3978, ///< The default port of the master server (UDP)
++	NETWORK_DEFAULT_CONTENT_SERVER_PORT = 3978, ///< The default port of the content server (TCP)
+ 	NETWORK_DEFAULT_PORT          = 3979, ///< The default port of the game server (TCP & UDP)
+ 	NETWORK_DEFAULT_DEBUGLOG_PORT = 3982, ///< The default port debug-log is sent too (TCP)
+ 
+diff -r 22edbd05c877 src/network/network_content.cpp
+--- a/src/network/network_content.cpp	Sat May 23 22:40:14 2009 +0000
++++ b/src/network/network_content.cpp	Sun May 24 10:20:37 2009 +0200
+@@ -25,6 +25,9 @@
+ extern bool HasScenario(const ContentInfo *ci, bool md5sum);
+ ClientNetworkContentSocketHandler _network_content_client;
+ 
++char *_network_content_server_host;
++uint16 _network_content_server_port;
++
+ /** Wrapper function for the HasProc */
+ static bool HasGRFConfig(const ContentInfo *ci, bool md5sum)
+ {
+@@ -471,7 +474,7 @@
+ 
+ 	if (this->sock != INVALID_SOCKET || this->isConnecting) return;
+ 	this->isConnecting = true;
+-	new NetworkContentConnecter(NetworkAddress(NETWORK_CONTENT_SERVER_HOST, NETWORK_CONTENT_SERVER_PORT, AF_UNSPEC));
++	new NetworkContentConnecter(NetworkAddress(strlen(_network_content_server_host) > 0 ? _network_content_server_host : NETWORK_DEFAULT_CONTENT_SERVER_HOST, _network_content_server_port, AF_UNSPEC));
+ }
+ 
+ /**
+diff -r 22edbd05c877 src/network/network_func.h
+--- a/src/network/network_func.h	Sat May 23 22:40:14 2009 +0000
++++ b/src/network/network_func.h	Sun May 24 10:20:37 2009 +0200
+@@ -25,6 +25,11 @@
+ extern StringList _network_host_list;
+ extern StringList _network_ban_list;
+ 
++extern char *_network_master_server_host;
++extern char *_network_content_server_host;
++extern uint16 _network_master_server_port;
++extern uint16 _network_content_server_port;
++
+ byte NetworkSpectatorCount();
+ void NetworkUpdateClientName();
+ bool NetworkCompanyHasClients(CompanyID company);
+diff -r 22edbd05c877 src/network/network_udp.cpp
+--- a/src/network/network_udp.cpp	Sat May 23 22:40:14 2009 +0000
++++ b/src/network/network_udp.cpp	Sun May 24 10:20:37 2009 +0200
+@@ -27,6 +27,8 @@
+ #include "core/udp.h"
+ 
+ ThreadMutex *_network_udp_mutex = ThreadMutex::New();
++char *_network_master_server_host;
++uint16 _network_master_server_port;
+ 
+ /** Session key to register ourselves to the master server */
+ static uint64 _session_key = 0;
+@@ -390,7 +392,7 @@
+ void NetworkUDPQueryMasterServer()
+ {
+ 	Packet p(PACKET_UDP_CLIENT_GET_LIST);
+-	NetworkAddress out_addr(NETWORK_MASTER_SERVER_HOST, NETWORK_MASTER_SERVER_PORT);
++	NetworkAddress out_addr(strlen(_network_master_server_host) > 0 ? _network_master_server_host : NETWORK_DEFAULT_MASTER_SERVER_HOST, _network_master_server_port);
+ 
+ 	/* packet only contains protocol version */
+ 	p.Send_uint8(NETWORK_MASTER_SERVER_VERSION);
+@@ -461,7 +463,7 @@
+ 	DEBUG(net, 1, "[udp] removing advertise from master server");
+ 
+ 	/* Find somewhere to send */
+-	NetworkAddress out_addr(NETWORK_MASTER_SERVER_HOST, NETWORK_MASTER_SERVER_PORT);
++	NetworkAddress out_addr(strlen(_network_master_server_host) > 0 ? _network_master_server_host : NETWORK_DEFAULT_MASTER_SERVER_HOST, _network_master_server_port);
+ 
+ 	/* Send the packet */
+ 	Packet p(PACKET_UDP_SERVER_UNREGISTER);
+@@ -491,7 +493,7 @@
+ void NetworkUDPAdvertiseThread(void *pntr)
+ {
+ 	/* Find somewhere to send */
+-	NetworkAddress out_addr(NETWORK_MASTER_SERVER_HOST, NETWORK_MASTER_SERVER_PORT);
++	NetworkAddress out_addr(strlen(_network_master_server_host) > 0 ? _network_master_server_host : NETWORK_DEFAULT_MASTER_SERVER_HOST, _network_master_server_port);
+ 
+ 	DEBUG(net, 1, "[udp] advertising to master server");
+ 
+diff -r 22edbd05c877 src/table/settings.h
+--- a/src/table/settings.h	Sat May 23 22:40:14 2009 +0000
++++ b/src/table/settings.h	Sun May 24 10:20:37 2009 +0200
+@@ -266,6 +266,12 @@
+ 	  SDTG_VAR("invisibility_options", SLE_UINT, S, 0, _invisibility_opt,  0,0, 0xFF,0, STR_NULL, NULL),
+ 	  SDTG_STR("keyboard",         SLE_STRB, S, 0, _keyboard_opt[0],       NULL,    STR_NULL, NULL),
+ 	  SDTG_STR("keyboard_caps",    SLE_STRB, S, 0, _keyboard_opt[1],       NULL,    STR_NULL, NULL),
++#ifdef ENABLE_NETWORK
++	  SDTG_STR("master_server_host",SLE_STRQ,   S, 0, _network_master_server_host, NETWORK_DEFAULT_MASTER_SERVER_HOST,             STR_NULL, NULL),
++	  SDTG_VAR("master_server_port",SLE_UINT16, S, 0, _network_master_server_port, NETWORK_DEFAULT_MASTER_SERVER_PORT, 0,65534, 0, STR_NULL, NULL),
++	  SDTG_STR("content_server_host",SLE_STRQ,  S, 0, _network_content_server_host,NETWORK_DEFAULT_CONTENT_SERVER_HOST,            STR_NULL, NULL),
++	  SDTG_VAR("content_server_port",SLE_UINT16,S, 0, _network_content_server_port,NETWORK_DEFAULT_CONTENT_SERVER_PORT,0,65534, 0, STR_NULL, NULL),
++#endif
+ 	  SDTG_END()
+ };
+ 

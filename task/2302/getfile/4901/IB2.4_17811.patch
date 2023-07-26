@@ -1,0 +1,1513 @@
+Index: src/aircraft_cmd.cpp
+===================================================================
+--- src/aircraft_cmd.cpp	(revision 17811)
++++ src/aircraft_cmd.cpp	(working copy)
+@@ -345,6 +345,9 @@
+ 
+ 		v->reliability = e->reliability;
+ 		v->reliability_spd_dec = e->reliability_spd_dec;
++		/* higher speed means higher breakdown chance */
++		/* to somewhat compensate for the fact that fast aircraft spend less time in the air */
++		v->breakdown_chance = Clamp(64 + (v->max_speed >> 3), 0, 255);
+ 		v->max_age = e->GetLifeLengthInDays();
+ 
+ 		_new_vehicle_id = v->index;
+@@ -771,7 +774,6 @@
+ enum AircraftSpeedLimits {
+ 	SPEED_LIMIT_TAXI     =     50,  ///< Maximum speed of an aircraft while taxiing
+ 	SPEED_LIMIT_APPROACH =    230,  ///< Maximum speed of an aircraft on finals
+-	SPEED_LIMIT_BROKEN   =    320,  ///< Maximum speed of an aircraft that is broken
+ 	SPEED_LIMIT_HOLD     =    425,  ///< Maximum speed of an aircraft that flies the holding pattern
+ 	SPEED_LIMIT_NONE     = 0xFFFF   ///< No environmental speed limit. Speed limit is type dependent
+ };
+@@ -814,7 +816,7 @@
+ 	spd = min(v->cur_speed + (spd >> 8) + (v->subspeed < t), speed_limit);
+ 
+ 	/* adjust speed for broken vehicles */
+-	if (v->vehstatus & VS_AIRCRAFT_BROKEN) spd = min(spd, SPEED_LIMIT_BROKEN);
++	if (v->breakdown_ctr == 1 && v->breakdown_type == BREAKDOWN_AIRCRAFT_SPEED) spd = min(v->breakdown_severity << 3, spd);
+ 
+ 	/* updates statusbar only if speed have changed to save CPU time */
+ 	if (spd != v->cur_speed) {
+@@ -1217,8 +1219,42 @@
+ 	return true;
+ }
+ 
++/**
++ * Send a broken plane that needs to visit a depot to the correct location.
++ * @param v The airplane in question.
++ */
++static void FindBreakdownDestination(Aircraft *v)
++{
++	assert(v->type == VEH_AIRCRAFT && v->breakdown_ctr == 1);
++
++	DestinationID destination = INVALID_STATION;
++	if (v->breakdown_type == BREAKDOWN_AIRCRAFT_DEPOT) {
++		/* Go to a hangar, if possible at our current destination */
++		v->FindClosestDepot(NULL, &destination, NULL);
++	} else if (v->breakdown_type == BREAKDOWN_AIRCRAFT_EM_LANDING) {
++		/* Go to the nearest airport with a hangar */
++		destination = FindNearestHangar(v);
++	} else {
++		NOT_REACHED();
++	}
++
++	if (destination != INVALID_STATION) {
++		if (destination != v->current_order.GetDestination()) {
++			v->current_order.MakeGoToDepot(destination, ODTFB_BREAKDOWN);
++			AircraftNextAirportPos_and_Order(v);
++		} else {
++			v->current_order.MakeGoToDepot(destination, ODTFB_BREAKDOWN);
++		}
++	} else {
++		/* If no hangar was found, crash */
++		v->targetairport = INVALID_STATION;
++		CrashAirplane(v);
++	}
++}
++
+ static void HandleBrokenAircraft(Aircraft *v)
+ {
++	assert(v->breakdown_type <= BREAKDOWN_AIRCRAFT_EM_LANDING);
+ 	if (v->breakdown_ctr != 1) {
+ 		v->breakdown_ctr = 1;
+ 		v->vehstatus |= VS_AIRCRAFT_BROKEN;
+@@ -1228,6 +1264,9 @@
+ 		SetWindowDirty(WC_VEHICLE_VIEW, v->index);
+ 		SetWindowDirty(WC_VEHICLE_DETAILS, v->index);
+ 	}
++	if (v->breakdown_type == BREAKDOWN_AIRCRAFT_SPEED || (v->current_order.IsType(OT_GOTO_DEPOT) && (v->current_order.GetDepotOrderType() & ODTFB_BREAKDOWN) && GetTargetAirportIfValid(v) != NULL)) return;
++	FindBreakdownDestination(v);
++	SetWindowDirty(WC_VEHICLE_VIEW, v->index);
+ }
+ 
+ 
+@@ -1249,7 +1288,8 @@
+ 
+ 	if (!(v->vehstatus & VS_AIRCRAFT_BROKEN)) return;
+ 
+-	if (v->cur_speed < 10) {
++	/* breakdown-related speed limits are lifted when we are on the ground */
++	if (v->state != FLYING && v->state != LANDING && v->breakdown_type == BREAKDOWN_AIRCRAFT_SPEED) {
+ 		v->vehstatus &= ~VS_AIRCRAFT_BROKEN;
+ 		v->breakdown_ctr = 0;
+ 		return;
+@@ -1358,11 +1398,15 @@
+ 	Station *st = Station::Get(v->targetairport);
+ 
+ 	/* FIXME -- MaybeCrashAirplane -> increase crashing chances of very modern airplanes on smaller than AT_METROPOLITAN airports */
+-	uint16 prob = 0x10000 / 1500;
++	/* The default crashing chance is ~0,01% if improved breakdowns is enabled and breakdown setting isn't off, and ~0,07% otherwise */
++	uint16 prob = (_settings_game.vehicle.improved_breakdowns && _settings_game.difficulty.vehicle_breakdowns) ? 0x10000 / 10000 : 0x10000 / 1500;
+ 	if ((st->Airport()->flags & AirportFTAClass::SHORT_STRIP) &&
+ 			(AircraftVehInfo(v->engine_type)->subtype & AIR_FAST) &&
+ 			!_cheats.no_jetcrash.value) {
+ 		prob = 0x10000 / 20;
++	} else if (v->breakdown_ctr == 1 && v->breakdown_type == BREAKDOWN_AIRCRAFT_EM_LANDING) {
++		/* Airplanes that are attempting an emergency landing have a 2% chance to crash */
++		prob = 0x10000 / 50;
+ 	}
+ 
+ 	if (GB(Random(), 0, 16) > prob) return;
+@@ -2030,11 +2074,17 @@
+ 	if (v->vehstatus & VS_STOPPED) return true;
+ 
+ 	/* aircraft is broken down? */
+-	if (v->breakdown_ctr != 0) {
+-		if (v->breakdown_ctr <= 2) {
+-			HandleBrokenAircraft(v);
++	if (v->breakdown_ctr > 0) {
++		if (v->state == FLYING || v->breakdown_ctr == 1) {
++			if (v->breakdown_ctr <= 2) {
++				HandleBrokenAircraft(v);
++			} else {
++				v->breakdown_ctr--;
++			}
+ 		} else {
+-			if (!v->current_order.IsType(OT_LOADING)) v->breakdown_ctr--;
++			/** If we are no longer in the FLYING state, stop the breakdown countdown,
++			 * to prevent the occurence of breakdowns while on an airport. */
++			v->breakdown_ctr = 0;
+ 		}
+ 	}
+ 
+Index: src/disaster_cmd.cpp
+===================================================================
+--- src/disaster_cmd.cpp	(revision 17811)
++++ src/disaster_cmd.cpp	(working copy)
+@@ -326,6 +326,7 @@
+ 		uint dist = Delta(v->x_pos, u->x_pos) + Delta(v->y_pos, u->y_pos);
+ 
+ 		if (dist < TILE_SIZE && !(u->vehstatus & VS_HIDDEN) && u->breakdown_ctr == 0) {
++			u->breakdown_type = BREAKDOWN_CRITICAL;
+ 			u->breakdown_ctr = 3;
+ 			u->breakdown_delay = 140;
+ 		}
+@@ -517,6 +518,7 @@
+ 				if (Delta(target->x_pos, v->x_pos) + Delta(target->y_pos, v->y_pos) <= 12 * TILE_SIZE) {
+ 					target->breakdown_ctr = 5;
+ 					target->breakdown_delay = 0xF0;
++					target->breakdown_type = BREAKDOWN_CRITICAL;
+ 				}
+ 			}
+ 		}
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 17811)
++++ src/lang/english.txt	(working copy)
+@@ -1096,6 +1096,7 @@
+ STR_CONFIG_SETTING_ADJACENT_STATIONS                            :{LTBLUE}Allow building adjacent stations: {ORANGE}{STRING}
+ STR_CONFIG_SETTING_DYNAMIC_ENGINES                              :{LTBLUE}Enable multiple NewGRF engine sets: {ORANGE}{STRING}
+ STR_CONFIG_SETTING_DYNAMIC_ENGINES_EXISTING_VEHICLES            :{WHITE}Changing this setting is not possible when there are vehicles.
++STR_CONFIG_SETTING_IMPROVED_BREAKDOWNS                          :{LTBLUE}Enable improved breakdowns: {ORANGE}{STRING}
+ 
+ STR_CONFIG_SETTING_NEVER_EXPIRE_AIRPORTS                        :{LTBLUE}Airports never expire: {ORANGE}{STRING1}
+ 
+@@ -2865,13 +2866,21 @@
+ STR_VEHICLE_STATUS_LOADING_UNLOADING                            :{LTBLUE}Loading / Unloading
+ STR_VEHICLE_STATUS_LEAVING                                      :{LTBLUE}Leaving
+ STR_VEHICLE_STATUS_CRASHED                                      :{RED}Crashed!
+-STR_VEHICLE_STATUS_BROKEN_DOWN                                  :{RED}Broken down
++STR_VEHICLE_STATUS_BROKEN_DOWN                                  :{RED}Broken down - {STRING1}
++STR_VEHICLE_STATUS_BROKEN_DOWN_VEL                              :{RED}Broken down - {STRING1}, {LTBLUE}{VELOCITY}
+ STR_VEHICLE_STATUS_STOPPED                                      :{RED}Stopped
+ STR_VEHICLE_STATUS_TRAIN_STOPPING                               :{RED}Stopping
+ STR_VEHICLE_STATUS_TRAIN_STOPPING_VEL                           :{RED}Stopping, {VELOCITY}
+ STR_VEHICLE_STATUS_TRAIN_NO_POWER                               :{RED}No power
+ STR_VEHICLE_STATUS_TRAIN_STUCK                                  :{ORANGE}Waiting for free path
+ 
++STR_BREAKDOWN_TYPE_CRITICAL                                     :Mechanical failure {SKIP}
++STR_BREAKDOWN_TYPE_EM_STOP                                      :Emergency stop {SKIP}
++STR_BREAKDOWN_TYPE_LOW_SPEED                                    :Limited to {VELOCITY}
++STR_BREAKDOWN_TYPE_LOW_POWER                                    :{COMMA}% Power
++STR_BREAKDOWN_TYPE_DEPOT                                        :Heading to {STATION} Hangar for repairs
++STR_BREAKDOWN_TYPE_LANDING                                      :Heading to {STATION} for emergency landing
++
+ STR_VEHICLE_STATUS_HEADING_FOR_STATION                          :{LTBLUE}Heading for {STATION}
+ STR_VEHICLE_STATUS_HEADING_FOR_STATION_VEL                      :{LTBLUE}Heading for {STATION}, {VELOCITY}
+ STR_VEHICLE_STATUS_NO_ORDERS                                    :{LTBLUE}No orders
+@@ -2908,6 +2917,10 @@
+ STR_VEHICLE_DETAILS_AIRCRAFT_RENAME                             :{BLACK}Name aircraft
+ 
+ STR_VEHICLE_INFO_AGE_RUNNING_COST_YR                            :{BLACK}Age: {LTBLUE}{STRING2}{BLACK}   Running Cost: {LTBLUE}{CURRENCY}/yr
++
++STR_RUNNING                                                     :{LTBLUE}Running
++STR_CURRENT_STATUS                                              :{BLACK}Current status: {STRING2}
++
+ # The next two need to stay in this order
+ STR_VEHICLE_INFO_AGE                                            :{COMMA} year{P "" s} ({COMMA})
+ STR_VEHICLE_INFO_AGE_RED                                        :{RED}{COMMA} year{P "" s} ({COMMA})
+Index: src/order_type.h
+===================================================================
+--- src/order_type.h	(revision 17811)
++++ src/order_type.h	(working copy)
+@@ -93,6 +93,7 @@
+ 	ODTF_MANUAL          = 0,      ///< Manually initiated order.
+ 	ODTFB_SERVICE        = 1 << 0, ///< This depot order is because of the servicing limit.
+ 	ODTFB_PART_OF_ORDERS = 1 << 1, ///< This depot order is because of a regular order.
++	ODTFB_BREAKDOWN      = 1 << 2, ///< This depot order is because of a breakdown.
+ };
+ 
+ /**
+Index: src/roadveh_cmd.cpp
+===================================================================
+--- src/roadveh_cmd.cpp	(revision 17811)
++++ src/roadveh_cmd.cpp	(working copy)
+@@ -257,6 +257,7 @@
+ 
+ 		v->reliability = e->reliability;
+ 		v->reliability_spd_dec = e->reliability_spd_dec;
++		v->breakdown_chance = 128;
+ 		v->max_age = e->GetLifeLengthInDays();
+ 		_new_vehicle_id = v->index;
+ 
+@@ -483,7 +484,6 @@
+ 
+ 	if ((v->vehstatus & VS_STOPPED) ||
+ 			(v->vehstatus & VS_CRASHED) ||
+-			v->breakdown_ctr != 0 ||
+ 			v->overtaking != 0 ||
+ 			v->state == RVSB_WORMHOLE ||
+ 			v->IsInDepot() ||
+@@ -660,29 +660,43 @@
+ 
+ 	return false;
+ }
+-
+-static void HandleBrokenRoadVeh(RoadVehicle *v)
++/**
++ * Handle a broken road vehicle.
++ * @note this function is called by HandleBrokenShip as well, because RV and ship functionalities are almost exactly the same.
++ * @return true if the vehicle is stopped completely, false otherwise.
++ */
++bool HandleBrokenRoadVeh(Vehicle *v)
+ {
+ 	if (v->breakdown_ctr != 1) {
+ 		v->breakdown_ctr = 1;
+-		v->cur_speed = 0;
+ 
+ 		if (v->breakdowns_since_last_service != 255)
+ 			v->breakdowns_since_last_service++;
+ 
++
++		switch (v->breakdown_type) {
++			case BREAKDOWN_CRITICAL:
++				if (!PlayVehicleSound(v, VSE_BREAKDOWN)) {
++					SndPlayVehicleFx((_settings_game.game_creation.landscape != LT_TOYLAND) ?
++						SND_0F_VEHICLE_BREAKDOWN : SND_35_COMEDY_BREAKDOWN, v);
++				}
++				if (!(v->vehstatus & VS_HIDDEN)) {
++					EffectVehicle *u = CreateEffectVehicleRel(v, 4, 4, 5, EV_BREAKDOWN_SMOKE);
++					if (u != NULL) u->animation_state = v->breakdown_delay * 2;
++				}
++				/* FALL THROUGH */
++			case BREAKDOWN_EM_STOP:
++				v->cur_speed = 0;
++				break;
++			case BREAKDOWN_LOW_SPEED:
++			case BREAKDOWN_LOW_POWER:
++				/* do nothing */
++				break;
++			default: NOT_REACHED();
++		}
+ 		v->MarkDirty();
+ 		SetWindowDirty(WC_VEHICLE_VIEW, v->index);
+ 		SetWindowDirty(WC_VEHICLE_DETAILS, v->index);
+-
+-		if (!PlayVehicleSound(v, VSE_BREAKDOWN)) {
+-			SndPlayVehicleFx((_settings_game.game_creation.landscape != LT_TOYLAND) ?
+-				SND_0F_VEHICLE_BREAKDOWN : SND_35_COMEDY_BREAKDOWN, v);
+-		}
+-
+-		if (!(v->vehstatus & VS_HIDDEN)) {
+-			EffectVehicle *u = CreateEffectVehicleRel(v, 4, 4, 5, EV_BREAKDOWN_SMOKE);
+-			if (u != NULL) u->animation_state = v->breakdown_delay * 2;
+-		}
+ 	}
+ 
+ 	if ((v->tick_counter & 1) == 0) {
+@@ -690,8 +704,15 @@
+ 			v->breakdown_ctr = 0;
+ 			v->MarkDirty();
+ 			SetWindowDirty(WC_VEHICLE_VIEW, v->index);
++			SetWindowDirty(WC_VEHICLE_DETAILS, v->index);
+ 		}
+ 	}
++	if ((!(v->vehstatus & VS_HIDDEN)) && ((v->breakdown_type == BREAKDOWN_LOW_SPEED || v->breakdown_type == BREAKDOWN_LOW_POWER) && (v->tick_counter & 0x1F) == 0)) {
++		CreateEffectVehicleRel(v, 0, 0, 2, EV_SMOKE); //some grey clouds to indicate a broken rv
++
++	}
++
++	return (v->breakdown_type == BREAKDOWN_CRITICAL || v->breakdown_type == BREAKDOWN_EM_STOP);
+ }
+ 
+ TileIndex RoadVehicle::GetOrderStationLocation(StationID station)
+@@ -830,9 +851,23 @@
+ 
+ 	v->subspeed = (uint8)spd;
+ 
+-	int tempmax = v->max_speed;
++	int tempmax = ((v->breakdown_ctr == 1) ? v->cur_speed : v->max_speed);
++		
++	if (v->breakdown_ctr == 1){		
++		if(v->breakdown_type == BREAKDOWN_LOW_POWER) {
++			if((v->tick_counter & 0x7) == 0) {
++				if(v->cur_speed > (v->breakdown_severity * v->max_speed) >> 8)  {
++					tempmax = v->cur_speed - (v->cur_speed / 10) - 1;
++				}else
++					tempmax = (v->breakdown_severity * v->max_speed) >> 8;
++			}
++		}
++		if (v->breakdown_type == BREAKDOWN_LOW_SPEED)
++			tempmax = min(v->cur_speed, v->breakdown_severity);
++	}	
++
+ 	if (v->cur_speed > v->max_speed) {
+-		tempmax = v->cur_speed - (v->cur_speed / 10) - 1;
++			tempmax = v->cur_speed - (v->cur_speed / 10) - 1;
+ 	}
+ 
+ 	v->cur_speed = spd = Clamp(v->cur_speed + ((int)spd >> 8), 0, tempmax);
+@@ -941,6 +976,9 @@
+ 	/* For now, articulated road vehicles can't overtake anything. */
+ 	if (v->HasArticulatedPart()) return;
+ 
++	/* Don't overtake if the vehicle is broken or about to break down */
++	if (v->breakdown_ctr != 0) return;
++
+ 	/* Vehicles are not driving in same direction || direction is not a diagonal direction */
+ 	if (v->direction != u->direction || !(v->direction & 1)) return;
+ 
+@@ -1780,10 +1818,11 @@
+ 	/* road vehicle has broken down? */
+ 	if (v->breakdown_ctr != 0) {
+ 		if (v->breakdown_ctr <= 2) {
+-			HandleBrokenRoadVeh(v);
+-			return true;
++			if (HandleBrokenRoadVeh(v))
++				return true;
++		} else if (!v->current_order.IsType(OT_LOADING)) {
++			v->breakdown_ctr--;
+ 		}
+-		if (!v->current_order.IsType(OT_LOADING)) v->breakdown_ctr--;
+ 	}
+ 
+ 	if (v->vehstatus & VS_STOPPED) return true;
+Index: src/saveload/afterload.cpp
+===================================================================
+--- src/saveload/afterload.cpp	(revision 17811)
++++ src/saveload/afterload.cpp	(working copy)
+@@ -1683,6 +1683,35 @@
+ 		FOR_ALL_STATIONS(st) {
+ 			st->indtype = IT_INVALID;
+ 		}
++		
++		/* Set some breakdown-related variables to the correct values. */
++		Vehicle *v;
++		FOR_ALL_VEHICLES(v) {
++			switch(v->type) {
++				case VEH_TRAIN: {
++					if (((Train *)v)->IsFrontEngine()) {
++						if (v->breakdown_ctr == 1) SetBit(((Train *)v)->flags, VRF_BREAKDOWN_STOPPED);
++					} else if (((Train *)v)->IsEngine() || ((Train *)v)->IsMultiheaded()) {
++						/** Non-front engines could have a reliability of 0.
++						 * Set it to the reliability of the front engine or the maximum, whichever is lower. */
++						const Engine *e = Engine::Get(v->engine_type);
++						v->reliability_spd_dec = e->reliability_spd_dec;
++						v->reliability = min(v->First()->reliability, e->reliability);
++					}
++				}
++				case VEH_ROAD:
++					v->breakdown_chance = 128;
++					break;
++				case VEH_SHIP:
++					v->breakdown_chance = 64;
++					break;
++				case VEH_AIRCRAFT:
++					v->breakdown_chance = Clamp(64 + (v->max_speed >> 3), 0, 255);
++					v->breakdown_severity = 40;
++					break;
++				default: break;
++			}
++		}
+ 	}
+ 
+ 	if (CheckSavegameVersion(104)) {
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 17811)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -47,7 +47,7 @@
+ 
+ #include "saveload_internal.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 127;
++extern const uint16 SAVEGAME_VERSION = 128;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/saveload/vehicle_sl.cpp
+===================================================================
+--- src/saveload/vehicle_sl.cpp	(revision 17811)
++++ src/saveload/vehicle_sl.cpp	(working copy)
+@@ -493,6 +493,8 @@
+ 		     SLE_VAR(Vehicle, breakdown_delay,       SLE_UINT8),
+ 		     SLE_VAR(Vehicle, breakdowns_since_last_service, SLE_UINT8),
+ 		     SLE_VAR(Vehicle, breakdown_chance,      SLE_UINT8),
++         SLE_CONDVAR(Vehicle, breakdown_type,        SLE_UINT8,               	 103, SL_MAX_VERSION),
++	     SLE_CONDVAR(Vehicle, breakdown_severity,    SLE_UINT8,               	 103, SL_MAX_VERSION),
+ 		 SLE_CONDVAR(Vehicle, build_year,            SLE_FILE_U8 | SLE_VAR_I32,    0,  30),
+ 		 SLE_CONDVAR(Vehicle, build_year,            SLE_INT32,                   31, SL_MAX_VERSION),
+ 
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 17811)
++++ src/settings_gui.cpp	(working copy)
+@@ -1376,6 +1376,7 @@
+ 	SettingEntry("vehicle.servint_aircraft"),
+ 	SettingEntry("order.no_servicing_if_no_breakdowns"),
+ 	SettingEntry("order.serviceathelipad"),
++	SettingEntry("vehicle.improved_breakdowns"),
+ };
+ /** Servicing sub-page */
+ static SettingsPage _settings_vehicles_servicing_page = {_settings_vehicles_servicing, lengthof(_settings_vehicles_servicing)};
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 17811)
++++ src/settings_type.h	(working copy)
+@@ -309,6 +309,7 @@
+ 	bool   never_expire_vehicles;            ///< never expire vehicles
+ 	byte   extend_vehicle_life;              ///< extend vehicle life by this many years
+ 	byte   road_side;                        ///< the side of the road vehicles drive on
++	bool   improved_breakdowns;              ///< different types, chances and severities of breakdowns
+ };
+ 
+ /** Settings related to the economy. */
+Index: src/ship_cmd.cpp
+===================================================================
+--- src/ship_cmd.cpp	(revision 17811)
++++ src/ship_cmd.cpp	(working copy)
+@@ -201,37 +201,13 @@
+ 	return TrackDirectionToTrackdir(FindFirstTrack(this->state), this->direction);
+ }
+ 
+-static void HandleBrokenShip(Vehicle *v)
++/**
++ * Handle a broken ship.
++ */
++static bool HandleBrokenShip(Vehicle *v)
+ {
+-	if (v->breakdown_ctr != 1) {
+-		v->breakdown_ctr = 1;
+-		v->cur_speed = 0;
+-
+-		if (v->breakdowns_since_last_service != 255)
+-			v->breakdowns_since_last_service++;
+-
+-		v->MarkDirty();
+-		SetWindowDirty(WC_VEHICLE_VIEW, v->index);
+-		SetWindowDirty(WC_VEHICLE_DETAILS, v->index);
+-
+-		if (!PlayVehicleSound(v, VSE_BREAKDOWN)) {
+-			SndPlayVehicleFx((_settings_game.game_creation.landscape != LT_TOYLAND) ?
+-				SND_10_TRAIN_BREAKDOWN : SND_3A_COMEDY_BREAKDOWN_2, v);
+-		}
+-
+-		if (!(v->vehstatus & VS_HIDDEN)) {
+-			EffectVehicle *u = CreateEffectVehicleRel(v, 4, 4, 5, EV_BREAKDOWN_SMOKE);
+-			if (u != NULL) u->animation_state = v->breakdown_delay * 2;
+-		}
+-	}
+-
+-	if (!(v->tick_counter & 1)) {
+-		if (!--v->breakdown_delay) {
+-			v->breakdown_ctr = 0;
+-			v->MarkDirty();
+-			SetWindowDirty(WC_VEHICLE_VIEW, v->index);
+-		}
+-	}
++	extern bool HandleBrokenRoadVeh(Vehicle*);
++	return HandleBrokenRoadVeh(v);
+ }
+ 
+ void Ship::MarkDirty()
+@@ -329,12 +305,22 @@
+ 
+ static bool ShipAccelerate(Vehicle *v)
+ {
+-	uint spd;
++	uint spd = min(v->cur_speed + 1, GetVehicleProperty(v, PROP_SHIP_SPEED, v->max_speed));
+ 	byte t;
+ 
+-	spd = min(v->cur_speed + 1, GetVehicleProperty(v, PROP_SHIP_SPEED, v->max_speed));
++	if (v->breakdown_ctr == 1 && v->breakdown_type == BREAKDOWN_LOW_POWER && v->cur_speed > (v->breakdown_severity * v->max_speed) >> 8 ) {
++		if ((v->tick_counter & 0x7) == 0 && v->cur_speed > 0) {
++			spd = v->cur_speed - 1;
++		} else {
++			spd = v->cur_speed;
++		}
++	}
+ 
+-	/* updates statusbar only if speed have changed to save CPU time */
++	if (v->breakdown_ctr == 1 && v->breakdown_type == BREAKDOWN_LOW_SPEED) {
++		spd = min(spd, v->breakdown_severity);
++	}
++
++	/*updates statusbar only if speed have changed to save CPU time */
+ 	if (spd != v->cur_speed) {
+ 		v->cur_speed = spd;
+ 		if (_settings_client.gui.vehicle_speed)
+@@ -593,10 +579,10 @@
+ 
+ 	if (v->breakdown_ctr != 0) {
+ 		if (v->breakdown_ctr <= 2) {
+-			HandleBrokenShip(v);
+-			return;
++			if (HandleBrokenShip(v)) return;
++		} else if (!v->current_order.IsType(OT_LOADING)) {
++			v->breakdown_ctr--;
+ 		}
+-		if (!v->current_order.IsType(OT_LOADING)) v->breakdown_ctr--;
+ 	}
+ 
+ 	if (v->vehstatus & VS_STOPPED) return;
+@@ -796,6 +782,7 @@
+ 
+ 		v->reliability = e->reliability;
+ 		v->reliability_spd_dec = e->reliability_spd_dec;
++		v->breakdown_chance = 64; //ships have a 50% lower breakdown chance than normal
+ 		v->max_age = e->GetLifeLengthInDays();
+ 		_new_vehicle_id = v->index;
+ 
+Index: src/table/settings.h
+===================================================================
+--- src/table/settings.h	(revision 17811)
++++ src/table/settings.h	(working copy)
+@@ -399,6 +399,7 @@
+ 	SDT_CONDBOOL(GameSettings, order.timetabling,                               67, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_SETTING_TIMETABLE_ALLOW,        NULL),
+ 	 SDT_CONDVAR(GameSettings, vehicle.plane_speed,                  SLE_UINT8, 90, SL_MAX_VERSION, 0, 0,     4,     1,       4, 0, STR_CONFIG_SETTING_PLANE_SPEED,            NULL),
+ 	SDT_CONDBOOL(GameSettings, vehicle.dynamic_engines,                         95, SL_MAX_VERSION, 0,NN, false,                    STR_CONFIG_SETTING_DYNAMIC_ENGINES,        ChangeDynamicEngines),
++	SDT_CONDBOOL(GameSettings, vehicle.improved_breakdowns,                    103, SL_MAX_VERSION, 0, 0, false,                    STR_CONFIG_SETTING_IMPROVED_BREAKDOWNS,    NULL),
+ 
+ 	    SDT_BOOL(GameSettings, station.join_stations,                                               0, 0,  true,                    STR_CONFIG_SETTING_JOINSTATIONS,           NULL),
+ 	SDTC_CONDBOOL(             gui.sg_full_load_any,                            22,             92, 0, 0,  true,                    STR_NULL,                                  NULL),
+Index: src/train.h
+===================================================================
+--- src/train.h	(revision 17811)
++++ src/train.h	(working copy)
+@@ -42,6 +42,20 @@
+ 
+ 	/* used to mark a train that can't get a path reservation */
+ 	VRF_TRAIN_STUCK    = 8,
++	/* used to mark a train that is braking because it is broken down */
++	VRF_BREAKDOWN_BRAKING = 9,
++
++	/* used to mark a train in which the power of one (or more) of the engines is reduced because of a breakdown */
++	VRF_BREAKDOWN_POWER = 10,
++
++	/* used to mark a train that has a reduced maximum speed because of a breakdown */
++	VRF_BREAKDOWN_SPEED = 11,
++
++	/* used to mark a train that is stopped because of a breakdown */
++	VRF_BREAKDOWN_STOPPED = 12,
++
++	/* Bitmask of all flags that indicate a broken train (braking is not included) */
++	VRF_IS_BROKEN = (1 << VRF_BREAKDOWN_POWER) | (1 << VRF_BREAKDOWN_SPEED) | (1 << VRF_BREAKDOWN_STOPPED),
+ };
+ 
+ void CcBuildLoco(bool success, TileIndex tile, uint32 p1, uint32 p2);
+@@ -76,6 +90,7 @@
+ 	uint16 cached_total_length; ///< Length of the whole train, valid only for first engine.
+ 	uint8 cached_veh_length;    ///< length of this vehicle in units of 1/8 of normal length, cached because this can be set by a callback
+ 	bool cached_tilt;           ///< train can tilt; feature provides a bonus in curves
++	uint8  cached_num_engines;  ///< total number of engines, including rear ends of multiheaded engines.
+ 
+ 	/* cached values, recalculated when the cargo on a train changes (in addition to the conditions above) */
+ 	uint32 cached_weight;     ///< total weight of the consist.
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 17811)
++++ src/train_cmd.cpp	(working copy)
+@@ -84,13 +84,16 @@
+ 
+ 
+ /**
+- * Recalculates the cached total power of a train. Should be called when the consist is changed
++ * Calculate the power and max TE of a train.
++ * @note We use reference parameters because we can't return more than one value easily.
+  * @param v First vehicle of the consist.
++ * @param total_power A reference to the variable to store the total_power in.
++ * @param max_te A reference to the variable to store the max TE in.
++ * @param breakdowns Whether to account for breakdowns when calculating.
+  */
+-void TrainPowerChanged(Train *v)
+-{
+-	uint32 total_power = 0;
+-	uint32 max_te = 0;
++static void CalculateTrainPower(const Train *v, uint32 &total_power, uint32 &max_te, bool breakdowns) {
++	total_power = 0;
++	max_te = 0;
+ 
+ 	for (const Train *u = v; u != NULL; u = u->Next()) {
+ 		RailType railtype = GetRailType(u->tile);
+@@ -106,7 +109,9 @@
+ 				if (power != 0) {
+ 					/* Halve power for multiheaded parts */
+ 					if (u->IsMultiheaded()) power /= 2;
+-
++					if (breakdowns && u->breakdown_ctr == 1 && u->breakdown_type == BREAKDOWN_LOW_POWER) {
++						power = power * u->breakdown_severity / 256;
++					}
+ 					total_power += power;
+ 					/* Tractive effort in (tonnes * 1000 * 10 =) N */
+ 					max_te += (u->tcache.cached_veh_weight * 10000 * GetVehicleProperty(u, PROP_TRAIN_TRACTIVE_EFFORT, rvi_u->tractive_effort)) / 256;
+@@ -118,8 +123,19 @@
+ 			total_power += RailVehInfo(u->tcache.first_engine)->pow_wag_power;
+ 		}
+ 	}
++}
+ 
++/**
++ * Recalculates the cached total power of a train. Should be called when the consist is changed
++ * @param v First vehicle of the consist.
++ */
++void TrainPowerChanged(Train *v)
++{
++	uint32 total_power, max_te;
++	CalculateTrainPower(v, total_power, max_te, false);
++
+ 	if (v->tcache.cached_power != total_power || v->tcache.cached_max_te != max_te) {
++
+ 		/* If it has no power (no catenary), stop the train */
+ 		if (total_power == 0) v->vehstatus |= VS_STOPPED;
+ 
+@@ -130,8 +146,55 @@
+ 	}
+ }
+ 
++/**
++ * Checks the breakdown flags (VehicleRailFlags 9-12) and sets the correct value in the first vehicle of the consist.
++ * This function is generally only called to check if a flag may be cleared.
++ * @param v the front engine
++ * @param flags bitmask of the flags to check.
++ */
++static void CheckBreakdownFlags(Train *v)
++{
++	assert(v->IsFrontEngine());
++	/* clear the flags we're gonna check first, we'll set them again later (if applicable ) */
++	CLRBITS(v->flags, (1 << VRF_BREAKDOWN_BRAKING) | VRF_IS_BROKEN);
+ 
++	for (const Train *w = v; w != NULL; w = w->Next()) {
++		if (v->IsEngine() || w->IsMultiheaded()) {
++			if (w->breakdown_ctr == 2) {
++				SetBit(v->flags, VRF_BREAKDOWN_BRAKING);
++			} else if (w->breakdown_ctr == 1) {
++				switch (w->breakdown_type) {
++					case BREAKDOWN_CRITICAL:
++					case BREAKDOWN_EM_STOP:   SetBit(v->flags, VRF_BREAKDOWN_STOPPED); break;
++					case BREAKDOWN_LOW_SPEED: SetBit(v->flags, VRF_BREAKDOWN_SPEED);   break;
++					case BREAKDOWN_LOW_POWER: SetBit(v->flags, VRF_BREAKDOWN_POWER);   break;
++				}
++			}
++		}
++	}
++}
++
+ /**
++ * Gets the speed a broken down train (low speed breakdown) is limited to.
++ * @note This value is not cached, because changing cached_max_speed would have unwanted consequences (e.g. in the GUI).
++ * @param v The front engine of the vehicle.
++ * @return The speed the train is limited to.
++ */
++
++static uint16 GetBreakdownSpeed(const Train *v)
++{
++	assert(v->IsFrontEngine());
++	uint16 speed = UINT16_MAX;
++
++	for (const Train *w = v; w != NULL; w = w->Next()) {
++		if (w->breakdown_ctr == 1 && w->breakdown_type == BREAKDOWN_LOW_SPEED) {
++			speed = min(speed, w->breakdown_severity);
++		}
++	}
++	return speed;
++}
++
++/**
+  * Recalculates the cached weight of a train and its vehicles. Should be called each time the cargo on
+  * the consist changes.
+  * @param v First vehicle of the consist.
+@@ -225,6 +288,7 @@
+ 	EngineID first_engine = v->IsFrontEngine() ? v->engine_type : INVALID_ENGINE;
+ 	v->tcache.cached_total_length = 0;
+ 	v->compatible_railtypes = RAILTYPES_NONE;
++	v->tcache.cached_num_engines = 0;
+ 
+ 	bool train_can_tilt = true;
+ 
+@@ -314,6 +378,10 @@
+ 				uint16 speed = GetVehicleProperty(u, PROP_TRAIN_SPEED, rvi_u->max_speed);
+ 				if (speed != 0) max_speed = min(speed, max_speed);
+ 			}
++
++			if (u->IsEngine() || u->IsMultiheaded()) {
++				v->tcache.cached_num_engines++;
++			}
+ 		}
+ 
+ 		if (e_u->CanCarryCargo() && u->cargo_type == e_u->GetDefaultCargoType() && u->cargo_subtype == 0) {
+@@ -510,9 +578,17 @@
+ 	}
+ 
+ 	int mass = v->tcache.cached_weight;
+-	int power = v->tcache.cached_power * 746;
++	uint32 power = v->tcache.cached_power * 746;
+ 	max_speed = min(max_speed, v->tcache.cached_max_speed);
++	uint32 max_te = v->tcache.cached_max_te; // [N]
+ 
++	/* handle breakdown power reduction */
++	if (mode == AM_ACCEL && HasBit(v->flags, VRF_BREAKDOWN_POWER)) {
++		/* We'd like to cache this, but changing cached_power has too many unwanted side-effects */
++		CalculateTrainPower(v, power, max_te, true);
++		power *= 746;
++	}
++
+ 	int num = 0; // number of vehicles, change this into the number of axles later
+ 	int incl = 0;
+ 	int drag_coeff = 20; //[1e-4]
+@@ -545,7 +621,8 @@
+ 	resistance += incl;
+ 	resistance *= 4; //[N]
+ 
+-	const int max_te = v->tcache.cached_max_te; // [N]
++	/* Due to the mph to m/s conversion below, at speeds below 3 mph the force is
++	 * actually double the train's power */
+ 	int force;
+ 	if (speed > 0) {
+ 		switch (v->railtype) {
+@@ -555,7 +632,7 @@
+ 				force = power / speed; //[N]
+ 				force *= 22;
+ 				force /= 10;
+-				if (mode == AM_ACCEL && force > max_te) force = max_te;
++				if (mode == AM_ACCEL && force > (int)max_te) force = max_te;
+ 				break;
+ 
+ 			default: NOT_REACHED();
+@@ -569,8 +646,36 @@
+ 		force = max(force, (mass * 8) + resistance);
+ 	}
+ 
++	/* If power is 0 because of a breakdown, we make the force 0 if accelerating */
++	if (mode == AM_ACCEL && HasBit(v->flags, VRF_BREAKDOWN_POWER) && power == 0) {
++		force = 0;
++	}
++
++	/* Calculate the breakdown chance */
++	if (_settings_game.vehicle.improved_breakdowns) {
++		assert(v->tcache.cached_max_speed > 0);
++		/** First, calculate (resistance / force * current speed / max speed) << 16.
++		 * This yields a number x on a 0-1 scale, but shifted 16 bits to the left.
++		 * We then calculate 64 + 128x, clamped to 0-255, but still shifted 16 bits to the left.
++		 * Then we apply a correction for multiengine trains, and in the end we shift it 16 bits to the right to get a 0-255 number.
++		 * @note A seperate correction for multiheaded engines is done in CheckVehicleBreakdown. We can't do that here because it would affect the whole consist.
++		 */
++		uint64 breakdown_factor = (uint64)abs(resistance) * (uint64)(v->cur_speed << 16);
++		breakdown_factor /= (max(force, 100) * v->tcache.cached_max_speed);
++		breakdown_factor = min((64 << 16) + (breakdown_factor * 128), 255 << 16);
++		if (v->tcache.cached_num_engines > 1) {
++			/* For multiengine trains, breakdown chance is multiplied by 3 / (num_engines + 2) */
++			breakdown_factor *= 3;
++			breakdown_factor /= (v->tcache.cached_num_engines + 2);
++		}
++		/* breakdown_chance is at least 5 (5 / 128 = ~4% of the normal chance) */
++		v->breakdown_chance = max(breakdown_factor >> 16, (uint64)5);
++	} else {
++		v->breakdown_chance = 128;
++	}
++
+ 	if (mode == AM_ACCEL) {
+-		return (force - resistance) / (mass * 2);
++		return (force - resistance) / (force > resistance ? (mass * 2) : (mass / 2));
+ 	} else {
+ 		return min(-force - resistance, -10000) / mass;
+ 	}
+@@ -586,6 +691,9 @@
+ 	uint weight = v->tcache.cached_weight;
+ 	assert(weight != 0);
+ 	v->acceleration = Clamp(power / weight * 4, 1, 255);
++
++	/* for non-realistic acceleration, breakdown chance is 128, corrected by the multiengine factor of 3/(n+2) */
++	v->breakdown_chance = min(128 * 3 / (v->tcache.cached_num_engines + 2), 5);
+ }
+ 
+ /**
+@@ -810,6 +918,8 @@
+ 	u->cargo_cap = v->cargo_cap;
+ 	u->railtype = v->railtype;
+ 	u->engine_type = v->engine_type;
++	u->reliability = v->reliability;
++	u->reliability_spd_dec = v->reliability_spd_dec;
+ 	u->build_year = v->build_year;
+ 	u->cur_image = SPR_IMG_QUERY;
+ 	u->random_bits = VehicleRandomBits();
+@@ -2037,7 +2147,7 @@
+ 		}
+ 	} else {
+ 		/* turn the whole train around */
+-		if ((v->vehstatus & VS_CRASHED) || v->breakdown_ctr != 0) return CMD_ERROR;
++		if ((v->vehstatus & VS_CRASHED) || HasBit(v->flags, VRF_BREAKDOWN_STOPPED)) return CMD_ERROR;
+ 
+ 		if (flags & DC_EXEC) {
+ 			/* Properly leave the station if we are loading and won't be loading anymore */
+@@ -3364,9 +3474,9 @@
+  */
+ static int UpdateTrainSpeed(Train *v)
+ {
+-	uint accel;
++	int accel;
+ 
+-	if ((v->vehstatus & VS_STOPPED) || HasBit(v->flags, VRF_REVERSING) || HasBit(v->flags, VRF_TRAIN_STUCK)) {
++	if ((v->vehstatus & VS_STOPPED) || HasBit(v->flags, VRF_REVERSING) || HasBit(v->flags, VRF_TRAIN_STUCK) || HasBit(v->flags, VRF_BREAKDOWN_BRAKING)) {
+ 		switch (_settings_game.vehicle.train_acceleration_model) {
+ 			default: NOT_REACHED();
+ 			case TAM_ORIGINAL:  accel = v->acceleration * -4; break;
+@@ -3375,7 +3485,16 @@
+ 	} else {
+ 		switch (_settings_game.vehicle.train_acceleration_model) {
+ 			default: NOT_REACHED();
+-			case TAM_ORIGINAL:  accel = v->acceleration * 2; break;
++			case TAM_ORIGINAL:  accel = v->acceleration * 2;
++								if (HasBit(v->flags, VRF_BREAKDOWN_POWER)) {
++								/* we need to apply the power reduction for non-realistic acceleration here */
++									uint32 power, max_te;
++									CalculateTrainPower(v, power, max_te, true);
++									accel = accel * power / v->tcache.cached_power;
++									/* We reduce accel by 50% of the *normal* value, so if power < 50%, we actually decelerate */
++									accel -= v->acceleration >> 1;
++								}
++								break;
+ 			case TAM_REALISTIC: accel = GetTrainAcceleration(v, AM_ACCEL); break;
+ 		}
+ 	}
+@@ -3383,7 +3502,7 @@
+ 	uint spd = v->subspeed + accel;
+ 	v->subspeed = (byte)spd;
+ 	{
+-		int tempmax = v->max_speed;
++		int tempmax = HasBit(v->flags, VRF_BREAKDOWN_SPEED) ? min(v->max_speed, GetBreakdownSpeed(v)) : v->max_speed;
+ 		if (v->cur_speed > v->max_speed)
+ 			tempmax = v->cur_speed - (v->cur_speed / 10) - 1;
+ 		v->cur_speed = spd = Clamp(v->cur_speed + ((int)spd >> 8), 0, tempmax);
+@@ -4146,40 +4265,81 @@
+ 
+ 	return true;
+ }
+-
+ static void HandleBrokenTrain(Train *v)
+ {
+ 	if (v->breakdown_ctr != 1) {
+-		v->breakdown_ctr = 1;
+-		v->cur_speed = 0;
++		if (v->breakdown_type == BREAKDOWN_LOW_POWER || v->First()->cur_speed <= ((v->breakdown_type == BREAKDOWN_LOW_SPEED) ? v->breakdown_severity : 0)) {
++			v->breakdown_ctr = 1;
+ 
+-		if (v->breakdowns_since_last_service != 255)
+-			v->breakdowns_since_last_service++;
++			if (v->breakdowns_since_last_service != 255)
++				v->breakdowns_since_last_service++;
+ 
+-		v->MarkDirty();
+-		SetWindowDirty(WC_VEHICLE_VIEW, v->index);
+-		SetWindowDirty(WC_VEHICLE_DETAILS, v->index);
++			switch (v->breakdown_type) {
++				case BREAKDOWN_CRITICAL:
++					if (!PlayVehicleSound(v, VSE_BREAKDOWN)) {
++						SndPlayVehicleFx((_settings_game.game_creation.landscape != LT_TOYLAND) ?
++							SND_10_TRAIN_BREAKDOWN : SND_3A_COMEDY_BREAKDOWN_2, v);
++					}
++					if (!(v->vehstatus & VS_HIDDEN)) {
++						EffectVehicle *u = CreateEffectVehicleRel(v, 4, 4, 5, EV_BREAKDOWN_SMOKE);
++						if (u != NULL) u->animation_state = v->breakdown_delay * 2;
++					}
++					/* FALL THROUGH */
++				case BREAKDOWN_EM_STOP:
++					CheckBreakdownFlags(v->First());
++					SetBit(v->First()->flags, VRF_BREAKDOWN_STOPPED);
++					break;
++				case BREAKDOWN_LOW_SPEED:
++					CheckBreakdownFlags(v->First());
++					SetBit(v->First()->flags, VRF_BREAKDOWN_SPEED);
++					break;
++				case BREAKDOWN_LOW_POWER:
++					SetBit(v->First()->flags, VRF_BREAKDOWN_POWER);
++					break;
++				default: NOT_REACHED();
++			}
+ 
+-		if (!PlayVehicleSound(v, VSE_BREAKDOWN)) {
+-			SndPlayVehicleFx((_settings_game.game_creation.landscape != LT_TOYLAND) ?
+-				SND_10_TRAIN_BREAKDOWN : SND_3A_COMEDY_BREAKDOWN_2, v);
++			v->First()->MarkDirty();
++			SetWindowDirty(WC_VEHICLE_VIEW, v->First()->index);
++			SetWindowDirty(WC_VEHICLE_DETAILS, v->First()->index);
++		} else {
++			SetBit(v->First()->flags, VRF_BREAKDOWN_BRAKING);
++			return;
+ 		}
+-
+-		if (!(v->vehstatus & VS_HIDDEN)) {
+-			EffectVehicle *u = CreateEffectVehicleRel(v, 4, 4, 5, EV_BREAKDOWN_SMOKE);
+-			if (u != NULL) u->animation_state = v->breakdown_delay * 2;
+-		}
+ 	}
+ 
+ 	if (!(v->tick_counter & 3)) {
+ 		if (!--v->breakdown_delay) {
+ 			v->breakdown_ctr = 0;
+-			v->MarkDirty();
+-			SetWindowDirty(WC_VEHICLE_VIEW, v->index);
++			CheckBreakdownFlags(v->First());
++			v->First()->MarkDirty();
++			SetWindowDirty(WC_VEHICLE_VIEW, v->First()->index);
+ 		}
+ 	}
++	if ((!(v->vehstatus & VS_HIDDEN)) && ((v->breakdown_type == BREAKDOWN_LOW_SPEED || v->breakdown_type == BREAKDOWN_LOW_POWER) && (v->tick_counter & 0x1F) == 0)) {
++		CreateEffectVehicleRel(v, 0, 0, 2, EV_SMOKE); //some grey clouds to indicate a broken engine
++	}
+ }
+ 
++/**
++ * Handle all breakdown related stuff for a train consist.
++ * @param v The front engine.
++ */
++static void HandlePossibleBreakdowns(Train *v)
++{
++	assert(v->IsFrontEngine());
++	for (Train *u = v; u != NULL; u = u->Next()) {
++		if (u->breakdown_ctr != 0 && (u->IsEngine() || u->IsMultiheaded())) {
++			if (u->breakdown_ctr <= 2) {
++				HandleBrokenTrain(u);
++				/* We check the order of v (the first vehicle) instead of u here! */
++			} else if (!v->current_order.IsType(OT_LOADING)) {
++				u->breakdown_ctr--;
++			}
++		}
++	}
++}
++
+ /** Maximum speeds for train that is broken down or approaching line end */
+ static const uint16 _breakdown_speeds[16] = {
+ 	225, 210, 195, 180, 165, 150, 135, 120, 105, 90, 75, 60, 45, 30, 15, 15
+@@ -4293,13 +4453,8 @@
+ static bool TrainCheckIfLineEnds(Train *v)
+ {
+ 	/* First, handle broken down train */
+-
+-	int t = v->breakdown_ctr;
+-	if (t > 1) {
++	if (HasBit(v->flags, VRF_BREAKDOWN_BRAKING)) {
+ 		v->vehstatus |= VS_TRAIN_SLOWING;
+-
+-		uint16 break_speed = _breakdown_speeds[GB(~t, 4, 4)];
+-		if (break_speed < v->cur_speed) v->cur_speed = break_speed;
+ 	} else {
+ 		v->vehstatus &= ~VS_TRAIN_SLOWING;
+ 	}
+@@ -4354,21 +4509,14 @@
+ 		SetWindowWidgetDirty(WC_VEHICLE_VIEW, v->index, VVW_WIDGET_START_STOP_VEH);
+ 	}
+ 
+-	/* train is broken down? */
+-	if (v->breakdown_ctr != 0) {
+-		if (v->breakdown_ctr <= 2) {
+-			HandleBrokenTrain(v);
+-			return true;
+-		}
+-		if (!v->current_order.IsType(OT_LOADING)) v->breakdown_ctr--;
+-	}
++	HandlePossibleBreakdowns(v);
+ 
+ 	if (HasBit(v->flags, VRF_REVERSING) && v->cur_speed == 0) {
+ 		ReverseTrainDirection(v);
+ 	}
+ 
+ 	/* exit if train is stopped */
+-	if ((v->vehstatus & VS_STOPPED) && v->cur_speed == 0) return true;
++	if ((v->vehstatus & VS_STOPPED || HasBit(v->flags, VRF_BREAKDOWN_STOPPED)) && v->cur_speed == 0) return true;
+ 
+ 	bool valid_order = !v->current_order.IsType(OT_NOTHING) && v->current_order.GetType() != OT_CONDITIONAL;
+ 	if (ProcessOrders(v) && CheckReverseTrain(v)) {
+@@ -4565,7 +4713,6 @@
+ 	if ((++this->day_counter & 7) == 0) DecreaseVehicleValue(this);
+ 
+ 	if (this->IsFrontEngine()) {
+-		CheckVehicleBreakdown(this);
+ 		AgeVehicle(this);
+ 
+ 		CheckIfTrainNeedsService(this);
+@@ -4594,6 +4741,10 @@
+ 		/* Also age engines that aren't front engines */
+ 		AgeVehicle(this);
+ 	}
++
++	if (IsEngine() || IsMultiheaded()) {
++		CheckVehicleBreakdown(this);
++	}
+ }
+ 
+ Trackdir Train::GetVehicleTrackdir() const
+Index: src/train_gui.cpp
+===================================================================
+--- src/train_gui.cpp	(revision 17811)
++++ src/train_gui.cpp	(working copy)
+@@ -145,18 +145,45 @@
+  * @param left  The left most coordinate to draw
+  * @param right The right most coordinate to draw
+  * @param y     The y coordinate
++ * @param line_number The line number to draw. 0 is standard type / value, 1 means breakdowns since last service, 2 means current status / reliability.
+  */
+-static void TrainDetailsInfoTab(const Vehicle *v, int left, int right, int y)
++static void TrainDetailsInfoTab(const Vehicle *v, int left, int right, int y, byte line_number)
+ {
+ 	if (RailVehInfo(v->engine_type)->railveh_type == RAILVEH_WAGON) {
+ 		SetDParam(0, v->engine_type);
+ 		SetDParam(1, v->value);
+ 		DrawString(left, right, y, STR_VEHICLE_DETAILS_TRAIN_WAGON_VALUE);
+ 	} else {
+-		SetDParam(0, v->engine_type);
+-		SetDParam(1, v->build_year);
+-		SetDParam(2, v->value);
+-		DrawString(left, right, y, STR_VEHICLE_DETAILS_TRAIN_ENGINE_BUILT_AND_VALUE);
++		switch (line_number) {
++			case 0:
++				SetDParam(0, v->engine_type);
++				SetDParam(1, v->build_year);
++				SetDParam(2, v->value);
++				DrawString(left, right, y, STR_VEHICLE_DETAILS_TRAIN_ENGINE_BUILT_AND_VALUE);
++				break;
++
++			case 1:
++				SetDParam(0, v->reliability * 100 >> 16);
++				SetDParam(1, v->breakdowns_since_last_service);
++				DrawString(left, right, y, STR_VEHICLE_INFO_RELIABILITY_BREAKDOWNS, TC_BLACK);
++				break;
++
++			case 2:
++				if (v->breakdown_ctr == 1) {
++					SetDParam(0, STR_VEHICLE_STATUS_BROKEN_DOWN);
++					SetDParam(1, STR_BREAKDOWN_TYPE_CRITICAL + v->breakdown_type);
++					if (v->breakdown_type == BREAKDOWN_LOW_SPEED) {
++						SetDParam(2, v->breakdown_severity * 10 / 16);
++					} else if (v->breakdown_type == BREAKDOWN_LOW_POWER) {
++						SetDParam(2, v->breakdown_severity * 100 / 256);
++					}
++				} else {
++					SetDParam(0, STR_RUNNING);
++				}
++				DrawString(left, right, y, STR_CURRENT_STATUS, TC_BLACK);
++			break;
++			default: NOT_REACHED();
++		}
+ 	}
+ }
+ 
+@@ -208,6 +235,7 @@
+ 		for (const Train *v = Train::Get(veh_id) ; v != NULL ; v = v->Next()) {
+ 			if (!v->IsArticulatedPart() || v->cargo_cap != 0) num++;
+ 		}
++		if (det_tab == 1) num += 2 * Train::Get(veh_id)->tcache.cached_num_engines;
+ 	}
+ 
+ 	return num;
+@@ -230,6 +258,7 @@
+ 	if (det_tab != TDW_TAB_TOTALS) {
+ 		const Train *u = v;
+ 		int x = 1;
++		byte line_number = 0;
+ 		for (;;) {
+ 			if (--vscroll_pos < 0 && vscroll_pos >= -vscroll_cap) {
+ 				int px = x;
+@@ -239,7 +268,8 @@
+ 					Point offset;
+ 					int width = u->GetDisplayImageWidth(&offset);
+ 					SpriteID pal = (u->vehstatus & VS_CRASHED) ? PALETTE_CRASH : GetVehiclePalette(u);
+-					DrawSprite(u->GetImage(DIR_W), pal, px + offset.x, y + 6 + offset.y);
++					if(line_number == 0)
++						DrawSprite(u->GetImage(DIR_W), pal, px + offset.x, y + 6 + offset.y);
+ 					px += width;
+ 					u = u->Next();
+ 				} while (u != NULL && u->IsArticulatedPart() && u->cargo_cap == 0);
+@@ -256,7 +286,7 @@
+ 					case TDW_TAB_INFO:
+ 						/* Only show name and value for the 'real' part */
+ 						if (!v->IsArticulatedPart()) {
+-							TrainDetailsInfoTab(v, px, right, py);
++							TrainDetailsInfoTab(v, px, right, py, line_number);
+ 						}
+ 						break;
+ 
+@@ -265,13 +295,21 @@
+ 						break;
+ 				}
+ 				y += 14;
+-
+-				v = u;
++			}
++			if (det_tab != 1 || line_number >= (((Train *)v)->IsWagon() ? 0 : 2)) {
++				line_number = 0;
++				if (v != u) {
++					/** If we have already iterated over the articulated parts in the do..while() loop above,
++					 * then there is no reason to do that again. */
++					v = u;
++				} else {
++					do {
++						v = v->Next();
++					} while (v != NULL && ((Train *)v)->IsArticulatedPart() && v->cargo_cap == 0);
++					u = v;
++				}
+ 			} else {
+-				/* Move to the next line */
+-				do {
+-					v = v->Next();
+-				} while (v != NULL && v->IsArticulatedPart() && v->cargo_cap == 0);
++				line_number++;
+ 			}
+ 			if (v == NULL) return;
+ 		}
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 17811)
++++ src/vehicle.cpp	(working copy)
+@@ -83,9 +83,18 @@
+ 
+ void VehicleServiceInDepot(Vehicle *v)
+ {
++	if (v->type == VEH_TRAIN) {
++		if (v->Next() != NULL) VehicleServiceInDepot(v->Next());
++		if (!(((Train*)v)->IsEngine()) && !(((Train*)v)->IsRearDualheaded())) return;
++		if (((Train*)v)->IsFrontEngine()) {
++			CLRBITS(((Train*)v)->flags, (1 << VRF_BREAKDOWN_BRAKING) | VRF_IS_BROKEN);
++		}
++	}
+ 	v->date_of_last_service = _date;
+ 	v->breakdowns_since_last_service = 0;
+ 	v->reliability = Engine::Get(v->engine_type)->reliability;
++	v->breakdown_ctr = 0;
++	v->vehstatus &= ~VS_AIRCRAFT_BROKEN;
+ 	SetWindowDirty(WC_VEHICLE_DETAILS, v->index); // ensure that last service date and reliability are updated
+ }
+ 
+@@ -827,50 +836,145 @@
+ 	SetWindowDirty(WC_VEHICLE_DETAILS, v->index);
+ }
+ 
+-static const byte _breakdown_chance[64] = {
+-	  3,   3,   3,   3,   3,   3,   3,   3,
+-	  4,   4,   5,   5,   6,   6,   7,   7,
+-	  8,   8,   9,   9,  10,  10,  11,  11,
+-	 12,  13,  13,  13,  13,  14,  15,  16,
+-	 17,  19,  21,  25,  28,  31,  34,  37,
+-	 40,  44,  48,  52,  56,  60,  64,  68,
+-	 72,  80,  90, 100, 110, 120, 130, 140,
+-	150, 170, 190, 210, 230, 250, 250, 250,
++/** The chances for the different types of vehicles to suffer from different types of breakdowns
++ * The chance for a given breakdown type n is _breakdown_chances[vehtype][n] - _breakdown_chances[vehtype][n-1] */
++static const byte _breakdown_chances[4][4] = {
++	{ //Trains:
++		25,  ///< 10% chance for BREAKDOWN_CRITICAL.
++		51,  ///< 10% chance for BREAKDOWN_EM_STOP.
++		127, ///< 30% chance for BREAKDOWN_LOW_SPEED.
++		255, ///< 50% chance for BREAKDOWN_LOW_POWER.
++	},
++	{ //Road Vehicles:
++		51,  ///< 20% chance for BREAKDOWN_CRITICAL.
++		76,  ///< 10% chance for BREAKDOWN_EM_STOP.
++		153, ///< 30% chance for BREAKDOWN_LOW_SPEED.
++		255, ///< 40% chance for BREAKDOWN_LOW_POWER.
++	},
++	{ //Ships:
++		51,  ///< 20% chance for BREAKDOWN_CRITICAL.
++		76,  ///< 10% chance for BREAKDOWN_EM_STOP.
++		178, ///< 40% chance for BREAKDOWN_LOW_SPEED.
++		255, ///< 30% chance for BREAKDOWN_LOW_POWER.
++	},
++	{ //Aircraft:
++		178, ///< 70% chance for BREAKDOWN_AIRCRAFT_SPEED.
++		229, ///< 20% chance for BREAKDOWN_AIRCRAFT_DEPOT.
++		255, ///< 10% chance for BREAKDOWN_AIRCRAFT_EM_LANDING.
++		255, ///< Aircraft have only 3 breakdown types, so anything above 0% here will cause a crash.
++	},
+ };
+ 
++/**
++ * Determine the type of breakdown a vehicle will have.
++ * Results are saved in breakdown_type and breakdown_severity.
++ * @param v the vehicle in question.
++ * @param r the random number to use. (Note that bits 0..6 are already used)
++ */
++void DetermineBreakdownType(Vehicle *v, uint32 r)
++{
++	/* if 'improved breakdowns' is off, just do the classic breakdown */
++	if (!_settings_game.vehicle.improved_breakdowns) {
++		v->breakdown_type = BREAKDOWN_CRITICAL;
++		v->breakdown_severity = 40; //only used by aircraft (321 km/h)
++		return;
++	}
++	byte rand = GB(r, 8, 8);
++	const byte *breakdown_type_chance = _breakdown_chances[v->type];
++
++	if (v->type == VEH_AIRCRAFT) {
++		if (rand <= breakdown_type_chance[BREAKDOWN_AIRCRAFT_SPEED]) {
++			v->breakdown_type = BREAKDOWN_AIRCRAFT_SPEED;
++			/* all speed values here are 1/8th of the real max speed in km/h */
++			byte max_speed = min(v->max_speed >> 3, 255);
++			byte min_speed = min(15 + (max_speed >> 2), v->max_speed >> 4);
++			v->breakdown_severity = min_speed + (((v->reliability + GB(r, 16, 16)) * (max_speed - min_speed)) >> 17);
++		} else if (rand <= breakdown_type_chance[BREAKDOWN_AIRCRAFT_DEPOT]) {
++			v->breakdown_type = BREAKDOWN_AIRCRAFT_DEPOT;
++		} else if (rand <= breakdown_type_chance[BREAKDOWN_AIRCRAFT_EM_LANDING]) {
++			/* emergency landings only happen when reliability < 87% */
++			if (v->reliability < 0xDDDD) {
++				v->breakdown_type = BREAKDOWN_AIRCRAFT_EM_LANDING;
++			} else {
++				/* try again */
++				DetermineBreakdownType(v, Random());
++			}
++		} else {
++			NOT_REACHED();
++		}
++		return;
++	}
++
++	if (rand <= breakdown_type_chance[BREAKDOWN_CRITICAL]) {
++		v->breakdown_type = BREAKDOWN_CRITICAL;
++	} else if (rand <= breakdown_type_chance[BREAKDOWN_EM_STOP]) {
++		/* Non-front engines cannot have emergency stops */
++		if (v->type == VEH_TRAIN && !(((Train*)v)->IsFrontEngine())) {
++			return DetermineBreakdownType(v, Random());
++		}
++		v->breakdown_type = BREAKDOWN_EM_STOP;
++		v->breakdown_delay >>= 2; //emergency stops don't last long (1/4 of normal)
++	} else if (rand <= breakdown_type_chance[BREAKDOWN_LOW_SPEED]) {
++		v->breakdown_type = BREAKDOWN_LOW_SPEED;
++		/* average of random and reliability */
++		uint16 rand2     = (GB(r, 16, 16) + v->reliability) >> 1;
++		uint16 max_speed = (v->type == VEH_TRAIN) ? GetVehicleProperty(v, PROP_TRAIN_SPEED, RailVehInfo(v->engine_type)->max_speed) : v->max_speed;
++		byte   min_speed = min(41, max_speed >> 2);
++		/* we use the min() function here because we want to use the real value of max_speed for the min_speed calculation */
++		max_speed = min(max_speed, 255);
++		v->breakdown_severity = Clamp((max_speed * rand2) >> 16, min_speed, max_speed);
++	} else if (rand <= breakdown_type_chance[BREAKDOWN_LOW_POWER]) {
++		v->breakdown_type = BREAKDOWN_LOW_POWER;
++		/** within this type there are two possibilities: (50/50)
++		 * power reduction (10-90%), or no power at all */
++		if (GB(r, 7, 1)) {
++			v->breakdown_severity = Clamp((GB(r, 16, 16) + v->reliability) >> 9, 26, 231);
++		} else {
++			v->breakdown_severity = 0;
++		}
++	} else {
++		NOT_REACHED();
++	}
++}
++
+ void CheckVehicleBreakdown(Vehicle *v)
+ {
+ 	int rel, rel_old;
+ 
+ 	/* decrease reliability */
+ 	v->reliability = rel = max((rel_old = v->reliability) - v->reliability_spd_dec, 0);
+-	if ((rel_old >> 8) != (rel >> 8)) SetWindowDirty(WC_VEHICLE_DETAILS, v->index);
++	if ((rel_old >> 8) != (rel >> 8)) SetWindowDirty(WC_VEHICLE_DETAILS, v->First()->index);
+ 
+-	if (v->breakdown_ctr != 0 || (v->vehstatus & VS_STOPPED) ||
++	if (v->breakdown_ctr != 0 || (v->First()->vehstatus & VS_STOPPED) ||
+ 			_settings_game.difficulty.vehicle_breakdowns < 1 ||
+-			v->cur_speed < 5 || _game_mode == GM_MENU) {
++			v->First()->cur_speed < 5 || _game_mode == GM_MENU ||
++			(v->type == VEH_AIRCRAFT && ((Aircraft*)v)->state != FLYING) ||
++			(v->type == VEH_TRAIN && !(((Train*)v)->IsFrontEngine()) && !_settings_game.vehicle.improved_breakdowns)) {
+ 		return;
+ 	}
++	uint32 r1 = Random();
++	uint32 r2 = Random();
+ 
+-	uint32 r = Random();
++	byte chance = 128;
++	if (_settings_game.vehicle.improved_breakdowns) {
++		/* Dual engines have their breakdown chances reduced to 70% of the normal value */
++		chance = (v->type == VEH_TRAIN && ((Train*)v)->IsMultiheaded()) ? v->First()->breakdown_chance * 7 / 10 : v->First()->breakdown_chance;
++	} else if(v->type == VEH_SHIP) {
++		chance = 64;
++	}
+ 
+-	/* increase chance of failure */
+-	int chance = v->breakdown_chance + 1;
+-	if (Chance16I(1, 25, r)) chance += 25;
+-	v->breakdown_chance = min(255, chance);
+-
+-	/* calculate reliability value to use in comparison */
+-	rel = v->reliability;
+-	if (v->type == VEH_SHIP) rel += 0x6666;
+-
+-	/* reduced breakdowns? */
+-	if (_settings_game.difficulty.vehicle_breakdowns == 1) rel += 0x6666;
+-
+-	/* check if to break down */
+-	if (_breakdown_chance[(uint)min(rel, 0xffff) >> 10] <= v->breakdown_chance) {
+-		v->breakdown_ctr    = GB(r, 16, 6) + 0x3F;
+-		v->breakdown_delay  = GB(r, 24, 7) + 0x80;
+-		v->breakdown_chance = 0;
++	/**
++	 * Chance is (1 - reliability) * breakdown_setting * breakdown_chance / 10.
++	 * At 90% reliabilty, normal setting (2) and average breakdown_chance (128),
++	 * a vehicle will break down (on average) every 100 days.
++	 * This *should* mean that vehicles break down about as often as (or a little less than) they used to.
++	 * However, because breakdowns are no longer by definition a complete stop,
++	 * their impact will be significantly less.
++	 */
++	if ((uint32)(0xffff - v->reliability) * _settings_game.difficulty.vehicle_breakdowns * chance > GB(r1, 0, 24) * 10) {
++		v->breakdown_ctr   = GB(r1, 24, 6) + 0xF;
++		v->breakdown_delay = GB(r2, 0, 7) + 0x80;
++		DetermineBreakdownType(v, r2);
+ 	}
+ }
+ 
+@@ -1523,7 +1627,7 @@
+ 			 * Now we change the setting to apply the new one and let the vehicle head for the same depot.
+ 			 * Note: the if is (true for requesting service == true for ordered to stop in depot)          */
+ 			if (flags & DC_EXEC) {
+-				this->current_order.SetDepotOrderType(ODTF_MANUAL);
++				if (!(this->current_order.GetDepotOrderType() & ODTFB_BREAKDOWN)) this->current_order.SetDepotOrderType(ODTF_MANUAL);
+ 				this->current_order.SetDepotActionType(halt_in_depot ? ODATF_SERVICE_ONLY : ODATFB_HALT);
+ 				SetWindowWidgetDirty(WC_VEHICLE_VIEW, this->index, VVW_WIDGET_START_STOP_VEH);
+ 			}
+@@ -1536,8 +1640,13 @@
+ 			 * then skip to the next order; effectively cancelling this forced service */
+ 			if (this->current_order.GetDepotOrderType() & ODTFB_PART_OF_ORDERS) this->IncrementOrderIndex();
+ 
+-			this->current_order.MakeDummy();
+-			SetWindowWidgetDirty(WC_VEHICLE_VIEW, this->index, VVW_WIDGET_START_STOP_VEH);
++			/* We don't cancel a breakdown-related goto depot order, we only change whether to halt or not */
++			if (this->current_order.GetDepotOrderType() & ODTFB_BREAKDOWN) {
++				this->current_order.SetDepotActionType(this->current_order.GetDepotActionType() == ODATFB_HALT ? ODATF_SERVICE_ONLY : ODATFB_HALT);
++			} else {
++				this->current_order.MakeDummy();
++				SetWindowWidgetDirty(WC_VEHICLE_VIEW, this->index, VVW_WIDGET_START_STOP_VEH);
++			}
+ 		}
+ 		return CommandCost();
+ 	}
+Index: src/vehicle_base.h
+===================================================================
+--- src/vehicle_base.h	(revision 17811)
++++ src/vehicle_base.h	(working copy)
+@@ -127,6 +127,8 @@
+ 	byte breakdown_delay;
+ 	byte breakdowns_since_last_service;
+ 	byte breakdown_chance;
++	byte breakdown_severity;      //Severity of the breakdown. Note that lower means more severe.
++	BreakdownType breakdown_type; //Type of breakdown
+ 
+ 	int32 x_pos;             // coordinates
+ 	int32 y_pos;
+Index: src/vehicle_gui.cpp
+===================================================================
+--- src/vehicle_gui.cpp	(revision 17811)
++++ src/vehicle_gui.cpp	(working copy)
+@@ -39,6 +39,7 @@
+ #include "vehiclelist.h"
+ #include "articulated_vehicles.h"
+ #include "cargotype.h"
++#include "train.h"
+ 
+ #include "table/sprites.h"
+ #include "table/strings.h"
+@@ -139,6 +140,31 @@
+ 	DrawSprite(SPR_BLOT, pal, x, y);
+ }
+ 
++/**
++ * Get the engine that suffers from the most severe breakdown.
++ * This means the engine with the lowest breakdown_type.
++ * If the breakdown types of 2 engines are equal, the one with the lowest breakdown_severity (most severe) is picked.
++ * @param v The front engine of the train.
++ * @return The most severly broken engine.
++ */
++const Vehicle *GetMostSeverelyBrokenEngine(const Train *v)
++{
++	assert(v->IsFrontEngine());
++	const Vehicle *w = v;
++	byte most_severe_type = 255;
++	for (const Vehicle *u = v; u != NULL; u = u->Next()) {
++		if (u->breakdown_ctr == 1) {
++			if (u->breakdown_type < most_severe_type) {
++				most_severe_type = u->breakdown_type;
++				w = u;
++			} else if (u->breakdown_type == most_severe_type && u->breakdown_severity < w->breakdown_severity) {
++				w = u;
++			}
++		}
++	}
++	return w;
++}
++
+ struct RefitOption {
+ 	CargoID cargo;
+ 	byte subtype;
+@@ -1424,8 +1450,25 @@
+ 		DrawString(2, this->width - 2, 35, STR_VEHICLE_INFO_PROFIT_THIS_YEAR_LAST_YEAR);
+ 
+ 		/* Draw breakdown & reliability */
+-		SetDParam(0, ToPercent16(v->reliability));
+-		SetDParam(1, v->breakdowns_since_last_service);
++		byte total_engines = 0;
++		if (v->type == VEH_TRAIN) {
++			/* we want to draw the average reliability and total number of breakdowns */
++			uint32 total_reliability = 0;
++			uint16 total_breakdowns  = 0;
++			for (const Vehicle *w = v; w != NULL; w = w->Next()) {
++				if (((Train*)w)->IsEngine() || ((Train *)w)->IsMultiheaded()) {
++					total_reliability += w->reliability;
++					total_breakdowns += w->breakdowns_since_last_service;
++				}
++			}
++			total_engines = ((Train *)v)->tcache.cached_num_engines;
++			assert(total_engines > 0);
++			SetDParam(0, ToPercent16(total_reliability / total_engines));
++			SetDParam(1, total_breakdowns);
++		} else {
++			SetDParam(0, ToPercent16(v->reliability));
++			SetDParam(1, v->breakdowns_since_last_service);
++		}
+ 		DrawString(2, this->width - 2, 45, STR_VEHICLE_INFO_RELIABILITY_BREAKDOWNS);
+ 
+ 		/* Draw service interval text */
+@@ -1651,6 +1694,13 @@
+ 	},
+ };
+ 
++/** Strings for aircraft breakdown types */
++static const StringID _aircraft_breakdown_strings[] = {
++	STR_BREAKDOWN_TYPE_LOW_SPEED,
++	STR_BREAKDOWN_TYPE_DEPOT,
++	STR_BREAKDOWN_TYPE_LANDING,
++};
++
+ /** Checks whether the vehicle may be refitted at the moment.*/
+ static bool IsVehicleRefitable(const Vehicle *v)
+ {
+@@ -1782,8 +1832,27 @@
+ 
+ 		if (v->vehstatus & VS_CRASHED) {
+ 			str = STR_VEHICLE_STATUS_CRASHED;
+-		} else if (v->type != VEH_AIRCRAFT && v->breakdown_ctr == 1) { // check for aircraft necessary?
+-			str = STR_VEHICLE_STATUS_BROKEN_DOWN;
++
++		} else if (v->breakdown_ctr == 1 || (v->type == VEH_TRAIN && ((Train*)v)->flags & VRF_IS_BROKEN)) {
++			str = STR_VEHICLE_STATUS_BROKEN_DOWN + _settings_client.gui.vehicle_speed;
++			SetDParam(2, v->GetDisplaySpeed());
++
++			if (v->type == VEH_AIRCRAFT) {
++				SetDParam(0, _aircraft_breakdown_strings[v->breakdown_type]);
++				if (v->breakdown_type == BREAKDOWN_AIRCRAFT_SPEED) {
++					SetDParam(1, v->breakdown_severity << 3);
++				} else {
++					SetDParam(1, v->current_order.GetDestination());
++				}
++			} else {
++				const Vehicle *w = (v->type == VEH_TRAIN) ? GetMostSeverelyBrokenEngine((Train*)v) : v;
++				SetDParam(0, STR_BREAKDOWN_TYPE_CRITICAL + w->breakdown_type);
++				if (w->breakdown_type == BREAKDOWN_LOW_SPEED) {
++					SetDParam(1, w->breakdown_severity >> (v->type == VEH_TRAIN ? 0 : 1));
++				} else if (w->breakdown_type == BREAKDOWN_LOW_POWER) {
++					SetDParam(1, w->breakdown_severity * 100 / 256);
++				}
++			}
+ 		} else if (v->vehstatus & VS_STOPPED) {
+ 			if (v->type == VEH_TRAIN) {
+ 				if (v->cur_speed == 0) {
+Index: src/vehicle_type.h
+===================================================================
+--- src/vehicle_type.h	(revision 17811)
++++ src/vehicle_type.h	(working copy)
+@@ -69,6 +69,18 @@
+ 	MAX_LENGTH_VEHICLE_NAME_PIXELS = 150, ///< The maximum length of a vehicle name in pixels
+ };
+ 
++/* The different types of breakdowns */
++enum BreakdownType {
++	BREAKDOWN_CRITICAL  = 0, ///< Old style breakdown (black smoke)
++	BREAKDOWN_EM_STOP   = 1, ///< Emergency stop
++	BREAKDOWN_LOW_SPEED = 2, ///< Lower max speed
++	BREAKDOWN_LOW_POWER = 3, ///< Power reduction
++	/* Aircraft have totally different breakdowns, so we use aliases to make things clearer */
++	BREAKDOWN_AIRCRAFT_SPEED      = BREAKDOWN_CRITICAL,  ///< Lower speed until the next airport
++	BREAKDOWN_AIRCRAFT_DEPOT      = BREAKDOWN_EM_STOP,   ///< We have to visit a depot at the next airport
++	BREAKDOWN_AIRCRAFT_EM_LANDING = BREAKDOWN_LOW_SPEED, ///< Emergency landing at the closest airport (with hangar!) we can find
++};
++
+ enum TrainAccelerationModel {
+ 	TAM_ORIGINAL,
+ 	TAM_REALISTIC,

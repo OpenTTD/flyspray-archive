@@ -1,0 +1,1991 @@
+Index: source.list
+===================================================================
+--- source.list	(revision 13225)
++++ source.list	(working copy)
+@@ -518,6 +518,10 @@
+ ai/api/ai_industry.hpp
+ ai/api/ai_industrylist.hpp
+ ai/api/ai_list.hpp
++ai/api/ai_local_builder.hpp
++ai/api/ai_local_map_reader.hpp
++ai/api/ai_local_pathfinder.hpp
++ai/api/ai_local_pathfinder_strategy.hpp
+ ai/api/ai_log.hpp
+ ai/api/ai_map.hpp
+ ai/api/ai_marine.hpp
+@@ -562,6 +566,9 @@
+ ai/api/ai_industry.cpp
+ ai/api/ai_industrylist.cpp
+ ai/api/ai_list.cpp
++ai/api/ai_local_builder.cpp
++ai/api/ai_local_map_reader.cpp
++ai/api/ai_local_pathfinder.cpp
+ ai/api/ai_log.cpp
+ ai/api/ai_map.cpp
+ ai/api/ai_marine.cpp
+Index: src/ai/api/ai_controller.cpp
+===================================================================
+--- src/ai/api/ai_controller.cpp	(revision 13225)
++++ src/ai/api/ai_controller.cpp	(working copy)
+@@ -38,6 +38,8 @@
+ #include "ai_industry.hpp.sq"
+ #include "ai_industrylist.hpp.sq"
+ #include "ai_list.hpp.sq"
++#include "ai_local_pathfinder.hpp.sq"
++#include "ai_local_pathfinder_strategy.hpp.sq"
+ #include "ai_log.hpp.sq"
+ #include "ai_map.hpp.sq"
+ #include "ai_marine.hpp.sq"
+@@ -110,6 +112,12 @@
+ 	SQAIIndustryList_CargoAccepting_Register(this->engine);
+ 	SQAIIndustryList_CargoProducing_Register(this->engine);
+ 	SQAIList_Register(this->engine);
++	SQAILocalPathFinderStrategy_Register(this->engine);
++	SQAILocalPathFinder_Register(this->engine);
++	SQAICheapPathFinderStrategy_Register(this->engine);
++	SQAIHasPathStrategy_Register(this->engine);
++	SQAIDefaultPathFinderStrategy_Register(this->engine);
++	SQAIStraightPathFinderStrategy_Register(this->engine);
+ 	SQAILog_Register(this->engine);
+ 	SQAIMap_Register(this->engine);
+ 	SQAIMarine_Register(this->engine);
+Index: src/ai/api/ai_local_builder.cpp
+===================================================================
+--- src/ai/api/ai_local_builder.cpp	(revision 0)
++++ src/ai/api/ai_local_builder.cpp	(revision 0)
+@@ -0,0 +1,448 @@
++/** @file ai_local_builder.cpp Road pathfinder - road builder section implementation */
++
++#include "ai_local_builder.hpp"
++#include "ai_local_map_reader.hpp"
++#include "ai_local_pathfinder.hpp"
++
++#include "ai_bridge.hpp"
++#include "ai_road.hpp"
++#include "ai_tile.hpp"
++#include "ai_testmode.hpp"
++#include "ai_tunnel.hpp"
++
++#include "../../bridge.h"
++#include "../../date_func.h"
++#include "../../landscape.h"
++#include "../../slope_func.h"
++#include "../../tunnelbridge_map.h"
++
++void AILocalPathBuilder::TerraformTiles(TileIndex a, TileIndex b, DiagDirection dir, bool terraform_all) const
++{
++	Slope a_slope = ::GetTileSlope(a, NULL);
++	Slope b_slope = ::GetTileSlope(b, NULL);
++
++	if ((IsTileType(a, MP_ROAD) || IsTileType(b, MP_ROAD)) && !AIRoad::AreRoadTilesConnected(a, b)) {
++		bool can_connect_tiles = false;
++		{
++			AITestMode test_mode;
++			if (AIRoad::BuildRoad(a, b)) can_connect_tiles = true;
++		}
++
++		if (a_slope != GetFoundationSlope(a, NULL) && !can_connect_tiles)
++			TerraformTile(a, AdaptedComplementSlope(a_slope), &AITile::RaiseTile);
++	
++		if (b_slope != GetFoundationSlope(b, NULL) && !can_connect_tiles)
++			TerraformTile(b, AdaptedComplementSlope(b_slope), &AITile::RaiseTile);
++	}
++
++
++	TileType tt = ::GetTileType(a);
++	if (tt == MP_TUNNELBRIDGE || tt == MP_RAILWAY || tt == MP_HOUSE) return;
++
++	/* Remove smallest "hills" and "holes" */
++	if (IsHill(a, b)) TerraformTile(a, GetTileSlope(a, NULL), &AITile::LowerTile);
++	if (IsHole(a, b)) AITile::RaiseTile(a, AdaptedComplementSlope(GetTileSlope(a, NULL)));
++
++	if (!terraform_all) return;
++
++
++	bool is_a_good_slope = ::IsInclinedSlope(a_slope) && (::GetInclinedSlopeDirection(a_slope) % 2 == dir % 2);
++	bool is_b_good_slope = ::IsInclinedSlope(b_slope) && (::GetInclinedSlopeDirection(b_slope) % 2 == dir % 2);
++
++	/* Stop if both tiles not require terraforming (flat, or sloped "right") */
++	if ((a_slope == SLOPE_FLAT || is_a_good_slope) && (b_slope == SLOPE_FLAT || is_b_good_slope)) return;
++
++	uint32 a_top = GetTileTopHeight(a);
++	uint32 b_top = GetTileTopHeight(b);
++
++	/* If one of tiles not require terraforming => terraform other */
++	if (a_slope == SLOPE_FLAT || is_a_good_slope) {
++		if (b_top > a_top) {
++			TerraformTile(b, b_slope, &AITile::LowerTile);
++		} else {
++			TerraformTile(b, AdaptedComplementSlope(b_slope), &AITile::RaiseTile);
++		}
++		return;
++	}
++	if (b_slope == SLOPE_FLAT || is_b_good_slope) {
++		if (a_top > b_top) {
++			TerraformTile(a, a_slope, &AITile::LowerTile);
++		} else {
++			TerraformTile(a, AdaptedComplementSlope(a_slope), &AITile::RaiseTile);
++		}
++		return;
++	}
++
++	/* Both tiles require terraforming */
++	/* With b we will be more careful in next iteration */
++	if (GetTileBottomHeight(b) == a_top) TerraformTile(b, ::GetTileSlope(b, NULL), &AITile::LowerTile);
++
++	TerraformTile(a, ::GetTileSlope(a, NULL), &AITile::LowerTile);
++
++	/* If we could not lower a => try to raise it */
++	/* If a become flat this do nothing with it, so it safe */
++	TerraformTile(a, AdaptedComplementSlope(::GetTileSlope(a, NULL)), &AITile::RaiseTile);
++
++}
++
++
++void AILocalPathBuilder::BuildBridge(TileIndex start, TileIndex end, DiagDirection dir) const
++{
++	if (::IsTileType(start, MP_TUNNELBRIDGE)) return;
++
++
++	/* Prepare tile for bridge start ramp */
++	TileIndex bridge_enter = ::TileAddByDiagDir(start, ::ReverseDiagDir(dir));
++
++	if (!AIRoad::AreRoadTilesConnected(bridge_enter, start))
++		if ((AIRoad::RoadType)m_options[PATH_ROAD_TYPE] == AIRoad::ROADTYPE_ROAD)
++			AIRoad::BuildRoad(bridge_enter, start);
++
++	if (::GetFoundationSlope(start, NULL) != SLOPE_FLAT) {
++		if (::IsTileType(start, MP_ROAD)) AITile::DemolishTile(start);
++
++		if ((AIRoad::RoadType)m_options[PATH_ROAD_TYPE] == AIRoad::ROADTYPE_ROAD)
++			AIRoad::BuildRoad(bridge_enter, start);
++	}
++
++	/* Same for end ramp tile */
++	TileIndex bridge_exit = ::TileAddByDiagDir(end, dir);
++
++	if (!AIRoad::AreRoadTilesConnected(end, bridge_exit))
++		if ((AIRoad::RoadType)m_options[PATH_ROAD_TYPE] == AIRoad::ROADTYPE_ROAD)
++			AIRoad::BuildRoad(end, bridge_exit);
++
++	if (::GetFoundationSlope(end, NULL) != SLOPE_FLAT) {
++		if (::IsTileType(end, MP_ROAD)) AITile::DemolishTile(end);
++
++		if ((AIRoad::RoadType)m_options[PATH_ROAD_TYPE] == AIRoad::ROADTYPE_ROAD)
++			AIRoad::BuildRoad(end, bridge_exit);
++	}
++
++
++	/* Try to build */
++	uint16 max_bridge_length = 0;
++	for (int32 b = MAX_BRIDGES - 1; b != 0; b--) {
++		if (AIBridge::BuildBridge(AIVehicle::VEHICLE_ROAD, b, start, end)) return;
++
++		if (max_bridge_length < AIBridge::GetMaxLength(b)) max_bridge_length = AIBridge::GetMaxLength(b);
++	}
++
++	/* If bridge was not builded */
++
++	if (::DistanceManhattan(start, end) + 3 > max_bridge_length) {
++		uint16 middle_tile_x = ::TileX(start) - (::TileX(start) - ::TileX(end)) / 2;
++		uint16 middle_tile_y = ::TileY(start) - (::TileY(start) - ::TileY(end)) / 2;
++	
++		TileIndex middle_tile = ::TileXY(middle_tile_x, middle_tile_y);
++	
++		Slope s = (dir == DIAGDIR_NE || DIAGDIR_SW) ? SLOPE_NW : SLOPE_NE;
++	
++		if (AITile::RaiseTile(middle_tile, s)) {
++			BuildBridge(start, middle_tile, dir);
++			BuildBridge(::TileAddByDiagDir(middle_tile, dir), end, dir);
++		}
++	}
++}
++
++void AILocalPathBuilder::BuildRouteTunnel(line_iterator i_start, line_iterator i_end, DiagDirection dir) const
++{
++	TileType tt = ::GetTileType(*i_start);
++	if (tt != MP_CLEAR && tt != MP_TREES) return;
++
++	Slope s = ::GetTileSlope(*i_start, NULL);
++
++	/* Do not build tunnel which direction will not be equal to route direction */
++	if (!::IsInclinedSlope(s)) return;
++	if (::GetInclinedSlopeDirection(s) != dir) return;
++
++	uint16 s_top = GetTileTopHeight(*i_start);
++
++	/* Go until line end, and check all it tiles as good place for tunnel exit. If so - build tunnel */
++	for (line_iterator ii = i_start + 1; ii < i_end - 1; ++ii) {
++		/* Stop if bridge needed instead of tunnel, or we exceed length limit, given in options */
++		if (GetTileTopHeight(*ii) < s_top || uint32(ii - i_start) > m_options[PATH_MAX_TUNNEL_LENGTH]) break;
++
++		if (GetTileBottomHeight(*ii) == s_top - 1) {
++			AITunnel::BuildTunnel(AIVehicle::VEHICLE_ROAD, *i_start);
++			return;
++		}
++	}
++}
++
++bool AILocalPathBuilder::BuildLine(line_iterator i_start, line_iterator i_end, DiagDirection dir, bool terraform_all) const
++{
++	/* Build tunnels */
++	for (line_iterator ii = i_start; ii < i_end; ++ii) {
++		if (GetTileTopHeight(*ii) == 0) continue;
++		TerraformTiles(*ii, *(ii + 1), dir, terraform_all);
++		if (ii > i_start) BuildRouteTunnel(ii, i_end, dir);
++
++		/* Don't need to build under bridges or over tunnels, skip such tiles */
++		if (::IsBridgeTile(*ii) && ::GetTunnelBridgeDirection(*ii) == dir) ++ii;
++		if (::IsTunnelTile(*ii) && ::GetTunnelBridgeDirection(*ii) == dir) {
++			TileIndex other_end = ::GetOtherTunnelBridgeEnd(*ii);
++			ii += (other_end == *(ii + 1)) ? 1 : ::DistanceManhattan((*ii), other_end);
++		}
++	}
++
++	bool res  = true;
++
++	/* Build roads */
++	for (line_iterator ii = i_start; ii < i_end; ++ii) {
++		/* Don't need to build under bridges or over tunnels, skip such tiles */
++		if (::IsBridgeTile(*ii) && ::GetTunnelBridgeDirection(*ii) == dir) ++ii;
++		if (::IsTunnelTile(*ii) && ::GetTunnelBridgeDirection(*ii) == dir) {
++			TileIndex other_end = ::GetOtherTunnelBridgeEnd(*ii);
++			ii += (other_end == *(ii + 1)) ? 1 : ::DistanceManhattan((*ii), other_end);
++		}
++
++		if (AIRoad::AreRoadTilesConnected(*ii, *(ii + 1))) continue;
++
++
++		res &= AIRoad::BuildRoad(*ii, *(ii + 1));
++	}
++	return res;
++}
++
++bool AILocalPathBuilder::BuildRoute(void *result, bool terraform_all) const
++{
++	if (result == NULL) return false;
++
++	std::vector<TileIndex> *route = ((Path *)result)->tiles;
++
++	/* Two adjanced items from this container points to two ends of one line */
++	std::vector<line_iterator> lines;
++
++	/* Contains directions of route lines */
++	std::vector<DiagDirection> line_directions;
++
++	/* Split route in straight lines */
++	SplitRouteToLines(route, lines, line_directions);
++
++	/* Destroy all houses first, or local authority can change and we will be unable to so */
++	for (uint16 i = 0; i < route->size(); i++)
++		if (::IsTileType((*route)[i], MP_HOUSE)) AITile::DemolishTile((*route)[i]);
++
++	/* Build bridges as soon as possible, or we can spare money for other (less important) things */
++	for (uint16 i = 1; i < lines.size(); i++)
++		for (line_iterator ii = lines[i-1]; (ii + 1) != lines[i]; ++ii)
++			if (::DistanceManhattan(*ii, *(ii + 1)) > 1)
++				BuildBridge(*ii, *(ii + 1), line_directions[i-1]);
++
++	bool res = true;
++
++	/* Terraform turning points. Important. If not do so we can't be sure that road connection possible */
++	for (uint16 i = 1; i < lines.size() - 1; i++) {
++		if (::IsInclinedSlope(GetFoundationSlope(*lines[i], NULL))) {
++			AITile::DemolishTile(*lines[i]);
++		}
++		TerraformTiles(*lines[i-1], *lines[i], line_directions[i-1], false);
++		TerraformTiles(*lines[i], *lines[i+1], line_directions[i-1], false);
++		BuildCornerSegment(lines, line_directions, i);
++	}
++
++	for (uint16 i = 1; i < lines.size(); i++)
++		res &= BuildLine(lines[i-1], lines[i], line_directions[i-1], terraform_all);
++
++	return res;
++}
++
++void AILocalPathBuilder::SplitRouteToLines(std::vector<TileIndex> *route, std::vector<line_iterator> &lines, std::vector<DiagDirection> &line_directions) const
++{
++	/* Use route start tile as first corner */
++	lines.push_back(route->begin());
++
++	const uint16 path_len = route->size();
++	for (uint16 i = 1, corner_x = TileX((*route)[0]), corner_y = TileY((*route)[0]); i <= path_len; i++) {
++		/* If tile has same coordinate as previos route corner (or line end), it forms line with that corner */
++		/* We should skip all such tiles except last one, which should be remembered and used as new corner */
++		/* Last line tile (line end, new corner) is previous tile after line-break occured */
++		/* Line-break happen if previos route corner coordinates (both) not equal to new tile coordinates */
++		if ((corner_x == ::TileX((*route)[i]) || corner_y == ::TileY((*route)[i])) && i != path_len)
++			continue;
++
++		/* Calculate new line direction */
++		int32 x_dir = corner_x - ::TileX((*route)[i-1]);
++		int32 y_dir = corner_y - ::TileY((*route)[i-1]);
++
++		x_dir != 0 ? x_dir = x_dir / abs(x_dir + y_dir) : y_dir = y_dir / abs(x_dir + y_dir);
++		DiagDirection new_line_direction = (DiagDirection)(x_dir * (-1 - x_dir) + 2 + y_dir);
++
++		/* Remember tile route[i-1] as line end and remember line direction */
++		lines.push_back(route->begin() + i - 1);
++		line_directions.push_back(new_line_direction);
++
++		/* Use tile route[i-1] further as new route corner */
++		corner_x = ::TileX((*route)[i-1]);
++		corner_y = ::TileY((*route)[i-1]);
++	}
++}
++
++void AILocalPathBuilder::PrepareCorner(TileIndex a_corner_tile, TileIndex b_corner_tile, DiagDirection dir) const
++{
++	Slope s = ::GetTileSlope(b_corner_tile, NULL);
++	if (IsSlopeWithOneCornerRaised(s)) {
++		TerraformTile(b_corner_tile, s, &AITile::LowerTile);
++		return;
++	}
++
++	bool bad_corner_slope = ::IsInclinedSlope(s) && ::GetInclinedSlopeDirection(s) % 2 == dir % 2;
++	bad_corner_slope |= IsSteepSlope(s);
++	if (bad_corner_slope) {
++		if (GetTileTopHeight(a_corner_tile) > GetTileBottomHeight(b_corner_tile)) {
++			TerraformTile(b_corner_tile, AdaptedComplementSlope(s), &AITile::RaiseTile);
++		} else {
++			TerraformTile(b_corner_tile, s, &AITile::LowerTile);
++		}
++	}
++}
++
++/* In fact this is critical function, and I don't sure it works completly correct */
++/* I've tested it as can, but still not sure */
++void AILocalPathBuilder::BuildCornerSegment(const std::vector<line_iterator> &lines, const std::vector<DiagDirection> &line_directions, uint16 i) const
++{
++	TileIndex t = *lines[i];
++
++	Slope s = ::GetTileSlope(*(lines[i] - 1), NULL);
++	bool is_good_s_slope = s == SLOPE_FLAT;
++	if ((!is_good_s_slope) && ::IsInclinedSlope(s)) {
++		is_good_s_slope = ::GetInclinedSlopeDirection(s) % 2 == line_directions[i-1] % 2;
++	}
++
++	/* This part checks if corner tile is at end of long (len > 1) inclined line */
++	/* If so, it should cut top (if corner is top line tile), or raise bottom (if corner is line's lowest tile) */
++	s = ::GetTileSlope(t, NULL);
++	if (::IsInclinedSlope(s) && ::GetInclinedSlopeDirection(s) % 2 == line_directions[i-1] % 2) {
++		if (is_good_s_slope && GetTileSlope(*(lines[i] - 1), NULL) != SLOPE_FLAT) {
++			if (GetTileTopHeight(t) < GetTileTopHeight( *(lines[i] - 1) )) {
++				TerraformTile(t, AdaptedComplementSlope(s), &AITile::RaiseTile);
++			} else {
++				TerraformTile(t, s, &AITile::LowerTile);
++			}
++		}
++	}
++
++	/* Knowing information about 2 or 3 tiles sometimes not enough to build without errors */
++	/* Sometimes we need to know future route behaviour, and act adequate */
++	/* This part checks if we must lower in future, but will be unable to do so
++	 * because of further corner tiles are located close to each other and this prevent terraforming
++	 * To build route we must lower first tile in this neighbour corners set */
++	uint16 j = 0;
++	for (j = 0; (j + i) < (lines.size() - 1) && *(lines[i] + j) == *lines[i+j]; j++) {}
++	if (j > 1 && i < lines.size() - j) {
++		if (GetTileTopHeight(*(lines[i] + j)) < GetTileTopHeight(t)) {
++			AITile::DemolishTile(t);
++			s = ::GetTileSlope(t, NULL);
++			if (s == SLOPE_FLAT) s = SLOPE_ELEVATED;
++			// Still not always works
++			AITile::LowerTile(t, s);
++		}
++	}
++
++	/* If corner tile for some reason connected with next route tile */
++	/* Terraform previous route tile (if needed) and build road to it */
++	if (AIRoad::AreRoadTilesConnected(t, *(lines[i] + 1))) {
++		if (!is_good_s_slope) {
++			s = ::GetTileSlope(*(lines[i] - 1), NULL);
++			if (GetTileTopHeight(t) > GetTileBottomHeight( *(lines[i] - 1) )) {
++				AITile::RaiseTile(*(lines[i] - 1), AdaptedComplementSlope(s));
++			} else {
++				TerraformTile(*(lines[i] - 1), s, &AITile::LowerTile);
++			}
++		}
++
++		if (AIRoad::AreRoadTilesConnected(t, *(lines[i] - 1))) return;
++		AIRoad::BuildRoad(t, *(lines[i] - 1));
++		return;
++	}
++
++	/* If corner tile connected with previous route tile */
++	/* Terraform next route tile (if needed) and build road to it */
++	if (AIRoad::AreRoadTilesConnected(t, *(lines[i] - 1))) {
++		if (*(lines[i] + 1) == *lines[i+1]) PrepareCorner(t, *(lines[i] + 1), line_directions[i]);
++
++		s = ::GetTileSlope(*(lines[i] + 1), NULL);
++		bool is_good_slope = s == SLOPE_FLAT;
++		if ((!is_good_slope) && ::IsInclinedSlope(s)) {
++			is_good_slope = ::GetInclinedSlopeDirection(s) % 2 == line_directions[i] % 2;
++		}
++
++		if (!is_good_slope) {
++			if (GetTileTopHeight(t) > GetTileBottomHeight( *(lines[i] + 1) )) {
++				AITile::RaiseTile(*(lines[i] + 1), AdaptedComplementSlope(s));
++			} else {
++				TerraformTile(*(lines[i] + 1), s, &AITile::LowerTile);
++			}
++		}
++
++		AIRoad::BuildRoad(t, *(lines[i] + 1));
++		return;
++	}
++
++	/* Following sections is blind search (almost) */
++	/* We build road from current to previous tile, then try to next tile */
++	/* If something goes wrong we erase builded roads, terraform tiles and try again */
++
++
++	/* ---------------------------------- First try ---------------------------------- */
++
++	if (*(lines[i] + 1) == *lines[i+1]) PrepareCorner(t, *(lines[i] + 1), line_directions[i]);
++	if (!AIRoad::BuildRoad(t, *(lines[i] - 1))) {
++		if (*(lines[i] - 1) == *lines[i-1]) {
++			s = GetTileSlope(*(lines[i] - 1), NULL);
++			if (s != GetFoundationSlope(*(lines[i] - 1), NULL)) {
++				AITile::RaiseTile(*(lines[i] - 1), AdaptedComplementSlope(s));
++			}
++		}
++	}
++	if (AIRoad::BuildRoad(t, *(lines[i] + 1))) return;
++
++
++	/* ---------------------------------- Second try ---------------------------------- */
++
++	AITile::DemolishTile(t);
++
++	s = ::GetTileSlope(t, NULL);
++	if (GetTileBottomHeight(*lines[i+1]) > GetTileBottomHeight(t)) {
++		TerraformTile(t, AdaptedComplementSlope(s), &AITile::RaiseTile);
++	} else {
++		TerraformTile(t, s, &AITile::LowerTile);
++	}
++
++	if (*(lines[i] + 1) == *lines[i+1]) PrepareCorner(t, *(lines[i] + 1), line_directions[i]);
++	AIRoad::BuildRoad(t, *(lines[i] - 1));
++	if (AIRoad::BuildRoad(t, *(lines[i] + 1))) return;
++
++
++	/* ---------------------------------- Third try ---------------------------------- */
++
++	AITile::DemolishTile(t);
++	AITile::DemolishTile(*(lines[i] - 1));
++
++	s = ::GetTileSlope(t, NULL);
++	TerraformTile(t, s, &AITile::LowerTile);
++
++	if (*(lines[i] + 1) == *lines[i+1]) PrepareCorner(t, *(lines[i] + 1), line_directions[i]);
++	AIRoad::BuildRoad(t, *(lines[i] - 1));
++	AIRoad::BuildRoad(t, *(lines[i] + 1));
++}
++
++bool TerraformTile(TileIndex tile, Slope to_terraform_slope, bool (*TerraformFunc)(TileIndex , int32 ))
++{
++	assert(IsValidTile(tile));
++	/* Do not terraform flat tiles(no need) and water(cost too much) */
++	if (to_terraform_slope == SLOPE_FLAT || to_terraform_slope == SLOPE_ELEVATED) return true;
++	if (IsTileType(tile, MP_WATER) && IsWater(tile)) return false;
++	if (GetTileBottomHeight(tile) == 0) return true;
++	Slope tile_slope = GetTileSlope(tile, NULL);
++	if (IsSteepSlope(tile_slope)) {
++		Slope s = SLOPE_N;
++		if (tile_slope == SLOPE_STEEP_E) s = SLOPE_E;
++		if (tile_slope == SLOPE_STEEP_W) s = SLOPE_W;
++		if (tile_slope == SLOPE_STEEP_S) s = SLOPE_S;
++		if (!AITile::LowerTile(tile, s)) return false;
++	}
++
++	return (*TerraformFunc)(tile, to_terraform_slope);
++}
+Index: src/ai/api/ai_local_builder.hpp
+===================================================================
+--- src/ai/api/ai_local_builder.hpp	(revision 0)
++++ src/ai/api/ai_local_builder.hpp	(revision 0)
+@@ -0,0 +1,108 @@
++/** @file ai_local_builder.hpp Road pathfinder - road builder section */
++
++#ifndef AI_LOCAL_BUILDER_HPP
++#define AI_LOCAL_BUILDER_HPP
++
++#include "ai_local_pathfinder_strategy.hpp"
++
++#include "../../direction_type.h"
++#include "../../slope_type.h"
++
++#include<vector>
++
++struct Path {
++	std::vector<TileIndex> *tiles;
++};
++
++/**
++ * Class that handles building process of found route.
++ * @note contains not neccessary terraforming code.
++ * If follow logic it should be encapsulated in standalone terraformer class.
++ */
++class AILocalPathBuilder {
++public:
++	/**
++	 * Counstructor.
++	 * @param options pathfinder options.
++	 */
++	AILocalPathBuilder(const PathOptions &s) : m_options(s) {};
++
++	/**
++	 * Builds Route
++	 * @param result struct, containing route description structure.
++	 * @param terraform_all defines: should builder terraform only necessary tiles or all tiles.
++	 * @return true if route has been built. False otherwise.
++	 */
++	bool BuildRoute(void *result, bool terraform_all) const;
++
++private:
++	typedef std::vector<TileIndex>::iterator line_iterator;
++
++	/**
++	 * Contain information about terrain penalties and other options.
++	 */
++	const PathOptions m_options;
++
++	/**
++	 * Try to build bridge from start point, to end point
++	 * @param i_start start tile pointer
++	 * @param i_end end tile pointer
++	 */
++	void BuildBridge(TileIndex start, TileIndex end, DiagDirection dir) const;
++
++	/**
++	 * Build road and tunnels to connect start point with end point
++	 * @param i_start start
++	 * @param i_end end
++	 * @param dir line direction
++	 * @param terraform_all defines: should builder terraform only necessary tiles or all tiles.
++	 * @return true if start and end tiles become connected, else false
++	 */
++	bool BuildLine(line_iterator i_start, line_iterator i_end, DiagDirection dir, bool terraform_all) const;
++
++
++	/**
++	 * Try to build tunnel from start point, to anywhere till end point
++	 * @param i_start tunnel start
++	 * @param i_end end
++	 * @param dir line direction
++	 */
++	void BuildRouteTunnel(line_iterator i_start, line_iterator i_end, DiagDirection dir) const;
++
++	/**
++	 * Split given route into lines.
++	 * @param route list of tiles builded by pathfinder
++	 * @param lines list of route lines
++	 * @param line_directions contains directions of route lines
++	 * @note lines and line_directions will be built by function
++	 */
++	void SplitRouteToLines(std::vector<TileIndex> *route, std::vector<line_iterator> &lines, std::vector<DiagDirection> &line_directions) const;
++
++	/**
++	 * Build route corner segment.
++	 * @param lines list of route lines
++	 * @param line_directions contains directions of route lines
++	 * @param i number of line, which start tile is corner we must to build
++	 */
++	void BuildCornerSegment(const std::vector<line_iterator> &lines, const std::vector<DiagDirection> &line_directions, uint16 i) const;
++
++	/**
++	 * Terraform couple of adjanced corner tiles to make road construction possible.
++	 * @param a_corner_tile first corner tile
++	 * @param b_corner_tile second corner tile
++	 * @param dir direction from first to second tile
++	 */
++	void PrepareCorner(TileIndex a_corner_tile, TileIndex b_corner_tile, DiagDirection dir) const;
++
++	/**
++	 * Terraform couple of adjanced tiles.
++	 * @param a first tile
++	 * @param b second tile
++	 * @param terraform_all defines: should builder terraform only necessary tiles or all tiles.
++	 * @param dir direction from first to second tile
++	 */
++	void TerraformTiles(TileIndex a, TileIndex b, DiagDirection dir, bool terraform_all) const;
++};
++
++bool TerraformTile(TileIndex tile, Slope to_terraform_slope, bool (*TerraformFunc)(TileIndex , int32 ));
++#endif /* AI_LOCAL_BUILDER_HPP */
+Index: src/ai/api/ai_local_map_reader.cpp
+===================================================================
+--- src/ai/api/ai_local_map_reader.cpp	(revision 0)
++++ src/ai/api/ai_local_map_reader.cpp	(revision 0)
+@@ -0,0 +1,387 @@
++/** @file ai_local_map_reader.cpp Road pathfinder - game map related section implementation */
++
++#include "ai_local_map_reader.hpp"
++#include "ai_local_builder.hpp"
++
++#include "ai_map.hpp"
++#include "ai_road.hpp"
++#include "ai_testmode.hpp"
++#include "ai_tile.hpp"
++
++#include "../../clear_map.h"
++#include "../../landscape.h"
++#include "../../rail_map.h"
++#include "../../tree_map.h"
++#include "../../tunnelbridge_map.h"
++
++LocalMapInfo AILocalMapReader::GetMapInfo(TileIndex s, TileIndex e, uint16 additional_range) const
++{
++	if (AIMap::DistanceFromEdge(s) < additional_range) additional_range = AIMap::DistanceFromEdge(s);
++	if (AIMap::DistanceFromEdge(e) < additional_range) additional_range = AIMap::DistanceFromEdge(e);
++
++	uint16 s_x = TileX(s);
++	uint16 e_x = TileX(e);
++	uint16 s_y = TileY(s);
++	uint16 e_y = TileY(e);
++
++	LocalMapInfo m_info;
++	m_info.x_min = (s_x < e_x ? s_x : e_x) - additional_range;
++	m_info.x_max = (s_x < e_x ? e_x : s_x) + additional_range;
++	m_info.y_min = (s_y < e_y ? s_y : e_y) - additional_range;
++	m_info.y_max = (s_y < e_y ? e_y : s_y) + additional_range;
++
++	return m_info;
++}
++
++
++
++uint16 AILocalMapReader::GetSlopePenalty(TileIndex t, DiagDirection dir) const
++{
++	Slope s = ::GetFoundationSlope(t, NULL);
++
++	if (s == SLOPE_FLAT) return 0;
++
++	if (!::IsInclinedSlope(s)) return m_options[PATH_COST_SLOPE];
++
++	if (::GetInclinedSlopeDirection(s) % 2 == dir % 2) return m_options[PATH_COST_GOOD_SLOPE];
++
++	return m_options[PATH_COST_BAD_SLOPE];
++}
++
++uint32 AILocalMapReader::GetTurnPenalty(TileIndex turn_tile, TileIndex after_turn_tile) const
++{
++	/* Do not turn on tiles which can not be flat, or on tiles which can be crossed only with bridge */
++	if (IsNefariousTile(after_turn_tile))
++		if (!AIRoad::AreRoadTilesConnected(turn_tile, after_turn_tile)) return UNREACHABLE;
++
++
++	uint32 penalty = m_options[PATH_COST_TURN];
++
++	/* This is some trick: make tiles with "bad" neighbours less atractive for direction change on it */
++	for (int8 x = -1; x <= 1; x++)
++		for (int8 y = -1; y <= 1; y++) {
++			if (NeedBridge(turn_tile + TileDiffXY(x, y))) penalty += 1;
++			if (!AITile::IsBuildable(turn_tile + TileDiffXY(x, y))) penalty += 1;
++		}
++
++	return penalty;
++}
++
++bool AILocalMapReader::HasTileWrongRoadType(TileIndex t) const
++{
++	/* Only two road types, so no need to invent bicycle */
++	AIRoad::RoadType rt = AIRoad::RoadType((m_options[PATH_ROAD_TYPE] + 1) % 2);
++
++	if (!AIRoad::IsRoadTypeAvailable(rt)) return false;
++
++	return AIRoad::HasRoadType(t, rt);
++}
++
++
++std::pair<TileIndex, uint32> AILocalMapReader::GetNextNodeTile(TileIndex tile, DiagDirection dir) const
++{
++	/* We consider adjacent tile for tunnel/bridge enter is tunnel/bridge exit */
++	/* And we must not check tunnel/bridge with other tiles */
++	if (::IsTileType(tile, MP_TUNNELBRIDGE)) {
++		if (::GetTunnelBridgeTransportType(tile) != TRANSPORT_ROAD)
++			return std::make_pair(tile, UNREACHABLE);
++
++		if (HasTileWrongRoadType(tile)) return std::make_pair(tile, UNREACHABLE);
++
++		if (::GetTunnelBridgeDirection(tile) == dir) {
++			TileIndex exit = ::GetOtherTunnelBridgeEnd(tile);
++			return std::make_pair(exit, ::DistanceManhattan(tile, exit) * m_options[PATH_COST_ROAD]);
++		}
++	}
++
++
++	TileIndex next = ::TileAddByDiagDir(tile, dir);
++	TileIndex t    = tile;
++
++	uint32 d = ::IsValidTile(next) ? GetRouteCostBetweenTwoAdjacentTiles(tile, next) : UNREACHABLE;
++	uint16 bridge_length = 1;
++	uint8 tile_foundation = GetTileBottomHeight(tile);
++	/* If we can't build a route at current(but i've called it "next") tile, then go forward(in given direction) */
++	/* When we stop => here is next route tile(if it valid and distance to it lesser than UNREACHABLE) */
++	while (d < UNREACHABLE && NeedBridge(next) && !AIRoad::AreRoadTilesConnected(t, next)) {
++		t = next;
++		next = ::TileAddByDiagDir(next, dir);
++		bridge_length++;
++
++		if (!::IsValidTile(next)) return std::make_pair(tile, UNREACHABLE);
++
++		if (GetTileTopHeight(t) > tile_foundation) return std::make_pair(tile, UNREACHABLE);
++
++		/* Do not build long bridges over canals */
++		if (bridge_length > 16 && GetTileBottomHeight(next) > 0) return std::make_pair(tile, UNREACHABLE);
++
++		d += (bridge_length > m_options[PATH_MAX_BRIDGE_LENGTH]) ?
++			GetRouteCostBetweenTwoAdjacentTiles(t, next) :
++			2 * (m_options[PATH_COST_CLEAR] + m_options[PATH_COST_GOOD_SLOPE]);
++	}
++
++	/* If we need bridge, but it's impossible to build it => forbid such route */
++	if (t != tile && GetTileBottomHeight(tile) != GetTileBottomHeight(next)) d += UNREACHABLE;
++
++	return std::make_pair(next, d);
++}
++
++
++
++uint32 AILocalMapReader::GetRouteCostBetweenTwoAdjacentTiles(TileIndex a, TileIndex b) const
++{
++	if (!::IsValidTile(a) || !::IsValidTile(b)) return UNREACHABLE;
++	if (::DistanceManhattan(a, b) != 1) return UNREACHABLE;
++
++	/* Get path direction and landscape penalties for it */
++	const DiagDirection dir = (TileX(a) == TileX(b)) ? DIAGDIR_SE : DIAGDIR_NE;
++
++	uint16 a_slope_penalty = GetSlopePenalty(a, dir);
++	uint16 b_slope_penalty = GetSlopePenalty(b, dir);
++
++	uint16 level_cross_penalty = (GetTileTopHeight(a) != GetTileTopHeight(b)) ? m_options[PATH_COST_LEVEL_CROSS] : 0;
++
++	if (GetTileBottomHeight(a) != GetTileBottomHeight(b)) {
++		level_cross_penalty += m_options[PATH_COST_LEVEL_CROSS];
++	} else if (GetTileBottomHeight(a) > 0 && (IsHill(a, b) || IsHole(a, b))) {
++		TileType a_type = GetTileType(a);
++		TileType b_type = GetTileType(b);
++		if ((a_type == MP_CLEAR || a_type == MP_TREES) && (b_type == MP_CLEAR || b_type == MP_TREES)) {
++			a_slope_penalty = m_options[PATH_COST_GOOD_SLOPE];
++			b_slope_penalty = m_options[PATH_COST_GOOD_SLOPE];
++		}
++	}
++
++	int32 result = a_slope_penalty + b_slope_penalty + level_cross_penalty;
++
++	if (AIRoad::IsRoadTile(b) && AIRoad::IsRoadTile(a)) {
++
++		if (HasTileWrongRoadType(a)) result += m_options[PATH_BAD_ROAD_TYPE_PENALTY];
++		if (HasTileWrongRoadType(b)) result += m_options[PATH_BAD_ROAD_TYPE_PENALTY];
++
++		/* If it is two road connected tiles => calculations complete (almost) */
++		if (AIRoad::AreRoadTilesConnected(a, b)) {
++			int16 special_slope_penalty = 0;
++			if (a_slope_penalty > 0)
++				special_slope_penalty += m_options[PATH_COST_GOOD_SLOPE] - a_slope_penalty;
++			if (b_slope_penalty > 0)
++				special_slope_penalty += m_options[PATH_COST_GOOD_SLOPE] - b_slope_penalty;
++	
++			if (NeedBridge(a)) result += m_options[PATH_COST_UNMOVABLE];
++			if (NeedBridge(b)) result += m_options[PATH_COST_UNMOVABLE];
++	
++			return result + 2 * (m_options[PATH_COST_ROAD]) + special_slope_penalty;
++		}
++
++		/* If it is two road tiles, but they not connected */
++		result += m_options[PATH_COST_CLEAR];
++		{
++			AITestMode test_mode;
++			if (!AIRoad::BuildRoad(a, b)) return UNREACHABLE;
++		}
++	}
++
++	/* Else start detail landscape analysis */
++	for (TileIndex t = a, opposite_t = b; ; t = b, opposite_t = a) {
++		if (NeedBridge(t)) {
++			if (!::MayHaveBridgeAbove(t)) return UNREACHABLE;
++			if (::IsBridgeAbove(t)) return UNREACHABLE;
++		}
++
++		switch (GetTileType(t)) {
++			case MP_CLEAR: {
++				result += m_options[PATH_COST_CLEAR];
++
++				ClearGround ground_type = ::GetClearGround(t);
++
++				if (ground_type == CLEAR_FIELDS) result += m_options[PATH_FARM_PENALTY];
++				if (ground_type == CLEAR_SNOW) result += m_options[PATH_SNOW_PENALTY];
++				if (ground_type == CLEAR_DESERT) result += m_options[PATH_DESERT_PENALTY];
++				if (ground_type == CLEAR_ROCKS) result += m_options[PATH_ROCKS_PENALTY];
++
++				break;
++			}
++
++			case MP_TREES: {
++				result += m_options[PATH_COST_CLEAR] + m_options[PATH_TREES_PENALTY];
++
++				if (::GetTreeGround(t) == TREE_GROUND_SNOW_DESERT) {
++					if (GetTreeType(t) == TREE_SUB_ARCTIC) result += m_options[PATH_SNOW_PENALTY];
++					if (GetTreeType(t) == TREE_CACTUS) result += m_options[PATH_DESERT_PENALTY];
++				}
++
++				break;
++			}
++
++			case MP_ROAD: {
++				result += m_options[PATH_COST_ROAD];
++
++				/* Forbid road through road depot */
++				if (::GetRoadTileType(t) == ROAD_TILE_DEPOT) return UNREACHABLE;
++				if (::HasRoadWorks(t)) return UNREACHABLE;
++
++				/* Road cross construction impossible on such tiles: we must forbid it too */
++				if (t == a && a_slope_penalty == m_options[PATH_COST_BAD_SLOPE]) return UNREACHABLE;
++				if (t == b && b_slope_penalty == m_options[PATH_COST_BAD_SLOPE]) return UNREACHABLE;
++
++
++				if (::IsNormalRoad(t) && ::GetDisallowedRoadDirections(t) != DRD_NONE)
++					result += m_options[PATH_COST_UNMOVABLE];
++
++				if (NeedBridge(opposite_t)) {
++					/* Check if can prepare tile for ramp, if not => can't build bridge */
++					AITestMode test_mode;
++					if (!AITile::DemolishTile(t)) return UNREACHABLE;
++				}
++
++				if (HasTileWrongRoadType(t)) result += m_options[PATH_BAD_ROAD_TYPE_PENALTY];
++				break;
++			}
++
++			case MP_RAILWAY: {
++				if (::GetRailTileType(t) != RAIL_TILE_NORMAL) result += m_options[PATH_COST_UNMOVABLE];
++
++				/* Don't build road on any rail if the last's one tile is not flat */
++				if (::GetTileSlope(t, NULL) != SLOPE_FLAT) return UNREACHABLE;
++
++				TrackBits b = ::GetTrackBits(t);
++				char tmp = (b == TRACK_BIT_X) ? 1 + dir % 2 : (b == TRACK_BIT_Y ? dir % 2 : 3);
++				result += (tmp % 2 == 0) ? m_options[PATH_COST_RAIL] : m_options[PATH_COST_UNMOVABLE];
++				break;
++			}
++			case MP_WATER: {
++				/* add penalty for "bad" shore, that require terraforming if build on it */
++				if (a_slope_penalty > m_options[PATH_COST_GOOD_SLOPE])
++					result += m_options[PATH_COST_WATER];
++				if (b_slope_penalty > m_options[PATH_COST_GOOD_SLOPE])
++					result += m_options[PATH_COST_WATER];
++
++
++				result += m_options[PATH_COST_WATER];
++				break;
++			}
++			case MP_HOUSE: {
++				AITestMode test_mode;
++				/* Can't demolish house => forget about road through it */
++				result += AITile::DemolishTile(t) ? m_options[PATH_COST_HOUSE] : UNREACHABLE;
++				break;
++			}
++
++			case MP_STATION:
++
++			case MP_INDUSTRY: result += UNREACHABLE; break;
++
++			case MP_UNMOVABLE: {
++				if (!::IsOwnedLand(t)) return UNREACHABLE;
++				result += m_options[PATH_COST_UNMOVABLE];
++
++				TileType tt = ::GetTileType(opposite_t);
++				if (tt != MP_CLEAR && tt != MP_TREES && !NeedBridge(tt)) return UNREACHABLE;
++				if (::GetTileSlope(t, NULL) != SLOPE_FLAT) return UNREACHABLE;
++				break;
++			}
++
++			case MP_TUNNELBRIDGE: {
++				if (::GetTunnelBridgeTransportType(t) != TRANSPORT_ROAD) return UNREACHABLE;
++				if (HasTileWrongRoadType(t)) return UNREACHABLE;
++
++				/* Only one road possible, when route direction opposite to tunnel/bridge direction */
++				DiagDirection d = ::GetTunnelBridgeDirection(t);
++				if (::TileAddByDiagDir(t, ::ReverseDiagDir(d)) != opposite_t) return UNREACHABLE;
++
++				result += m_options[PATH_COST_ROAD];
++
++				if (::IsTileType(opposite_t, MP_ROAD) && !AIRoad::AreRoadTilesConnected(a, b)) {
++					AITestMode test_mode;
++					if (!AIRoad::BuildRoad(a, b)) return UNREACHABLE;
++					result += m_options[PATH_COST_CLEAR] - m_options[PATH_COST_ROAD];
++				}
++
++			}
++			default: break;
++		}
++		if (t == b) break;
++	}
++	return result;
++}
++
++
++bool AILocalMapReader::NeedBridge(TileIndex t) const
++{
++	TileType tt = GetTileType(t);
++
++	/* Build bridges over water, railway, opponent's owned land and one way roads */
++	if (IsOwnedLandTile(tt) || tt == MP_RAILWAY || (tt == MP_WATER && IsWater(t))) return true;
++
++	if (tt == MP_ROAD && ::IsNormalRoad(t) && ::GetDisallowedRoadDirections(t) != DRD_NONE) return true;
++
++	if (HasTileWrongRoadType(t) && (bool)m_options[PATH_USE_BAD_ROAD_TYPE_TILES] == false) return true;
++
++	return false;
++}
++
++bool AILocalMapReader::IsNefariousTile(TileIndex t) const
++{
++	if (::IsTileType(t, MP_TUNNELBRIDGE)) return false;
++	if (NeedBridge(t)) return true;
++
++	Slope s = ::GetTileSlope(t, NULL);
++	if (s == SLOPE_FLAT) return false;
++
++	if (GetTileBottomHeight(t) == 0 && IsSlopeWithOneCornerRaised(s)) return true;
++	if (GetTileBottomHeight(t) == 0 && IsSteepSlope(s)) return true;
++
++	{
++		AITestMode test_mode;
++		if (TerraformTile(t, s, &AITile::LowerTile)) return false;
++	}
++	{
++		AITestMode test_mode;
++		return !TerraformTile(t, AdaptedComplementSlope(s), &AITile::RaiseTile);
++	}
++}
++
++bool IsHill(TileIndex t1, TileIndex t2)
++{
++	assert(IsValidTile(t1));
++	assert(IsValidTile(t2));
++	int8      dx                     = ::TileX(t1) - ::TileX(t2);
++	int8      dy                     = ::TileY(t1) - ::TileY(t2);
++	TileIndex t                      = (dx == 0) ? (dy < 0 ? t1 : t2) : (dx < 0 ? t1 : t2);
++	uint16    common_corner_1_height = (dy == 0) ? TCH(t, 1, 0) : TCH(t, 0, 1);
++	uint16    common_corner_2_height = TCH(t, 1, 1);
++	uint16    corner_00_height       = TCH(t, 0, 0);
++	uint16    corner_01_height       = (dy == 0) ? TCH(t, 0, 1) : TCH(t, 1, 0);
++	uint16    corner_10_height       = (dy == 0) ? TCH(t, 2, 1) : TCH(t, 1, 2);
++	uint16    corner_11_height       = (dy == 0) ? TCH(t, 2, 0) : TCH(t, 0, 2);
++
++	if (corner_01_height != corner_00_height || corner_11_height != corner_10_height) return false;
++
++	uint16 base_height = corner_00_height;
++	if (base_height != corner_11_height) return false;
++
++	return (common_corner_1_height > base_height || common_corner_2_height > base_height) ? true : false;
++}
++
++bool IsHole(TileIndex t1, TileIndex t2)
++{
++	assert(IsValidTile(t1));
++	assert(IsValidTile(t2));
++	int8      dx                     = ::TileX(t1) - ::TileX(t2);
++	int8      dy                     = ::TileY(t1) - ::TileY(t2);
++	TileIndex t                      = (dx == 0) ? (dy < 0 ? t1 : t2) : (dx < 0 ? t1 : t2);
++	uint16    common_corner_1_height = (dy == 0) ? TCH(t, 1, 0) : TCH(t, 0, 1);
++	uint16    common_corner_2_height = TCH(t, 1, 1);
++	uint16    corner_00_height       = TCH(t, 0, 0);
++	uint16    corner_01_height       = (dy == 0) ? TCH(t, 0, 1) : TCH(t, 1, 0);
++	uint16    corner_10_height       = (dy == 0) ? TCH(t, 2, 1) : TCH(t, 1, 2);
++	uint16    corner_11_height       = (dy == 0) ? TCH(t, 2, 0) : TCH(t, 0, 2);
++
++	if (corner_01_height != corner_00_height || corner_11_height != corner_10_height) return false;
++	
++	uint16 base_height = corner_00_height;
++	if (base_height != corner_11_height) return false;
++
++	return (common_corner_1_height < base_height || common_corner_2_height < base_height) ? true : false;
++}
++
+Index: src/ai/api/ai_local_map_reader.hpp
+===================================================================
+--- src/ai/api/ai_local_map_reader.hpp	(revision 0)
++++ src/ai/api/ai_local_map_reader.hpp	(revision 0)
+@@ -0,0 +1,140 @@
++/** @file ai_local_map_reader.hpp Road pathfinder - game map related section */
++
++#ifndef AI_LOCAL_MAP_READER_HPP
++#define AI_LOCAL_MAP_READER_HPP
++
++#include "ai_local_pathfinder_strategy.hpp"
++
++#include "../../rail_map.h"
++#include "../../road_map.h"
++#include "../../unmovable_map.h"
++#include "../../water_map.h"
++#include <utility>
++
++/**
++* Contains LocalMap borders.
++* LocalMap is part of game map within rectangle, which bounds are indicated by this structure
++*/
++struct LocalMapInfo {
++	uint16 x_min;
++	uint16 y_min;
++	uint16 x_max;
++	uint16 y_max;
++};
++
++/**
++ * Class that handles all game map access functions.
++ * It should be "between" game and pathfinder and provide unification for game map access.
++ */
++class AILocalMapReader {
++public:
++	/**
++	 * Counstructor.
++	 * @param options pathfinder options.
++	 */
++	AILocalMapReader(const PathOptions &options) : m_options(options) {};
++
++	/**
++	 * Construct LocalMapInfo structure for given start and end tiles.
++	 * @param s start route tile.
++	 * @param e end route tile.
++	 * @param additional_range additional LocalMap height and width.
++	 * @return structure that defines area within which we can build roads to connect s and e.
++	 * @see LocalMapInfo
++	 * @note No need to have LocalMapInfo here now,
++	 * but maybe if add to LocalMapInfo structure
++	 * that will hold all distances for all couples of adjanced tiles, it can speedup pathfinder.
++	 * Instead of function call and distance calculation we than just read already calculated value.
++	 * This have sense because if node is tile + direction, we calculate distances in pathfinder at least twice.
++	 * So question is in memory cost.
++	 */
++	LocalMapInfo GetMapInfo(TileIndex s, TileIndex e, uint16 additional_range) const;
++
++	/**
++	 * Goes through map from given node and returns tile that can serve as new node tile, and distance to it.
++	 * This should reduce total amount of nodes to use and reduce algorithm work time.
++	 * @param tile node tile
++	 * @param dir node direction
++	 * @return std::pair.first - next tile, std::pair.second - distance to next tile
++	 * @note @see Node
++	 * @note Next node tile may be not "next tile in given direction". Function skips water tiles for example.
++	 */
++	std::pair<TileIndex, uint32> GetNextNodeTile(TileIndex tile, DiagDirection dir) const;
++
++	/**
++	 * Calculates penalty for changing route direction.
++	 * @param turn_tile corner tile where we want to turn
++	 * @param after_turn_tile next tile after corner tile
++	 * @return number that indicates penalty
++	 * @note if no safe turning possible special constant will be returned (@see UNREACHABLE)
++	 */
++	uint32 GetTurnPenalty(TileIndex turn_tile, TileIndex after_turn_tile) const;
++
++	/**
++	 * Calculates actual distance between neighbouring tiles.
++	 * @param a first tile
++	 * @param b second tile
++	 * @return number that indicates distance
++	 */
++	uint32 GetRouteCostBetweenTwoAdjacentTiles(TileIndex a, TileIndex b) const;
++
++private:
++	/**
++	 * Contain information about terrain penalties and other options.
++	 */
++	const PathOptions m_options;
++
++	/**
++	 * Calculates penalty for non-flat tiles.
++	 * @param t tile to check penalty for
++	 * @param dir direction of route
++	 * @note Same tile may have different penalty if route crosses it in different directions (if tile slope is inclined)
++	 */
++	uint16 GetSlopePenalty(TileIndex t, DiagDirection dir) const;
++
++	/**
++	 * Check if tile has road type we are not building (tram if we build road)
++	 * @param t tile to check
++	 * @return true if tile has road type we are not building, else false
++	 */
++	bool HasTileWrongRoadType(TileIndex t) const;
++
++	/**
++	 * Check if need bridge to go through tile
++	 * @param t tile to check
++	 * @return true if need bridge to go through tile, else false
++	 */
++	bool NeedBridge(TileIndex t) const;
++
++	/**
++	 * Check if tile so bad, that we can't build corners on it
++	 * @param t tile to check
++	 * @return true if tile so bad, that we can't build corners on it, else false
++	 */
++	bool IsNefariousTile(TileIndex t) const;
++};
++
++/* No need in this functions as class members */
++//TileCornerHeight
++inline uint16 TCH(TileIndex t, uint32 x, uint32 y) { return GB(_m[t + TileDiffXY(x, y)].type_height, 0, 4);}
++
++inline uint16 GetTileTopHeight(TileIndex t)
++{
++	const uint32 a = ::TileHeight(t);
++	const uint32 b = ::TileHeight(t + ::TileDiffXY(1, 1));
++	return a != b ? (a > b ? a : b) : (TCH(t, 1, 0) > TCH(t, 0, 1) ? TCH(t, 1, 0) : TCH(t, 0, 1));
++}
++
++inline uint16 GetTileBottomHeight(TileIndex t)
++{
++	const uint32 a = ::TileHeight(t);
++	const uint32 b = ::TileHeight(t + ::TileDiffXY(1, 1));
++	return a != b ? (a < b ? a : b) : (TCH(t, 1, 0) < TCH(t, 0, 1) ? TCH(t, 1, 0) : TCH(t, 0, 1));
++}
++
++inline Slope AdaptedComplementSlope(Slope s) { return (Slope) (0xF ^ s);}
++
++bool IsHill(TileIndex t1, TileIndex t2);
++bool IsHole(TileIndex t1, TileIndex t2);
++
++#endif /* AI_LOCAL_MAP_READER_HPP */
+Index: src/ai/api/ai_local_pathfinder.cpp
+===================================================================
+--- src/ai/api/ai_local_pathfinder.cpp	(revision 0)
++++ src/ai/api/ai_local_pathfinder.cpp	(revision 0)
+@@ -0,0 +1,250 @@
++/** @file ai_local_pathfinder.cpp handles functions of the AILocalPathfinder class */
++
++#include "ai_local_pathfinder.hpp"
++
++#include "ai_road.hpp"
++
++#include <algorithm>
++
++void * AILocalPathFinder::FindRoute(TileIndex s, TileIndex e)
++{
++	if (!::IsValidTile(s) || !::IsValidTile(e)) return NULL;
++	if (m_options[PATH_ROAD_TYPE] > AIRoad::ROADTYPE_TRAM) return NULL;
++	if (!AIRoad::IsRoadTypeAvailable((AIRoad::RoadType)m_options[PATH_ROAD_TYPE])) return NULL;
++
++	/* We will save road type used by ai to restore it after search process */
++	AIRoad::RoadType ai_current_road_type = AIRoad::GetCurrentRoadType();
++
++	AIRoad::SetCurrentRoadType((AIRoad::RoadType)m_options[PATH_ROAD_TYPE]);
++
++
++	void *route = A_Alg(map_reader.GetMapInfo(s, e, m_range), s, e);
++
++
++	AIRoad::SetCurrentRoadType(ai_current_road_type);
++
++	return route;
++}
++
++
++bool AILocalPathFinder::BuildRoute(void *result, bool enable_full_terraforming)
++{
++	//In current revision AIRoad::RoadType does not have ROADTYPE_END value
++	if (m_options[PATH_ROAD_TYPE] > AIRoad::ROADTYPE_TRAM) return false;
++	if (!AIRoad::IsRoadTypeAvailable((AIRoad::RoadType)m_options[PATH_ROAD_TYPE])) return false;
++
++	/* We will save road type used by ai to restore it after building process */
++	AIRoad::RoadType ai_current_road_type = AIRoad::GetCurrentRoadType();
++
++	AIRoad::SetCurrentRoadType((AIRoad::RoadType)m_options[PATH_ROAD_TYPE]);
++
++
++	bool build_result = m_builder.BuildRoute(result, enable_full_terraforming);
++
++
++	AIRoad::SetCurrentRoadType(ai_current_road_type);
++
++	return build_result;
++}
++
++uint16 AILocalPathFinder::GetRouteLength(void *result)
++{
++	if (!IsValidRoute(result)) return 0;
++
++	std::vector<TileIndex> * route = ((Path *)result)->tiles;
++
++	uint16 length = 0;
++	for (uint16 i = 1; i < route->size(); i++) length += ::DistanceManhattan((*route)[i-1], (*route)[i]);
++
++	return length;
++}
++
++void AILocalPathFinder::FreeRoute(void *res)
++{
++	if (res == NULL) return;
++	delete ((Path *)res)->tiles;
++	delete (Path *)res;
++}
++
++Path* AILocalPathFinder::A_Alg(const LocalMapInfo &m_info, TileIndex s, TileIndex e) const
++{
++	const uint16 e_x = ::TileX(e);
++	const uint16 e_y = ::TileY(e);
++
++	const uint16 s_x = ::TileX(s);
++	const uint16 s_y = ::TileY(s);
++
++	const uint16 mx = m_info.x_min;
++	const uint16 my = m_info.y_min;
++
++	const uint16 dx = m_info.x_max - mx + 1;
++	const uint16 dy = m_info.y_max - my + 1;
++
++	/* Just to be sure we will not face any surpises */
++	if (dx <= 1 || dy <= 1) return NULL;
++	if (m_info.x_max <= s_x || s_x <= mx) return NULL;
++	if (m_info.y_max <= s_y || s_y <= my) return NULL;
++	if (m_info.x_max <= e_x || e_x <= mx) return NULL;
++	if (m_info.y_max <= e_y || e_y <= my) return NULL;
++
++	/* We will try to achieve maximal perfomance, but this requires a lot of memory */
++	/* We save info about node in some_array (or/and read info from some_array) */
++	/* This arrays give us constant access time to associated data, instead of log time with other approaches */
++	/* This is 3D arrays: x - this is x coordinate of node tile in LocalMap, y - y coordinate, z - node direction */
++
++	/* is_open - if node is in open container => is_open<node> is true */
++	/* parent - parent<node_A> is direction of parent node to node_A (so we can restore route from a single node) */
++	/* f - hold nodes F = G + H value */
++
++	std::vector< std::vector < bool > > helper_is_open_line(dy, std::vector<bool>(4, false));
++	std::vector< std::vector < std::vector < bool > > > is_open(dx, helper_is_open_line);
++
++	/* Using uint8 instead of DiagDirection because sizeof(uint8) is 1 and sizeof(DiagDirection) is 4 */
++	std::vector< std::vector < uint8 > > helper_parent_line(dy, std::vector<uint8>(4, 0));
++	std::vector< std::vector < std::vector < uint8 > > > parent(dx, helper_parent_line);
++
++	/* We will set 2 * UNREACHABLE as default value to check if node is in closed list:
++	 * If we use node already then it's f value will be lesser than 2 * UNREACHABLE */
++	std::vector< std::vector < uint32 > > helper_f_line(dy, std::vector<uint32>(4, 2 * UNREACHABLE));
++	std::vector< std::vector < std::vector < uint32 > > > f(dx, helper_f_line);
++
++	/* Open nodes container, it keeps nodes sorted through f value */
++	NodeList open_nodes = NodeList(CompareNode(&f, mx, my));
++
++	/* Set up initial parametres */
++	for (DiagDirection dir = DIAGDIR_BEGIN; dir < DIAGDIR_END; dir++) {
++		f[s_x-mx][s_y-my][dir] = Heuristic(s, ::TileAddByDiagDir(s, dir), e);
++		is_open[s_x-mx][s_y-my][dir] = true;
++		parent[s_x-mx][s_y-my][dir] = dir;
++		open_nodes.insert((Node){s_x, s_y, dir});
++	}
++
++	DiagDirection finish_dir = INVALID_DIAGDIR;
++
++	/* Main alg loop */
++	while (!open_nodes.empty()) {
++
++		/* Select best node. It's f value is lowest among other nodes */
++		Node      best_node = *open_nodes.begin();
++		TileIndex best_tile = ::TileXY(best_node.x, best_node.y);
++		uint32    best_f    = f[best_node.x-mx][best_node.y-my][best_node.dir];
++
++		/* Route has been found (current node is end node) => stop */
++		if (best_tile == e) {
++			finish_dir = best_node.dir;
++			break;
++		}
++
++		/* Remove best node from open list */
++		open_nodes.erase(*open_nodes.begin());
++		is_open[best_node.x - mx][best_node.y - my][best_node.dir] = false;
++
++		/* Get next route tile and distance to it */
++		std::pair<TileIndex, uint32> next_tile_info = map_reader.GetNextNodeTile(best_tile, best_node.dir);
++
++		if (next_tile_info.second >= UNREACHABLE) continue;
++
++		/* Next route tile (candidate at least) */
++		/* If we go from best node tile in best node direction, then it's first tile where we can build */
++		TileIndex next_tile = next_tile_info.first;
++
++		if (m_info.x_max < ::TileX(next_tile) || ::TileX(next_tile) < mx) continue;
++		if (m_info.y_max < ::TileY(next_tile) || ::TileY(next_tile) < my) continue;
++
++		const uint16 n_x = ::TileX(next_tile) - mx;
++		const uint16 n_y = ::TileY(next_tile) - my;
++
++		/* Distance from s to next node tile */
++		uint32 new_g = best_f - Heuristic(best_tile, next_tile, e) + next_tile_info.second;
++
++		/* This is very important. Here we check if next tile will require bridge to go through it */
++		/* But if we need to rotate route at tile which should be new bridge ramp => bridge impossible */
++		/* If so, we forbid it and prevent many problems */
++		TileIndex best_plus  = ::TileAddByDiagDir(best_tile, best_node.dir);
++		TileIndex next_minus = ::TileAddByDiagDir(next_tile, ReverseDiagDir(best_node.dir));
++
++		bool no_turn = map_reader.GetTurnPenalty(best_tile, best_plus) >= UNREACHABLE;
++		if (!no_turn) no_turn = map_reader.GetTurnPenalty(next_tile, next_minus) >= UNREACHABLE;
++
++
++		/* Checking adjanced tiles */
++		for (DiagDirection dir = DIAGDIR_BEGIN; dir < DIAGDIR_END; dir++) {
++			/* Going from A to B, and then from B to A has no sense */
++			if (dir == ::ReverseDiagDir(best_node.dir)) continue;
++
++			/* If we need bridge, but will be unable build it => no way to this node */
++			if (dir != best_node.dir && no_turn) continue;
++
++			/* Do not open node again if it already closed */
++			if (is_open[n_x][n_y][dir] == false && f[n_x][n_y][dir] != 2 * UNREACHABLE) continue;
++
++			/* Next tile after next_tile */
++			/* We will use it to calculate h and earlier check for ability to further build route */
++			TileIndex next_next = ::TileAddByDiagDir(next_tile, dir);
++
++			if (m_info.x_max < ::TileX(next_next) || ::TileX(next_next) < mx) continue;
++			if (m_info.y_max < ::TileY(next_next) || ::TileY(next_next) < my) continue;
++
++			uint32 new_h = Heuristic(next_tile, next_next, e);
++
++			/* Add penalty for road corner */
++			uint32 turn_cost = best_node.dir != dir ? map_reader.GetTurnPenalty(next_tile, next_next) : 0;
++
++			/* If we need bridge, but will be unable build it => no way to this node */
++			if (turn_cost >= UNREACHABLE) continue;
++
++			/* If new route through node is better than old route => update all corresponding node info */
++			if ((new_g + turn_cost) < (f[n_x][n_y][dir] - new_h)) {
++				Node next_node = {n_x + mx, n_y + my, dir};
++				if (is_open[n_x][n_y][dir])
++					open_nodes.erase(find(open_nodes.begin(), open_nodes.end(), next_node));
++
++				f[n_x][n_y][dir] = new_g + new_h + turn_cost;
++				parent[n_x][n_y][dir] = best_node.dir;
++
++				/* Insert next node into open container */
++				open_nodes.insert(next_node);
++				is_open[n_x][n_y][dir] = true;
++			}
++		}
++	}
++
++	if (finish_dir == INVALID_DIAGDIR) return NULL;
++	if (f[e_x-mx][e_y-my][finish_dir] >= UNREACHABLE) return NULL;
++
++	/* Save found route into special structure and return it */
++	Path *route = new Path;
++	route->tiles = new std::vector<TileIndex>();
++
++	bool is_valid_route = false;
++	for (Node node = (Node){e_x, e_y, finish_dir}; ;) {
++		TileIndex node_tile = ::TileXY(node.x, node.y);
++
++		route->tiles->push_back(node_tile);
++
++		if (node_tile == s) {
++			is_valid_route = true;
++			break;
++		}
++
++		DiagDirection parent_dir = (DiagDirection)parent[node.x - mx][node.y - my][node.dir];
++
++		if (!(parent_dir < DIAGDIR_END)) break;
++
++		TileIndex parent_tile = map_reader.GetNextNodeTile(node_tile, ReverseDiagDir(parent_dir)).first;
++
++		if (!::IsValidTile(parent_tile)) break;
++		if (m_info.x_max < ::TileX(parent_tile) || ::TileX(parent_tile) < mx) break;
++		if (m_info.y_max < ::TileY(parent_tile) || ::TileY(parent_tile) < my) break;
++
++		node = (Node){::TileX(parent_tile), ::TileY(parent_tile), parent_dir};
++	}
++
++	if (!is_valid_route) {
++		delete route->tiles;
++		delete route;
++		return NULL;
++	}
++
++	return route;
++}
+Index: src/ai/api/ai_local_pathfinder.hpp
+===================================================================
+--- src/ai/api/ai_local_pathfinder.hpp	(revision 0)
++++ src/ai/api/ai_local_pathfinder.hpp	(revision 0)
+@@ -0,0 +1,157 @@
++/** @file ai_local_pathfinder.hpp Road pathfinder */
++
++#ifndef AI_LOCAL_PATHFINDER_HPP
++#define AI_LOCAL_PATHFINDER_HPP
++
++#include "ai_local_builder.hpp"
++#include "ai_local_map_reader.hpp"
++#include "ai_local_pathfinder_strategy.hpp"
++
++#include "ai_object.hpp"
++
++#include "../../map_func.h"
++
++#include <vector>
++#include <set>
++
++/**
++ * A road pathfinder based on A* algoritm.
++ * First it determines rectangle area containing start and end tiles.
++ * Consider this area as graph (let's name it "LocalMap"), pathfinder then applies A* algoritm to it.
++ * And returns recieved result.
++ */
++class AILocalPathFinder : public AIObject {
++	public:
++
++	/**
++	 * The name of the class, needed by several sub-processes.
++	 */
++	static const char *GetClassName() { return "AILocalPathFinder"; }
++
++	/**
++	 * Constructor.
++	 * @param pathfinder_strategy config object, defines pathfinder options.
++	 * @param additional_range additional LocalMap height and width.
++	 */
++	AILocalPathFinder(AILocalPathFinderStrategy *pathfinder_strategy, uint32 additional_range) :  m_options(pathfinder_strategy->GetPathOptions()), m_builder(m_options), map_reader(m_options), m_range(additional_range + 8) {};
++
++	/**
++	 * Find a route between 2 points.
++	 * @param s First of tiles you want to connect. We will start search from this tile.
++	 * @param e Second of tiles you want to connect. This will be new route end.
++	 * @return internal structure about how to make the route, or NULL if no route was found.
++	 */
++	void *FindRoute(TileIndex s, TileIndex e);
++
++	/**
++	 * Build route, found by FindRoute.
++	 * @param result a structure returned by FindRoute.
++	 * @return true if succed, else false.
++	 */
++	bool BuildRoute(void *result, bool enable_full_terraforming);
++
++
++	void FreeRoute(void *result);
++
++	/**
++	 * Check if FindRoute has found valid route.
++	 * @param result a structure returned by FindRoute.
++	 * @return true if route valid, else false.
++	 */
++	static bool IsValidRoute(void *result) { return result != NULL;};
++
++	/**
++	 * Obtain route length.
++	 * @param result a structure returned by FindRoute.
++	 * @return length of given route, or zero if it is invalid.
++	 */
++	uint16 GetRouteLength(void *result);
++
++	~AILocalPathFinder() {}
++	private:
++
++	/**
++	 * A node for A* algorithm.
++	 * A* works in terms of "nodes". This struct describe what is "node" for our A* implementation.
++	 * Our route node consist of route tile, represented by x and y coordinates,
++	 * and direction, that points to next route node tile.
++	 */
++	struct Node {
++		uint16 x;
++		uint16 y;
++		DiagDirection dir;
++		inline bool operator ==(const Node &n) const {
++			return this->x == n.x && this->y == n.y && this->dir == n.dir;
++		}
++	};
++
++	/**
++	 * Special structure required to compare nodes in container.
++	 */
++	struct CompareNode : public std::binary_function <Node, Node, bool>
++	{
++		std::vector< std::vector< std::vector<uint32> > >*distance_container;
++		uint16 x_shift;
++		uint16 y_shift;
++
++		CompareNode(std::vector< std::vector< std::vector<uint32> > > *f, uint16 x, uint16 y) : std::binary_function <Node, Node, bool>() {
++			distance_container = f;
++			x_shift = x;
++			y_shift = y;
++		}
++
++		bool operator() (const Node &n1, const Node &n2) const {
++			uint32 d1 = (*distance_container)[n1.x - x_shift][n1.y - y_shift][n1.dir];
++			uint32 d2 = (*distance_container)[n2.x - x_shift][n2.y - y_shift][n2.dir];
++			if (d1 != d2) return d1 < d2;
++			if (n1.x != n2.x) return n1.x < n2.x;
++			if (n1.y != n2.y) return n1.y < n2.y;
++			return n1.dir < n2.dir;
++		}
++	};
++
++	typedef std::set<Node, CompareNode> NodeList;
++
++	/**
++	* Contain information about terrain penalties and other options.
++	*/
++	const PathOptions m_options;
++
++	/**
++	* Builds route.
++	*/
++	const AILocalPathBuilder m_builder;
++
++	/**
++	* Calculates distances in map.
++	*/
++	const AILocalMapReader map_reader;
++
++	/**
++	* Defines graph size.
++	*/
++	const uint16 m_range;
++
++	/**
++	* Calculate heuristic.
++	* @param t tile, which heuristic we want to know
++	* @param p previous tile to tile t (in route)
++	* @param e route end point tile
++	*/
++	uint32 Heuristic (TileIndex t, TileIndex n, TileIndex e) const {
++		uint32 result = 2 * DistanceManhattan(n, e) * m_options[PATH_COST_ROAD];
++		if (DistanceManhattan(t, e) < DistanceManhattan(n, e))
++			result += 2 * (m_options[PATH_COST_TURN] + m_options[PATH_COST_ROAD]);
++		return result;
++	}
++
++	/**
++	* A* algorithm.
++	* @param m_info LocalMap coordinates
++	* @param s path start tile
++	* @param e path end tile
++	* @return Path structure, containing path, or NULL
++	*/
++	Path* A_Alg(const LocalMapInfo &m_info, TileIndex s, TileIndex e) const;
++};
++#endif /* AI_LOCAL_PATHFINDER_HPP */
+Index: src/ai/api/ai_local_pathfinder.hpp.sq
+===================================================================
+--- src/ai/api/ai_local_pathfinder.hpp.sq	(revision 0)
++++ src/ai/api/ai_local_pathfinder.hpp.sq	(revision 0)
+@@ -0,0 +1,24 @@
++#include "ai_local_pathfinder.hpp"
++namespace SQConvert {
++	/* Allow AILocalPathFinder to be used as Squirrel parameter */
++	template <> AILocalPathFinder *GetParam(ForceType<AILocalPathFinder *>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return  (AILocalPathFinder *)instance; }
++	template <> AILocalPathFinder &GetParam(ForceType<AILocalPathFinder &>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return *(AILocalPathFinder *)instance; }
++	template <> const AILocalPathFinder *GetParam(ForceType<const AILocalPathFinder *>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return  (AILocalPathFinder *)instance; }
++	template <> const AILocalPathFinder &GetParam(ForceType<const AILocalPathFinder &>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return *(AILocalPathFinder *)instance; }
++	template <> int Return<AILocalPathFinder *>(HSQUIRRELVM vm, AILocalPathFinder *res) { if (res == NULL) { sq_pushnull(vm); return 1; } res->AddRef(); Squirrel::CreateClassInstanceVM(vm, "AILocalPathFinder", res, NULL, DefSQDestructorCallback<AILocalPathFinder>); return 1; }
++}; // namespace SQConvert
++void SQAILocalPathFinder_Register(Squirrel *engine) {
++	DefSQClass <AILocalPathFinder> SQAILocalPathFinder("AILocalPathFinder");
++	SQAILocalPathFinder.PreRegister(engine);
++	SQAILocalPathFinder.AddConstructor<void (AILocalPathFinder::*)(AILocalPathFinderStrategy *pathfinder_strategy, uint32 additional_range), 3>(engine, "xxi");
++
++	SQAILocalPathFinder.DefSQStaticMethod(engine, &AILocalPathFinder::GetClassName, "GetClassName", 1, "x");
++	SQAILocalPathFinder.DefSQStaticMethod(engine, &AILocalPathFinder::IsValidRoute,    "IsValidRoute",     2, "xp");
++
++	SQAILocalPathFinder.DefSQMethod(engine, &AILocalPathFinder::FindRoute,       "FindRoute",        3, "xii");
++	SQAILocalPathFinder.DefSQMethod(engine, &AILocalPathFinder::GetRouteLength,  "GetRouteLength",   2, "xp");
++	SQAILocalPathFinder.DefSQMethod(engine, &AILocalPathFinder::BuildRoute,      "BuildRoute",       3, "xpb");
++	SQAILocalPathFinder.DefSQMethod(engine, &AILocalPathFinder::FreeRoute,       "FreeRoute",        2, "xp");
++
++	SQAILocalPathFinder.PostRegister(engine);
++}
+Index: src/ai/api/ai_local_pathfinder_strategy.hpp
+===================================================================
+--- src/ai/api/ai_local_pathfinder_strategy.hpp	(revision 0)
++++ src/ai/api/ai_local_pathfinder_strategy.hpp	(revision 0)
+@@ -0,0 +1,251 @@
++/** @file ai_local_pathfinder_strategy.hpp Holds different pre-configured options for AILocalPathFinder class */
++
++#ifndef AI_LOCAL_PATHFINDER_STRATEGY_HPP
++#define AI_LOCAL_PATHFINDER_STRATEGY_HPP
++
++#include "ai_object.hpp"
++#include "../../road_map.h"
++#include "../../road_type.h"
++
++#include <vector>
++
++/**
++ * "Machine infinity".
++ * This number indicates "infinite" distance between two map points.
++ * If distance between tiles A and B is greater than this number, we assume that A and B can not be conected by any route.
++ */
++static const uint32 UNREACHABLE = 1000000;
++
++typedef std::vector<uint32> PathOptions;
++
++//This is just indexes. DO NOT EDIT IT TO CHANGE PATHFINDER OPTIONS!!!
++/**
++ * Enumeration for the available pathfinder options
++ *
++ * This is just indexes. You can use them to change associated values from squirrel
++ * @see SetPathFinderOption
++ */
++enum AVAILABLE_PATHFINDER_OPTIONS {
++	PATH_BEGIN                   =  0,
++	PATH_COST_CLEAR              =  0, //!< Defines cost of clear tile for pathfinding algorithm
++	PATH_COST_ROAD               =  1, //!< Cost of road tile
++	PATH_COST_RAIL               =  2, //!< Cost of rail tile
++	PATH_COST_SLOPE              =  3, //!< Cost of not inclined, but sloped tile
++	PATH_COST_GOOD_SLOPE         =  4, //!< Cost of inclined sloped tile, which is inclined in direction of route
++	PATH_COST_BAD_SLOPE          =  5, //!< Cost of inclined sloped tile, which is inclined not in direction of route
++	PATH_COST_HOUSE              =  6, //!< Cost of tile with house
++	PATH_COST_WATER              =  7, //!< Cost of water tile
++	PATH_COST_TURN               =  8, //!< Additional cost for road corners
++	PATH_COST_UNMOVABLE          =  9, //!< Cost of tile owned by other player
++	PATH_COST_LEVEL_CROSS        = 10, //!< Penalty for moving via hills
++	PATH_MAX_TUNNEL_LENGTH       = 11, //!< Defines how long can be tunnels built by pathfinder
++	PATH_MAX_BRIDGE_LENGTH       = 12, //!< Defines max "free" bridge length
++	PATH_FARM_PENALTY            = 13, //!< Penalty for farm on clear tile
++	PATH_SNOW_PENALTY            = 14, //!< Penalty for snow tile
++	PATH_DESERT_PENALTY          = 15, //!< Penalty for desert tile
++	PATH_ROCKS_PENALTY           = 16, //!< Penalty for rocks on clear tile
++	PATH_TREES_PENALTY           = 17, //!< Penalty for trees
++	PATH_USE_ON_TRACK_STATIONS   = 18, //not used now
++	PATH_ROAD_TYPE               = 19, //!< Defines what for you want route to be found: for road connection, or for tram
++	PATH_USE_BAD_ROAD_TYPE_TILES = 20, //!< Defines: should bridges be built(always)  over tram way if you build road
++	PATH_BAD_ROAD_TYPE_PENALTY   = 21, //!< Penalty for tram way (if you build road, and for road if you build tram)
++	PATH_END,
++};
++
++/**
++ * Base class. It is ment as parent-class for real implementation
++ * so all options have a general interface, but can have different backends.
++ */
++class AILocalPathFinderStrategy : public AIObject {
++public :
++	static const char *GetClassName() { return "AILocalPathFinderStrategy"; }
++
++	AILocalPathFinderStrategy() : outer_options(PathOptions(PATH_END, UNREACHABLE + 1)) {};
++
++	PathOptions GetPathOptions() const {
++		PathOptions result = GetDefaultOptions();
++
++		for (uint32 i = PATH_BEGIN; i < PATH_END; i++)
++			if (result[i] != outer_options[i] && outer_options[i] != UNREACHABLE + 1)
++				result[i] = outer_options[i];
++
++		return result;
++	};
++
++	/**
++	 * Set pathfinder option.
++	 * @param option one of available pathfinder options
++	 * @param value new option value
++	 */
++	void SetPathFinderOption(uint32 option, uint32 value) {
++		outer_options[option] = (value <= UNREACHABLE) ? value : UNREACHABLE;
++	};
++
++protected:
++	/**
++	 * Defines default pathfinder options for each strategy implementation.
++	 * @return defualt strategy options
++	 */
++	virtual PathOptions GetDefaultOptions() const = 0;
++
++private :
++	PathOptions outer_options;
++};
++
++/**
++ * Checks if road already built
++ * Run pathfinder with this option and use IsValidRoute() method on result
++ */
++class AIHasPathStrategy : public AILocalPathFinderStrategy {
++	public :
++	static const char *GetClassName() { return "AIHasPathStrategy"; }
++
++	/* virtual */ PathOptions GetDefaultOptions() const
++	{
++		PathOptions default_options(PATH_END);
++
++		default_options[PATH_COST_CLEAR]            = UNREACHABLE;
++		default_options[PATH_COST_ROAD]             = 2;
++		default_options[PATH_COST_RAIL]             = UNREACHABLE;
++		default_options[PATH_COST_SLOPE]            = 1;
++		default_options[PATH_COST_GOOD_SLOPE]       = 0;
++		default_options[PATH_COST_BAD_SLOPE]        = 2;
++		default_options[PATH_COST_HOUSE]            = UNREACHABLE;
++		default_options[PATH_COST_WATER]            = UNREACHABLE;
++		default_options[PATH_COST_TURN]             = 2;
++		default_options[PATH_COST_UNMOVABLE]        = UNREACHABLE;
++		default_options[PATH_COST_LEVEL_CROSS]      = 2;
++		default_options[PATH_MAX_TUNNEL_LENGTH]     = 0;
++		default_options[PATH_MAX_BRIDGE_LENGTH]     = 0;
++		default_options[PATH_FARM_PENALTY]          = 0;
++		default_options[PATH_SNOW_PENALTY]          = 0;
++		default_options[PATH_DESERT_PENALTY]        = 0;
++		default_options[PATH_ROCKS_PENALTY]         = 0;
++		default_options[PATH_TREES_PENALTY]         = 0;
++		default_options[PATH_USE_ON_TRACK_STATIONS] = false;
++		default_options[PATH_ROAD_TYPE]             = ROADTYPE_ROAD;
++		default_options[PATH_USE_BAD_ROAD_TYPE_TILES] = true;
++		default_options[PATH_BAD_ROAD_TYPE_PENALTY] = 0;
++
++		return default_options;
++	};
++};
++
++/**
++ * Defines options for path so cheap as possible, no matter to it real length.
++ */
++class AICheapPathFinderStrategy : public AILocalPathFinderStrategy {
++	public :
++	static const char *GetClassName() { return "AICheapPathFinderStrategy"; }
++
++	/* virtual */ PathOptions GetDefaultOptions() const
++	{
++		PathOptions default_options(PATH_END);
++
++		default_options[PATH_COST_CLEAR]            = 8;
++		default_options[PATH_COST_ROAD]             = 2;
++		default_options[PATH_COST_RAIL]             = 16;
++		default_options[PATH_COST_SLOPE]            = 14;
++		default_options[PATH_COST_GOOD_SLOPE]       = 0;
++		default_options[PATH_COST_BAD_SLOPE]        = 28;
++		default_options[PATH_COST_HOUSE]            = 128;
++		default_options[PATH_COST_WATER]            = 64;
++		default_options[PATH_COST_TURN]             = 2;
++		default_options[PATH_COST_UNMOVABLE]        = 4096;
++		default_options[PATH_COST_LEVEL_CROSS]      = 16;
++		default_options[PATH_MAX_TUNNEL_LENGTH]     = 5;
++		default_options[PATH_MAX_BRIDGE_LENGTH]     = 5;
++		default_options[PATH_FARM_PENALTY]          = 8;
++		default_options[PATH_SNOW_PENALTY]          = 2;
++		default_options[PATH_DESERT_PENALTY]        = 2;
++		default_options[PATH_ROCKS_PENALTY]         = 4;
++		default_options[PATH_TREES_PENALTY]         = 0;
++		default_options[PATH_USE_ON_TRACK_STATIONS] = false;
++		default_options[PATH_ROAD_TYPE]             = ROADTYPE_ROAD;
++		default_options[PATH_USE_BAD_ROAD_TYPE_TILES] = true;
++		default_options[PATH_BAD_ROAD_TYPE_PENALTY] = 16;
++
++		return default_options;
++	};
++};
++
++/**
++ * Defines "default" options.
++ */
++class AIDefaultPathFinderStrategy : public AILocalPathFinderStrategy {
++	public :
++	static const char *GetClassName() { return "AIDefaultPathFinderStrategy"; }
++
++	/* virtual */ PathOptions GetDefaultOptions() const
++	{
++		PathOptions default_options(PATH_END);
++
++		default_options[PATH_COST_CLEAR]            = 8;
++		default_options[PATH_COST_ROAD]             = 4;
++		default_options[PATH_COST_RAIL]             = 10;
++		default_options[PATH_COST_SLOPE]            = 6;
++		default_options[PATH_COST_GOOD_SLOPE]       = 2;
++		default_options[PATH_COST_BAD_SLOPE]        = 10;
++		default_options[PATH_COST_HOUSE]            = 128;
++		default_options[PATH_COST_WATER]            = 24;
++		default_options[PATH_COST_TURN]             = 14;
++		default_options[PATH_COST_UNMOVABLE]        = 4096;
++		default_options[PATH_COST_LEVEL_CROSS]      = 14;
++		default_options[PATH_MAX_TUNNEL_LENGTH]     = 10;
++		default_options[PATH_MAX_BRIDGE_LENGTH]     = 10;
++		default_options[PATH_FARM_PENALTY]          = 4;
++		default_options[PATH_SNOW_PENALTY]          = 1;
++		default_options[PATH_DESERT_PENALTY]        = 1;
++		default_options[PATH_ROCKS_PENALTY]         = 2;
++		default_options[PATH_TREES_PENALTY]         = 0;
++		default_options[PATH_USE_ON_TRACK_STATIONS] = false;
++		default_options[PATH_ROAD_TYPE]             = ROADTYPE_ROAD;
++		default_options[PATH_USE_BAD_ROAD_TYPE_TILES] = false;
++		default_options[PATH_BAD_ROAD_TYPE_PENALTY] = 10;
++
++		return default_options;
++	};
++};
++
++/**
++ * Defines options for path so straight as possible, no matter to it cost.
++ * @note Use with caution!
++ */
++class AIStraightPathFinderStrategy : public AILocalPathFinderStrategy {
++	public :
++	static const char *GetClassName() { return "AIStraightPathFinderStrategy"; }
++
++	/* virtual */ PathOptions GetDefaultOptions() const
++	{
++		PathOptions default_options(PATH_END);
++
++		default_options[PATH_COST_CLEAR]            = 8;
++		default_options[PATH_COST_ROAD]             = 6;
++		default_options[PATH_COST_RAIL]             = 8;
++		default_options[PATH_COST_SLOPE]            = 1;
++		default_options[PATH_COST_GOOD_SLOPE]       = 0;
++		default_options[PATH_COST_BAD_SLOPE]        = 2;
++		default_options[PATH_COST_HOUSE]            = 128;
++		default_options[PATH_COST_WATER]            = 16;
++		default_options[PATH_COST_TURN]             = 1000;
++		default_options[PATH_COST_UNMOVABLE]        = 4096;
++		default_options[PATH_COST_LEVEL_CROSS]      = 2;
++		default_options[PATH_MAX_TUNNEL_LENGTH]     = 15;
++		default_options[PATH_MAX_BRIDGE_LENGTH]     = 15;
++		default_options[PATH_FARM_PENALTY]          = 0;
++		default_options[PATH_SNOW_PENALTY]          = 0;
++		default_options[PATH_DESERT_PENALTY]        = 0;
++		default_options[PATH_ROCKS_PENALTY]         = 0;
++		default_options[PATH_TREES_PENALTY]         = 0;
++		default_options[PATH_USE_ON_TRACK_STATIONS] = false;
++		default_options[PATH_ROAD_TYPE]             = ROADTYPE_ROAD;
++		default_options[PATH_USE_BAD_ROAD_TYPE_TILES] = true;
++		default_options[PATH_BAD_ROAD_TYPE_PENALTY] = 8;
++
++		return default_options;
++	};
++
++};
++
++#endif /* AI_LOCAL_PATHFINDER_STRATEGY_HPP */
++
+Index: src/ai/api/ai_local_pathfinder_strategy.hpp.sq
+===================================================================
+--- src/ai/api/ai_local_pathfinder_strategy.hpp.sq	(revision 0)
++++ src/ai/api/ai_local_pathfinder_strategy.hpp.sq	(revision 0)
+@@ -0,0 +1,130 @@
++#include "ai_local_pathfinder_strategy.hpp"
++namespace SQConvert {
++	/* Allow AILocalPathFinderStrategy to be used as Squirrel parameter */
++	template <> AILocalPathFinderStrategy *GetParam(ForceType<AILocalPathFinderStrategy *>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return  (AILocalPathFinderStrategy *)instance; }
++	template <> AILocalPathFinderStrategy &GetParam(ForceType<AILocalPathFinderStrategy &>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return *(AILocalPathFinderStrategy *)instance; }
++	template <> const AILocalPathFinderStrategy *GetParam(ForceType<const AILocalPathFinderStrategy *>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return  (AILocalPathFinderStrategy *)instance; }
++	template <> const AILocalPathFinderStrategy &GetParam(ForceType<const AILocalPathFinderStrategy &>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return *(AILocalPathFinderStrategy *)instance; }
++	template <> int Return<AILocalPathFinderStrategy *>(HSQUIRRELVM vm, AILocalPathFinderStrategy *res) { if (res == NULL) { sq_pushnull(vm); return 1; } res->AddRef(); Squirrel::CreateClassInstanceVM(vm, "AILocalPathFinderStrategy", res, NULL, DefSQDestructorCallback<AILocalPathFinderStrategy>); return 1; }
++}; // namespace SQConvert
++void SQAILocalPathFinderStrategy_Register(Squirrel *engine) {
++	DefSQClass <AILocalPathFinderStrategy> SQAILocalPathFinderStrategy("AILocalPathFinderStrategy");
++	SQAILocalPathFinderStrategy.PreRegister(engine);
++
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_COST_CLEAR,              "PATH_COST_CLEAR");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_COST_ROAD,               "PATH_COST_ROAD");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_COST_RAIL,               "PATH_COST_RAIL");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_COST_SLOPE,              "PATH_COST_SLOPE");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_COST_GOOD_SLOPE,         "PATH_COST_GOOD_SLOPE");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_COST_BAD_SLOPE,          "PATH_COST_BAD_SLOPE");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_COST_HOUSE,              "PATH_COST_HOUSE");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_COST_TURN,               "PATH_COST_TURN");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_COST_UNMOVABLE,          "PATH_COST_UNMOVABLE");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_COST_LEVEL_CROSS,        "PATH_COST_LEVEL_CROSS");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_MAX_TUNNEL_LENGTH,       "PATH_MAX_TUNNEL_LENGTH");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_MAX_BRIDGE_LENGTH,       "PATH_MAX_BRIDGE_LENGTH");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_FARM_PENALTY,            "PATH_FARM_PENALTY");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_SNOW_PENALTY,            "PATH_SNOW_PENALTY");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_DESERT_PENALTY,          "PATH_DESERT_PENALTY");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_ROCKS_PENALTY,           "PATH_ROCKS_PENALTY");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_USE_ON_TRACK_STATIONS,   "PATH_USE_ON_TRACK_STATIONS");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_ROAD_TYPE,               "PATH_ROAD_TYPE");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_USE_BAD_ROAD_TYPE_TILES, "PATH_USE_BAD_ROAD_TYPE_TILES");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, PATH_BAD_ROAD_TYPE_PENALTY,   "PATH_BAD_ROAD_TYPE_PENALTY");
++
++	SQAILocalPathFinderStrategy.DefSQConst(engine, 0,              "PATH_FALSE");
++	SQAILocalPathFinderStrategy.DefSQConst(engine, 1,              "PATH_TRUE");
++
++
++	SQAILocalPathFinderStrategy.DefSQStaticMethod(engine, &AILocalPathFinderStrategy::GetClassName, "GetClassName", 1, "x");
++
++	//SQAILocalPathFinderStrategy.DefSQMethod(engine, &AILocalPathFinderStrategy::SetPathFinderOption, "SetOption", 3, "xii");
++
++	SQAILocalPathFinderStrategy.PostRegister(engine);
++}
++
++namespace SQConvert {
++	/* Allow AIHasPathStrategy to be used as Squirrel parameter */
++	template <> AIHasPathStrategy *GetParam(ForceType<AIHasPathStrategy *>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return  (AIHasPathStrategy *)instance; }
++	template <> AIHasPathStrategy &GetParam(ForceType<AIHasPathStrategy &>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return *(AIHasPathStrategy *)instance; }
++	template <> const AIHasPathStrategy *GetParam(ForceType<const AIHasPathStrategy *>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return  (AIHasPathStrategy *)instance; }
++	template <> const AIHasPathStrategy &GetParam(ForceType<const AIHasPathStrategy &>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return *(AIHasPathStrategy *)instance; }
++	template <> int Return<AIHasPathStrategy *>(HSQUIRRELVM vm, AIHasPathStrategy *res) { if (res == NULL) { sq_pushnull(vm); return 1; } res->AddRef(); Squirrel::CreateClassInstanceVM(vm, "AIHasPathStrategy", res, NULL, DefSQDestructorCallback<AIHasPathStrategy>); return 1; }
++}; // namespace SQConvert
++void SQAIHasPathStrategy_Register(Squirrel *engine) {
++	DefSQClass <AIHasPathStrategy> SQAIHasPathStrategy("AIHasPathStrategy");
++	SQAIHasPathStrategy.PreRegister(engine, "AILocalPathFinderStrategy");
++
++	SQAIHasPathStrategy.AddConstructor<void (AIHasPathStrategy::*)(), 1>(engine, "x");
++
++	SQAIHasPathStrategy.DefSQStaticMethod(engine, &AIHasPathStrategy::GetClassName, "GetClassName", 1, "x");
++
++	SQAIHasPathStrategy.DefSQMethod(engine, &AIHasPathStrategy::SetPathFinderOption, "SetOption", 3, "xii");
++
++	SQAIHasPathStrategy.PostRegister(engine);
++}
++
++
++namespace SQConvert {
++	/* Allow AICheapPathFinderStrategy to be used as Squirrel parameter */
++	template <> AICheapPathFinderStrategy *GetParam(ForceType<AICheapPathFinderStrategy *>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return  (AICheapPathFinderStrategy *)instance; }
++	template <> AICheapPathFinderStrategy &GetParam(ForceType<AICheapPathFinderStrategy &>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return *(AICheapPathFinderStrategy *)instance; }
++	template <> const AICheapPathFinderStrategy *GetParam(ForceType<const AICheapPathFinderStrategy *>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return  (AICheapPathFinderStrategy *)instance; }
++	template <> const AICheapPathFinderStrategy &GetParam(ForceType<const AICheapPathFinderStrategy &>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return *(AICheapPathFinderStrategy *)instance; }
++	template <> int Return<AICheapPathFinderStrategy *>(HSQUIRRELVM vm, AICheapPathFinderStrategy *res) { if (res == NULL) { sq_pushnull(vm); return 1; } res->AddRef(); Squirrel::CreateClassInstanceVM(vm, "AICheapPathFinderStrategy", res, NULL, DefSQDestructorCallback<AICheapPathFinderStrategy>); return 1; }
++}; // namespace SQConvert
++void SQAICheapPathFinderStrategy_Register(Squirrel *engine) {
++	DefSQClass <AICheapPathFinderStrategy> SQAICheapPathFinderStrategy("AICheapPathFinderStrategy");
++	SQAICheapPathFinderStrategy.PreRegister(engine, "AILocalPathFinderStrategy");
++
++	SQAICheapPathFinderStrategy.AddConstructor<void (AICheapPathFinderStrategy::*)(), 1>(engine, "x");
++
++	SQAICheapPathFinderStrategy.DefSQStaticMethod(engine, &AICheapPathFinderStrategy::GetClassName, "GetClassName", 1, "x");
++
++	SQAICheapPathFinderStrategy.DefSQMethod(engine, &AICheapPathFinderStrategy::SetPathFinderOption, "SetOption", 3, "xii");
++
++	SQAICheapPathFinderStrategy.PostRegister(engine);
++}
++
++
++namespace SQConvert {
++	/* Allow AIDefaultPathFinderStrategy to be used as Squirrel parameter */
++	template <> AIDefaultPathFinderStrategy *GetParam(ForceType<AIDefaultPathFinderStrategy *>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return  (AIDefaultPathFinderStrategy *)instance; }
++	template <> AIDefaultPathFinderStrategy &GetParam(ForceType<AIDefaultPathFinderStrategy &>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return *(AIDefaultPathFinderStrategy *)instance; }
++	template <> const AIDefaultPathFinderStrategy *GetParam(ForceType<const AIDefaultPathFinderStrategy *>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return  (AIDefaultPathFinderStrategy *)instance; }
++	template <> const AIDefaultPathFinderStrategy &GetParam(ForceType<const AIDefaultPathFinderStrategy &>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return *(AIDefaultPathFinderStrategy *)instance; }
++	template <> int Return<AIDefaultPathFinderStrategy *>(HSQUIRRELVM vm, AIDefaultPathFinderStrategy *res) { if (res == NULL) { sq_pushnull(vm); return 1; } res->AddRef(); Squirrel::CreateClassInstanceVM(vm, "AIDefaultPathFinderStrategy", res, NULL, DefSQDestructorCallback<AIDefaultPathFinderStrategy>); return 1; }
++}; // namespace SQConvert
++void SQAIDefaultPathFinderStrategy_Register(Squirrel *engine) {
++	DefSQClass <AIDefaultPathFinderStrategy> SQAIDefaultPathFinderStrategy("AIDefaultPathFinderStrategy");
++	SQAIDefaultPathFinderStrategy.PreRegister(engine, "AILocalPathFinderStrategy");
++
++	SQAIDefaultPathFinderStrategy.AddConstructor<void (AIDefaultPathFinderStrategy::*)(), 1>(engine, "x");
++
++	SQAIDefaultPathFinderStrategy.DefSQStaticMethod(engine, &AIDefaultPathFinderStrategy::GetClassName, "GetClassName", 1, "x");
++
++	SQAIDefaultPathFinderStrategy.DefSQMethod(engine, &AIDefaultPathFinderStrategy::SetPathFinderOption, "SetOption", 3, "xii");
++
++	SQAIDefaultPathFinderStrategy.PostRegister(engine);
++}
++
++namespace SQConvert {
++	/* Allow AIStraightPathFinderStrategy to be used as Squirrel parameter */
++	template <> AIStraightPathFinderStrategy *GetParam(ForceType<AIStraightPathFinderStrategy *>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return  (AIStraightPathFinderStrategy *)instance; }
++	template <> AIStraightPathFinderStrategy &GetParam(ForceType<AIStraightPathFinderStrategy &>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return *(AIStraightPathFinderStrategy *)instance; }
++	template <> const AIStraightPathFinderStrategy *GetParam(ForceType<const AIStraightPathFinderStrategy *>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return  (AIStraightPathFinderStrategy *)instance; }
++	template <> const AIStraightPathFinderStrategy &GetParam(ForceType<const AIStraightPathFinderStrategy &>, HSQUIRRELVM vm, int index) { SQUserPointer instance; sq_getinstanceup(vm, index, &instance, 0); return *(AIStraightPathFinderStrategy *)instance; }
++	template <> int Return<AIStraightPathFinderStrategy *>(HSQUIRRELVM vm, AIStraightPathFinderStrategy *res) { if (res == NULL) { sq_pushnull(vm); return 1; } res->AddRef(); Squirrel::CreateClassInstanceVM(vm, "AIStraightPathFinderStrategy", res, NULL, DefSQDestructorCallback<AIStraightPathFinderStrategy>); return 1; }
++}; // namespace SQConvert
++void SQAIStraightPathFinderStrategy_Register(Squirrel *engine) {
++	DefSQClass <AIStraightPathFinderStrategy> SQAIStraightPathFinderStrategy("AIStraightPathFinderStrategy");
++	SQAIStraightPathFinderStrategy.PreRegister(engine, "AILocalPathFinderStrategy");
++
++	SQAIStraightPathFinderStrategy.AddConstructor<void (AIStraightPathFinderStrategy::*)(), 1>(engine, "x");
++
++	SQAIStraightPathFinderStrategy.DefSQStaticMethod(engine, &AIStraightPathFinderStrategy::GetClassName, "GetClassName", 1, "x");
++
++	SQAIStraightPathFinderStrategy.DefSQMethod(engine, &AIStraightPathFinderStrategy::SetPathFinderOption, "SetOption", 3, "xii");
++
++	SQAIStraightPathFinderStrategy.PostRegister(engine);
++}

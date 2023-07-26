@@ -1,0 +1,109 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 15022)
++++ src/settings.cpp	(working copy)
+@@ -1311,7 +1311,8 @@
+ 	SDT_CONDBOOL(GameSettings, station.adjacent_stations,                       62, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_PATCHES_ADJACENT_STATIONS,      NULL),
+ 	SDT_CONDBOOL(GameSettings, economy.station_noise_level,                     96, SL_MAX_VERSION, 0, 0, false,                    STR_CONFIG_PATCHES_NOISE_LEVEL,            InvalidateTownViewWindow),
+ 	SDT_CONDBOOL(GameSettings, station.distant_join_stations,                  106, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_PATCHES_DISTANT_JOIN_STATIONS,  DeleteSelectStationWindow),
+-
++	SDT_CONDBOOL(GameSettings, order.aggressive_conductors,                    106, SL_MAX_VERSION, 0, 0, false,                    STR_CONFIG_PATCHES_AGGRESSIVE_CONDUCTORS,  NULL),
++	
+ 	    SDT_BOOL(GameSettings, economy.inflation,                                                   0, 0,  true,                    STR_CONFIG_PATCHES_INFLATION,              NULL),
+ 	     SDT_VAR(GameSettings, construction.raw_industry_construction, SLE_UINT8,                   0,MS,     0,     0,       2, 0, STR_CONFIG_PATCHES_RAW_INDUSTRY_CONSTRUCTION_METHOD, InvalidateBuildIndustryWindow),
+ 	    SDT_BOOL(GameSettings, economy.multiple_industry_per_town,                                  0, 0, false,                    STR_CONFIG_PATCHES_MULTIPINDTOWN,          NULL),
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 15022)
++++ src/lang/english.txt	(working copy)
+@@ -1030,6 +1030,7 @@
+ STR_CONFIG_PATCHES_DISTANT_JOIN_STATIONS                        :{LTBLUE}Allow to join stations not directly adjacent: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_IMPROVEDLOAD                                 :{LTBLUE}Use improved loading algorithm: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_GRADUAL_LOADING                              :{LTBLUE}Load vehicles gradually: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_AGGRESSIVE_CONDUCTORS                        :{LTBLUE}Leave newly arrived cargo when not full-loading: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_INFLATION                                    :{LTBLUE}Inflation: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_SELECTGOODS                                  :{LTBLUE}Deliver cargo to a station only when there is a demand: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_LONGBRIDGES                                  :{LTBLUE}Allow building very long bridges: {ORANGE}{STRING1}
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 15022)
++++ src/settings_gui.cpp	(working copy)
+@@ -1068,6 +1068,7 @@
+ 	PatchEntry("order.improved_load"),
+ 	PatchEntry("order.gradual_loading"),
+ 	PatchEntry("order.selectgoods"),
++	PatchEntry("order.aggressive_conductors"),
+ };
+ /** Cargo handling sub-page */
+ static PatchPage _patches_stations_cargo_page = {_patches_stations_cargo, lengthof(_patches_stations_cargo)};
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 15022)
++++ src/settings_type.h	(working copy)
+@@ -277,6 +277,7 @@
+ 	bool   no_servicing_if_no_breakdowns;    ///< dont send vehicles to depot when breakdowns are disabled
+ 	bool   timetabling;                      ///< whether to allow timetabling
+ 	bool   serviceathelipad;                 ///< service helicopters at helipads automatically (no need to send to depot)
++	bool   aggressive_conductors;            ///< whether vehicles should leave a station when new cargo is entering the station while the vehicle still has spare cargo space, when not using full-load
+ };
+ 
+ /** Settings related to vehicles. */
+Index: src/economy.cpp
+===================================================================
+--- src/economy.cpp	(revision 15022)
++++ src/economy.cpp	(working copy)
+@@ -1455,6 +1455,9 @@
+ 	industry_set.Clear();
+ 
+ 	for (Vehicle *v = front_v; v != NULL; v = v->Next()) {
++		/* this could be a nice place to clear the almost finished flag */
++		ClrBit(v->vehicle_flags, VF_LOADING_ALMOST_FINISHED);
++		
+ 		/* No cargo to unload */
+ 		if (v->cargo_cap == 0 || v->cargo.Empty() || front_v->current_order.GetUnloadType() & OUFB_NO_UNLOAD) continue;
+ 
+@@ -1580,6 +1583,9 @@
+ 	for (; v != NULL; v = v->Next()) {
+ 		if (v->cargo_cap == 0) continue;
+ 
++		/* ignore any newly available cargo when we already got everything that was available on the previous check */
++		if (HasBit(v->vehicle_flags, VF_LOADING_ALMOST_FINISHED)) continue;
++
+ 		byte load_amount = EngInfo(v->engine_type)->load_amount;
+ 
+ 		/* The default loadamount for mail is 1/4 of the load amount for passengers */
+@@ -1646,10 +1652,20 @@
+ 		ge->last_age = _cur_year - u->build_year;
+ 		ge->days_since_pickup = 0;
+ 
++		cap = v->cargo_cap - v->cargo.Count();
++		
++		/* Make this vehicle actually leave when we got all available cargo and it is time to leave,
++		* ignoring new cargo arriving at the station from now on */
++		if (_settings_game.order.aggressive_conductors &&
++			((u->current_order.GetLoadType() & OLFB_FULL_LOAD) == 0) &&
++			(ge->cargo.Empty() || (cap > ge->cargo.Count())) &&
++			(!_settings_game.order.gradual_loading || load_amount > ge->cargo.Count()) &&
++			(!_settings_game.order.timetabling || u->current_order_time >= (uint) max(u->current_order.wait_time - u->lateness_counter, 0)))
++			SetBit(v->vehicle_flags, VF_LOADING_ALMOST_FINISHED);
++
+ 		/* If there's goods waiting at the station, and the vehicle
+ 		 * has capacity for it, load it on the vehicle. */
+-		if (!ge->cargo.Empty() &&
+-				(cap = v->cargo_cap - v->cargo.Count()) != 0) {
++		if (!ge->cargo.Empty() && cap != 0) {
+ 			uint count = ge->cargo.Count();
+ 
+ 			/* Skip loading this vehicle if another train/vehicle is already handling
+Index: src/vehicle_base.h
+===================================================================
+--- src/vehicle_base.h	(revision 15022)
++++ src/vehicle_base.h	(working copy)
+@@ -78,6 +78,7 @@
+ 	VF_TIMETABLE_STARTED,       ///< Whether the vehicle has started running on the timetable yet.
+ 	VF_AUTOFILL_TIMETABLE,      ///< Whether the vehicle should fill in the timetable automatically.
+ 	VF_AUTOFILL_PRES_WAIT_TIME, ///< Whether non-destructive auto-fill should preserve waiting times
++	VF_LOADING_ALMOST_FINISHED, ///< Whether we should leave when the currently loading cargo has loaded.
+ };
+ 
+ struct VehicleRail {

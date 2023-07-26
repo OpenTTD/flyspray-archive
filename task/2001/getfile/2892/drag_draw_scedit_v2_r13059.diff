@@ -1,0 +1,382 @@
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revision 13059)
++++ src/command.cpp	(working copy)
+@@ -199,6 +199,8 @@
+ DEF_COMMAND(CmdChangeTimetable);
+ DEF_COMMAND(CmdSetVehicleOnTime);
+ DEF_COMMAND(CmdAutofillTimetable);
++
++DEF_COMMAND(CmdTerraformTileToHeight);
+ #undef DEF_COMMAND
+ 
+ /**
+@@ -348,6 +350,7 @@
+ 	{CmdChangeTimetable,                     0}, /* CMD_CHANGE_TIMETABLE */
+ 	{CmdSetVehicleOnTime,                    0}, /* CMD_SET_VEHICLE_ON_TIME */
+ 	{CmdAutofillTimetable,                   0}, /* CMD_AUTOFILL_TIMETABLE */
++	{CmdTerraformTileToHeight,        CMD_AUTO}, /* CMD_TERRAFORM_TILE_TO_HEIGHT */
+ };
+ 
+ /*!
+@@ -546,6 +549,7 @@
+ 	notest =
+ 		(cmd & 0xFF) == CMD_CLEAR_AREA ||
+ 		(cmd & 0xFF) == CMD_LEVEL_LAND ||
++		(cmd & 0xFF) == CMD_TERRAFORM_TILE_TO_HEIGHT ||
+ 		(cmd & 0xFF) == CMD_REMOVE_LONG_ROAD ||
+ 		(cmd & 0xFF) == CMD_CLONE_VEHICLE;
+ 
+Index: src/command_type.h
+===================================================================
+--- src/command_type.h	(revision 13059)
++++ src/command_type.h	(working copy)
+@@ -280,6 +280,8 @@
+ 	CMD_CHANGE_TIMETABLE,             ///< change the timetable for a vehicle
+ 	CMD_SET_VEHICLE_ON_TIME,          ///< set the vehicle on time feature (timetable)
+ 	CMD_AUTOFILL_TIMETABLE,           ///< autofill the timetable
++
++	CMD_TERRAFORM_TILE_TO_HEIGHT,     ///< set a single tile to target height
+ };
+ 
+ /**
+Index: src/terraform_cmd.cpp
+===================================================================
+--- src/terraform_cmd.cpp	(revision 13059)
++++ src/terraform_cmd.cpp	(working copy)
+@@ -394,3 +394,59 @@
+ 
+ 	return (cost.GetCost() == 0) ? CMD_ERROR : cost;
+ }
++
++/** Sets a single tile to target height (for raise/lower/level draw)
++ * @param tile tile to modify
++ * @param flags for this command type
++ * @param p1 target height (without modifier)
++ * @param p2 height modifier; eg raise (+1), lower (-1) or level (0)
++ * @return error or cost of terraforming
++ * @note don't confuse with CommandCost TerraformTileHeight!
++ */
++CommandCost CmdTerraformTileToHeight(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++{
++	_terraform_err_tile = 0;
++
++	if (p1 >= MapSize()) return CMD_ERROR;
++
++	/* Check range of destination height */
++	if (p1 == MAX_TILE_HEIGHT && p2 == 1) return_cmd_error(STR_1004_TOO_HIGH);
++	if (p1 == 0 && p2 == (uint32(-1))) return_cmd_error(STR_1003_ALREADY_AT_SEA_LEVEL);
++
++	uint curh = TileHeight(tile); // current height
++	uint h = p1 + p2; // target height
++
++	CommandCost cost(EXPENSES_CONSTRUCTION); // the total cost for the operation
++
++	/* if the tile already has the target height, return cost 0 */
++	if ((p2 == 1 || curh <= h) && (p2 == uint32(-1) || curh >= h)) return cost;
++
++	Money money = GetAvailableMoneyForCommand(); // the available money
++	_additional_cash_required = 0; // additional cash required if we run out of money
++	bool succeed = false; // did at least one sub-command succeed?
++
++	/* the different comparators are needed because we don't want to lower with the raise tool and vice versa */
++	while ((p2 != 1 && curh > h) || (p2 != uint32(-1) && curh < h)) {
++		/* first, calculate the outcome of one terraform step with a dry run */
++		CommandCost ret = DoCommand(tile, SLOPE_N, (curh > h) ? 0 : 1, flags & ~DC_EXEC, CMD_TERRAFORM_LAND);
++		if (CmdFailed(ret)) break; // the step failed
++		succeed = true;
++
++		money -= ret.GetCost();
++		/* if this command is executed and we have run out of money, add it to additional cash required */
++		if ((flags & DC_EXEC) && money < 0) {
++			_additional_cash_required += ret.GetCost();
++		} else {
++			/* if it's not executed OR we have enough money, add the sub-command's costs to total costs*/
++			cost.AddCost(ret);
++			/* we have enough money, so now really execute the step */
++			if (flags & DC_EXEC) DoCommand(tile, SLOPE_N, (curh > h) ? 0 : 1, flags, CMD_TERRAFORM_LAND);
++		}
++		/* the height has been lowered or raised */
++		curh += (curh > h) ? -1 : 1;
++	}
++
++	/* if we (at least partly) succeeded, return the costs, else an error */
++	if (succeed) return cost;
++	return CMD_ERROR;
++}
+Index: src/terraform_gui.cpp
+===================================================================
+--- src/terraform_gui.cpp	(revision 13059)
++++ src/terraform_gui.cpp	(working copy)
+@@ -102,6 +102,9 @@
+ 	if (success) SndPlayTileFx(SND_1F_SPLAT, end);
+ }
+ 
++static uint _draw_height;
++static TileIndex _draw_tile;
++
+ /**
+  * A central place to handle all X_AND_Y dragged GUI functions.
+  * @param e WindowEvent variable holding in its higher bits (excluding the lower
+@@ -147,6 +150,44 @@
+ 	return true;
+ }
+ 
++/**
++ * A central place to handle all drag&draw GUI functions.
++ * @param e WindowEvent variable holding in its higher bits the type of action to be performed
++ * @return Returns true if the action was found and handled, and false otherwise.
++ **/
++bool GUIPlaceProcDraw(const WindowEvent *e)
++{
++	TileIndex tile = e->we.place.tile;
++
++	if (tile == _draw_tile) return true;
++
++	switch (e->we.place.select_proc) {
++		case DDSP_RAISE_AND_LEVEL_AREA:
++			if (TileHeight(tile) <= _draw_height)
++				DoCommandP(tile, _draw_height, 1, CcTerraform, CMD_TERRAFORM_TILE_TO_HEIGHT | CMD_MSG(STR_0808_CAN_T_RAISE_LAND_HERE));
++			break;
++		case DDSP_LOWER_AND_LEVEL_AREA:
++			if (TileHeight(tile) >= _draw_height)
++				DoCommandP(tile, _draw_height, (uint32)-1, CcTerraform, CMD_TERRAFORM_TILE_TO_HEIGHT | CMD_MSG(STR_0809_CAN_T_LOWER_LAND_HERE));
++			break;
++		default:
++			return false;
++	}
++
++	_draw_tile = tile;
++	return true;
++}
++
++/**
++ * Sets the current drawing tile to invalid tile and the drawing height to the starting tile height.
++ * @param e WindowEvent
++ **/
++void StartDrawing(const WindowEvent *e)
++{
++	_draw_tile = INVALID_TILE;
++	_draw_height = TileHeight(e->we.place.tile);
++}
++
+ typedef void OnButtonClick(Window *w);
+ 
+ static const uint16 _terraform_keycodes[] = {
+@@ -342,10 +383,7 @@
+ 	_generating_world = true; // used to create green terraformed land
+ 
+ 	if (_terraform_size == 1) {
+-		StringID msg =
+-			mode ? STR_0808_CAN_T_RAISE_LAND_HERE : STR_0809_CAN_T_LOWER_LAND_HERE;
+-
+-		DoCommandP(tile, SLOPE_N, (uint32)mode, CcTerraform, CMD_TERRAFORM_LAND | CMD_MSG(msg));
++		VpStartDrawing(tile, mode ? DDSP_RAISE_AND_LEVEL_AREA : DDSP_LOWER_AND_LEVEL_AREA);
+ 	} else {
+ 		SndPlayTileFx(SND_1F_SPLAT, tile);
+ 
+@@ -673,6 +711,15 @@
+ 			w->RaiseButtons();
+ 			w->SetDirty();
+ 			break;
++
++		case WE_PLACE_DRAW:
++			if (e->we.place.pt.x == -1) break;
++			StartDrawing(e);
++		/* FALL THROUGH */
++		case WE_DRAG_DRAW:
++			if (e->we.place.pt.x == -1) break;
++			GUIPlaceProcDraw(e);
++			break;
+ 	}
+ }
+ 
+Index: src/tilehighlight_func.h
+===================================================================
+--- src/tilehighlight_func.h	(revision 13059)
++++ src/tilehighlight_func.h	(working copy)
+@@ -13,6 +13,8 @@
+ typedef void PlaceProc(TileIndex tile);
+ void PlaceProc_DemolishArea(TileIndex tile);
+ bool GUIPlaceProcDragXY(const WindowEvent *e);
++bool GUIPlaceProcDraw(const WindowEvent *e);
++void StartDrawing(const WindowEvent *e);
+ 
+ bool HandlePlacePushButton(Window *w, int widget, CursorID cursor, ViewportHighlightMode mode, PlaceProc *placeproc);
+ void SetObjectToPlaceWnd(CursorID icon, SpriteID pal, ViewportHighlightMode mode, Window *w);
+@@ -21,6 +23,7 @@
+ 
+ void VpSelectTilesWithMethod(int x, int y, ViewportPlaceMethod method);
+ void VpStartPlaceSizing(TileIndex tile, ViewportPlaceMethod method, ViewportDragDropSelectionProcess process);
++void VpStartDrawing(TileIndex tile, ViewportDragDropSelectionProcess process);
+ void VpSetPresizeRange(TileIndex from, TileIndex to);
+ void VpSetPlaceSizingLimit(int limit);
+ 
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 13059)
++++ src/viewport.cpp	(working copy)
+@@ -2228,6 +2228,34 @@
+ 	_special_mouse_mode = WSM_SIZING;
+ }
+ 
++/** start drawing */
++void VpStartDrawing(TileIndex tile, ViewportDragDropSelectionProcess process)
++{
++	_thd.select_proc   = process;
++	_thd.selend.x = _thd.selstart.x = TileX(tile) * TILE_SIZE;
++	_thd.selend.y = _thd.selstart.y = TileY(tile) * TILE_SIZE;
++
++	/* If place mode is Rectangle, placement starts from centre of a tile */
++	if (_thd.place_mode == VHM_RECT) {
++		_thd.selend.x += TILE_SIZE / 2;
++		_thd.selend.y += TILE_SIZE / 2;
++		_thd.selstart.x += TILE_SIZE / 2;
++		_thd.selstart.y += TILE_SIZE / 2;
++	}
++
++	_special_mouse_mode = WSM_DRAWING;
++
++	/* stop drawing mode if the window has been closed */
++	Window *w = FindWindowById(_thd.window_class, _thd.window_number);
++	if (w == NULL) {
++		ResetObjectToPlace();
++		return;
++	}
++
++	w->OnPlaceDraw(GetTileBelowCursor(), TileVirtXY(_thd.selend.x, _thd.selend.y), process);
++
++}
++
+ void VpSetPlaceSizingLimit(int limit)
+ {
+ 	_thd.sizelimit = limit;
+@@ -2660,6 +2688,38 @@
+ 	_thd.selend.y = y;
+ }
+ 
++/** while drawing */
++bool VpHandleDrawingDrag()
++{
++	if (_special_mouse_mode != WSM_DRAWING) return true;
++
++	/* stop drawing mode if the window has been closed */
++	Window *w = FindWindowById(_thd.window_class, _thd.window_number);
++	if (w == NULL) {
++		ResetObjectToPlace();
++		return false;
++	}
++
++	/* while drawing execute the draw procedure of the corresponding window */
++	if (_left_button_down) {
++		_thd.selend = GetTileBelowCursor();
++
++		/* If place mode is not Rectangle, correction needed */
++		if (_thd.place_mode != VHM_RECT) {
++			_thd.selend.x += TILE_SIZE / 2;
++			_thd.selend.y += TILE_SIZE / 2;
++		}
++
++		w->OnDragDraw(GetTileBelowCursor(), TileVirtXY(_thd.selend.x, _thd.selend.y), _thd.select_proc);
++		return false;
++	}
++
++	/* mouse button released.. */
++	_special_mouse_mode = WSM_NONE;
++
++	return false;
++}
++
+ /** while dragging */
+ bool VpHandlePlaceSizingDrag()
+ {
+Index: src/window.cpp
+===================================================================
+--- src/window.cpp	(revision 13059)
++++ src/window.cpp	(working copy)
+@@ -261,7 +261,25 @@
+ 	this->HandleWindowEvent(&e);
+ }
+ 
++void Window::OnPlaceDraw(Point pt, TileIndex tile, byte select_proc)
++{
++	WindowEvent e;
++	e.event = WE_PLACE_DRAW;
++	e.we.place.pt = pt;
++	e.we.place.tile = tile;
++	e.we.place.select_proc = select_proc;
++	this->HandleWindowEvent(&e);
++}
+ 
++void Window::OnDragDraw(Point pt, TileIndex tile, byte select_proc)
++{
++	WindowEvent e;
++	e.event = WE_DRAG_DRAW;
++	e.we.place.pt = pt;
++	e.we.place.tile = tile;
++	e.we.place.select_proc = select_proc;
++	this->HandleWindowEvent(&e);
++}
+ 
+ void CDECL Window::SetWidgetsDisabledState(bool disab_stat, int widgets, ...)
+ {
+@@ -1941,6 +1959,7 @@
+ 
+ extern void UpdateTileSelection();
+ extern bool VpHandlePlaceSizingDrag();
++extern bool VpHandleDrawingDrag();
+ 
+ void MouseLoop(MouseClick click, int mousewheel)
+ {
+@@ -1948,6 +1967,7 @@
+ 	HandlePlacePresize();
+ 	UpdateTileSelection();
+ 	if (!VpHandlePlaceSizingDrag())  return;
++	if (!VpHandleDrawingDrag())      return;
+ 	if (!HandleDragDrop())           return;
+ 	if (!HandleWindowDragging())     return;
+ 	if (!HandleScrollbarScrolling()) return;
+Index: src/window_gui.h
+===================================================================
+--- src/window_gui.h	(revision 13059)
++++ src/window_gui.h	(working copy)
+@@ -134,6 +134,8 @@
+ 	WE_SCROLL,
+ 	WE_INVALIDATE_DATA, ///< Notification that data displayed by the window is obsolete
+ 	WE_CTRL_CHANGED,    ///< CTRL key has changed state
++	WE_PLACE_DRAW,      ///< Start of Drag&Draw
++	WE_DRAG_DRAW,       ///< During Drag&Draw
+ };
+ 
+ /**
+@@ -516,6 +518,22 @@
+ 	 */
+ 	virtual void OnPlacePresize(Point pt, TileIndex tile);
+ 
++	/**
++	 * The user clicked some place on the map in order to activate a drag&draw tool.
++	 * @param pt   the exact point on the map that has been clicked.
++	 * @param tile the tile on the map that has been clicked.
++	 * @param select_proc   what will be created during drawing.
++	 */
++	virtual void OnPlaceDraw(Point pt, TileIndex tile, byte select_proc);
++
++	/**
++	 * The user is drawing on the map with some drag&draw tool.
++	 * @param pt   the exact point on the map that the mouse is over.
++	 * @param tile the tile on the map that the mouse is over.
++	 * @param select_proc   what will be created during drawing.
++	 */
++	virtual void OnDragDraw(Point pt, TileIndex tile, byte select_proc);
++
+ 	/*** End of the event handling ***/
+ };
+ 
+@@ -693,6 +711,7 @@
+ 	WSM_DRAGDROP = 1,
+ 	WSM_SIZING   = 2,
+ 	WSM_PRESIZE  = 3,
++	WSM_DRAWING  = 4,
+ };
+ 
+ Window *GetCallbackWnd();

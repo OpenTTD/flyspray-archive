@@ -1,0 +1,171 @@
+diff -r c185434c3ed0 src/lang/english.txt
+--- a/src/lang/english.txt	Sun Nov 16 16:57:53 2008 +0100
++++ b/src/lang/english.txt	Sun Nov 16 17:01:47 2008 +0100
+@@ -1218,6 +1218,7 @@
+ STR_CONFIG_PATCHES_STATIONS                                     :{BLACK}Stations
+ STR_CONFIG_PATCHES_ECONOMY                                      :{BLACK}Economy
+ STR_CONFIG_PATCHES_AI                                           :{BLACK}Competitors
++STR_CONFIG_PATCHES_TITLE_SIGNALS                                :{ORANGE}Signals
+ 
+ STR_CONFIG_PATCHES_DISABLED                                     :disabled
+ STR_CONFIG_PATCHES_INT32                                        :{NUM}
+diff -r c185434c3ed0 src/settings_gui.cpp
+--- a/src/settings_gui.cpp	Sun Nov 16 16:57:53 2008 +0100
++++ b/src/settings_gui.cpp	Sun Nov 16 17:01:47 2008 +0100
+@@ -597,6 +597,8 @@
+ 	PEF_KIND_MASK    = (PEF_SETTING_KIND | PEF_SUBTREE_KIND) ///< Bit-mask for fetching entry kind
+ };
+ 
++struct PatchPage; // Forward declaration
++
+ /** Data structure describing a single patch in a tab */
+ struct PatchEntry {
+ 	uint16 flags;               ///< Flags of the pach entry. @see PatchEntryFlags
+@@ -605,10 +607,16 @@
+ 			const char *name;           ///< Name of the setting
+ 			const SettingDesc *setting; ///< Setting description of the patch
+ 			uint index;                 ///< Index of the setting in the settings table
+-		} entry;
++		} entry; ///< Data fields if patch entry is a setting
++		struct {
++			PatchPage *page; ///< Pointer to the sub-page
++			bool folded;     ///< Sub-page is folded (not visible except for its title)
++			StringID title;  ///< Title of the sub-page
++		} sub; ///< Data fields if patch entry is a sub-page
+ 	} d;
+ 
+ 	PatchEntry(const char *nm);
++	PatchEntry(PatchPage *page, StringID title);
+ 
+ 	void Init();
+ 	PatchEntry *FindEntry(uint row, uint *cur_row);
+@@ -635,13 +643,22 @@
+ 
+ /* == PatchEntry methods == */
+ 
+-/** Constructor a patch setting */
++/** Constructor of a patch entry if it is a setting */
+ PatchEntry::PatchEntry(const char *nm)
+ {
+ 	flags = PEF_SETTING_KIND;
+ 	d.entry.name = nm;
+ 	d.entry.setting = NULL;
+ 	d.entry.index = 0;
++}
++
++/** Constructor of a patch entry if it is a sub-page */
++PatchEntry::PatchEntry(PatchPage *sub, StringID str)
++{
++	flags = PEF_SUBTREE_KIND;
++	d.sub.page = sub;
++	d.sub.folded = true;
++	d.sub.title = str;
+ }
+ 
+ /** Initialization of a patch entry */
+@@ -651,6 +668,9 @@
+ 		case PEF_SETTING_KIND:
+ 			d.entry.setting = GetPatchFromName(d.entry.name, &d.entry.index);
+ 			assert(d.entry.setting != NULL);
++			break;
++		case PEF_SUBTREE_KIND:
++			d.sub.page->Init();
+ 			break;
+ 		default: NOT_REACHED();
+ 	}
+@@ -670,6 +690,13 @@
+ 		case PEF_SETTING_KIND:
+ 			(*cur_row)++;
+ 			break;
++		case PEF_SUBTREE_KIND:
++			(*cur_row)++; // row containing the title
++			if (d.sub.folded)
++				break;
++
++			/* sub-page is visible => search it too */
++			return d.sub.page->FindEntry(row, cur_row);
+ 		default: NOT_REACHED();
+ 	}
+ 	return NULL;
+@@ -681,6 +708,8 @@
+ 	switch(flags & PEF_KIND_MASK) {
+ 		case PEF_SETTING_KIND:
+ 			return 1;
++		case PEF_SUBTREE_KIND:
++			return 1 + d.sub.page->Length();
+ 		default: NOT_REACHED();
+ 	}
+ 	return 0; // not used, but keeps the compilers happy
+@@ -703,7 +732,7 @@
+ 		return cur_row;
+ 
+ 	switch(flags & PEF_KIND_MASK) {
+-		case PEF_SETTING_KIND: {
++		case PEF_SETTING_KIND:
+ 			if (cur_row >= first_row) {
+ 				int state = flags & (PEF_LEFT_DEPRESSED | PEF_RIGHT_DEPRESSED);
+ 				int y = base_y + (cur_row - first_row) * SETTING_HEIGHT;
+@@ -711,7 +740,15 @@
+ 			}
+ 			cur_row++;
+ 			break;
+-		}
++		case PEF_SUBTREE_KIND:
++			if (cur_row >= first_row) {
++				int y = base_y + (cur_row - first_row) * SETTING_HEIGHT;
++				DrawString(base_x, y, d.sub.title, TC_FROMSTRING);
++			}
++			cur_row++;
++			if (!d.sub.folded)
++				cur_row = d.sub.page->Draw(patches_ptr, base_x, base_y, first_row, max_row, cur_row);
++			break;
+ 		default: NOT_REACHED();
+ 	}
+ 	return cur_row;
+@@ -874,6 +911,17 @@
+ 	PatchEntry("gui.show_track_reservation"),
+ };
+ 
++static PatchEntry _patches_construction_signals[] = {
++	PatchEntry("gui.enable_signal_gui"),
++	PatchEntry("gui.drag_signals_density"),
++	PatchEntry("gui.semaphore_build_before"),
++	PatchEntry("gui.default_signal_type"),
++	PatchEntry("gui.cycle_signal_types"),
++};
++static PatchPage _patches_construction_signals_page = {
++	_patches_construction_signals, lengthof(_patches_construction_signals)
++};
++
+ static PatchEntry _patches_construction[] = {
+ 	PatchEntry("construction.build_on_slopes"),
+ 	PatchEntry("construction.autoslope"),
+@@ -881,12 +929,8 @@
+ 	PatchEntry("construction.longbridges"),
+ 	PatchEntry("construction.signal_side"),
+ 	PatchEntry("station.always_small_airport"),
+-	PatchEntry("gui.enable_signal_gui"),
+-	PatchEntry("gui.drag_signals_density"),
++	PatchEntry(&_patches_construction_signals_page, STR_CONFIG_PATCHES_TITLE_SIGNALS),
+ 	PatchEntry("game_creation.oil_refinery_limit"),
+-	PatchEntry("gui.semaphore_build_before"),
+-	PatchEntry("gui.default_signal_type"),
+-	PatchEntry("gui.cycle_signal_types"),
+ };
+ 
+ static PatchEntry _patches_stations[] = {
+@@ -1064,6 +1108,14 @@
+ 				PatchEntry *pe = page->FindEntry(btn, &cur_row);
+ 
+ 				if (pe == NULL) return;  // Clicked below the last setting of the page
++
++				if ((pe->flags & PEF_KIND_MASK) == PEF_SUBTREE_KIND) {
++					pe->d.sub.folded = !pe->d.sub.folded; // Flip 'folded'-ness of the sub-page
++
++					SetVScrollCount(this, page->Length()); // Update the scrollbar and redraw
++					this->SetDirty();
++					return;
++				}
+ 
+ 				assert((pe->flags & PEF_KIND_MASK) == PEF_SETTING_KIND);
+ 				const SettingDesc *sd = pe->d.entry.setting;

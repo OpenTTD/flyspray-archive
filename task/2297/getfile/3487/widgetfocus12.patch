@@ -1,0 +1,677 @@
+Index: src/console_gui.cpp
+===================================================================
+--- src/console_gui.cpp	(revision 14505)
++++ src/console_gui.cpp	(working copy)
+@@ -153,7 +153,6 @@
+ 	IConsoleWindow(const WindowDesc *desc) : Window(desc)
+ 	{
+ 		_iconsole_mode = ICONSOLE_OPENED;
+-		SetBit(_no_scroll, SCROLL_CON); // override cursor arrows; the gamefield will not scroll
+ 
+ 		this->height = _screen.height / 3;
+ 		this->width  = _screen.width;
+@@ -162,7 +161,6 @@
+ 	~IConsoleWindow()
+ 	{
+ 		_iconsole_mode = ICONSOLE_CLOSED;
+-		ClrBit(_no_scroll, SCROLL_CON);
+ 	}
+ 
+ 	virtual void OnPaint()
+@@ -183,7 +181,7 @@
+ 
+ 		DoDrawString(_iconsole_cmdline.buf, 10 + delta, this->height - ICON_LINE_HEIGHT, CC_COMMAND);
+ 
+-		if (_iconsole_cmdline.caret) {
++		if (_focused_window == this && _iconsole_cmdline.caret) {
+ 			DoDrawString("_", 10 + delta + _iconsole_cmdline.caretxoffs, this->height - ICON_LINE_HEIGHT, TC_WHITE);
+ 		}
+ 	}
+Index: src/genworld_gui.cpp
+===================================================================
+--- src/genworld_gui.cpp	(revision 14505)
++++ src/genworld_gui.cpp	(working copy)
+@@ -257,6 +257,7 @@
+ 
+ 		snprintf(this->edit_str_buf, this->edit_str_size, "%u", _settings_newgame.game_creation.generation_seed);
+ 		InitializeTextBuffer(&this->text, this->edit_str_buf, this->edit_str_size, 120);
++		this->SetFocusedWidget(GLAND_RANDOM_EDITBOX);
+ 		this->caption = STR_NULL;
+ 		this->afilter = CS_NUMERAL;
+ 
+Index: src/misc_gui.cpp
+===================================================================
+--- src/misc_gui.cpp	(revision 14505)
++++ src/misc_gui.cpp	(working copy)
+@@ -956,14 +956,34 @@
+ 	return false;
+ }
+ 
+-int QueryString::HandleEditBoxKey(Window *w, int wid, uint16 key, uint16 keycode, Window::EventState &state)
++bool QueryString::HasEditBoxFocus(Window *w, int wid) const
+ {
++	
++	if (w->window_class == WC_OSK) {
++
++		if (_focused_window == w->parent && 
++				w->parent->focused_widget && 
++				w->parent->focused_widget->type == WWT_EDITBOX)
++			return true;
++	}
++	if (w->IsWidgetGlobalyFocused(wid)) {
++		return true;
++	}
++
++	return false;
++}
++
++HandleEditBoxResult QueryString::HandleEditBoxKey(Window *w, int wid, uint16 key, uint16 keycode, Window::EventState &state)
++{
++	if (!QueryString::HasEditBoxFocus(w, wid))
++		return HEBR_NOT_FOCUSED;
++
+ 	state = Window::ES_HANDLED;
+ 
+ 	switch (keycode) {
+-		case WKC_ESC: return 2;
++		case WKC_ESC: return HEBR_ESCAPE_KEY;
+ 
+-		case WKC_RETURN: case WKC_NUM_ENTER: return 1;
++		case WKC_RETURN: case WKC_NUM_ENTER: return HEBR_RETURN_KEY;
+ 
+ 		case (WKC_CTRL | 'V'):
+ 			if (InsertTextBufferClipboard(&this->text)) w->InvalidateWidget(wid);
+@@ -990,12 +1010,12 @@
+ 			}
+ 	}
+ 
+-	return 0;
++	return HEBR_DEFAULT;
+ }
+ 
+ void QueryString::HandleEditBox(Window *w, int wid)
+ {
+-	if (HandleCaret(&this->text)) w->InvalidateWidget(wid);
++	if (HasEditBoxFocus(w, wid) && HandleCaret(&this->text)) w->InvalidateWidget(wid);
+ }
+ 
+ void QueryString::DrawEditBox(Window *w, int wid)
+@@ -1031,12 +1051,12 @@
+ 	if (tb->caretxoffs + delta < 0) delta = -tb->caretxoffs;
+ 
+ 	DoDrawString(tb->buf, delta, 0, TC_YELLOW);
+-	if (tb->caret) DoDrawString("_", tb->caretxoffs + delta, 0, TC_WHITE);
++	if (HasEditBoxFocus(w, wid) && tb->caret) DoDrawString("_", tb->caretxoffs + delta, 0, TC_WHITE);
+ 
+ 	_cur_dpi = old_dpi;
+ }
+ 
+-int QueryStringBaseWindow::HandleEditBoxKey(int wid, uint16 key, uint16 keycode, EventState &state)
++HandleEditBoxResult QueryStringBaseWindow::HandleEditBoxKey(int wid, uint16 key, uint16 keycode, EventState &state)
+ {
+ 	return this->QueryString::HandleEditBoxKey(this, wid, key, keycode, state);
+ }
+@@ -1064,7 +1084,7 @@
+ 	QueryStringWindow(uint16 size, const WindowDesc *desc, Window *parent) : QueryStringBaseWindow(size, desc)
+ 	{
+ 		this->parent = parent;
+-		SetBit(_no_scroll, SCROLL_EDIT);
++		this->SetFocusedWidget(QUERY_STR_WIDGET_TEXT);
+ 
+ 		this->FindWindowPlacementAndResize(desc);
+ 	}
+@@ -1120,13 +1140,14 @@
+ 		EventState state;
+ 		switch (this->HandleEditBoxKey(QUERY_STR_WIDGET_TEXT, key, keycode, state)) {
+ 			default: NOT_REACHED();
+-			case 0: {
++			case HEBR_DEFAULT: {
+ 				Window *osk = FindWindowById(WC_OSK, 0);
+ 				if (osk != NULL && osk->parent == this) osk->OnInvalidateData();
+ 			} break;
+-			case 1: this->OnOk(); // Enter pressed, confirms change
++			case HEBR_RETURN_KEY: this->OnOk(); // Enter pressed, confirms change
+ 			/* FALL THROUGH */
+-			case 2: delete this; break; // ESC pressed, closes window, abandons changes
++			case HEBR_ESCAPE_KEY: delete this; break; // ESC pressed, closes window, abandons changes
++			case HEBR_NOT_FOCUSED: break;
+ 		}
+ 		return state;
+ 	}
+@@ -1138,7 +1159,6 @@
+ 			this->parent = NULL; // so parent doesn't try to delete us again
+ 			parent->OnQueryTextFinished(NULL);
+ 		}
+-		ClrBit(_no_scroll, SCROLL_EDIT);
+ 	}
+ };
+ 
+@@ -1173,7 +1193,6 @@
+ void ShowQueryString(StringID str, StringID caption, uint maxlen, uint maxwidth, Window *parent, CharSetFilter afilter, QueryStringFlags flags)
+ {
+ 	DeleteWindowById(WC_QUERY_STRING, 0);
+-	DeleteWindowById(WC_SAVELOAD, 0);
+ 
+ 	QueryStringWindow *w = new QueryStringWindow(maxlen + 1, &_query_string_desc, parent);
+ 
+@@ -1439,7 +1458,6 @@
+ 		};
+ 
+ 		SetObjectToPlace(SPR_CURSOR_ZZZ, PAL_NONE, VHM_NONE, WC_MAIN_WINDOW, 0);
+-		SetBit(_no_scroll, SCROLL_SAVE);
+ 
+ 		/* Use an array to define what will be the current file type being handled
+ 		 * by current file mode */
+@@ -1487,6 +1505,10 @@
+ 				ttd_strlcpy(o_dir.name, _personal_dir, lengthof(o_dir.name));
+ 		}
+ 
++		/* Focus the edit box by default in the save windows */
++		if (_saveload_mode == SLD_SAVE_GAME || _saveload_mode == SLD_SAVE_SCENARIO)
++			this->SetFocusedWidget(10);
++
+ 		this->vscroll.cap = 10;
+ 		this->resize.step_width = 2;
+ 		this->resize.step_height = 10;
+@@ -1501,7 +1523,6 @@
+ 			if (_pause_game >= 0) DoCommandP(0, 0, 0, NULL, CMD_PAUSE);
+ 		}
+ 		FiosFreeSavegameList();
+-		ClrBit(_no_scroll, SCROLL_SAVE);
+ 	}
+ 
+ 	virtual void OnPaint()
+@@ -1620,7 +1641,7 @@
+ 
+ 		EventState state = ES_NOT_HANDLED;
+ 		if ((_saveload_mode == SLD_SAVE_GAME || _saveload_mode == SLD_SAVE_SCENARIO) &&
+-				this->HandleEditBoxKey(10, key, keycode, state) == 1) { // Press Enter
++				this->HandleEditBoxKey(10, key, keycode, state) == HEBR_RETURN_KEY) { // Press Enter
+ 			this->HandleButtonClick(12);
+ 		}
+ 
+@@ -1699,7 +1720,6 @@
+ 
+ void ShowSaveLoadDialog(SaveLoadDialogMode mode)
+ {
+-	DeleteWindowById(WC_QUERY_STRING, 0);
+ 	DeleteWindowById(WC_SAVELOAD, 0);
+ 
+ 	const WindowDesc *sld;
+Index: src/network/network_chat_gui.cpp
+===================================================================
+--- src/network/network_chat_gui.cpp	(revision 14505)
++++ src/network/network_chat_gui.cpp	(working copy)
+@@ -275,9 +275,9 @@
+ 		this->dest    = dest;
+ 		this->afilter = CS_ALPHANUMERAL;
+ 		InitializeTextBuffer(&this->text, this->edit_str_buf, this->edit_str_size, 0);
++		this->SetFocusedWidget(2);
+ 
+ 		InvalidateWindowData(WC_NEWS_WINDOW, 0, this->height);
+-		SetBit(_no_scroll, SCROLL_CHAT); // do not scroll the game with the arrow-keys
+ 
+ 		_chat_tab_completion_active = false;
+ 
+@@ -287,7 +287,6 @@
+ 	~NetworkChatWindow ()
+ 	{
+ 		InvalidateWindowData(WC_NEWS_WINDOW, 0, 0);
+-		ClrBit(_no_scroll, SCROLL_CHAT);
+ 	}
+ 
+ 	/**
+@@ -468,14 +467,15 @@
+ 			_chat_tab_completion_active = false;
+ 			switch (this->HandleEditBoxKey(2, key, keycode, state)) {
+ 				default: NOT_REACHED();
+-				case 0: {
++				case HEBR_DEFAULT: {
+ 					Window *osk = FindWindowById(WC_OSK, 0);
+ 					if (osk != NULL && osk->parent == this) osk->OnInvalidateData();
+ 				} break;
+-				case 1: /* Return */
++				case HEBR_RETURN_KEY: /* Return */
+ 					SendChat(this->text.buf, this->dtype, this->dest);
+ 				/* FALLTHROUGH */
+-				case 2: /* Escape */ delete this; break;
++				case HEBR_ESCAPE_KEY: /* Escape */ delete this; break;
++				case HEBR_NOT_FOCUSED: break;
+ 			}
+ 		}
+ 		return state;
+Index: src/network/network_gui.cpp
+===================================================================
+--- src/network/network_gui.cpp	(revision 14505)
++++ src/network/network_gui.cpp	(working copy)
+@@ -289,6 +289,7 @@
+ 		ttd_strlcpy(this->edit_str_buf, _settings_client.network.client_name, this->edit_str_size);
+ 		this->afilter = CS_ALPHANUMERAL;
+ 		InitializeTextBuffer(&this->text, this->edit_str_buf, this->edit_str_size, 120);
++		this->SetFocusedWidget(NGWW_CLIENT);
+ 
+ 		UpdateNetworkGameWindow(true);
+ 
+@@ -578,7 +579,7 @@
+ 			return state;
+ 		}
+ 
+-		if (this->HandleEditBoxKey(NGWW_CLIENT, key, keycode, state) == 1) return state; // enter pressed
++		if (this->HandleEditBoxKey(NGWW_CLIENT, key, keycode, state) == HEBR_RETURN_KEY) return state; // enter pressed
+ 
+ 		/* The name is only allowed when it starts with a letter! */
+ 		if (!StrEmpty(this->edit_str_buf) && this->edit_str_buf[0] != ' ') {
+@@ -773,6 +774,7 @@
+ 
+ 		this->afilter = CS_ALPHANUMERAL;
+ 		InitializeTextBuffer(&this->text, this->edit_str_buf, this->edit_str_size, 160);
++		this->SetFocusedWidget(NSSW_GAMENAME);
+ 
+ 		this->field = NSSW_GAMENAME;
+ 
+@@ -957,7 +959,7 @@
+ 	{
+ 		EventState state = ES_NOT_HANDLED;
+ 		if (this->field == NSSW_GAMENAME) {
+-			if (this->HandleEditBoxKey(NSSW_GAMENAME, key, keycode, state) == 1) return state; // enter pressed
++			if (this->HandleEditBoxKey(NSSW_GAMENAME, key, keycode, state) == HEBR_RETURN_KEY) return state; // enter pressed
+ 
+ 			ttd_strlcpy(_settings_client.network.server_name, this->text.buf, sizeof(_settings_client.network.server_name));
+ 		}
+@@ -1763,6 +1765,7 @@
+ 		this->parent = parent;
+ 		this->afilter = CS_ALPHANUMERAL;
+ 		InitializeTextBuffer(&this->text, this->edit_str_buf, this->edit_str_size, 0);
++		this->SetFocusedWidget(4);
+ 
+ 		this->FindWindowPlacementAndResize(desc);
+ 	}
+Index: src/osk_gui.cpp
+===================================================================
+--- src/osk_gui.cpp	(revision 14505)
++++ src/osk_gui.cpp	(working copy)
+@@ -66,7 +66,6 @@
+ 		/* make a copy in case we need to reset later */
+ 		this->orig_str_buf = strdup(this->qs->text.buf);
+ 
+-		SetBit(_no_scroll, SCROLL_EDIT);
+ 		/* Not needed by default. */
+ 		this->DisableWidget(OSK_WIDGET_SPECIAL);
+ 
+@@ -138,6 +137,21 @@
+ 		bool delete_this = false;
+ 
+ 		switch (widget) {
++			case OSK_WIDGET_TEXT:					
++				/* Find the edit box of the parent window and give focus to that */
++				for (uint i = 0; i < this->parent->widget_count; i++) {
++					Widget &wi = this->parent->widget[i];
++					if (wi.type == WWT_EDITBOX) {
++						this->parent->focused_widget = &wi;
++						break;
++					}
++				}	
++
++				/* Give focus to parent window */
++				SetFocusedWindow(this->parent);
++
++				break;
++
+ 			case OSK_WIDGET_BACKSPACE:
+ 				if (DeleteTextBufferChar(&this->qs->text, WKC_BACKSPACE)) this->InvalidateWidget(OSK_WIDGET_TEXT);
+ 				break;
+Index: src/querystring_gui.h
+===================================================================
+--- src/querystring_gui.h	(revision 14505)
++++ src/querystring_gui.h	(working copy)
+@@ -9,6 +9,17 @@
+ #include "window_gui.h"
+ 
+ /**
++ * Return values for HandleEditBoxKey
++ */
++enum HandleEditBoxResult
++{
++	HEBR_DEFAULT = 0, // This is returned when none of the below are the case. Suggestions for a better name than 'default' are welcome.
++	HEBR_RETURN_KEY,
++	HEBR_ESCAPE_KEY,
++	HEBR_NOT_FOCUSED,
++};
++
++/**
+  * Data stored about a string that can be modified in the GUI
+  */
+ struct QueryString {
+@@ -33,9 +44,10 @@
+ 		free((void*)this->orig);
+ 	}
+ 
++	bool HasEditBoxFocus(Window *w, int wid) const;
+ 	void DrawEditBox(Window *w, int wid);
+ 	void HandleEditBox(Window *w, int wid);
+-	int HandleEditBoxKey(Window *w, int wid, uint16 key, uint16 keycode, Window::EventState &state);
++	HandleEditBoxResult HandleEditBoxKey(Window *w, int wid, uint16 key, uint16 keycode, Window::EventState &state);
+ };
+ 
+ struct QueryStringBaseWindow : public Window, public QueryString {
+@@ -55,7 +67,7 @@
+ 
+ 	void DrawEditBox(int wid);
+ 	void HandleEditBox(int wid);
+-	int HandleEditBoxKey(int wid, uint16 key, uint16 keycode, EventState &state);
++	HandleEditBoxResult HandleEditBoxKey(int wid, uint16 key, uint16 keycode, EventState &state);
+ };
+ 
+ void ShowOnScreenKeyboard(QueryStringBaseWindow *parent, int button, int cancel, int ok);
+Index: src/signs_gui.cpp
+===================================================================
+--- src/signs_gui.cpp	(revision 14505)
++++ src/signs_gui.cpp	(working copy)
+@@ -199,18 +199,17 @@
+ 
+ 	SignWindow(const WindowDesc *desc, const Sign *si) : QueryStringBaseWindow(MAX_LENGTH_SIGN_NAME_BYTES, desc)
+ 	{
+-		SetBit(_no_scroll, SCROLL_EDIT);
+ 		this->caption = STR_280B_EDIT_SIGN_TEXT;
+ 		this->afilter = CS_ALPHANUMERAL;
+ 		this->LowerWidget(QUERY_EDIT_SIGN_WIDGET_TEXT);
+ 
+ 		UpdateSignEditWindow(si);
++		this->SetFocusedWidget(QUERY_EDIT_SIGN_WIDGET_TEXT);
+ 		this->FindWindowPlacementAndResize(desc);
+ 	}
+ 
+ 	~SignWindow()
+ 	{
+-		ClrBit(_no_scroll, SCROLL_EDIT);
+ 	}
+ 
+ 	void UpdateSignEditWindow(const Sign *si)
+@@ -230,6 +229,7 @@
+ 		InitializeTextBuffer(&this->text, this->edit_str_buf, this->edit_str_size, MAX_LENGTH_SIGN_NAME_PIXELS);
+ 
+ 		this->InvalidateWidget(QUERY_EDIT_SIGN_WIDGET_TEXT);
++		this->SetFocusedWidget(QUERY_EDIT_SIGN_WIDGET_TEXT);
+ 	}
+ 
+ 	/**
+@@ -358,9 +358,8 @@
+ 
+ void ShowRenameSignWindow(const Sign *si)
+ {
+-	/* Delete all other edit windows and the save window */
++	/* Delete all other edit windows */
+ 	DeleteWindowById(WC_QUERY_STRING, 0);
+-	DeleteWindowById(WC_SAVELOAD, 0);
+ 
+ 	new SignWindow(&_query_sign_edit_desc, si);
+ }
+Index: src/window.cpp
+===================================================================
+--- src/window.cpp	(revision 14505)
++++ src/window.cpp	(working copy)
+@@ -38,7 +38,13 @@
+ Window *_z_windows[MAX_NUMBER_OF_WINDOWS];
+ Window **_last_z_window; ///< always points to the next free space in the z-array
+ 
+-byte _no_scroll;
++/*
++ * window that currently have focus. - The main purpose is to generate 
++ * FocusLost events, not to give next window in z-order focus when a 
++ * window is closed.
++ */
++Window *_focused_window; 
++
+ Point _cursorpos_drag_start;
+ 
+ int _scrollbar_start_pos;
+@@ -50,7 +56,23 @@
+ 
+ byte _special_mouse_mode;
+ 
++void SetFocusedWindow(Window* w)
++{
++	/* Invalidate focused widget */
++	if (_focused_window && _focused_window->focused_widget) {
++		uint focused_widget_id = _focused_window->focused_widget - _focused_window->widget;
++		_focused_window->InvalidateWidget(focused_widget_id);
++	}
+ 
++	/* Remember which window was previously focused */
++	Window* old_focused = _focused_window;
++	_focused_window = w;
++
++	/* So we can inform it that it lost focus */
++	if (old_focused) old_focused->OnFocusLost();
++	if (_focused_window) _focused_window->OnFocus();
++}
++
+ /**
+  * Sets the enabled/disabled status of a list of widgets.
+  * By default, widgets are enabled.
+@@ -166,6 +188,14 @@
+ 	int widget = 0;
+ 	if (w->desc_flags & WDF_DEF_WIDGET) {
+ 		widget = GetWidgetFromPos(w, x, y);
++		
++		/* If clicked on a window that previously did dot have focus */
++		if (_focused_window != w) {
++			if (_focused_window) _focused_window->OnFocusLost();
++			SetFocusedWindow(w);
++			w->OnFocus(); 
++		}
++
+ 		if (widget < 0) return; // exit if clicked outside of widgets
+ 
+ 		/* don't allow any interaction if the button has been disabled */
+@@ -173,6 +203,11 @@
+ 
+ 		const Widget *wi = &w->widget[widget];
+ 
++		/* Clicked on a widget that is not disabled. 
++		 * So unless the clicked widget is the caption bar, change focus to this widget */
++		if (wi->type != WWT_CAPTION)
++			w->focused_widget = wi; 
++
+ 		if (wi->type & WWB_MASK) {
+ 			/* special widget handling for buttons*/
+ 			switch (wi->type) {
+@@ -447,6 +482,9 @@
+ 	/* Prevent Mouseover() from resetting mouse-over coordinates on a non-existing window */
+ 	if (_mouseover_last_w == this) _mouseover_last_w = NULL;
+ 
++	/* Make sure we don't try to access this window as the focused window when it don't exist anymore. */
++	if (_focused_window == this) _focused_window = NULL;
++
+ 	/* Find the window in the z-array, and effectively remove it
+ 	 * by moving all windows after it one to the left. This must be
+ 	 * done before removing the child so we cannot cause recursion
+@@ -729,12 +767,16 @@
+ 	this->width = min_width;
+ 	this->height = min_height;
+ 	AssignWidgetToWindow(this, widget);
++	this->focused_widget = 0;
+ 	this->resize.width = min_width;
+ 	this->resize.height = min_height;
+ 	this->resize.step_width = 1;
+ 	this->resize.step_height = 1;
+ 	this->window_number = window_number;
+ 
++	if (cls != WC_OSK)
++		SetFocusedWindow(this);
++
+ 	/* Hacky way of specifying always-on-top windows. These windows are
+ 		* always above other windows because they are moved below them.
+ 		* status-bar is above news-window because it has been created earlier.
+@@ -1110,8 +1152,8 @@
+ 	IConsoleClose();
+ 
+ 	_last_z_window = _z_windows;
++	_focused_window = 0;
+ 	_mouseover_last_w = NULL;
+-	_no_scroll = 0;
+ 	_scrolling_viewport = 0;
+ }
+ 
+@@ -1660,9 +1702,8 @@
+  */
+ void HandleKeypress(uint32 raw_key)
+ {
+-	/* Stores if a window with a textfield for typing is open
+-	 * If this is the case, keypress events are only passed to windows with text fields and
+-	 * to thein this main toolbar. */
++	/* Stores if the focused window has a focused text edit widget.
++	 * If this is the case, keypress events are only passed to the focused window */
+ 	bool query_open = false;
+ 
+ 	/*
+@@ -1694,30 +1735,20 @@
+ 	 */
+ 	if (key == 0 && keycode == 0) return;
+ 
+-	/* check if we have a query string window open before allowing hotkeys */
+-	if (FindWindowById(WC_QUERY_STRING,            0) != NULL ||
+-			FindWindowById(WC_SEND_NETWORK_MSG,        0) != NULL ||
+-			FindWindowById(WC_GENERATE_LANDSCAPE,      0) != NULL ||
+-			FindWindowById(WC_CONSOLE,                 0) != NULL ||
+-			FindWindowById(WC_SAVELOAD,                0) != NULL ||
+-			FindWindowById(WC_COMPANY_PASSWORD_WINDOW, 0) != NULL) {
+-		query_open = true;
++	/* Check if the focused window has a focused editbox */
++	if (_focused_window != 0 && 
++			(_focused_window->window_class == WC_CONSOLE || // The console does not have an edit box so a special case is needed
++			_focused_window->focused_widget != 0 && 
++			_focused_window->focused_widget->type == WWT_EDITBOX))
++	{ 
++		/* All input will in this case go to the focused window */
++		_focused_window->OnKeyPress(key, keycode);
++		return;
+ 	}
+ 
+ 	/* Call the event, start with the uppermost window. */
+ 	for (Window* const *wz = _last_z_window; wz != _z_windows;) {
+ 		Window *w = *--wz;
+-
+-		/* if a query window is open, only call the event for certain window types */
+-		if (query_open &&
+-				w->window_class != WC_QUERY_STRING &&
+-				w->window_class != WC_SEND_NETWORK_MSG &&
+-				w->window_class != WC_GENERATE_LANDSCAPE &&
+-				w->window_class != WC_CONSOLE &&
+-				w->window_class != WC_SAVELOAD &&
+-				w->window_class != WC_COMPANY_PASSWORD_WINDOW) {
+-			continue;
+-		}
+ 		if (w->OnKeyPress(key, keycode) == Window::ES_HANDLED) return;
+ 	}
+ 
+@@ -1840,7 +1871,11 @@
+ 
+ static void HandleKeyScrolling()
+ {
+-	if (_dirkeys && !_no_scroll) {
++	/*
++	 * Check that any of the dirkeys is pressed and that the focused window 
++	 * dont has an edit-box as focused widget.
++	 */
++	if (_dirkeys && !(_focused_window != 0 && _focused_window->focused_widget != 0 && _focused_window->focused_widget->type == WWT_EDITBOX)) {
+ 		int factor = _shift_pressed ? 50 : 10;
+ 		ScrollMainViewport(scrollamt[_dirkeys][0] * factor, scrollamt[_dirkeys][1] * factor);
+ 	}
+Index: src/window_gui.h
+===================================================================
+--- src/window_gui.h	(revision 14505)
++++ src/window_gui.h	(working copy)
+@@ -224,6 +224,7 @@
+ 	Widget *widget;        ///< Widgets of the window
+ 	uint widget_count;     ///< Number of widgets of the window
+ 	uint32 desc_flags;     ///< Window/widgets default flags setting, @see WindowDefaultFlag
++	const Widget *focused_widget; ///< Currently focused widget or 0, if no widget have focus
+ 
+ 	Window *parent;        ///< Parent window
+ 
+@@ -237,6 +238,9 @@
+ 	void HideWidget(byte widget_index);
+ 	void ShowWidget(byte widget_index);
+ 	bool IsWidgetHidden(byte widget_index) const;
++	void SetFocusedWidget(byte widget_index);
++	bool IsWidgetGlobalyFocused(byte widget_index) const; 
++	bool IsWidgetFocused(byte widget_index) const; 
+ 	void SetWidgetLoweredState(byte widget_index, bool lowered_stat);
+ 	void ToggleWidgetLoweredState(byte widget_index);
+ 	void LowerWidget(byte widget_index);
+@@ -266,6 +270,8 @@
+ 	 */
+ 	virtual void OnPaint() {}
+ 
++	virtual void OnFocus() {}
++	virtual void OnFocusLost() {}
+ 
+ 	/**
+ 	 * A key has been pressed.
+@@ -539,6 +545,7 @@
+ /* window.cpp */
+ extern Window *_z_windows[];
+ extern Window **_last_z_window;
++extern Window *_focused_window;
+ 
+ /** Iterate over all windows */
+ #define FOR_ALL_WINDOWS(wz) for (wz = _z_windows; wz != _last_z_window; wz++)
+@@ -555,9 +562,6 @@
+ 	SCROLL_CHAT = 4,
+ };
+ 
+-/** Disable scrolling of the main viewport when an input-window is active. */
+-extern byte _no_scroll;
+-
+ extern Point _cursorpos_drag_start;
+ 
+ extern int _scrollbar_start_pos;
+@@ -578,6 +582,8 @@
+ Window *GetCallbackWnd();
+ Window **FindWindowZPosition(const Window *w);
+ 
++void SetFocusedWindow(Window* w);
++
+ void ScrollbarClickHandler(Window *w, const Widget *wi, int x, int y);
+ 
+ void ResizeButtons(Window *w, byte left, byte right);
+@@ -674,6 +680,38 @@
+ }
+ 
+ /**
++ * Set focus within this window to given widget. The function however don't
++ * change which window that has focus.
++ * @param widget_index : index of the widget in the window to set focus to
++ */
++inline void Window::SetFocusedWidget(byte widget_index)
++{
++	if (widget_index < this->widget_count)
++		this->focused_widget = &this->widget[widget_index];
++}
++
++/**
++ * Check if given widget has user input focus. This means that both the window
++ * has focus and that the given widget has focus within the window.
++ * @param widget_index : index of the widget in the window to check
++ * @return true if given widget is the focused window in this window and this window has focus
++ */
++inline bool Window::IsWidgetGlobalyFocused(byte widget_index) const
++{
++	return _focused_window == this && IsWidgetFocused(widget_index);
++}
++
++/**
++ * Check if given widget is focused within this window
++ * @param widget_index : index of the widget in the window to check
++ * @return true if given widget is the focused window in this window
++ */
++inline bool Window::IsWidgetFocused(byte widget_index) const
++{
++	return this->focused_widget == &this->widget[widget_index];
++}
++
++/**
+  * Sets the lowered/raised status of a widget.
+  * @param widget_index index of this widget in the window
+  * @param lowered_stat status to use ie: lowered = true, raised = false

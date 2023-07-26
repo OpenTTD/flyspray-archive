@@ -1,0 +1,188 @@
+Index: rail.h
+===================================================================
+--- rail.h	(revision 6028)
++++ rail.h	(working copy)
+@@ -465,4 +465,6 @@
+ void DrawCatenary(const TileInfo *ti);
+ 
+ uint GetRailFoundation(Slope tileh, TrackBits bits);
++
++void ToggleElrails(bool enable);
+ #endif /* RAIL_H */
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 6028)
++++ lang/english.txt	(working copy)
+@@ -1125,6 +1125,8 @@
+ STR_CONFIG_PATCHES_YAPF_ROAD                                    :{LTBLUE}Use YAPF for roadvehs: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_YAPF_RAIL                                    :{LTBLUE}Use YAPF for trains: {ORANGE}{STRING1}
+ 
++STR_CONFIG_PATCHES_ENABLE_ELRAILS                               :{LTBLUE}Enable electric rails: {ORANGE}{STRING1}
++
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :Sub-tropical landscape
+Index: elrail.c
+===================================================================
+--- elrail.c	(revision 6028)
++++ elrail.c	(working copy)
+@@ -50,9 +50,12 @@
+ #include "station_map.h"
+ #include "tile.h"
+ #include "viewport.h"
++#include "gfx.h"
+ #include "functions.h" /* We should REALLY get rid of this goddamn file, as it is butt-ugly */
+ #include "variables.h" /* ... same here */
+ #include "rail.h"
++#include "gui.h"
++#include "vehicle.h"
+ #include "debug.h"
+ #include "tunnel_map.h"
+ #include "road_map.h"
+@@ -380,3 +383,31 @@
+ 	}
+ 	DrawCatenaryRailway(ti);
+ }
++
++void ToggleElrails(bool enable)
++{
++	Engine *e;
++	Player *p;
++
++	if (enable) {
++		RailVehicleInfo *rv_info;
++
++		for (e = _engines, rv_info = _rail_vehicle_info; e != endof(_engines); e++, rv_info++) {
++			if (e->type != VEH_Train) continue;
++			if (rv_info->engclass == 2 && e->railtype == RAILTYPE_RAIL) e->railtype = RAILTYPE_ELECTRIC;
++		}
++	} else {
++		FOR_ALL_ENGINES(e) {
++			if (e->type != VEH_Train) continue;
++			if (e->railtype == RAILTYPE_ELECTRIC) e->railtype = RAILTYPE_RAIL;
++		}
++	}
++
++	FOR_ALL_PLAYERS(p) p->avail_railtypes = GetPlayerRailtypes(p->index);
++
++	/* This resets the _last_built_railtype, which will be invalid for electric
++	 * rails. It may have unintended consequences if that function is ever
++	 * extended, though. */
++	InitializeMainGui();
++	MarkWholeScreenDirty();
++}
+Index: misc.c
+===================================================================
+--- misc.c	(revision 6028)
++++ misc.c	(working copy)
+@@ -18,6 +18,7 @@
+ #include "ai/ai.h"
+ #include "table/landscape_const.h"
+ #include "date.h"
++#include "gui.h"
+ 
+ char _name_array[512][32];
+ 
+@@ -83,7 +84,6 @@
+ void InitializeAirportGui(void);
+ void InitializeDockGui(void);
+ void InitializeIndustries(void);
+-void InitializeMainGui(void);
+ void InitializeLandscape(void);
+ void InitializeTowns(void);
+ void InitializeTrees(void);
+Index: settings.c
+===================================================================
+--- settings.c	(revision 6028)
++++ settings.c	(working copy)
+@@ -38,6 +38,7 @@
+ #include "newgrf.h"
+ #include "genworld.h"
+ #include "date.h"
++#include "rail.h"
+ 
+ /** The patch values that are used for new games and/or modified in config file */
+ Patches _patches_newgame;
+@@ -1139,6 +1140,12 @@
+ 	DoCommandP(0, 2, _patches.autorenew_money, NULL, CMD_REPLACE_VEHICLE);
+ 	return 0;
+ }
++
++static int32 SettingsToggleElrail(int32 p1)
++{
++	ToggleElrails(p1 == 1);
++	return 0;
++}
+ /* End - Callback Functions */
+ 
+ #ifndef EXTERNAL_PLAYER
+@@ -1300,6 +1307,7 @@
+ 	 SDT_VAR(Patches, servint_aircraft,  SLE_UINT16, 0,D0,   100,     5,    800, STR_CONFIG_PATCHES_SERVINT_AIRCRAFT,     InValidateDetailsWindow),
+ 	SDT_BOOL(Patches, no_servicing_if_no_breakdowns, 0, 0, false,                STR_CONFIG_PATCHES_NOSERVICE,            NULL),
+ 	SDT_BOOL(Patches, wagon_speed_limits,            0, 0,  true,                STR_CONFIG_PATCHES_WAGONSPEEDLIMITS,     NULL),
++	SDT_CONDBOOL(Patches, enable_elrails,     33, SL_MAX_VERSION, 0, 0, true,    STR_CONFIG_PATCHES_ENABLE_ELRAILS,       SettingsToggleElrail),
+ 
+ 	/***************************************************************************/
+ 	/* Station section of the GUI-configure patches window */
+Index: engine.c
+===================================================================
+--- engine.c	(revision 6028)
++++ engine.c	(working copy)
+@@ -152,6 +152,8 @@
+ 		e->flags = 0;
+ 		e->player_avail = 0;
+ 
++		if (e->type == VEH_Train && ! _patches.enable_elrails && e->railtype == RAILTYPE_ELECTRIC) e->railtype = RAILTYPE_RAIL;
++
+ 		// The magic value of 729 days below comes from the NewGRF spec. If the
+ 		// base intro date is before 1922 then the random number of days is not
+ 		// added.
+Index: variables.h
+===================================================================
+--- variables.h	(revision 6028)
++++ variables.h	(working copy)
+@@ -126,6 +126,7 @@
+ 	bool no_servicing_if_no_breakdowns; // dont send vehicles to depot when breakdowns are disabled
+ 	bool link_terraform_toolbar; // display terraform toolbar when displaying rail, road, water and airport toolbars
+ 	bool reverse_scroll; // Right-Click-Scrolling scrolls in the opposite direction
++	bool enable_elrails;
+ 
+ 	uint8 toolbar_pos;			// position of toolbars, 0=left, 1=center, 2=right
+ 	uint8 window_snap_radius; // Windows snap at each other if closer than this
+Index: gui.h
+===================================================================
+--- gui.h	(revision 6028)
++++ gui.h	(working copy)
+@@ -12,6 +12,7 @@
+ void CcPlaySound10(bool success, TileIndex tile, uint32 p1, uint32 p2);
+ void CcBuildCanal(bool success, TileIndex tile, uint32 p1, uint32 p2);
+ void CcTerraform(bool success, TileIndex tile, uint32 p1, uint32 p2);
++void InitializeMainGui(void);
+ 
+ /* settings_gui.c */
+ void ShowGameOptions(void);
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 6028)
++++ saveload.c	(working copy)
+@@ -30,7 +30,7 @@
+ #include "variables.h"
+ #include <setjmp.h>
+ 
+-const uint16 SAVEGAME_VERSION = 32;
++const uint16 SAVEGAME_VERSION = 33;
+ uint16 _sl_version;       /// the major savegame version identifier
+ byte   _sl_minor_version; /// the minor savegame version, DO NOT USE!
+ 
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 6028)
++++ settings_gui.c	(working copy)
+@@ -643,6 +643,7 @@
+ 	"servint_aircraft",
+ 	"no_servicing_if_no_breakdowns",
+ 	"wagon_speed_limits",
++	"enable_elrails",
+ };
+ 
+ typedef struct PatchEntry {

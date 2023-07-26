@@ -1,0 +1,287 @@
+From 6ba971b7198cae715a92f422baa5cc8bd8fd4caf Mon Sep 17 00:00:00 2001
+From: Michael Lutz <michi@icosahedron.de>
+Date: Sat, 19 Sep 2009 01:25:03 +0200
+Subject: -Feature [FS#2053]: [OSX] Implement clipboard support for OS X.
+
+---
+ src/misc_gui.cpp         |   59 ++++++++++++++++++++++++++++++++++++++++++++++
+ src/os/macosx/macos.mm   |   19 ++++++++++++++
+ src/os/os2/os2.cpp       |   34 +-------------------------
+ src/os/unix/unix.cpp     |    4 ++-
+ src/os/windows/win32.cpp |   45 +++--------------------------------
+ 5 files changed, 87 insertions(+), 74 deletions(-)
+
+diff --git a/src/misc_gui.cpp b/src/misc_gui.cpp
+index 544c35d..7c488fe 100644
+--- a/src/misc_gui.cpp
++++ b/src/misc_gui.cpp
+@@ -44,6 +44,16 @@
+ 
+ #include "table/strings.h"
+ 
++
++/**
++ * Try to retrive the current clipboard contents.
++ *
++ * @note OS-specific funtion.
++ * @return True if some text could be retrived.
++ */
++bool GetClipboardContents(char *buffer, size_t buff_len);
++
++
+ /* Variables to display file lists */
+ SaveLoadDialogMode _saveload_mode;
+ 
+@@ -1015,6 +1025,49 @@ bool InsertTextBufferChar(Textbuf *tb, WChar key)
+ }
+ 
+ /**
++ * Insert a chunk of text from the clipboard onto the textbuffer. Get TEXT clipboard
++ * and append this up to the maximum length (either absolute or screenlength). If maxlength
++ * is zero, we don't care about the screenlength but only about the physical length of the string
++ * @param tb Textbuf type to be changed
++ * @return true on successful change of Textbuf, or false otherwise
++ */
++bool InsertTextBufferClipboard(Textbuf *tb)
++{
++	char utf8_buf[512];
++
++	if (!GetClipboardContents(utf8_buf, lengthof(utf8_buf))) return false;
++
++	uint16 width = 0, length = 0;
++	WChar c;
++	for (const char *ptr = utf8_buf; (c = Utf8Consume(&ptr)) != '\0';) {
++		if (!IsPrintable(c)) break;
++
++		byte len = Utf8CharLen(c);
++		if (tb->size + length + len > tb->maxsize) break;
++
++		byte charwidth = GetCharacterWidth(FS_NORMAL, c);
++		if (tb->maxwidth != 0 && width + tb->width + charwidth > tb->maxwidth) break;
++
++		width += charwidth;
++		length += len;
++	}
++
++	if (length == 0) return false;
++
++	memmove(tb->buf + tb->caretpos + length, tb->buf + tb->caretpos, tb->size - tb->caretpos);
++	memcpy(tb->buf + tb->caretpos, utf8_buf, length);
++	tb->width += width;
++	tb->caretxoffs += width;
++
++	tb->size += length;
++	tb->caretpos += length;
++	assert(tb->size <= tb->maxsize);
++	tb->buf[tb->size - 1] = '\0'; // terminating zero
++
++	return true;
++}
++
++/**
+  * Handle text navigation with arrow keys left/right.
+  * This defines where the caret will blink and the next characer interaction will occur
+  * @param tb Textbuf type where navigation occurs
+@@ -1140,10 +1193,16 @@ HandleEditBoxResult QueryString::HandleEditBoxKey(Window *w, int wid, uint16 key
+ 
+ 		case WKC_RETURN: case WKC_NUM_ENTER: return HEBR_CONFIRM;
+ 
++#ifdef WITH_COCOA
++		case (WKC_META | 'V'):
++#endif
+ 		case (WKC_CTRL | 'V'):
+ 			if (InsertTextBufferClipboard(&this->text)) w->SetWidgetDirty(wid);
+ 			break;
+ 
++#ifdef WITH_COCOA
++		case (WKC_META | 'U'):
++#endif
+ 		case (WKC_CTRL | 'U'):
+ 			DeleteTextBufferAll(&this->text);
+ 			w->SetWidgetDirty(wid);
+diff --git a/src/os/macosx/macos.mm b/src/os/macosx/macos.mm
+index 7c67e00..2829878 100644
+--- a/src/os/macosx/macos.mm
++++ b/src/os/macosx/macos.mm
+@@ -10,6 +10,7 @@
+ #include "../../stdafx.h"
+ #include "../../core/bitmath_func.hpp"
+ #include "../../rev.h"
++#include "../../string_func.h"
+ 
+ #define Rect  OTTDRect
+ #define Point OTTDPoint
+@@ -271,3 +272,21 @@ long GetMacOSVersionBugfix()
+ 
+ 	return sysVersion;
+ }
++
++
++bool GetClipboardContents(char *buffer, size_t buff_len)
++{
++	NSPasteboard *pb = [ NSPasteboard generalPasteboard ];
++	NSArray *types = [ NSArray arrayWithObject:NSStringPboardType ];
++	NSString *bestType = [ pb availableTypeFromArray:types ];
++
++	/* Clipboard has no text data available. */
++	if (bestType == nil) return false;
++
++	NSString *string = [ pb stringForType:NSStringPboardType ];
++	if (string == nil || [ string length ] == 0) return false;
++
++	ttd_strlcpy(buffer, [ string UTF8String ], buff_len);
++
++	return true;
++}
+diff --git a/src/os/os2/os2.cpp b/src/os/os2/os2.cpp
+index 06508b3..ead6f78 100644
+--- a/src/os/os2/os2.cpp
++++ b/src/os/os2/os2.cpp
+@@ -176,14 +176,7 @@ int CDECL main(int argc, char *argv[])
+ 	return ttd_main(argc, argv);
+ }
+ 
+-/**
+- * Insert a chunk of text from the clipboard onto the textbuffer. Get TEXT clipboard
+- * and append this up to the maximum length (either absolute or screenlength). If maxlength
+- * is zero, we don't care about the screenlength but only about the physical length of the string
+- * @param tb Textbuf type to be changed
+- * @return Return true on successful change of Textbuf, or false otherwise
+- */
+-bool InsertTextBufferClipboard(Textbuf *tb)
++bool GetClipboardContents(char *buffer, size_t buff_len)
+ {
+ /* XXX -- Currently no clipboard support implemented with GCC */
+ #ifndef __INNOTEK_LIBC__
+@@ -195,30 +188,7 @@ bool InsertTextBufferClipboard(Textbuf *tb)
+ 
+ 		if (text != NULL)
+ 		{
+-			uint length = 0;
+-			uint width = 0;
+-			const char *i;
+-
+-			for (i = text; IsValidAsciiChar(*i); i++)
+-			{
+-				uint w;
+-
+-				if (tb->size + length + 1 > tb->maxsize) break;
+-
+-				w = GetCharacterWidth(FS_NORMAL, (byte)*i);
+-				if (tb->maxwidth != 0 && width + tb->width + w > tb->maxwidth) break;
+-
+-				width += w;
+-				length++;
+-			}
+-
+-			memmove(tb->buf + tb->caretpos + length, tb->buf + tb->caretpos, tb->size - tb->caretpos);
+-			memcpy(tb->buf + tb->caretpos, text, length);
+-			tb->width += width;
+-			tb->caretxoffs += width;
+-			tb->size += length;
+-			tb->caretpos += length;
+-
++			ttd_strlcpy(buffer, text, buff_len);
+ 			WinCloseClipbrd(hab);
+ 			return true;
+ 		}
+diff --git a/src/os/unix/unix.cpp b/src/os/unix/unix.cpp
+index 54d18b8..e7dc359 100644
+--- a/src/os/unix/unix.cpp
++++ b/src/os/unix/unix.cpp
+@@ -269,10 +269,12 @@ int CDECL main(int argc, char *argv[])
+ 	return ret;
+ }
+ 
+-bool InsertTextBufferClipboard(Textbuf *tb)
++#ifndef WITH_COCOA
++bool GetClipboardContents(char *buffer, size_t buff_len)
+ {
+ 	return false;
+ }
++#endif
+ 
+ 
+ /* multi os compatible sleep function */
+diff --git a/src/os/windows/win32.cpp b/src/os/windows/win32.cpp
+index 6ca9701..4ff4e3a 100644
+--- a/src/os/windows/win32.cpp
++++ b/src/os/windows/win32.cpp
+@@ -465,28 +465,18 @@ void DetermineBasePaths(const char *exe)
+ 	_searchpaths[SP_APPLICATION_BUNDLE_DIR] = NULL;
+ }
+ 
+-/**
+- * Insert a chunk of text from the clipboard onto the textbuffer. Get TEXT clipboard
+- * and append this up to the maximum length (either absolute or screenlength). If maxlength
+- * is zero, we don't care about the screenlength but only about the physical length of the string
+- * @param tb Textbuf type to be changed
+- * @return true on successful change of Textbuf, or false otherwise
+- */
+-bool InsertTextBufferClipboard(Textbuf *tb)
++
++bool GetClipboardContents(char *buffer, size_t buff_len)
+ {
+ 	HGLOBAL cbuf;
+-	char utf8_buf[512];
+ 	const char *ptr;
+ 
+-	WChar c;
+-	uint16 width, length;
+-
+ 	if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+ 		OpenClipboard(NULL);
+ 		cbuf = GetClipboardData(CF_UNICODETEXT);
+ 
+ 		ptr = (const char*)GlobalLock(cbuf);
+-		const char *ret = convert_from_fs((wchar_t*)ptr, utf8_buf, lengthof(utf8_buf));
++		const char *ret = convert_from_fs((wchar_t*)ptr, buffer, buff_len);
+ 		GlobalUnlock(cbuf);
+ 		CloseClipboard();
+ 
+@@ -497,7 +487,7 @@ bool InsertTextBufferClipboard(Textbuf *tb)
+ 		cbuf = GetClipboardData(CF_TEXT);
+ 
+ 		ptr = (const char*)GlobalLock(cbuf);
+-		strecpy(utf8_buf, FS2OTTD(ptr), lastof(utf8_buf));
++		ttd_strlcpy(buffer, FS2OTTD(ptr), buff_len);
+ 
+ 		GlobalUnlock(cbuf);
+ 		CloseClipboard();
+@@ -506,33 +496,6 @@ bool InsertTextBufferClipboard(Textbuf *tb)
+ 		return false;
+ 	}
+ 
+-	width = length = 0;
+-
+-	for (ptr = utf8_buf; (c = Utf8Consume(&ptr)) != '\0';) {
+-		if (!IsPrintable(c)) break;
+-
+-		byte len = Utf8CharLen(c);
+-		if (tb->size + length + len > tb->maxsize) break;
+-
+-		byte charwidth = GetCharacterWidth(FS_NORMAL, c);
+-		if (tb->maxwidth != 0 && width + tb->width + charwidth > tb->maxwidth) break;
+-
+-		width += charwidth;
+-		length += len;
+-	}
+-
+-	if (length == 0) return false;
+-
+-	memmove(tb->buf + tb->caretpos + length, tb->buf + tb->caretpos, tb->size - tb->caretpos);
+-	memcpy(tb->buf + tb->caretpos, utf8_buf, length);
+-	tb->width += width;
+-	tb->caretxoffs += width;
+-
+-	tb->size += length;
+-	tb->caretpos += length;
+-	assert(tb->size <= tb->maxsize);
+-	tb->buf[tb->size - 1] = '\0'; // terminating zero
+-
+ 	return true;
+ }
+ 
+-- 
+1.6.3.2
+

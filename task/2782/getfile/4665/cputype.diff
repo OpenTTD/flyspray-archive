@@ -1,0 +1,215 @@
+diff -r 59e772a777bc src/os/macosx/macos.mm
+--- a/src/os/macosx/macos.mm	Sun Aug 30 05:42:03 2009 +0200
++++ b/src/os/macosx/macos.mm	Sun Aug 30 15:01:58 2009 +0200
+@@ -11,20 +11,33 @@
+ #include "../../core/bitmath_func.hpp"
+ #include "../../rev.h"
+ 
++#include <sys/sysctl.h>  
++#include <fcntl.h>
++#include <mach-o/arch.h>
++#include <mach/machine.h>
++
++
+ #define Rect  OTTDRect
+ #define Point OTTDPoint
+ #include <AppKit/AppKit.h>
+ #undef Rect
+ #undef Point
+ 
+-#include <mach/mach.h>
+-#include <mach/mach_host.h>
+-#include <mach/host_info.h>
+-#include <mach/machine.h>
++// These are not defined in the 10.4 SDK.
++#ifndef CPUFAMILY_INTEL_6_23
++#define CPUFAMILY_INTEL_6_23 0x78ea4fbc  /* Penryn */
++#endif
++#ifndef CPUFAMILY_INTEL_6_26
++#define CPUFAMILY_INTEL_6_26 0x6b5a4cd2  /* Nehalem */
++#endif
+ 
+-#ifndef CPU_SUBTYPE_POWERPC_970
+-#define CPU_SUBTYPE_POWERPC_970 ((cpu_subtype_t) 100)
+-#endif
++enum StrLength_MacOSErrormessages {
++	STRLEN_OSVERSION = 40,
++	STRLEN_CPUFAMILY = 100, // must be smaller than STRLEN_PROCESSOR
++	STRLEN_PROCESSOR = 150,
++	STRLEN_NEWGRFS   = 150,
++	STRLEN_TOTAL     = 340, // equal the total less the cpufamily 
++};
+ 
+ /*
+  * This file contains objective C
+@@ -43,11 +56,99 @@
+  * A return value of -1 indicates that something went wrong and we don't know.
+  */
+ 
++int _getSysCTLstring(const char key[], char * dest, size_t maxlen) {  
++    size_t len = 0;  
++    int err;  
++    /** Call with NULL for 'dest' to have the required size stored in 'len'. If the 'key'  
++     * doesn't exist, 'err' will be -1 and if all goes well, it will be 0.
++	 */
++    err = sysctlbyname(key, NULL, &len, NULL, 0);  
++    if (err == 0) {  
++        if (len > maxlen)  
++            len = maxlen;  
++        // Call with actual pointers to 'dest' and clamped 'len' fields to perform the read.  
++        err = sysctlbyname(key, dest, &len, NULL, 0);  
++    }  
++    return err;  
++}  
++
++template <typename T>  
++int _getSysCTLvalue(const char key[], T * dest) {  
++    size_t len = 0;  
++    int err;  
++    /** Call with NULL for 'dest' to get the size. If the 'key' doesn't exist, the  
++     * 'err' returned will be -1, so 0 indicates success. 
++	 */
++    err = sysctlbyname(key, NULL, &len, NULL, 0);  
++    if (err == 0) {  
++		assert(len == sizeof(T));
++        err = sysctlbyname(key, dest, &len, NULL, 0);  
++    }  
++    return err;  
++}  
++
++void GetProcessorType(char ret_strg[STRLEN_PROCESSOR])  
++{  
++    unsigned long lraw;  
++            
++    // Determine CPU Family, Type, and Subtype  
++    int cpufam  = 0;
++	int cputype = 0;
++	int cpusub  = 0;
++	char family_str[STRLEN_CPUFAMILY];
++    int err = _getSysCTLvalue<unsigned long>("hw.cpufamily", &lraw);    
++    if (!err) {
++        cpufam = (int) lraw;  
++        err = _getSysCTLvalue<unsigned long>("hw.cputype", &lraw);      
++        if (!err) {
++            cputype = (int) lraw;  
++            err = _getSysCTLvalue<unsigned long>("hw.cpusubtype", &lraw);   
++            if (!err) cpusub = (int) lraw;  
++            // If we've made it this far,   
++			switch (cpufam) {
++				case CPUFAMILY_POWERPC_G3: 
++					sprintf(family_str,"PowerPC G3");
++				case CPUFAMILY_POWERPC_G4:
++					sprintf(family_str,"PowerPC G4");
++				case CPUFAMILY_POWERPC_G5:
++					sprintf(family_str,"PowerPC G5");
++				case CPUFAMILY_INTEL_6_14:
++					sprintf(family_str,"Intel 'Yonam' Core Processor");
++				case CPUFAMILY_INTEL_6_15:
++					sprintf(family_str,"Intel 'Merom' Core Processor");
++				case CPUFAMILY_INTEL_6_23:
++					sprintf(family_str,"Intel 'Penryn' Core Processor");
++				case CPUFAMILY_INTEL_6_26:
++					sprintf(family_str,"Intel 'Nehalem' Core Processor");
++				default:
++					/** We want to try MacOS' default method. So fake an error
++					 * for this method
++					 */
++					err = -1;
++			}
++        }  
++    }  
++	/** Though it would be the easiest approach, we don't use this by default 
++		* as those information are not up2date always and e.g. return for a 
++		* core2duo also i486 type as 80486 CPU. It gives an indication, but is
++		* off by quite a bit.
++		*/	
++	if (err) {
++		const NXArchInfo *archinfo = NXGetLocalArchInfo();				
++		if (archinfo != NULL) {
++			sprintf(family_str, "best guestimate is %s: %s", archinfo->name, archinfo->description);
++		} else {
++			sprintf(family_str, "unknown");
++		} 
++	}
++	sprintf(ret_strg,"Processor: %s (ID %x, Type %d, Subtype %d)",family_str, cpufam, cputype, cpusub);
++}  
++
+ void GetMacOSVersion(int *return_major, int *return_minor, int *return_bugfix)
+ {
+ 	// Default value = -1 in case an error occurs
+-	*return_major = -1;
+-	*return_minor = -1;
++	*return_major  = -1;
++	*return_minor  = -1;
+ 	*return_bugfix = -1;
+ 	SInt32 systemVersion, version_major, version_minor, version_bugfix = -1;
+ 	if (Gestalt(gestaltSystemVersion, &systemVersion) == noErr) {
+@@ -67,39 +168,18 @@
+ 
+ static char *GetOSString()
+ {
+-	// get the hardware info
+-	host_basic_info_data_t hostInfo;
+-	mach_msg_type_number_t infoCount;
++	// Obtain CPU information
++	char CPU[STRLEN_PROCESSOR];
++	GetProcessorType(CPU);
+ 
+-	infoCount = HOST_BASIC_INFO_COUNT;
+-	host_info(
+-		mach_host_self(), HOST_BASIC_INFO, (host_info_t)&hostInfo, &infoCount
+-	);
+-
+-	// replace the hardware info with strings, that tells a bit more than just an int
+-	const char *CPU;
+-	switch (hostInfo.cpu_subtype) {
+-#ifdef __POWERPC__
+-		case CPU_SUBTYPE_POWERPC_750:  CPU = "G3"; break;
+-		case CPU_SUBTYPE_POWERPC_7400:
+-		case CPU_SUBTYPE_POWERPC_7450: CPU = "G4"; break;
+-		case CPU_SUBTYPE_POWERPC_970:  CPU = "G5"; break;
+-		default:                       CPU = "Unknown PPC"; break;
+-#else
+-		/* it looks odd to have a switch for two cases, but it leaves room for easy
+-		 * expansion. Odds are that Apple will some day use newer CPUs than i686
+-		 */
+-		case CPU_SUBTYPE_PENTPRO: CPU = "i686"; break;
+-		default:                  CPU = "Unknown Intel"; break;
+-#endif
+-	}
+-
+-	/** get the version of OSX
++	/** Get the version of OSX
+ 	 * Maximum length of the OS-Version string should not exceed 40 chars.
+ 	 */
+-	char OS[40];
+-	int version_major, version_minor, version_bugfix = -1;
+-	GetMacOSVersion( &version_major, &version_minor, &version_bugfix);
++	char OS[STRLEN_OSVERSION];
++	int version_major;
++	int version_minor;
++	int version_bugfix;
++	GetMacOSVersion(&version_major, &version_minor, &version_bugfix);
+ 	
+ 	if ((version_major) != -1 && (version_minor != -1) && (version_bugfix != -1)) {
+ 		sprintf(OS, "%d.%d.%d", version_major, version_minor, version_bugfix);
+@@ -107,8 +187,8 @@
+ 		sprintf(OS, "uncertain %d.%d.%d", version_major, version_minor, version_bugfix);
+ 	}
+ 
+-	// make a list of used newgrf files
+-	char newgrf[125];
++	// Make a list of used newgrf files
++	char newgrf[STRLEN_NEWGRFS];
+ /*	if (_first_grffile != NULL) {
+ 		char *n = newgrf;
+ 		const GRFFile *file;
+@@ -121,7 +201,7 @@
+ 		sprintf(newgrf, "unkown");
+ //	}
+ 
+-	static char buffer[195];
++	static char buffer[STRLEN_TOTAL];
+ 	snprintf(
+ 		buffer, lengthof(buffer),
+ 		"Please add this info: (tip: copy-paste works)\n"

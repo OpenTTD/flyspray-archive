@@ -1,0 +1,112 @@
+From 8fda399663af300ffb448ff33c7a6c3fb9a98751 Mon Sep 17 00:00:00 2001
+From: Michael Lutz <michi@icosahedron.de>
+Date: Wed, 3 Sep 2008 02:27:33 +0200
+Subject: -Fix [FS#2265]: If a change of conventional/electric rail coincided with the start of a station platform, stale reservations could be left behind.
+
+---
+ src/yapf/yapf_node_rail.hpp |   12 ----------
+ src/yapf/yapf_rail.cpp      |   50 +++++++++++++++++++++++++++++++++++-------
+ 2 files changed, 41 insertions(+), 21 deletions(-)
+
+diff --git a/src/yapf/yapf_node_rail.hpp b/src/yapf/yapf_node_rail.hpp
+index 192bce2..0d7e5d4 100644
+--- a/src/yapf/yapf_node_rail.hpp
++++ b/src/yapf/yapf_node_rail.hpp
+@@ -193,18 +193,6 @@ struct CYapfRailNodeT
+ 			cur = ft.m_new_tile;
+ 			assert(KillFirstBit(ft.m_new_td_bits) == TRACKDIR_BIT_NONE);
+ 			cur_td = FindFirstTrackdir(ft.m_new_td_bits);
+-
+-			/* Did we skip tiles because of a station? */
+-			if (ft.m_is_station && ft.m_tiles_skipped > 0) {
+-				TileIndexDiff diff = TileOffsByDiagDir(TrackdirToExitdir(cur_td));
+-				TileIndex     tile = TILE_ADD(cur, -diff * ft.m_tiles_skipped);
+-
+-				/* Call func for all tiles in between. */
+-				for (int i = 0; i < ft.m_tiles_skipped; ++i) {
+-					if (!(obj.*func)(tile, cur_td)) return false;
+-					tile = TILE_ADD(tile, diff);
+-				}
+-			}
+ 		}
+ 
+ 		return (obj.*func)(cur, cur_td);
+diff --git a/src/yapf/yapf_rail.cpp b/src/yapf/yapf_rail.cpp
+index 88fe70f..0582825 100644
+--- a/src/yapf/yapf_rail.cpp
++++ b/src/yapf/yapf_rail.cpp
+@@ -10,6 +10,7 @@
+ #include "yapf_destrail.hpp"
+ #include "../vehicle_func.h"
+ #include "../pbs.h"
++#include "../functions.h"
+ 
+ #define DEBUG_YAPF_CACHE 0
+ 
+@@ -46,23 +47,54 @@ private:
+ 		return true;
+ 	}
+ 
++	/** Reserve a railway platform. Tile contains the failed tile on abort. */
++	bool ReserveRailwayStationPlatform(TileIndex &tile, DiagDirection dir)
++	{
++		TileIndex     start = tile;
++		TileIndexDiff diff = TileOffsByDiagDir(dir);
++
++		do {
++			if (GetRailwayStationReservation(tile)) return false;
++			SetRailwayStationReservation(tile, true);
++			MarkTileDirtyByTile(tile);
++			tile = TILE_ADD(tile, diff);
++		} while (IsCompatibleTrainStationTile(tile, start));
++
++		return true;
++	}
++
++	/** Try to reserve a single track/platform. */
+ 	bool ReserveSingleTrack(TileIndex tile, Trackdir td)
+ 	{
+-		if (!TryReserveRailTrack(tile, TrackdirToTrack(td))) {
+-			/* Tile couldn't be reserved, undo. */
+-			m_res_fail_tile = tile;
+-			m_res_fail_td = td;
+-			return false;
++		if (IsRailwayStationTile(tile)) {
++			if (!ReserveRailwayStationPlatform(tile, TrackdirToExitdir(ReverseTrackdir(td)))) {
++				/* Platform could not be reserved, undo. */
++				m_res_fail_tile = tile;
++				m_res_fail_td = td;
++			}
++		} else {
++			if (!TryReserveRailTrack(tile, TrackdirToTrack(td))) {
++				/* Tile couldn't be reserved, undo. */
++				m_res_fail_tile = tile;
++				m_res_fail_td = td;
++				return false;
++			}
+ 		}
+-		/* YAPF can sometimes skip parts of a station, so make sure we
+-		 * always reserve the whole platform. */
+-		if (IsRailwayStationTile(tile)) SetRailwayStationPlatformReservation(tile, TrackdirToExitdir(ReverseTrackdir(td)), true);
++
+ 		return tile != m_res_dest;
+ 	}
+ 
++	/** Unreserve a single track/platform. Stops when the previous failer is reached. */
+ 	bool UnreserveSingleTrack(TileIndex tile, Trackdir td)
+ 	{
+-		if (tile != m_res_fail_tile || td != m_res_fail_td) UnreserveRailTrack(tile, TrackdirToTrack(td));
++		if (IsRailwayStationTile(tile)) {
++			TileIndex     start = tile;
++			TileIndexDiff diff = TileOffsByDiagDir(TrackdirToExitdir(ReverseTrackdir(td)));
++			while ((tile != m_res_fail_tile || td != m_res_fail_td) && IsCompatibleTrainStationTile(tile, start)) {
++				SetRailwayStationReservation(tile, false);
++				tile = TILE_ADD(tile, diff);
++			}
++		} else if (tile != m_res_fail_tile || td != m_res_fail_td) UnreserveRailTrack(tile, TrackdirToTrack(td));
+ 		return tile != m_res_dest && (tile != m_res_fail_tile || td != m_res_fail_td);
+ 	}
+ 
+-- 
+1.5.6.4
+

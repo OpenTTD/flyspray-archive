@@ -1,0 +1,150 @@
+diff -r 1fae38bc99b2 src/date.cpp
+--- a/src/date.cpp	Sat Apr 04 13:09:36 2009 +0000
++++ b/src/date.cpp	Sun Apr 05 15:33:48 2009 +0200
+@@ -163,6 +163,7 @@
+ extern void TownsMonthlyLoop();
+ extern void IndustryMonthlyLoop();
+ extern void StationMonthlyLoop();
++extern void UnmovableMonthlyLoop();
+ 
+ extern void CompaniesYearlyLoop();
+ extern void VehiclesYearlyLoop();
+@@ -256,6 +257,7 @@
+ 		TownsMonthlyLoop();
+ 		IndustryMonthlyLoop();
+ 		StationMonthlyLoop();
++		UnmovableMonthlyLoop();
+ #ifdef ENABLE_NETWORK
+ 		if (_network_server) NetworkServerMonthlyLoop();
+ #endif /* ENABLE_NETWORK */
+diff -r 1fae38bc99b2 src/unmovable.h
+--- a/src/unmovable.h	Sat Apr 04 13:09:36 2009 +0000
++++ b/src/unmovable.h	Sun Apr 05 15:33:48 2009 +0200
+@@ -21,5 +21,23 @@
+ 
+ };
+ 
++struct RadioTowerConstructionSpec {
++	Year start; //start of construction period
++	Year end;   // end of construction period
++	int unscaled_count; // number of radiotower to build during period for a 256x256 map
++
++	int PeriodInMonth() const { return (this->end - this->start) * 12; } // number of months of this period
++	int Count() { return ScaleByMapSize(this->unscaled_count); } // number of radiotower to build during period scaled to map size
++};
++
++static const int MAX_NUMBER_OF_RADIOTOWER = 16; // unscaled maximum number of radiotower on the map
++
++static const int RADIOTOWER_CONSTRUCTION_STAGES = 4;
++static struct RadioTowerConstructionSpec const _radiotower_construction_spec[RADIOTOWER_CONSTRUCTION_STAGES] = {
++	{1920, 1970, 1},
++	{1970, 1995, 3},
++	{1995, 2020, 7},
++	{2020, ORIGINAL_END_YEAR, 5}
++};
+ 
+ #endif /* UNMOVABLE_H */
+diff -r 1fae38bc99b2 src/unmovable_cmd.cpp
+--- a/src/unmovable_cmd.cpp	Sat Apr 04 13:09:36 2009 +0000
++++ b/src/unmovable_cmd.cpp	Sun Apr 05 15:33:48 2009 +0200
+@@ -23,6 +23,7 @@
+ #include "cheat_type.h"
+ #include "landscape_type.h"
+ #include "unmovable.h"
++#include "date_func.h"
+ 
+ #include "table/strings.h"
+ #include "table/sprites.h"
+@@ -382,12 +383,47 @@
+ 	return false;
+ }
+ 
++bool MaybeNewRadioTower()
++{
++	TileIndex tile = RandomTile();
++
++	uint h;
++	if (IsTileType(tile, MP_CLEAR) && GetTileSlope(tile, &h) == SLOPE_FLAT && h >= TILE_HEIGHT * 4 && !IsBridgeAbove(tile)) {
++		if (IsRadioTowerNearby(tile)) return false;
++
++		MakeTransmitter(tile);
++		return true;
++	}
++	return false;
++}
++
++int RadioTowerToBuildInStage(int stage)
++{
++	RadioTowerConstructionSpec spec = _radiotower_construction_spec[stage];
++	/* Returns the number of radiotower to build in either the full stage or part of it */
++	return (int) ((min(_cur_year, spec.end) - spec.start) * spec.Count() / (spec.end - spec.start));
++}
++
++int RadioTowerToBuild()
++{
++	if (_radiotower_construction_spec[0].start >= _cur_year) return 0; // before construction stages, no radiotower to build
++	if (_radiotower_construction_spec[RADIOTOWER_CONSTRUCTION_STAGES - 1].end < _cur_year) return ScaleByMapSize(MAX_NUMBER_OF_RADIOTOWER); // after construction stages, build all radiotowers
++
++	/* Add the number of radiotowers to build for each completed or started stages */
++	int radiotower_to_build = 0;
++	for (int i = 0; i < RADIOTOWER_CONSTRUCTION_STAGES; i++) {
++		radiotower_to_build += RadioTowerToBuildInStage(i);
++		if (_radiotower_construction_spec[i].end >= _cur_year) break; // end of construction stage is after current year
++	}
++	return radiotower_to_build;
++}
++
+ void GenerateUnmovables()
+ {
+ 	if (_settings_game.game_creation.landscape == LT_TOYLAND) return;
+ 
+ 	/* add radio tower */
+-	int radiotower_to_build = ScaleByMapSize(15); // maximum number of radio towers on the map
++	int radiotower_to_build = RadioTowerToBuild(); // initial number of radio towers on the map
+ 	int lighthouses_to_build = _settings_game.game_creation.landscape == LT_TROPIC ? 0 : ScaleByMapSize1D((Random() & 3) + 7);
+ 
+ 	/* Scale the amount of lighthouses with the amount of land at the borders. */
+@@ -409,13 +445,7 @@
+ 	SetGeneratingWorldProgress(GWP_UNMOVABLE, radiotower_to_build + lighthouses_to_build);
+ 
+ 	for (uint i = ScaleByMapSize(1000); i != 0; i--) {
+-		TileIndex tile = RandomTile();
+-
+-		uint h;
+-		if (IsTileType(tile, MP_CLEAR) && GetTileSlope(tile, &h) == SLOPE_FLAT && h >= TILE_HEIGHT * 4 && !IsBridgeAbove(tile)) {
+-			if (IsRadioTowerNearby(tile)) continue;
+-
+-			MakeTransmitter(tile);
++		if (MaybeNewRadioTower()) {
+ 			IncreaseGeneratingWorldProgress(GWP_UNMOVABLE);
+ 			if (--radiotower_to_build == 0) break;
+ 		}
+@@ -513,3 +543,28 @@
+ 	GetFoundation_Unmovable,        // get_foundation_proc
+ 	TerraformTile_Unmovable,        // terraform_tile_proc
+ };
++
++bool ShouldBuildRadioTowerThisMonth()
++{
++	/* Return false if we are outside of construction bounds */
++	if (_radiotower_construction_spec[0].start > _cur_year || _radiotower_construction_spec[RADIOTOWER_CONSTRUCTION_STAGES - 1].end <= _cur_year) return false;
++
++	for (int i = 0; i < RADIOTOWER_CONSTRUCTION_STAGES; i++) { // Iterate over construction periods
++		RadioTowerConstructionSpec spec = _radiotower_construction_spec[i];
++		if (spec.end > _cur_year) { 
++				/* Found current construction period, calculate the chance to build a new radiotower */
++				return Chance16(spec.Count(), spec.PeriodInMonth());
++		}
++	}
++	return false; // Not reached
++}
++
++void UnmovableMonthlyLoop()
++{
++	if (ShouldBuildRadioTowerThisMonth()) {
++		/* Try to build a new radiotower */
++		for (uint i = ScaleByMapSize(100); i != 0; i--) {
++			if (MaybeNewRadioTower()) break;
++		}
++	}
++}

@@ -1,0 +1,269 @@
+Change vehicles to use OrderList instead of pointer to first order.
+
+diff -r c03c07f16fba src/order_base.h
+--- a/src/order_base.h	Wed Oct 29 16:18:56 2008 +0100
++++ b/src/order_base.h	Wed Oct 29 16:19:06 2008 +0100
+@@ -431,7 +431,7 @@ static inline bool IsValidOrderListID(ui
+ #define FOR_ALL_ORDERS(order) FOR_ALL_ORDERS_FROM(order, 0)
+ 
+ 
+-#define FOR_VEHICLE_ORDERS(v, order) for (order = v->orders; order != NULL; order = order->next)
++#define FOR_VEHICLE_ORDERS(v, order) for (order = (v->orders.list == NULL) ? NULL : v->orders.list->GetFirstOrder(); order != NULL; order = order->next)
+ 
+ /* (Un)pack routines */
+ Order UnpackOldOrder(uint16 packed);
+diff -r c03c07f16fba src/order_cmd.cpp
+--- a/src/order_cmd.cpp	Wed Oct 29 16:18:56 2008 +0100
++++ b/src/order_cmd.cpp	Wed Oct 29 16:19:06 2008 +0100
+@@ -448,7 +448,7 @@ void OrderList::DebugCheckSanity() const
+ 
+ 	for (const Vehicle *v = this->first_shared; v != NULL; v = v->NextShared()) {
+ 		++check_num_vehicles;
+-		assert(v->orders == this->first);
++		assert(v->orders.list == this);
+ 	}
+ 	assert(this->num_vehicles == check_num_vehicles);
+ 	DEBUG(misc, 6, "... detected %u orders, %u vehicles, %u ticks", (unsigned)this->num_orders,
+@@ -488,7 +488,7 @@ static uint GetOrderDistance(const Order
+ 		conditional_depth++;
+ 
+ 		int dist1 = GetOrderDistance(prev, GetVehicleOrder(v, cur->GetConditionSkipToOrder()), v, conditional_depth);
+-		int dist2 = GetOrderDistance(prev, cur->next == NULL ? v->orders : cur->next, v, conditional_depth);
++		int dist2 = GetOrderDistance(prev, cur->next == NULL ? v->orders.list->GetFirstOrder() : cur->next, v, conditional_depth);
+ 		return max(dist1, dist2);
+ 	}
+ 
+@@ -1542,13 +1542,18 @@ void CheckOrders(const Vehicle* v)
+ 		if (v->GetNumOrders() > 1) {
+ 			const Order* last = GetLastVehicleOrder(v);
+ 
+-			if (v->orders->Equals(*last)) {
++			if (v->orders.list->GetFirstOrder()->Equals(*last)) {
+ 				problem_type = 2;
+ 			}
+ 		}
+ 
+ 		/* Do we only have 1 station in our order list? */
+ 		if (n_st < 2 && problem_type == -1) problem_type = 0;
++
++#ifdef _DEBUG
++		assert(v->orders.list); // otherwise the check for v->FirstShared() != v would have been true
++		v->orders.list->DebugCheckSanity();
++#endif
+ 
+ 		/* We don't have a problem */
+ 		if (problem_type < 0) return;
+@@ -1637,20 +1642,19 @@ bool VehicleHasDepotOrders(const Vehicle
+  * Delete all orders from a vehicle
+  *
+  */
+-void DeleteVehicleOrders(Vehicle *v)
++void DeleteVehicleOrders(Vehicle *v, bool keep_orderlist)
+ {
+ 	DeleteOrderWarnings(v);
+ 
+ 	if (v->IsOrderListShared()) {
+ 		/* Remove ourself from the shared order list. */
+ 		v->RemoveFromShared();
+-	} else if (v->orders != NULL) {
++		v->orders.list = NULL;
++	} else if (v->orders.list != NULL) {
+ 		/* Remove the orders */
+-		v->orders->FreeChain();
+-	}
+-
+-	v->orders = NULL;
+-	v->num_orders = 0;
++		v->orders.list->FreeChain(keep_orderlist);
++		if (!keep_orderlist) v->orders.list = NULL;
++	}
+ }
+ 
+ Date GetServiceIntervalClamped(uint index)
+diff -r c03c07f16fba src/order_func.h
+--- a/src/order_func.h	Wed Oct 29 16:18:56 2008 +0100
++++ b/src/order_func.h	Wed Oct 29 16:19:06 2008 +0100
+@@ -34,7 +34,7 @@ void InvalidateVehicleOrder(const Vehicl
+ void InvalidateVehicleOrder(const Vehicle *v, int data);
+ bool VehicleHasDepotOrders(const Vehicle *v);
+ void CheckOrders(const Vehicle*);
+-void DeleteVehicleOrders(Vehicle *v);
++void DeleteVehicleOrders(Vehicle *v, bool keep_orderlist = false);
+ bool ProcessOrders(Vehicle *v);
+ bool UpdateOrderDest(Vehicle *v, const Order *order, int conditional_depth = 0);
+ VehicleOrderID ProcessConditionalOrder(const Order *order, const Vehicle *v);
+diff -r c03c07f16fba src/timetable_cmd.cpp
+--- a/src/timetable_cmd.cpp	Wed Oct 29 16:18:56 2008 +0100
++++ b/src/timetable_cmd.cpp	Wed Oct 29 16:19:06 2008 +0100
+@@ -17,12 +17,16 @@ static void ChangeTimetable(Vehicle *v, 
+ static void ChangeTimetable(Vehicle *v, VehicleOrderID order_number, uint16 time, bool is_journey)
+ {
+ 	Order *order = GetVehicleOrder(v, order_number);
++	int delta;
+ 
+ 	if (is_journey) {
++		delta = time - order->travel_time;
+ 		order->travel_time = time;
+ 	} else {
++		delta = time - order->wait_time;
+ 		order->wait_time = time;
+ 	}
++	v->orders.list->UpdateOrderTimetable(delta);
+ 
+ 	for (v = v->FirstShared(); v != NULL; v = v->NextShared()) {
+ 		if (v->cur_order_index == order_number && v->current_order.Equals(*order)) {
+@@ -156,6 +160,7 @@ CommandCost CmdAutofillTimetable(TileInd
+ 				order->wait_time = 0;
+ 				order->travel_time = 0;
+ 			}
++			if (v->orders.list) v->orders.list->ResetOrderTimetable();
+ 
+ 			v->current_order.wait_time = 0;
+ 			v->current_order.travel_time = 0;
+diff -r c03c07f16fba src/train_cmd.cpp
+--- a/src/train_cmd.cpp	Wed Oct 29 16:18:56 2008 +0100
++++ b/src/train_cmd.cpp	Wed Oct 29 16:19:06 2008 +0100
+@@ -1269,8 +1269,7 @@ CommandCost CmdMoveRailVehicle(TileIndex
+ 				if (!IsFrontEngine(src)) {
+ 					/* setting the type to 0 also involves setting up the orders field. */
+ 					SetFrontEngine(src);
+-					assert(src->orders == NULL);
+-					src->num_orders = 0;
++					assert(src->orders.list == NULL);
+ 
+ 					/* Decrease the engines number of the src engine_type */
+ 					if (!IsDefaultGroupID(src->group_id) && IsValidGroupID(src->group_id)) {
+@@ -1441,8 +1440,7 @@ CommandCost CmdSellRailWagon(TileIndex t
+ 							first->group_id        = DEFAULT_GROUP;
+ 
+ 							/* Copy orders (by sharing) */
+-							new_f->orders          = first->orders;
+-							new_f->num_orders      = first->GetNumOrders();
++							new_f->orders.list     = first->orders.list;
+ 							new_f->AddToShared(first);
+ 							DeleteVehicleOrders(first);
+ 
+diff -r c03c07f16fba src/vehicle.cpp
+--- a/src/vehicle.cpp	Wed Oct 29 16:18:56 2008 +0100
++++ b/src/vehicle.cpp	Wed Oct 29 16:19:06 2008 +0100
+@@ -312,7 +312,6 @@ Vehicle::Vehicle()
+ 	this->group_id           = DEFAULT_GROUP;
+ 	this->fill_percent_te_id = INVALID_TE_ID;
+ 	this->first              = this;
+-	this->first_shared       = this;
+ 	this->colormap           = PAL_NONE;
+ }
+ 
+diff -r c03c07f16fba src/vehicle_base.h
+--- a/src/vehicle_base.h	Wed Oct 29 16:18:56 2008 +0100
++++ b/src/vehicle_base.h	Wed Oct 29 16:19:06 2008 +0100
+@@ -205,7 +205,6 @@ private:
+ 
+ 	Vehicle *next_shared;     ///< pointer to the next vehicle that shares the order
+ 	Vehicle *previous_shared; ///< NOSAVE: pointer to the previous vehicle in the shared order chain
+-	Vehicle *first_shared;    ///< NOSAVE: pointer to the first vehicle in the shared order chain
+ public:
+ 	friend const SaveLoad *GetVehicleDescription(VehicleType vt); ///< So we can use private/protected variables in the saveload code
+ 	friend void AfterLoadVehicles(bool clear_te_id);              ///< So we can set the previous and first pointers while loading
+@@ -297,10 +296,12 @@ public:
+ 
+ 	byte vehstatus;                 ///< Status
+ 	Order current_order;            ///< The current order (+ status, like: loading)
+-	VehicleOrderID num_orders;      ///< How many orders there are in the list
+ 	VehicleOrderID cur_order_index; ///< The index to the current order
+ 
+-	Order *orders;                  ///< Pointer to the first order for this vehicle
++	union {
++		OrderList *list;              ///< Pointer to the order list for this vehicle
++		Order     *old;               ///< Only used during conversion of old save games
++	} orders;
+ 
+ 	bool leave_depot_instantly;     ///< NOSAVE: stores if the vehicle needs to leave the depot it just entered. Used by autoreplace
+ 
+@@ -479,6 +480,12 @@ public:
+ 
+ 
+ 	/**
++	 * Get the first order of the vehicles order list.
++	 * @return first order of order list.
++	 */
++	inline Order *GetFirstOrder() const { return (this->orders.list == NULL) ? NULL : this->orders.list->GetFirstOrder(); }
++
++	/**
+ 	 * Adds this vehicle to a shared vehicle chain.
+ 	 * @param shared_chain a vehicle of the chain with shared vehicles.
+ 	 * @pre !this->IsOrderListShared()
+@@ -491,9 +498,8 @@ public:
+ 	void RemoveFromShared();
+ 
+ 	/**
+-	 * Get the next vehicle of this vehicle.
+-	 * @note articulated parts are also counted as vehicles.
+-	 * @return the next vehicle or NULL when there isn't a next vehicle.
++	 * Get the next vehicle of the shared vehicle chain.
++	 * @return the next shared vehicle or NULL when there isn't a next vehicle.
+ 	 */
+ 	inline Vehicle *NextShared() const { return this->next_shared; }
+ 
+@@ -507,19 +513,19 @@ public:
+ 	 * Get the first vehicle of this vehicle chain.
+ 	 * @return the first vehicle of the chain.
+ 	 */
+-	inline Vehicle *FirstShared() const { return this->first_shared; }
++	inline Vehicle *FirstShared() const { return (this->orders.list == NULL) ? NULL : this->orders.list->GetFirstSharedVehicle(); }
+ 
+ 	/**
+ 	 * Check if we share our orders with another vehicle.
+ 	 * @return true if there are other vehicles sharing the same order
+ 	 */
+-	inline bool IsOrderListShared() const { return this->previous_shared != NULL || this->next_shared != NULL; };
+-
+-  /**
++	inline bool IsOrderListShared() const { return this->orders.list != NULL && this->orders.list->IsShared(); }
++
++	/**
+ 	 * Get the number of orders this vehicle has.
+ 	 * @return the number of orders this vehicle has.
+ 	 */
+-	inline VehicleOrderID GetNumOrders() const { return this->num_orders; }
++	inline VehicleOrderID GetNumOrders() const { return (this->orders.list == NULL) ? 0 : this->orders.list->GetNumOrders(); }
+ 
+ 	/**
+ 	 * Copy certain configurations and statistics of a vehicle after successful autoreplace/renew
+@@ -657,34 +663,14 @@ static inline bool IsValidVehicleID(uint
+ }
+ 
+ /* Returns order 'index' of a vehicle or NULL when it doesn't exists */
+-static inline Order *GetVehicleOrder(const Vehicle *v, int index)
+-{
+-	Order *order = v->orders;
+-
+-	if (index < 0) return NULL;
+-
+-	while (order != NULL && index-- > 0)
+-		order = order->next;
+-
+-	return order;
+-}
++static inline Order *GetVehicleOrder(const Vehicle *v, int index) { return (v->orders.list == NULL) ? NULL : v->orders.list->GetOrderAt(index); }
+ 
+ /**
+  * Returns the last order of a vehicle, or NULL if it doesn't exists
+  * @param v Vehicle to query
+  * @return last order of a vehicle, if available
+  */
+-static inline Order *GetLastVehicleOrder(const Vehicle *v)
+-{
+-	Order *order = v->orders;
+-
+-	if (order == NULL) return NULL;
+-
+-	while (order->next != NULL)
+-		order = order->next;
+-
+-	return order;
+-}
++static inline Order *GetLastVehicleOrder(const Vehicle *v) { return (v->orders.list == NULL) ? NULL : v->orders.list->GetLastOrder(); }
+ 
+ /**
+  * Returns the Trackdir on which the vehicle is currently located.

@@ -1,0 +1,398 @@
+diff -Naur old/bin/data/playlist.m3u new/bin/data/playlist.m3u
+--- old/bin/data/playlist.m3u	1970-01-01 02:00:00.000000000 +0200
++++ new/bin/data/playlist.m3u	2009-01-07 13:28:44.000000000 +0200
+@@ -0,0 +1,6 @@
++example1.ogg
++example2.mp3
++example3.mid
++example4.mod
++music/example5.s3m
++../../musics/example6.mp3
+diff -Naur old/config.lib new/config.lib
+--- old/config.lib	2008-12-05 21:18:05.000000000 +0200
++++ new/config.lib	2009-01-07 14:30:38.000000000 +0200
+@@ -56,7 +56,7 @@
+ 	with_osx_sysroot="1"
+ 	with_application_bundle="1"
+ 	with_menu_entry="1"
+-	with_allegro="1"
++	with_allegro="0"
+ 	with_sdl="1"
+ 	with_cocoa="1"
+ 	with_zlib="1"
+@@ -1206,6 +1206,8 @@
+ 		fi
+ 	fi
+ 
++   LIBS="$LIBS -lSDL_mixer"
++
+ 	if [ "$with_cocoa" != "0" ]; then
+ 		CFLAGS="$CFLAGS -DWITH_COCOA"
+ 		LIBS="$LIBS -F/System/Library/Frameworks -framework Cocoa -framework Carbon -framework AudioUnit"
+diff -Naur old/source.list new/source.list
+--- old/source.list	2008-12-05 21:18:05.000000000 +0200
++++ new/source.list	2008-12-09 16:37:07.000000000 +0200
+@@ -719,3 +719,6 @@
+ 		os/macosx/splash.cpp
+ 	#end
+ #end
++
++music/sdl_music.h
++music/sdl_music.cpp
+diff -Naur old/src/music/sdl_music.cpp new/src/music/sdl_music.cpp
+--- old/src/music/sdl_music.cpp	1970-01-01 02:00:00.000000000 +0200
++++ new/src/music/sdl_music.cpp	2009-01-07 19:01:49.000000000 +0200
+@@ -0,0 +1,129 @@
++/*sdl_ogg.cpp 2009-01-07 by Aapo Rantalainen */
++
++/** @file sdl_music.cpp Playing music via sdl_mixer. */
++
++
++#include "../stdafx.h"
++#include "../debug.h"
++#include "sdl_music.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include "SDL.h"
++#include "SDL_mixer.h"
++#include <iostream>
++#include <fstream>
++#include <string>
++using namespace std;
++
++static FMusicDriver_SDL iFMusicDriver_SDL;
++static Mix_Music *music = NULL;
++int musicPlaying = 0;
++
++#define MAX_NUMBER_OF_PLAYLIST_ITEM 1000
++char *songs[MAX_NUMBER_OF_PLAYLIST_ITEM];
++static int songcount;
++
++void musicFinished()
++{
++   //Music is done!
++   musicPlaying = 0;
++}
++
++const char *MusicDriver_SDL::Start(const char * const *param)
++{
++if (SDL_Init(SDL_INIT_AUDIO) != 0) 
++   {
++   DEBUG(driver, 0, "SDL_mixer: Unable to initialize SDL_AUDIO");
++   return NULL;
++   }
++
++   int audio_rate = 22050;                //Frequency of audio playback
++   Uint16 audio_format = AUDIO_S16SYS;    //Format of the audio we're playing
++   int audio_channels = 2;                //2 channels = stereo
++   int audio_buffers = 4096;              //Size of the audio buffers in memory
++
++   if(Mix_OpenAudio(audio_rate, audio_format, audio_channels, audio_buffers) != 0) 
++   {
++   DEBUG(driver, 0, "SDL_mixer:Unable to OpenAudio");
++   return NULL;
++   }
++
++
++string line;
++int count=0;
++  ifstream myfile ("data/playlist.m3u");
++  if (myfile.is_open())
++  {
++    while (! myfile.eof() && count<MAX_NUMBER_OF_PLAYLIST_ITEM)
++    {
++      getline (myfile,line);
++      songs[count]= (char*)malloc(1200);
++      strcpy (songs[count], line.c_str());
++      count++;
++    }
++    myfile.close();
++  }
++songcount=count;
++
++musicPlaying = 1;
++	return NULL;
++}
++
++void MusicDriver_SDL::Stop()
++{
++   //Release the memory allocated to our music
++   Mix_HaltMusic();
++   Mix_FreeMusic(music);
++
++   //Need to make sure that SDL_mixer and SDL have a chance to clean up
++   Mix_CloseAudio();
++   SDL_Quit();
++}
++
++void MusicDriver_SDL::PlaySong(const char *filename)
++{
++if (songcount==0)
++{
++musicPlaying = 1;
++   return;
++}
++
++int index=atoi(filename);
++while (index<0 || index>=songcount)
++   {
++   if (index<0) index+=songcount;
++   if (index>=songcount) index-=songcount;
++   }
++
++
++char load_file[300];
++sprintf(load_file,"data/%s",songs[index]);
++music = Mix_LoadMUS(load_file);
++
++if(Mix_PlayMusic(music, 0) == -1) 
++   {
++      DEBUG(driver, 0, "SDL_mixer: Unable to play music file");
++      return;
++   }
++musicPlaying = 1;
++Mix_HookMusicFinished(musicFinished);
++}
++
++void MusicDriver_SDL::StopSong()
++{
++Mix_HaltMusic();
++}
++
++bool MusicDriver_SDL::IsSongPlaying()
++{
++	return musicPlaying;
++}
++
++void MusicDriver_SDL::SetVolume(byte vol)
++{
++  //not implemented
++	//set_volume(-1, vol);
++}
++
++//#endif /* WITH_SDL_MUSIC */
+diff -Naur old/src/music/sdl_music.h new/src/music/sdl_music.h
+--- old/src/music/sdl_music.h	1970-01-01 02:00:00.000000000 +0200
++++ new/src/music/sdl_music.h	2009-01-07 14:11:33.000000000 +0200
+@@ -0,0 +1,32 @@
++
++/** @file sdl_music.h Base support for playing music files via sdl_mixer. */
++
++#ifndef MUSIC_SDL_H
++#define MUSIC_SDL_H
++
++#include "music_driver.hpp"
++
++class MusicDriver_SDL: public MusicDriver {
++public:
++	/* virtual */ const char *Start(const char * const *param);
++
++	/* virtual */ void Stop();
++
++	/* virtual */ void PlaySong(const char *filename);
++
++	/* virtual */ void StopSong();
++
++	/* virtual */ bool IsSongPlaying();
++
++	/* virtual */ void SetVolume(byte vol);
++};
++
++class FMusicDriver_SDL: public MusicDriverFactory<FMusicDriver_SDL> {
++public:
++	static const int priority = 1;
++	/* virtual */ const char *GetName() { return "sdl"; }
++	/* virtual */ const char *GetDescription() { return "SDL Music Driver"; }
++	/* virtual */ Driver *CreateInstance() { return new MusicDriver_SDL(); }
++};
++
++#endif /* MUSIC_SDL_H */
+diff -Naur old/src/music_gui.cpp new/src/music_gui.cpp
+--- old/src/music_gui.cpp	2008-12-05 21:18:00.000000000 +0200
++++ new/src/music_gui.cpp	2009-01-07 12:29:14.000000000 +0200
+@@ -24,6 +24,8 @@
+ static byte _cur_playlist[NUM_SONGS_PLAYLIST];
+ 
+ 
++static int songnumber=0;
++static void DoPlaySong();
+ 
+ static byte _playlist_all[] = {
+ 	1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 0
+@@ -52,6 +54,13 @@
+ 
+ static void SkipToPrevSong()
+ {
++if (msf.sdl_music)
++   {
++   songnumber--;
++   DoPlaySong();
++   return;
++   }
++
+ 	byte *b = _cur_playlist;
+ 	byte *p = b;
+ 	byte t;
+@@ -72,6 +81,13 @@
+ 
+ static void SkipToNextSong()
+ {
++if (msf.sdl_music)
++   {
++   songnumber++;
++   DoPlaySong();
++   return;
++   }
++
+ 	byte* b = _cur_playlist;
+ 	byte t;
+ 
+@@ -94,6 +110,14 @@
+ 
+ static void DoPlaySong()
+ {
++if (msf.sdl_music)
++   {
++   char temp[7];
++   sprintf(temp,"%d",songnumber);
++   _music_driver->PlaySong(temp);
++   return;
++   }
++
+ 	char filename[MAX_PATH];
+ 	FioFindFullPath(filename, lengthof(filename), GM_DIR,
+ 			_origin_songs_specs[_music_wnd_cursong - 1].filename);
+@@ -110,6 +134,16 @@
+ 	uint i = 0;
+ 	uint j = 0;
+ 
++if (msf.sdl_music)
++   {
++   //this is just disabling music_gui playlist-thing
++   for (j=0;j<22;j++) {
++   _cur_playlist[j] = j+1;
++   }
++   _cur_playlist[22] = 0;
++   return;
++   }
++
+ 	memset(_cur_playlist, 0, sizeof(_cur_playlist));
+ 	do {
+ 		/* We are now checking for the existence of that file prior
+diff -Naur old/src/openttd.cpp new/src/openttd.cpp
+--- old/src/openttd.cpp	2008-12-05 21:18:01.000000000 +0200
++++ new/src/openttd.cpp	2009-01-07 14:15:06.000000000 +0200
+@@ -591,6 +591,11 @@
+ 
+ 	DEBUG(driver, 1, "Loading drivers...");
+ 
++   if ( strcmp(_ini_musicdriver,"sdl")==0)
++      msf.sdl_music=true;
++   else
++      msf.sdl_music=false;
++
+ 	_sound_driver = (SoundDriver*)SoundDriverFactoryBase::SelectDriver(_ini_sounddriver, Driver::DT_SOUND);
+ 	if (_sound_driver == NULL) {
+ 		StrEmpty(_ini_sounddriver) ?
+diff -Naur old/src/settings.cpp new/src/settings.cpp
+--- old/src/settings.cpp	2008-12-05 21:18:00.000000000 +0200
++++ new/src/settings.cpp	2009-01-07 12:26:57.000000000 +0200
+@@ -1140,6 +1140,7 @@
+ 	SDT_BOOL(MusicFileSettings, playing,               S, 0, true,            STR_NULL, NULL),
+ 	SDT_BOOL(MusicFileSettings, shuffle,               S, 0, false,           STR_NULL, NULL),
+ 	 SDT_STR(MusicFileSettings, extmidi,     SLE_STRB, S, 0, EXTERNAL_PLAYER, STR_NULL, NULL),
++   SDT_BOOL(MusicFileSettings, sdl_music,               S, 0, true,            STR_NULL, NULL),
+ 	 SDT_END()
+ };
+ 
+diff -Naur old/src/sound.cpp new/src/sound.cpp
+--- old/src/sound.cpp	2008-12-05 21:18:00.000000000 +0200
++++ new/src/sound.cpp	2009-01-07 19:01:39.000000000 +0200
+@@ -26,6 +26,11 @@
+ /** The number of sounds in the original sample.cat */
+ static const uint ORIGINAL_SAMPLE_COUNT = 73;
+ 
++// sdl sounds
++#include "SDL_mixer.h"
++static Mix_Chunk *sound_effect[73]; /*same than ORIGINAL_SAMPLE_COUNT*/
++static bool sdl_mixer_not_init = 1;
++
+ static void OpenBankFile(const char *filename)
+ {
+ 	FileEntry *fe = CallocT<FileEntry>(ORIGINAL_SAMPLE_COUNT);
+@@ -132,6 +137,28 @@
+ 
+ bool SoundInitialize(const char *filename)
+ {
++if (msf.sdl_music)
++   {
++   int audio_rate = 22050;                //Frequency of audio playback
++   Uint16 audio_format = AUDIO_S16SYS;    //Format of the audio we're playing
++   int audio_channels = 2;                //2 channels = stereo
++   int audio_buffers = 4096;              //Size of the audio buffers in memory
++
++   if(Mix_OpenAudio(audio_rate, audio_format, audio_channels, audio_buffers) != 0) 
++      {
++      DEBUG(driver, 0, "SDL_mixer:Unable to initialize audio");
++      return NULL;
++      }
++
++   for (int i=0;i<73;i++) 
++      {
++      char name[22];
++      sprintf(name,"data/sounds/%d.wav",i);
++      sound_effect[i]= Mix_LoadWAV(name);
++      }
++   return true;
++   }
++
+ 	OpenBankFile(filename);
+ 	return true;
+ }
+@@ -139,6 +166,34 @@
+ /* Low level sound player */
+ static void StartSound(uint sound, int panning, uint volume)
+ {
++if (msf.sdl_music) 
++   {
++   /*
++   Panning and volume are not implemented
++   */
++   if (sdl_mixer_not_init)
++      {
++      sdl_mixer_not_init=0;
++      SoundInitialize("");
++      }
++
++   /*
++   int channel = Mix_PlayChannel(int request_channel , Mix_Chunk sample , int loop);
++   channel = returns which channel is used
++   request_channel = what channel you want to use, -1 means anything available
++   sample = file
++   loop: -1=infinityloop, 0=play once, x=repeat x times
++   */
++   Mix_PlayChannel(-1, sound_effect[sound+2], 0);
++   /*
++   Sound can be stopped with
++   Mix_HaltChannel(phaserChannel);
++   Where phaserChannel is used channel
++   */
++   return;
++   }
++
++
+ 	if (volume == 0) return;
+ 
+ 	const FileEntry *fe = GetSound(sound);
+diff -Naur old/src/sound_type.h new/src/sound_type.h
+--- old/src/sound_type.h	2008-12-05 21:18:00.000000000 +0200
++++ new/src/sound_type.h	2009-01-07 12:26:41.000000000 +0200
+@@ -16,6 +16,7 @@
+ 	bool playing;
+ 	bool shuffle;
+ 	char extmidi[80];
++   bool sdl_music;
+ };
+ 
+ struct FileEntry {

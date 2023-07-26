@@ -1,0 +1,115 @@
+Index: src/video/sdl_v.cpp
+===================================================================
+--- src/video/sdl_v.cpp	(revision 15209)
++++ src/video/sdl_v.cpp	(working copy)
+@@ -17,6 +17,7 @@
+ #include "../core/random_func.hpp"
+ #include "../functions.h"
+ #include "../texteff.hpp"
++#include "../fileio_func.h"
+ #include "sdl_v.h"
+ #include <SDL.h>
+ 
+@@ -96,7 +97,7 @@
+ 	}
+ }
+ 
+-static const Dimension default_resolutions[] = {
++static const Dimension _default_resolutions[] = {
+ 	{ 640,  480},
+ 	{ 800,  600},
+ 	{1024,  768},
+@@ -112,36 +113,33 @@
+ 
+ static void GetVideoModes()
+ {
+-	int i;
+-	SDL_Rect **modes;
++	SDL_Rect **modes = SDL_CALL SDL_ListModes(NULL, SDL_SWSURFACE | SDL_FULLSCREEN);
++	if (modes == NULL) usererror("sdl: no modes available");
+ 
+-	modes = SDL_CALL SDL_ListModes(NULL, SDL_SWSURFACE + (_fullscreen ? SDL_FULLSCREEN : 0));
+-
+-	if (modes == NULL)
+-		usererror("sdl: no modes available");
+-
+-	_all_modes = (modes == (void*)-1);
+-
+-	if (_all_modes) {
+-		// all modes available, put some default ones here
+-		memcpy(_resolutions, default_resolutions, sizeof(default_resolutions));
+-		_num_resolutions = lengthof(default_resolutions);
++	_all_modes = (SDL_CALL SDL_ListModes(NULL, SDL_SWSURFACE | (_fullscreen ? SDL_FULLSCREEN : 0)) == (void*)-1);
++	if (modes == (void*)-1) {
++		int n = 0;
++		for (uint i = 0; i < lengthof(_default_resolutions); i++) {
++			if (SDL_VideoModeOK(_default_resolutions[i].width, _default_resolutions[i].height, 8, SDL_FULLSCREEN) != 0) {
++				_resolutions[n] = _default_resolutions[i];
++				if (++n == lengthof(_resolutions)) break;
++			}
++		}
++		_num_resolutions = n;
+ 	} else {
+ 		int n = 0;
+-		for (i = 0; modes[i]; i++) {
++		for (int i = 0; modes[i]; i++) {
+ 			int w = modes[i]->w;
+ 			int h = modes[i]->h;
+-			if (w >= 640 && h >= 480) {
+-				int j;
+-				for (j = 0; j < n; j++) {
+-					if (_resolutions[j].width == w && _resolutions[j].height == h) break;
+-				}
++			int j;
++			for (j = 0; j < n; j++) {
++				if (_resolutions[j].width == w && _resolutions[j].height == h) break;
++			}
+ 
+-				if (j == n) {
+-					_resolutions[j].width  = w;
+-					_resolutions[j].height = h;
+-					if (++n == lengthof(_resolutions)) break;
+-				}
++			if (j == n) {
++				_resolutions[j].width  = w;
++				_resolutions[j].height = h;
++				if (++n == lengthof(_resolutions)) break;
+ 			}
+ 		}
+ 		_num_resolutions = n;
+@@ -151,22 +149,23 @@
+ 
+ static void GetAvailableVideoMode(int *w, int *h)
+ {
+-	int i;
+-	int best;
+-	uint delta;
++	/* When there are no resolutions we can't change anything.
++	 * Furthermore when all modes are correct we don't need to change
++	 * anything, but when there isn't a config file yet we don't use
++	 * the given resolution, but we try to find the best matching
++	 * resolution. When for example the device can't show 640x480 even
++	 * when SDL says so. */
++	if ((FileExists(_config_file) && _all_modes) || _num_resolutions == 0) return;
+ 
+-	// all modes available?
+-	if (_all_modes || _num_resolutions == 0) return;
+-
+-	// is the wanted mode among the available modes?
+-	for (i = 0; i != _num_resolutions; i++) {
++	/* Is the wanted mode among the available modes? */
++	for (int i = 0; i != _num_resolutions; i++) {
+ 		if (*w == _resolutions[i].width && *h == _resolutions[i].height) return;
+ 	}
+ 
+-	// use the closest possible resolution
+-	best = 0;
+-	delta = abs((_resolutions[0].width - *w) * (_resolutions[0].height - *h));
+-	for (i = 1; i != _num_resolutions; ++i) {
++	/* Use the closest possible resolution */
++	uint best = 0;
++	uint delta = abs((_resolutions[0].width - *w) * (_resolutions[0].height - *h));
++	for (int i = 1; i != _num_resolutions; ++i) {
+ 		uint newdelta = abs((_resolutions[i].width - *w) * (_resolutions[i].height - *h));
+ 		if (newdelta < delta) {
+ 			best = i;

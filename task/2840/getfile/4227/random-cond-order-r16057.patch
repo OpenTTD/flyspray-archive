@@ -1,0 +1,157 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 16057)
++++ src/lang/english.txt	(working copy)
+@@ -2682,6 +2682,7 @@
+ STR_ORDER_CONDITIONAL_AGE                                       :Vehicle age (years)
+ STR_ORDER_CONDITIONAL_REQUIRES_SERVICE                          :Requires service
+ STR_ORDER_CONDITIONAL_UNCONDITIONALLY                           :Always
++STR_ORDER_CONDITIONAL_PERCENT                                   :Percent chance
+ STR_ORDER_CONDITIONAL_COMPARATOR_EQUALS                         :is equal to
+ STR_ORDER_CONDITIONAL_COMPARATOR_NOT_EQUALS                     :is not equal to
+ STR_ORDER_CONDITIONAL_COMPARATOR_LESS_THAN                      :is less than
+@@ -2694,6 +2695,7 @@
+ STR_CONDITIONAL_UNCONDITIONAL                                   :Jump to order {COMMA}
+ STR_CONDITIONAL_NUM                                             :Jump to order {COMMA} when {STRING} {STRING} {COMMA}
+ STR_CONDITIONAL_TRUE_FALSE                                      :Jump to order {COMMA} when {STRING} {STRING}
++STR_CONDITIONAL_PERCENT                                         :Jump to order {COMMA} with {COMMA} percent probability
+ 
+ STR_TIMETABLE_NO_TRAVEL                                         :{SETX 30}No travel
+ STR_TIMETABLE_TRAVEL_NOT_TIMETABLED                             :{SETX 30}Travel (not timetabled)
+Index: src/order_type.h
+===================================================================
+--- src/order_type.h	(revision 16057)
++++ src/order_type.h	(working copy)
+@@ -109,6 +109,7 @@
+ 	OCV_AGE,              ///< Skip based on the age
+ 	OCV_REQUIRES_SERVICE, ///< Skip when the vehicle requires service
+ 	OCV_UNCONDITIONALLY,  ///< Always skip
++	OCV_PERCENT,          ///< Skip with xx percent probability
+ 	OCV_END
+ };
+ 
+Index: src/order_cmd.cpp
+===================================================================
+--- src/order_cmd.cpp	(revision 16057)
++++ src/order_cmd.cpp	(working copy)
+@@ -548,6 +548,9 @@
+ 					if (new_order.GetConditionValue() != 0) return CMD_ERROR;
+ 					break;
+ 
++				case OCV_PERCENT:
++					if (occ != OCC_EQUALS) return CMD_ERROR;
++					/* FALL THROUGH */
+ 				case OCV_LOAD_PERCENTAGE:
+ 				case OCV_RELIABILITY:
+ 					if (new_order.GetConditionValue() > 100) return CMD_ERROR;
+@@ -920,7 +923,9 @@
+ 		case MOF_COND_COMPARATOR:
+ 			if (data >= OCC_END) return CMD_ERROR;
+ 			switch (order->GetConditionVariable()) {
+-				case OCV_UNCONDITIONALLY: return CMD_ERROR;
++				case OCV_UNCONDITIONALLY:
++				case OCV_PERCENT:
++					return CMD_ERROR;
+ 
+ 				case OCV_REQUIRES_SERVICE:
+ 					if (data != OCC_IS_TRUE && data != OCC_IS_FALSE) return CMD_ERROR;
+@@ -938,6 +943,7 @@
+ 
+ 				case OCV_LOAD_PERCENTAGE:
+ 				case OCV_RELIABILITY:
++				case OCV_PERCENT:
+ 					if (data > 100) return CMD_ERROR;
+ 					break;
+ 
+@@ -1013,6 +1019,9 @@
+ 						if (occ != OCC_IS_TRUE && occ != OCC_IS_FALSE) order->SetConditionComparator(OCC_IS_TRUE);
+ 						break;
+ 
++					case OCV_PERCENT:
++						order->SetConditionComparator(OCC_EQUALS);
++						/* FALL THROUGH */
+ 					case OCV_LOAD_PERCENTAGE:
+ 					case OCV_RELIABILITY:
+ 						if (order->GetConditionValue() > 100) order->SetConditionValue(100);
+@@ -1615,6 +1624,7 @@
+ 		case OCV_MAX_SPEED:        skip_order = OrderConditionCompare(occ, v->GetDisplayMaxSpeed() * 10 / 16, value); break;
+ 		case OCV_AGE:              skip_order = OrderConditionCompare(occ, v->age / DAYS_IN_LEAP_YEAR,        value); break;
+ 		case OCV_REQUIRES_SERVICE: skip_order = OrderConditionCompare(occ, v->NeedsServicing(),               value); break;
++		case OCV_PERCENT:          skip_order = Chance16(value, 100); break;
+ 		case OCV_UNCONDITIONALLY:  skip_order = true; break;
+ 		default: NOT_REACHED();
+ 	}
+@@ -1822,3 +1832,4 @@
+ 
+ 	_backup_orders_tile = 0;
+ }
++
+Index: src/order_gui.cpp
+===================================================================
+--- src/order_gui.cpp	(revision 16057)
++++ src/order_gui.cpp	(working copy)
+@@ -138,6 +138,7 @@
+ 	STR_ORDER_CONDITIONAL_AGE,
+ 	STR_ORDER_CONDITIONAL_REQUIRES_SERVICE,
+ 	STR_ORDER_CONDITIONAL_UNCONDITIONALLY,
++	STR_ORDER_CONDITIONAL_PERCENT,
+ 	INVALID_STRING_ID,
+ };
+ 
+@@ -256,10 +257,15 @@
+ 			SetDParam(2, order->GetDestination());
+ 			break;
+ 
+-		case OT_CONDITIONAL:
++		case OT_CONDITIONAL: {
+ 			SetDParam(2, order->GetConditionSkipToOrder() + 1);
+-			if (order->GetConditionVariable() == OCV_UNCONDITIONALLY) {
++			const OrderConditionVariable ocv = order->GetConditionVariable();
++			/* handle some non-ordinary cases seperately */
++			if (ocv == OCV_UNCONDITIONALLY) {
+ 				SetDParam(1, STR_CONDITIONAL_UNCONDITIONAL);
++			} else if (ocv == OCV_PERCENT) {
++				SetDParam(1, STR_CONDITIONAL_PERCENT);
++				SetDParam(3, order->GetConditionValue()); 
+ 			} else {
+ 				OrderConditionComparator occ = order->GetConditionComparator();
+ 				SetDParam(1, (occ == OCC_IS_TRUE || occ == OCC_IS_FALSE) ? STR_CONDITIONAL_TRUE_FALSE : STR_CONDITIONAL_NUM);
+@@ -277,7 +283,7 @@
+ 			} else {
+ 				SetDParam(6, STR_EMPTY);
+ 			}
+-			break;
++		} break;
+ 
+ 		default: NOT_REACHED();
+ 	}
+@@ -798,7 +804,7 @@
+ 					this->ShowWidget(ORDER_WIDGET_COND_VALUE);
+ 
+ 					OrderConditionVariable ocv = order->GetConditionVariable();
+-					this->SetWidgetDisabledState(ORDER_WIDGET_COND_COMPARATOR, ocv == OCV_UNCONDITIONALLY);
++					this->SetWidgetDisabledState(ORDER_WIDGET_COND_COMPARATOR, ocv == OCV_UNCONDITIONALLY || ocv == OCV_PERCENT);
+ 					this->SetWidgetDisabledState(ORDER_WIDGET_COND_VALUE, ocv == OCV_REQUIRES_SERVICE || ocv == OCV_UNCONDITIONALLY);
+ 
+ 					uint value = order->GetConditionValue();
+@@ -985,6 +991,7 @@
+ 					value = ConvertDisplaySpeedToSpeed(value);
+ 					break;
+ 
++				case OCV_PERCENT:
+ 				case OCV_RELIABILITY:
+ 				case OCV_LOAD_PERCENTAGE:
+ 					value = Clamp(value, 0, 100);
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 16057)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -40,7 +40,7 @@
+ 
+ #include "saveload_internal.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 117;
++extern const uint16 SAVEGAME_VERSION = 118;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 

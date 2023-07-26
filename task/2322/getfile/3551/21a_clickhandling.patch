@@ -1,0 +1,173 @@
+diff -r 2292b1ac96b3 src/settings_gui.cpp
+--- a/src/settings_gui.cpp	Sun Nov 02 15:31:38 2008 +0100
++++ b/src/settings_gui.cpp	Sun Nov 02 16:01:16 2008 +0100
+@@ -1240,9 +1240,7 @@
+ 	static GameSettings *patches_ptr;  ///< Pointer to the game settings being displayed and modified
+ 	static int patches_max;  ///< Maximal number of patches on a single page
+ 
+-	int page;
+-	int entry;
+-	int click;
++	TreeField *tf_entry;  ///< Currently selected TreeField (used for storing new value from editbox back into patch settings)
+ 
+ 	PatchesSelectionWindow(const WindowDesc *desc) : Window(desc)
+ 	{
+@@ -1256,6 +1254,7 @@
+ 		static bool first_time = true;
+ 
+ 		patches_ptr = (_game_mode == GM_MENU) ? &_settings_newgame : &_settings_game;
++		tf_entry = NULL;
+ 
+ 		/* Build up the dynamic settings-array only once per OpenTTD session */
+ 		if (first_time) {
+@@ -1286,9 +1285,7 @@
+ 
+ 	virtual void OnClick(Point pt, int widget)
+ 	{
+-/* TEMPORARY COMMENT TO MAKE IT BUILDABLE AGAIN
+-		switch (widget) {
+-			case PATCHSEL_OPTIONSPANEL: {
++		if (widget == PATCHSEL_OPTIONSPANEL) {
+ 				int y = pt.y - SETTINGTREE_TOP_OFFSET;  // Shift y coordinate
+ 				if (y < 0) return;  // Clicked above first entry
+ 
+@@ -1298,13 +1295,26 @@
+ 				byte btn = y / SETTING_HEIGHT;  // Compute which setting is selected
+ 				if (y % SETTING_HEIGHT > SETTING_HEIGHT - 2) return;  // Clicked too low at the setting
+ 
+-				const PatchPage *page = &_patches_page[this->page];
++			uint current_row = 0;
++			TreeField *tf = _treeview.FindField(this->vscroll.pos + btn, &current_row);
++			if (tf == NULL) return; // Clicked too low
+ 
+-				if (btn >= page->num) return;  // Clicked below the last setting of the page
++			x -= (1 + tf->level) * TREE_LEVEL_WIDTH; // Reposition x to start of patch setting
++			if (x < 0) return;  // Clicked left of patch entry
+ 
+-				const SettingDesc *sd = page->entries[btn].setting;
++			if ((tf->flags & TFK_KIND_MASK) == TFK_SUBTREE) {
++				/* reverse folding of sub-tree */
++				tf->df.sub.unfolded = !tf->df.sub.unfolded;
+ 
+-				/-* return if action is only active in network, or only settable by server *-/
++				this->SetDirty();
++				return;
++			}
++
++			assert((tf->flags & TFK_KIND_MASK) == TFK_PATCH);
++			/* clicked at a patch setting */
++				const SettingDesc *sd = tf->df.patch.desc;
++
++				/* return if action is only active in network, or only settable by server */
+ 				if (!(sd->save.conv & SLF_NETWORK_NO) && _networking && !_network_server) return;
+ 				if ((sd->desc.flags & SGF_NETWORK_ONLY) && !_networking) return;
+ 				if ((sd->desc.flags & SGF_NO_NETWORK) && _networking) return;
+@@ -1312,7 +1322,7 @@
+ 				void *var = GetVariableAddress(patches_ptr, &sd->save);
+ 				int32 value = (int32)ReadValue(var, sd->save.conv);
+ 
+-				/-* clicked on the icon on the left side. Either scroller or bool on/off *-/
++				/* clicked on the icon on the left side. Either scroller or bool on/off */
+ 				if (x < 21) {
+ 					const SettingDescBase *sdb = &sd->desc;
+ 					int32 oldvalue = value;
+@@ -1320,20 +1330,20 @@
+ 					switch (sdb->cmd) {
+ 					case SDT_BOOLX: value ^= 1; break;
+ 					case SDT_NUMX: {
+-						/-* Add a dynamic step-size to the scroller. In a maximum of
++						/* Add a dynamic step-size to the scroller. In a maximum of
+ 							* 50-steps you should be able to get from min to max,
+ 							* unless specified otherwise in the 'interval' variable
+-							* of the current patch. *-/
++							* of the current patch. */
+ 						uint32 step = (sdb->interval == 0) ? ((sdb->max - sdb->min) / 50) : sdb->interval;
+ 						if (step == 0) step = 1;
+ 
+-						/-* don't allow too fast scrolling *-/
++						/* don't allow too fast scrolling */
+ 						if ((this->flags4 & WF_TIMEOUT_MASK) > WF_TIMEOUT_TRIGGER) {
+ 							_left_button_clicked = false;
+ 							return;
+ 						}
+ 
+-						/-* Increase or decrease the value and clamp it to extremes *-/
++						/* Increase or decrease the value and clamp it to extremes */
+ 						if (x >= 10) {
+ 							value += step;
+ 							if (value > sdb->max) value = sdb->max;
+@@ -1342,9 +1352,9 @@
+ 							if (value < sdb->min) value = (sdb->flags & SGF_0ISDISABLED) ? 0 : sdb->min;
+ 						}
+ 
+-						/-* Set up scroller timeout for numeric values *-/
++						/* Set up scroller timeout for numeric values */
+ 						if (value != oldvalue && !(sd->desc.flags & SGF_MULTISTRING)) {
+-							this->click = btn * 2 + 1 + ((x >= 10) ? 1 : 0);
++							tf->flags |= (x >= 10) ? TFK_RIGHT_CLICKED : TFK_LEFT_CLICKED;
+ 							this->flags4 |= WF_TIMEOUT_BEGIN;
+ 							_left_button_clicked = false;
+ 						}
+@@ -1353,53 +1363,40 @@
+ 					}
+ 
+ 					if (value != oldvalue) {
+-						SetPatchValue(page->entries[btn].index, value);
++						SetPatchValue(tf->df.patch.index, value);
+ 						this->SetDirty();
+ 					}
+ 				} else {
+-					/-* only open editbox for types that its sensible for *-/
++					/* only open editbox for types that its sensible for */
+ 					if (sd->desc.cmd != SDT_BOOLX && !(sd->desc.flags & SGF_MULTISTRING)) {
+-						/-* Show the correct currency-translated value *-/
++						/* Show the correct currency-translated value */
+ 						if (sd->desc.flags & SGF_CURRENCY) value *= _currency->rate;
+ 
+-						this->entry = btn;
++						tf_entry = tf;
+ 						SetDParam(0, value);
+ 						ShowQueryString(STR_CONFIG_PATCHES_INT32, STR_CONFIG_PATCHES_QUERY_CAPT, 10, 100, this, CS_NUMERAL, QSF_NONE);
+ 					}
+ 				}
+-			} break;
+-
+-			case PATCHSEL_INTERFACE: case PATCHSEL_CONSTRUCTION: case PATCHSEL_VEHICLES:
+-			case PATCHSEL_STATIONS:  case PATCHSEL_ECONOMY:      case PATCHSEL_COMPETITORS:
+-				this->RaiseWidget(this->page + PATCHSEL_INTERFACE);
+-				this->page = widget - PATCHSEL_INTERFACE;
+-				this->LowerWidget(this->page + PATCHSEL_INTERFACE);
+-				DeleteWindowById(WC_QUERY_STRING, 0);
+-				this->SetDirty();
+-				break;
+ 		}
+-*/
+ 	}
+ 
+ 	virtual void OnTimeout()
+ 	{
+-		this->click = 0;
++		_treeview.ClearClicked();
+ 		this->SetDirty();
+ 	}
+ 
+ 	virtual void OnQueryTextFinished(char *str)
+ 	{
+ 		if (!StrEmpty(str)) {
+-/* TEMPORARY COMMENT TO MAKE IT BUILDABLE AGAIN
+-			const PatchEntry *pe = &_patches_page[this->page].entries[this->entry];
+-			const SettingDesc *sd = pe->setting;
++			assert(tf_entry != NULL);
++			const SettingDesc *sd = tf_entry->df.patch.desc;
+ 			int32 value = atoi(str);
+ 
+-			/-* Save the correct currency-translated value *-/
++			/* Save the correct currency-translated value */
+ 			if (sd->desc.flags & SGF_CURRENCY) value /= _currency->rate;
+ 
+-			SetPatchValue(pe->index, value);
+-*/
++			SetPatchValue(tf_entry->df.patch.index, value);
+ 			this->SetDirty();
+ 		}
+ 	}

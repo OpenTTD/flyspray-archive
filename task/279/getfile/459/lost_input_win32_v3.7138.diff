@@ -1,0 +1,207 @@
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 7138)
++++ openttd.c	(working copy)
+@@ -1004,6 +1004,7 @@
+ 	if (!_pause || _cheats.build_in_pause.value) MoveAllTextEffects();
+ 
+ 	InputLoop();
++	MouseLoop(0, 0); // handle autoscroll
+ 
+ 	MusicLoop();
+ }
+Index: video/win32_v.c
+===================================================================
+--- video/win32_v.c	(revision 7138)
++++ video/win32_v.c	(working copy)
+@@ -207,6 +207,8 @@
+ 
+ static LRESULT CALLBACK WndProcGdi(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+ {
++	bool handled = false;
++
+ 	switch (msg) {
+ 		case WM_CREATE:
+ 			SetTimer(hwnd, TID_POLLMOUSE, MOUSE_POLL_DELAY, (TIMERPROC)TrackMouseTimerProc);
+@@ -266,31 +268,36 @@
+ 		case WM_LBUTTONDOWN:
+ 			SetCapture(hwnd);
+ 			_left_button_down = true;
+-			return 0;
++			handled = true;
++			break;
+ 
+ 		case WM_LBUTTONUP:
+ 			ReleaseCapture();
+ 			_left_button_down = false;
+ 			_left_button_clicked = false;
+-			return 0;
++			handled = true;
++			break;
+ 
+ 		case WM_RBUTTONDOWN:
+ 			SetCapture(hwnd);
+ 			_right_button_down = true;
+ 			_right_button_clicked = true;
+-			return 0;
++			handled = true;
++			break;
+ 
+ 		case WM_RBUTTONUP:
+ 			ReleaseCapture();
+ 			_right_button_down = false;
+-			return 0;
++			handled = true;
++			break;
+ 
+ 		case WM_MOUSELEAVE:
+ 			UndrawMouseCursor();
+ 			_cursor.in_window = false;
+ 
+ 			if (!_left_button_down && !_right_button_down) MyShowCursor(true);
+-			return 0;
++			handled = true;
++			break;
+ 
+ 		case WM_MOUSEMOVE: {
+ 			int x = (int16)LOWORD(lParam);
+@@ -337,7 +344,8 @@
+ 				_cursor.dirty = true;
+ 			}
+ 			MyShowCursor(false);
+-			return 0;
++			handled = true;
++			break;
+ 		}
+ 
+ 		case WM_KEYDOWN: {
+@@ -378,7 +386,8 @@
+ 
+ 				case VK_F10: /* F10, ignore activation of menu */
+ 					_pressed_key = MapWindowsKey(wParam) << 16;
+-					return 0;
++					handled = true;
++					break;
+ 
+ 				default: /* ALT in combination with something else */
+ 					_pressed_key = MapWindowsKey(wParam) << 16;
+@@ -481,13 +490,16 @@
+ 			} else if (delta > 0) {
+ 				_cursor.wheel--;
+ 			}
+-			return 0;
++			handled = true;
++			break;
+ 		}
+ 
+ 		case WM_ACTIVATEAPP:
+ 			_wnd.has_focus = (bool)wParam;
+ 			break;
+ 	}
++	InputLoop(); // _pressed_key is reset to zero before InputLoop() returns
++	if (handled) return 0;
+ 	return DefWindowProc(hwnd, msg, wParam, lParam);
+ }
+ 
+@@ -775,6 +787,24 @@
+ 	_wnd.running = true;
+ 
+ 	for (;;) {
++		/* get status of shift and ctrl buttons just before the message loop gets processed */
++		_ctrl_pressed = _wnd.has_focus && GetAsyncKeyState(VK_CONTROL) < 0;
++		_shift_pressed = _wnd.has_focus && GetAsyncKeyState(VK_SHIFT) < 0;
++#ifdef _DEBUG
++		_dbg_screen_rect = _wnd.has_focus && GetAsyncKeyState(VK_CAPITAL) < 0;
++#endif
++
++		// determine which directional keys are down
++		if (_wnd.has_focus) {
++			_dirkeys =
++				(GetAsyncKeyState(VK_LEFT) < 0 ? 1 : 0) +
++				(GetAsyncKeyState(VK_UP) < 0 ? 2 : 0) +
++				(GetAsyncKeyState(VK_RIGHT) < 0 ? 4 : 0) +
++				(GetAsyncKeyState(VK_DOWN) < 0 ? 8 : 0);
++		} else {
++			_dirkeys = 0;
++		}
++		/* Note that the following message loop now invokes InputLoop() whenever the user input is detected */
+ 		while (PeekMessage(&mesg, NULL, 0, 0, PM_REMOVE)) {
+ 			InteractiveRandom(); // randomness
+ 			TranslateMessage(&mesg);
+@@ -789,7 +819,7 @@
+ 		if (_wnd.has_focus && GetAsyncKeyState(VK_TAB) < 0) {
+ 			/* Disable speeding up game with ALT+TAB (if syskey is pressed, the
+ 			 * real key is in the upper 16 bits (see WM_SYSKEYDOWN in WndProcGdi()) */
+-			 if (GetAsyncKeyState(VK_MENU) >= 0 &&
++			if (GetAsyncKeyState(VK_MENU) >= 0 &&
+ #endif
+ 			    !_networking && _game_mode != GM_MENU)
+ 				_fast_forward |= 2;
+@@ -803,23 +833,7 @@
+ 
+ 		if (cur_ticks == next_tick) {
+ 			next_tick += 30;
+-			_ctrl_pressed = _wnd.has_focus && GetAsyncKeyState(VK_CONTROL)<0;
+-			_shift_pressed = _wnd.has_focus && GetAsyncKeyState(VK_SHIFT)<0;
+-#ifdef _DEBUG
+-			_dbg_screen_rect = _wnd.has_focus && GetAsyncKeyState(VK_CAPITAL)<0;
+-#endif
+ 
+-			// determine which directional keys are down
+-			if (_wnd.has_focus) {
+-				_dirkeys =
+-					(GetAsyncKeyState(VK_LEFT) < 0 ? 1 : 0) +
+-					(GetAsyncKeyState(VK_UP) < 0 ? 2 : 0) +
+-					(GetAsyncKeyState(VK_RIGHT) < 0 ? 4 : 0) +
+-					(GetAsyncKeyState(VK_DOWN) < 0 ? 8 : 0);
+-			} else {
+-				_dirkeys = 0;
+-			}
+-
+ 			GameLoop();
+ 			_cursor.delta.x = _cursor.delta.y = 0;
+ 
+Index: window.c
+===================================================================
+--- window.c	(revision 7138)
++++ window.c	(working copy)
+@@ -1397,7 +1397,7 @@
+ 	}
+ }
+ 
+-static void HandleKeypress(uint32 key)
++void HandleKeypress(uint32 key)
+ {
+ 	Window *w;
+ 	WindowEvent e;
+@@ -1447,7 +1447,7 @@
+ extern void UpdateTileSelection(void);
+ extern bool VpHandlePlaceSizingDrag(void);
+ 
+-static void MouseLoop(int click, int mousewheel)
++void MouseLoop(int click, int mousewheel)
+ {
+ 	int x,y;
+ 	Window *w;
+@@ -1586,7 +1586,8 @@
+ 		_cursor.wheel = 0;
+ 	}
+ 
+-	MouseLoop(click, mousewheel);
++	/* click == 0 && mousewheel == 0 handles autoscroll - so it should be called only once per tick */
++	if (click != 0 || mousewheel != 0) MouseLoop(click, mousewheel);
+ }
+ 
+ 
+Index: window.h
+===================================================================
+--- window.h	(revision 7138)
++++ window.h	(working copy)
+@@ -801,6 +801,7 @@
+ void ResetWindowSystem(void);
+ int GetMenuItemIndex(const Window *w, int x, int y);
+ void InputLoop(void);
++void MouseLoop(int click, int mousewheel);
+ void UpdateWindows(void);
+ void InvalidateWidget(const Window *w, byte widget_index);
+ void InvalidateThisWindowData(Window *w);

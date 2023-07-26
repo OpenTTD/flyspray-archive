@@ -1,0 +1,68 @@
+diff -r 34ed3e65b3da src/order_cmd.cpp
+--- a/src/order_cmd.cpp	Wed Oct 29 16:18:37 2008 +0100
++++ b/src/order_cmd.cpp	Wed Oct 29 16:18:40 2008 +0100
+@@ -668,6 +668,7 @@ CommandCost CmdInsertOrder(TileIndex til
+ 	if (sel_ord > v->GetNumOrders()) return CMD_ERROR;
+ 
+ 	if (!HasOrderPoolFree(1)) return_cmd_error(STR_8831_NO_MORE_SPACE_FOR_ORDERS);
++	if (v->orders.list == NULL && !OrderList::CanAllocateItem()) return_cmd_error(STR_8831_NO_MORE_SPACE_FOR_ORDERS);
+ 
+ 	if (v->type == VEH_SHIP && IsHumanCompany(v->owner) && _settings_game.pf.pathfinder_for_ships != VPF_NPF) {
+ 		/* Make sure the new destination is not too far away from the previous */
+@@ -677,7 +678,8 @@ CommandCost CmdInsertOrder(TileIndex til
+ 		/* Find the last goto station or depot order before the insert location.
+ 		 * If the order is to be inserted at the beginning of the order list this
+ 		 * finds the last order in the list. */
+-		for (const Order *o = v->orders; o != NULL; o = o->next) {
++		const Order *o;
++		FOR_VEHICLE_ORDERS(v, o) {
+ 			if (o->IsType(OT_GOTO_STATION) || o->IsType(OT_GOTO_DEPOT)) prev = o;
+ 			if (++n == sel_ord && prev != NULL) break;
+ 		}
+@@ -694,42 +696,16 @@ CommandCost CmdInsertOrder(TileIndex til
+ 		new_o->AssignOrder(new_order);
+ 
+ 		/* Create new order and link in list */
+-		if (v->orders == NULL) {
+-			v->orders = new_o;
++		if (v->orders.list == NULL) {
++			v->orders.list = new OrderList(new_o, v);
+ 		} else {
+-			/* Try to get the previous item (we are inserting above the
+-			    selected) */
+-			Order *order = GetVehicleOrder(v, sel_ord - 1);
+-
+-			if (order == NULL && GetVehicleOrder(v, sel_ord) != NULL) {
+-				/* There is no previous item, so we are altering v->orders itself
+-				    But because the orders can be shared, we copy the info over
+-				    the v->orders, so we don't have to change the pointers of
+-				    all vehicles */
+-				SwapOrders(v->orders, new_o);
+-				/* Now update the next pointers */
+-				v->orders->next = new_o;
+-			} else if (order == NULL) {
+-				/* 'sel' is a non-existing order, add him to the end */
+-				order = GetLastVehicleOrder(v);
+-				order->next = new_o;
+-			} else {
+-				/* Put the new order in between */
+-				new_o->next = order->next;
+-				order->next = new_o;
+-			}
++			v->orders.list->InsertOrderAt(new_o, sel_ord);
+ 		}
+ 
+ 		Vehicle *u = v->FirstShared();
+ 		DeleteOrderWarnings(u);
+ 		for (; u != NULL; u = u->NextShared()) {
+-			/* Increase amount of orders */
+-			u->num_orders++;
+-
+-			/* If the orderlist was empty, assign it */
+-			if (u->orders == NULL) u->orders = v->orders;
+-
+-			assert(v->orders == u->orders);
++			assert(v->orders.list == u->orders.list);
+ 
+ 			/* If there is added an order before the current one, we need
+ 			to update the selected order */

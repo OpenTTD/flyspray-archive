@@ -1,0 +1,161 @@
+Index: src/newgrf.cpp
+===================================================================
+--- src/newgrf.cpp	(revision 16593)
++++ src/newgrf.cpp	(working copy)
+@@ -3739,7 +3739,7 @@
+ 			return true;
+ 
+ 		case 0x11: // current rail tool type
+-			*value = 0;
++			*value = GetCurrentNewGRFRailType();
+ 			return true;
+ 
+ 		case 0x12: // Game mode
+Index: src/station_cmd.cpp
+===================================================================
+--- src/station_cmd.cpp	(revision 16591)
++++ src/station_cmd.cpp	(working copy)
+@@ -854,8 +854,10 @@
+ {
+ 	/* Does the authority allow this? */
+ 	if (!CheckIfAuthorityAllowsNewStation(tile_org, flags)) return CMD_ERROR;
+-	if (!ValParamRailtype((RailType)(p1 & 0xF))) return CMD_ERROR;
+ 
++	RailType railtype = (RailType)(p1 & 0xF);
++	if (!ValParamRailtype(railtype)) return CMD_ERROR;
++
+ 	/* unpack parameters */
+ 	Axis axis = Extract<Axis, 4>(p1);
+ 	uint numtracks = GB(p1,  8, 8);
+@@ -976,9 +978,7 @@
+ 		}
+ 
+ 		/* Check if the station is buildable */
+-		if (HasBit(statspec->callbackmask, CBM_STATION_AVAIL) && GB(GetStationCallback(CBID_STATION_AVAILABILITY, 0, 0, statspec, NULL, INVALID_TILE), 0, 8) == 0) {
+-			return CMD_ERROR;
+-		}
++		if (!IsStationAvailable(statspec, railtype)) return CMD_ERROR;
+ 	}
+ 
+ 	if (flags & DC_EXEC) {
+@@ -1034,7 +1034,7 @@
+ 				}
+ 
+ 				byte old_specindex = IsTileType(tile, MP_STATION) ? GetCustomStationSpecIndex(tile) : 0;
+-				MakeRailStation(tile, st->owner, st->index, axis, layout & ~1, (RailType)GB(p1, 0, 4));
++				MakeRailStation(tile, st->owner, st->index, axis, layout & ~1, railtype);
+ 				/* Free the spec if we overbuild something */
+ 				DeallocateSpecFromStation(st, old_specindex);
+ 
+Index: src/rail_gui.cpp
+===================================================================
+--- src/rail_gui.cpp	(revision 16591)
++++ src/rail_gui.cpp	(working copy)
+@@ -1097,7 +1097,7 @@
+ 				const StationSpec *statspec = GetCustomStationSpec(_railstation.station_class, i);
+ 
+ 				if (statspec != NULL && statspec->name != 0) {
+-					if (HasBit(statspec->callbackmask, CBM_STATION_AVAIL) && GB(GetStationCallback(CBID_STATION_AVAILABILITY, 0, 0, statspec, NULL, INVALID_TILE), 0, 8) == 0) {
++					if (!IsStationAvailable(statspec, _cur_railtype)) {
+ 						GfxFillRect(8, y - 2, 127, y + 10, 0, FILLRECT_CHECKER);
+ 					}
+ 
+@@ -1251,9 +1251,7 @@
+ 
+ 				/* Check station availability callback */
+ 				statspec = GetCustomStationSpec(_railstation.station_class, y);
+-				if (statspec != NULL &&
+-					HasBit(statspec->callbackmask, CBM_STATION_AVAIL) &&
+-					GB(GetStationCallback(CBID_STATION_AVAILABILITY, 0, 0, statspec, NULL, INVALID_TILE), 0, 8) == 0) return;
++				if (statspec != NULL && !IsStationAvailable(statspec, _cur_railtype)) return;
+ 
+ 				_railstation.station_type = y;
+ 
+@@ -1822,9 +1820,7 @@
+ 
+ 				DrawWaypointSprite(2 + i * 68, 25, this->hscroll.pos + i, _cur_railtype);
+ 
+-				if (statspec != NULL &&
+-						HasBit(statspec->callbackmask, CBM_STATION_AVAIL) &&
+-						GB(GetStationCallback(CBID_STATION_AVAILABILITY, 0, 0, statspec, NULL, INVALID_TILE), 0, 8) == 0) {
++				if (statspec != NULL && !IsStationAvailable(statspec, _cur_railtype)) {
+ 					GfxFillRect(4 + i * 68, 18, 67 + i * 68, 75, 0, FILLRECT_CHECKER);
+ 				}
+ 			}
+@@ -1843,9 +1839,7 @@
+ 
+ 				/* Check station availability callback */
+ 				const StationSpec *statspec = GetCustomStationSpec(STAT_CLASS_WAYP, type);
+-				if (statspec != NULL &&
+-						HasBit(statspec->callbackmask, CBM_STATION_AVAIL) &&
+-						GB(GetStationCallback(CBID_STATION_AVAILABILITY, 0, 0, statspec, NULL, INVALID_TILE), 0, 8) == 0) return;
++				if (statspec != NULL && IsStationAvailable(statspec, _cur_railtype)) return;
+ 
+ 				_cur_waypoint_type = type;
+ 				SndPlayFx(SND_15_BEEP);
+Index: src/newgrf_station.cpp
+===================================================================
+--- src/newgrf_station.cpp	(revision 16591)
++++ src/newgrf_station.cpp	(working copy)
+@@ -681,8 +681,47 @@
+ 	return group->GetCallbackResult();
+ }
+ 
++/** The NewGRF 'converted' versions of the railtype */
++static byte _newgrf_cur_railtype = 0;
+ 
+ /**
++ * Check whether a station for the given station specification is available.
++ * @param statspec the station specification.
++ * @param railtype the railtype to build for.
++ * @return true if the station may be built.
++ */
++bool IsStationAvailable(const StationSpec *statspec, RailType railtype)
++{
++	if (!HasBit(statspec->callbackmask, CBM_STATION_AVAIL)) return true;
++
++	/* Convert the railtype to what the NewGRF expects. */
++	switch (railtype) {
++		default:
++		case RAILTYPE_RAIL:     _newgrf_cur_railtype = 0; break;
++		case RAILTYPE_ELECTRIC: _newgrf_cur_railtype = _settings_game.vehicle.disable_elrails ? 0 : 1; break;
++		case RAILTYPE_MONO:     _newgrf_cur_railtype = _settings_game.vehicle.disable_elrails ? 1 : 2; break;
++		case RAILTYPE_MAGLEV:   _newgrf_cur_railtype = 2; break;
++	}
++
++	bool available = GB(GetStationCallback(CBID_STATION_AVAILABILITY, 0, 0, statspec, NULL, INVALID_TILE), 0, 8) != 0;
++
++	/* And reset it as soon as possible, so later calls always have the same
++	 * value for it, i.e. no desyncs because of different values! */
++	_newgrf_cur_railtype = 0;
++
++	return available;
++}
++
++/**
++ * Get the current railtype in a safe manner for NewGRFs
++ * @return the railtype.
++ */
++byte GetCurrentNewGRFRailType()
++{
++	return _newgrf_cur_railtype;
++}
++
++/**
+  * Allocate a StationSpec to a Station. This is called once per build operation.
+  * @param statspec StationSpec to allocate.
+  * @param st Station to allocate it to.
+Index: src/newgrf_station.h
+===================================================================
+--- src/newgrf_station.h	(revision 16591)
++++ src/newgrf_station.h	(working copy)
+@@ -135,6 +135,9 @@
+ SpriteID GetCustomStationGroundRelocation(const StationSpec *statspec, const Station *st, TileIndex tile);
+ uint16 GetStationCallback(CallbackID callback, uint32 param1, uint32 param2, const StationSpec *statspec, const Station *st, TileIndex tile);
+ 
++bool IsStationAvailable(const StationSpec *statspec, RailType railtype);
++byte GetCurrentNewGRFRailType();
++
+ /* Allocate a StationSpec to a Station. This is called once per build operation. */
+ int AllocateSpecToStation(const StationSpec *statspec, Station *st, bool exec);
+ 

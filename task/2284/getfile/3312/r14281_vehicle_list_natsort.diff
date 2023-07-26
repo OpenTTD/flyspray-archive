@@ -1,0 +1,188 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 14281)
++++ src/settings.cpp	(working copy)
+@@ -1087,6 +1087,15 @@
+ 	return 0;
+ }
+ 
++static int32 VehicleListNatsortUpdate(const int value)
++{
++	InvalidateWindowClassesData(WC_TRAINS_LIST, 0);
++	InvalidateWindowClassesData(WC_SHIPS_LIST, 0);
++	InvalidateWindowClassesData(WC_ROADVEH_LIST, 0);
++	InvalidateWindowClassesData(WC_AIRCRAFT_LIST, 0);
++	return 0;
++}
++
+ #ifdef ENABLE_NETWORK
+ 
+ static int32 UpdateMinPlayers(int32 p1)
+@@ -1458,6 +1467,7 @@
+ 
+ 	  SDTC_VAR(gui.console_backlog_timeout,  SLE_UINT16, S,  0,   100,       10,    65500, 0, STR_NULL,                                       NULL),
+ 	  SDTC_VAR(gui.console_backlog_length,   SLE_UINT16, S,  0,   100,       10,    65500, 0, STR_NULL,                                       NULL),
++	 SDTC_BOOL(gui.vehicle_list_natsort,                 S,  0,  true,                         STR_CONFIG_PATCHES_VEHICLE_LIST_NATSORT,       VehicleListNatsortUpdate),
+ #ifdef ENABLE_NETWORK
+ 	  SDTC_VAR(gui.network_chat_box_width,   SLE_UINT16, S,  0,   700,      200,    65535, 0, STR_NULL,                                       NULL),
+ 	  SDTC_VAR(gui.network_chat_box_height,   SLE_UINT8, S,  0,    25,        5,      255, 0, STR_NULL,                                       NULL),
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 14281)
++++ src/lang/english.txt	(working copy)
+@@ -1237,6 +1237,8 @@
+ STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS_NPF                     :NPF
+ STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS_YAPF                    :YAPF {RED}(Not recommended)
+ 
++STR_CONFIG_PATCHES_VEHICLE_LIST_NATSORT                         :{LTBLUE}Natural name sorting in vehicle lists: {ORANGE}{STRING1}
++
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :Sub-tropical landscape
+Index: src/lang/hungarian.txt
+===================================================================
+--- src/lang/hungarian.txt	(revision 14281)
++++ src/lang/hungarian.txt	(working copy)
+@@ -1277,6 +1277,8 @@
+ STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS_NPF                     :NPF
+ STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS_YAPF                    :YAPF {RED}(Ellenjavallt)
+ 
++STR_CONFIG_PATCHES_VEHICLE_LIST_NATSORT                         :{LTBLUE}Nevek természetes rendezése a járműlistáknál: {ORANGE}{STRING1}
++
+ STR_TEMPERATE_LANDSCAPE                                         :mérsékelt táj
+ STR_SUB_ARCTIC_LANDSCAPE                                        :sarkköri táj
+ STR_SUB_TROPICAL_LANDSCAPE                                      :trópusi táj
+Index: src/lang/english_US.txt
+===================================================================
+--- src/lang/english_US.txt	(revision 14281)
++++ src/lang/english_US.txt	(working copy)
+@@ -1194,6 +1194,8 @@
+ STR_CONFIG_PATCHES_QUERY_CAPT                                   :{WHITE}Change setting value
+ STR_CONFIG_PATCHES_SERVICE_INTERVAL_INCOMPATIBLE                :{WHITE}Some or all of the default service interval(s) below are incompatible with chosen setting! 5-90% and 30-800 days are valid
+ 
++STR_CONFIG_PATCHES_VEHICLE_LIST_NATSORT                         :{LTBLUE}Natural name sorting in vehicle lists: {ORANGE}{STRING1}
++
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :Sub-tropical landscape
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 14281)
++++ src/settings_gui.cpp	(working copy)
+@@ -706,6 +706,7 @@
+ 	"vehicle.plane_speed",
+ 	"order.timetabling",
+ 	"vehicle.dynamic_engines",
++	"gui.vehicle_list_natsort",
+ };
+ 
+ struct PatchEntry {
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 14281)
++++ src/settings_type.h	(working copy)
+@@ -85,6 +85,7 @@
+ 
+ 	uint16 console_backlog_timeout;          ///< the minimum amount of time items should be in the console backlog before they will be removed in ~3 seconds granularity.
+ 	uint16 console_backlog_length;           ///< the minimum amount of items in the console backlog before items will be removed.
++	bool vehicle_list_natsort;               ///< Whether to use natural sort for names in vehicle list
+ #ifdef ENABLE_NETWORK
+ 	uint16 network_chat_box_width;           ///< width of the chat box in pixels
+ 	uint8  network_chat_box_height;          ///< height of the chat box in lines
+Index: src/vehicle_gui.cpp
+===================================================================
+--- src/vehicle_gui.cpp	(revision 14281)
++++ src/vehicle_gui.cpp	(working copy)
+@@ -507,10 +507,75 @@
+ 	return (*a)->unitnumber - (*b)->unitnumber;
+ }
+ 
++/* macro to increase readability */
++#define NATSORT_BETWEEN(a, b, c) (a >= b && a <= c)
++
++/**
++ * Compares two strings using case insensitive natural sort
++ * @param s1 string1
++ * @param s2 string2
++ * @return -1, 0, 1, same as strcmp()
++ */
++int CompareNatsort(const char *s1, const char *s2)
++{
++	unsigned int i = 0, j, k, s1_int, s2_int, tmp1, tmp2;
++
++	while (s1[i] != 0 && s2[i] != 0)
++	{
++		/*  if we find a digit we have to read the whole number
++		 *  (the order of '-' in the ASCII table is lower than '0', so negative numbers already solved) */
++
++		if (NATSORT_BETWEEN(s1[i], 48, 57) || NATSORT_BETWEEN(s2[i], 48, 57))
++		{
++			j = i;
++			k = i;
++			s1_int = 0;
++			s2_int = 0;
++
++			while (NATSORT_BETWEEN(s1[j], 48, 57))
++			{
++				s1_int = s1_int * 10 + s1[j++] - 48;
++			}
++
++			while (NATSORT_BETWEEN(s2[k], 48, 57))
++			{
++				s2_int = s2_int * 10 + s2[k++] - 48;
++			}
++
++			if (s1_int != s2_int)
++			{
++				return s1_int < s2_int ? -1 : 1;
++			}
++		}
++
++		/* do case insensivie check */
++		tmp1 = NATSORT_BETWEEN(s1[i], 65, 90) ? s1[i] + 32 : s1[i];
++		tmp2 = NATSORT_BETWEEN(s2[i], 65, 90) ? s2[i] + 32 : s2[i];
++
++		if (tmp1 != tmp2)
++		{
++			return tmp1 < tmp2 ? -1 : 1;
++		}
++
++		i++;
++	}
++
++	/* if length of s1 and s2 are different, but the common length
++	 * is the same, the shorter will be sooner */
++	if (s1[i] != s2[i])
++	{
++		return s1[i] == 0 ? -1 : 1;
++	}
++
++	return 0;
++}
++#undef NATSORT_BETWEEN
++
+ /** Sort vehicles by their name */
+ static int CDECL VehicleNameSorter(const Vehicle* const *a, const Vehicle* const *b)
+ {
+ 	static char last_name[2][64];
++	int r;
+ 
+ 	if (*a != _last_vehicle[0]) {
+ 		_last_vehicle[0] = *a;
+@@ -524,7 +589,15 @@
+ 		GetString(last_name[1], STR_VEHICLE_NAME, lastof(last_name[1]));
+ 	}
+ 
+-	int r = strcmp(last_name[0], last_name[1]);
++	if (_settings_client.gui.vehicle_list_natsort)
++	{
++		r = CompareNatsort(last_name[0], last_name[1]);
++	}
++	else
++	{
++		r = strcmp(last_name[0], last_name[1]);
++	}
++
+ 	return (r != 0) ? r : VehicleNumberSorter(a, b);
+ }
+ 

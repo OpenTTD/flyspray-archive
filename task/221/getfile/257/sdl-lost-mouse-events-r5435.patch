@@ -1,0 +1,274 @@
+Index: video/sdl_v.c
+===================================================================
+--- video/sdl_v.c	(revision 5435)
++++ video/sdl_v.c	(working copy)
+@@ -286,11 +286,21 @@
+ static int PollEvent(void)
+ {
+ 	SDL_Event ev;
++	SDL_Event ev_stop;
+ 
+-	if (!SDL_CALL SDL_PollEvent(&ev))
+-		return -2;
++	ev_stop.type = SDL_USEREVENT;
++	ev_stop.user.code = 0;
++	ev_stop.user.data1 = NULL;
++	ev_stop.user.data2 = NULL;
+ 
++	SDL_CALL SDL_PushEvent(&ev_stop);
++
++	while (SDL_CALL SDL_PollEvent(&ev)) {
++
+ 	switch (ev.type) {
++	case SDL_USEREVENT:
++		return -1;
++
+ 	case SDL_MOUSEMOTION:
+ 		if (_cursor.fix_at) {
+ 			int dx = ev.motion.x - _cursor.pos.x;
+@@ -298,7 +308,8 @@
+ 			if (dx != 0 || dy != 0) {
+ 				_cursor.delta.x += dx;
+ 				_cursor.delta.y += dy;
+-				SDL_CALL SDL_WarpMouse(_cursor.pos.x, _cursor.pos.y);
++				SDL_CALL SDL_WarpMouse(_cursor.pos.x,
++						       _cursor.pos.y);
+ 			}
+ 		} else {
+ 			_cursor.delta.x = ev.motion.x - _cursor.pos.x;
+@@ -310,25 +321,28 @@
+ 		break;
+ 
+ 	case SDL_MOUSEBUTTONDOWN:
+-		if (_rightclick_emulate && (SDL_CALL SDL_GetModState() & (KMOD_LCTRL | KMOD_RCTRL)))
++		if (_rightclick_emulate && (SDL_CALL SDL_GetModState()
++					    & (KMOD_LCTRL | KMOD_RCTRL)))
+ 			ev.button.button = SDL_BUTTON_RIGHT;
+ 
+ 		switch (ev.button.button) {
+-			case SDL_BUTTON_LEFT:
+-				_left_button_down = true;
+-				break;
+-			case SDL_BUTTON_RIGHT:
+-				_right_button_down = true;
+-				_right_button_clicked = true;
+-				break;
+-			case SDL_BUTTON_WHEELUP:
+-				_cursor.wheel--;
+-				break;
+-			case SDL_BUTTON_WHEELDOWN:
+-				_cursor.wheel++;
+-				break;
+-			default:
+-				break;
++		case SDL_BUTTON_LEFT:
++			_left_button_down = true;
++			_left_button_down_handled = false;
++			break;
++		case SDL_BUTTON_RIGHT:
++			_right_button_down = true;
++			_right_button_clicked = true;
++			_right_button_down_handled = false;
++			break;
++		case SDL_BUTTON_WHEELUP:
++			_cursor.wheel--;
++			break;
++		case SDL_BUTTON_WHEELDOWN:
++			_cursor.wheel++;
++			break;
++		default:
++			break;
+ 		}
+ 		break;
+ 
+@@ -338,13 +352,34 @@
+ 			_left_button_down = false;
+ 			_left_button_clicked = false;
+ 		} else if (ev.button.button == SDL_BUTTON_LEFT) {
+-			_left_button_down = false;
+-			_left_button_clicked = false;
++			if (_left_button_down_handled) {
++				_left_button_down = false;
++				_left_button_clicked = false;
++			} else {
++				DEBUG(sdl, 9)
++				  ("Left button down not handled yet, pushing back\n");
++				if (SDL_PushEvent(&ev)) {
++					DEBUG(sdl, 9)
++					  ("Could not push back\n");
++					_left_button_down = false;
++					_left_button_clicked = false;
++				}
++			}
+ 		} else if (ev.button.button == SDL_BUTTON_RIGHT) {
+-			_right_button_down = false;
++			if (_right_button_down_handled) {
++				_right_button_down = false;
++			} else {
++				DEBUG(sdl, 9)
++				  ("Right button down not handled yet, pushing back\n");
++				if (SDL_PushEvent(&ev)) {
++					DEBUG(sdl, 9)
++					  ("Could not push back\n");
++					_right_button_down = false;
++				}
++			}
+ 		}
+ 		break;
+-
++  
+ 	case SDL_ACTIVEEVENT:
+ 		if (!(ev.active.state & SDL_APPMOUSEFOCUS)) break;
+ 
+@@ -355,29 +390,26 @@
+ 			_cursor.in_window = false;
+ 		}
+ 		break;
+-
++  
+ 	case SDL_QUIT:
+ 		// do not ask to quit on the main screen
+ 		if (_game_mode != GM_MENU) {
+ 			if (_patches.autosave_on_exit) {
+ 				DoExitSave();
+ 				return 0;
+-			} else {
++			} else
+ 				AskExitGame();
+-			}
+-		} else {
++		} else
+ 			return 0;
+-		}
+ 		break;
+ 
+-		case SDL_KEYDOWN: /* Toggle full-screen on ALT + ENTER/F */
++	case SDL_KEYDOWN: /* Toggle full-screen on ALT + ENTER/F */
+ 		if ((ev.key.keysym.mod & (KMOD_ALT | KMOD_META)) &&
+-				(ev.key.keysym.sym == SDLK_RETURN || ev.key.keysym.sym == SDLK_f)) {
++		    (ev.key.keysym.sym == SDLK_RETURN || ev.key.keysym.sym == SDLK_f)) {
+ 			ToggleFullScreen(!_fullscreen);
+ 		} else {
+ 			_pressed_key = ConvertSdlKeyIntoMy(&ev.key.keysym);
+ 		}
+-
+ 		break;
+ 
+ 	case SDL_VIDEORESIZE: {
+@@ -387,6 +419,7 @@
+ 		break;
+ 	}
+ 	}
++	}
+ 	return -1;
+ }
+ 
+@@ -427,8 +460,7 @@
+ 	for (;;) {
+ 		InteractiveRandom(); // randomness
+ 
+-		while ((i = PollEvent()) == -1) {}
+-		if (i >= 0) return;
++		if ((i = PollEvent()) >= 0) return;
+ 
+ 		if (_exit_game) return;
+ 
+Index: debug.c
+===================================================================
+--- debug.c	(revision 5435)
++++ debug.c	(working copy)
+@@ -21,6 +21,7 @@
+ int _debug_ntp_level;
+ int _debug_npf_level;
+ int _debug_yapf_level;
++int _debug_sdl_level;
+ 
+ 
+ void CDECL debug(const char *s, ...)
+@@ -53,7 +54,8 @@
+ 	DEBUG_LEVEL(oldloader),
+ 	DEBUG_LEVEL(ntp),
+ 	DEBUG_LEVEL(npf),
+-	DEBUG_LEVEL(yapf)
++	DEBUG_LEVEL(yapf),
++	DEBUG_LEVEL(sdl)
+ 	};
+ #undef DEBUG_LEVEL
+ 
+Index: debug.h
+===================================================================
+--- debug.h	(revision 5435)
++++ debug.h	(working copy)
+@@ -20,6 +20,7 @@
+ 	extern int _debug_ntp_level;
+ 	extern int _debug_npf_level;
+ 	extern int _debug_yapf_level;
++	extern int _debug_sdl_level;
+ #endif
+ 
+ void CDECL debug(const char *s, ...);
+Index: misc_gui.c
+===================================================================
+--- misc_gui.c	(revision 5435)
++++ misc_gui.c	(working copy)
+@@ -506,7 +506,10 @@
+ 		break;
+ 
+ 	case WE_MOUSELOOP:
+-		if (_right_button_down) DeleteWindow(w);
++	  	if (_right_button_down) {
++		  	DeleteWindow(w);
++		  	_right_button_down_handled = true;
++		}
+ 		break;
+ 
+ 	case WE_4:
+Index: window.c
+===================================================================
+--- window.c	(revision 5435)
++++ window.c	(working copy)
+@@ -795,6 +795,7 @@
+ 	if (_left_button_down) {
+ 		e.event = WE_POPUPMENU_OVER;
+ 		e.popupmenu.pt = _cursor.pos;
++		_left_button_down_handled = true;
+ 	} else {
+ 		_popup_menu_active = false;
+ 		e.event = WE_POPUPMENU_SELECT;
+@@ -1158,6 +1159,8 @@
+ 		return true;
+ 	}
+ 
++	_right_button_down_handled = true;
++
+ 	w = FindWindowFromPt(_cursor.pos.x, _cursor.pos.y);
+ 	if (w == NULL) goto stop_capt;
+ 
+@@ -1467,9 +1470,11 @@
+ 	click = 0;
+ 	if (_left_button_down && !_left_button_clicked) {
+ 		_left_button_clicked = true;
++		_left_button_down_handled = true;
+ 		click = 1;
+ 	} else if (_right_button_clicked) {
+ 		_right_button_clicked = false;
++		_right_button_down_handled = true;
+ 		click = 2;
+ 	}
+ 
+Index: window.h
+===================================================================
+--- window.h	(revision 5435)
++++ window.h	(working copy)
+@@ -615,9 +615,11 @@
+ VARDEF Point _cursorpos_drag_start;
+ 
+ VARDEF bool _left_button_down;
++VARDEF bool _left_button_down_handled;
+ VARDEF bool _left_button_clicked;
+ 
+ VARDEF bool _right_button_down;
++VARDEF bool _right_button_down_handled;
+ VARDEF bool _right_button_clicked;
+ 
+ VARDEF int _alloc_wnd_parent_num;

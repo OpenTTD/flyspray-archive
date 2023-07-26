@@ -1,0 +1,244 @@
+diff -r 9f2b9cc1b12d src/settings_gui.cpp
+--- a/src/settings_gui.cpp	Mon Nov 17 20:29:44 2008 +0100
++++ b/src/settings_gui.cpp	Mon Nov 17 21:12:57 2008 +0100
+@@ -583,7 +583,8 @@
+ 	new GameDifficultyWindow();
+ }
+ 
+-static const int SETTING_HEIGHT = 11;         ///< Height of a single patch setting in the tree view
++static const int SETTING_HEIGHT = 11; ///< Height of a single patch setting row
++static const int LEVEL_WIDTH = 15;    ///< Indenting width of a sub-page in pixels
+ 
+ 
+ /** PatchEntry flags */
+@@ -625,11 +626,12 @@
+ 	PatchEntry *FindEntry(uint row, uint *cur_row);
+ 	byte Length() const;
+ 
+-	uint Draw(GameSettings *patches_ptr, int x, int y, uint first_row, uint max_row, uint cur_row = 0);
++	uint Draw(GameSettings *patches_ptr, int x, int y, uint first_row, uint max_row, uint cur_row = 0, uint parent_last = 0);
+ 
+ 	void SetButtons(uint16 new_value);
+ private:
+ 	void DrawPatch(GameSettings *patches_ptr, const SettingDesc *sd, int x, int y, int state);
++	void DrawCircle(int x_base, int y, bool folded);
+ };
+ 
+ /** Data structure describing one page of patches in the patch settings window. */
+@@ -641,7 +643,7 @@
+ 	PatchEntry *FindEntry(uint row, uint *cur_row) const;
+ 	byte Length() const;
+ 
+-	uint Draw(GameSettings *patches_ptr, int base_x, int base_y, uint first_row, uint max_row, uint cur_row = 0) const;
++	uint Draw(GameSettings *patches_ptr, int base_x, int base_y, uint first_row, uint max_row, uint cur_row = 0, uint parent_last = 0) const;
+ };
+ 
+ /* == PatchEntry methods == */
+@@ -736,30 +738,56 @@
+  * @param first_row   First row number to draw
+  * @param max_row     Row-number to stop drawing (the row-number of the row below the last row to draw)
+  * @param cur_row     Current row number (internal variable)
++ * @param parent_last Last-field booleans of parent page level (page level \e i sets bit \e i to 1 if it is its last field)
+  * @return Row number of the next row to draw
+  */
+-uint PatchEntry::Draw(GameSettings *patches_ptr, int base_x, int base_y, uint first_row, uint max_row, uint cur_row)
++uint PatchEntry::Draw(GameSettings *patches_ptr, int base_x, int base_y, uint first_row, uint max_row, uint cur_row, uint parent_last)
+ {
+ 	if (cur_row >= max_row)
+ 		return cur_row;
++
++
++	int x = base_x;
++	int y = base_y;
++	if (cur_row >= first_row) {
++		int colour = _colour_gradient[COLOUR_ORANGE][4];
++		y = base_y + (cur_row - first_row) * SETTING_HEIGHT; // Compute correct y start position
++
++		/* Draw vertical for parent nesting levels */
++		for (uint lvl = 0; lvl < level; lvl++) {
++			if (!HasBit(parent_last, lvl))
++				GfxDrawLine(x + 4, y, x + 4, y + SETTING_HEIGHT - 1, colour);
++			x += LEVEL_WIDTH;
++		}
++		/* draw own |- prefix */
++		int halfway_y = y + SETTING_HEIGHT / 2;
++		int bottom_y = (flags & PEF_LAST_FIELD) ? halfway_y : y + SETTING_HEIGHT - 1;
++		GfxDrawLine(x + 4, y, x + 4, bottom_y, colour);
++		/* Small horizontal line from the last vertical line */
++		GfxDrawLine(x + 4, halfway_y, x + LEVEL_WIDTH - 4, halfway_y, colour);
++		x += LEVEL_WIDTH;
++	}
+ 
+ 	switch(flags & PEF_KIND_MASK) {
+ 		case PEF_SETTING_KIND:
+ 			if (cur_row >= first_row) {
+ 				int state = flags & (PEF_LEFT_DEPRESSED | PEF_RIGHT_DEPRESSED);
+-				int y = base_y + (cur_row - first_row) * SETTING_HEIGHT;
+-				DrawPatch(patches_ptr, d.entry.setting, base_x, y, state);
++				DrawPatch(patches_ptr, d.entry.setting, x, y, state);
+ 			}
+ 			cur_row++;
+ 			break;
+ 		case PEF_SUBTREE_KIND:
+ 			if (cur_row >= first_row) {
+-				int y = base_y + (cur_row - first_row) * SETTING_HEIGHT;
+-				DrawString(base_x, y, d.sub.title, TC_FROMSTRING);
++				DrawCircle(x, y, d.sub.folded);
++				DrawString(x + 12, y, d.sub.title, TC_FROMSTRING);
+ 			}
+ 			cur_row++;
+-			if (!d.sub.folded)
+-				cur_row = d.sub.page->Draw(patches_ptr, base_x, base_y, first_row, max_row, cur_row);
++			if (!d.sub.folded) {
++				if (flags & PEF_LAST_FIELD)
++					SetBit(parent_last, level); // Add own last-field state
++
++				cur_row = d.sub.page->Draw(patches_ptr, base_x, base_y, first_row, max_row, cur_row, parent_last);
++			}
+ 			break;
+ 		default: NOT_REACHED();
+ 	}
+@@ -832,6 +860,65 @@
+ 	DrawString(x + 25, y, (sdb->str) + disabled, TC_FROMSTRING);
+ }
+ 
++/**
++ * Draw a \c (+) circle or a \c (-) circle.
++ * @param x_base Left-most x position to start from for each line
++ * @param y      Y position of the first line
++ * @param folded Boolean indicating what circle to draw
++ *               (\c false means draw a folded \c (+) circle, \c true means draw an unfolded \c (-) circle)
++ */
++void PatchEntry::DrawCircle(int x_base, int y, bool folded)
++{
++	static const int8 _FOLDED[] = {
++		-2,  5, 0,    // ..#####
++		-1,  7, 0,    // .#######
++		 4, -2, 4, 0, // ####.####
++		 4, -2, 4, 0, // ####.####
++		 2, -6, 2, 0, // ##.....##
++		 4, -2, 4, 0, // ####.####
++		 4, -2, 4, 0, // ####.####
++		-1,  7, 0,    // .#######
++		-2,  5, 0,    // ..#####
++		 0
++	};
++	static const int8 _UNFOLDED[] = {
++		-2,  5, 0,    // ..#####
++		-1,  7, 0,    // .#######
++		 9, 0,        // #########
++		 9, 0,        // #########
++		 2, -6, 2, 0, // ##.....##
++		 9, 0,        // #########
++		 9, 0,        // #########
++		-1,  7, 0,    // .#######
++		-2,  5, 0,    // ..#####
++		 0
++	};
++
++	/* Circle is defined as a sequence of lines, where a positive value \e
++	 * n means draw a line of length \e n, and a negative value \e m means
++	 * skip length \e m. Each line is \c 0 terminated. The line sequence is
++	 * terminated with an empty line
++	 */
++	int colour = _colour_gradient[COLOUR_ORANGE][4];
++	const int8 *circle_bytes = folded ? _FOLDED : _UNFOLDED;
++	while (*circle_bytes != 0) {
++		int x = x_base;
++		while (*circle_bytes != 0) {
++			if (*circle_bytes < 0) {
++				x += -(*circle_bytes);
++			} else {
++				int x2 = x + *circle_bytes - 1;
++				GfxDrawLine(x, y, x2, y, colour);
++				x = x2;
++			}
++			circle_bytes++;
++
++		}
++		circle_bytes++;
++		y++;
++	}
++};
++
+ /* == PatchPage methods == */
+ 
+ /**
+@@ -876,16 +963,17 @@
+  * @param base_y      Upper-most position in window/panel to start drawing of row number \a first_row
+  * @param first_row   Number of first row to draw
+  * @param max_row     Row-number to stop drawing (the row-number of the row below the last row to draw)
+- * @param cur_row         Current row number (internal variable)
++ * @param cur_row     Current row number (internal variable)
++ * @param parent_last Last-field booleans of parent page level (page level \e i sets bit \e i to 1 if it is its last field)
+  * @return Row number of the next row to draw
+  */
+-uint PatchPage::Draw(GameSettings *patches_ptr, int base_x, int base_y, uint first_row, uint max_row, uint cur_row) const
++uint PatchPage::Draw(GameSettings *patches_ptr, int base_x, int base_y, uint first_row, uint max_row, uint cur_row, uint parent_last) const
+ {
+ 	if (cur_row >= max_row)
+ 		return cur_row;
+ 
+ 	for (uint i = 0; i < num; i++) {
+-		cur_row = entries[i].Draw(patches_ptr, base_x, base_y, first_row, max_row, cur_row);
++		cur_row = entries[i].Draw(patches_ptr, base_x, base_y, first_row, max_row, cur_row, parent_last);
+ 		if (cur_row >= max_row)
+ 			break;
+ 	}
+@@ -1111,9 +1199,6 @@
+ 				int y = pt.y - SETTINGTREE_TOP_OFFSET;  // Shift y coordinate
+ 				if (y < 0) return;  // Clicked above first entry
+ 
+-				int x = pt.x - SETTINGTREE_LEFT_OFFSET;  // Shift x coordinate
+-				if (x < 0) return;  // Clicked left of the entry
+-
+ 				byte btn = this->vscroll.pos + y / SETTING_HEIGHT;  // Compute which setting is selected
+ 				if (y % SETTING_HEIGHT > SETTING_HEIGHT - 2) return;  // Clicked too low at the setting
+ 
+@@ -1122,6 +1207,10 @@
+ 				PatchEntry *pe = page->FindEntry(btn, &cur_row);
+ 
+ 				if (pe == NULL) return;  // Clicked below the last setting of the page
++
++				int x = pt.x - SETTINGTREE_LEFT_OFFSET - (pe->level + 1) * LEVEL_WIDTH;  // Shift x coordinate
++				if (x < 0) return;  // Clicked left of the entry
++
+ 
+ 				if ((pe->flags & PEF_KIND_MASK) == PEF_SUBTREE_KIND) {
+ 					pe->d.sub.folded = !pe->d.sub.folded; // Flip 'folded'-ness of the sub-page
+@@ -1257,23 +1346,23 @@
+ 
+ static const Widget _patches_selection_widgets[] = {
+ {   WWT_CLOSEBOX,   RESIZE_NONE,  COLOUR_MAUVE,     0,    10,     0,    13, STR_00C5,                        STR_018B_CLOSE_WINDOW},
+-{    WWT_CAPTION,   RESIZE_NONE,  COLOUR_MAUVE,    11,   381,     0,    13, STR_CONFIG_PATCHES_CAPTION,      STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{      WWT_PANEL,   RESIZE_NONE,  COLOUR_MAUVE,     0,   381,    14,    41, 0x0,                             STR_NULL},
+-{      WWT_PANEL, RESIZE_BOTTOM,  COLOUR_MAUVE,     0,   369,    42,   215, 0x0,                             STR_NULL}, // PATCHSEL_OPTIONSPANEL
+-{  WWT_SCROLLBAR, RESIZE_BOTTOM,  COLOUR_MAUVE,   370,   381,    42,   203, 0x0,                             STR_0190_SCROLL_BAR_SCROLLS_LIST}, // PATCHSEL_SCROLLBAR
+-{  WWT_RESIZEBOX,     RESIZE_TB,  COLOUR_MAUVE,   370,   381,   204,   215, 0x0,                             STR_RESIZE_BUTTON}, // PATCHSEL_RESIZE
++{    WWT_CAPTION,   RESIZE_NONE,  COLOUR_MAUVE,    11,   411,     0,    13, STR_CONFIG_PATCHES_CAPTION,      STR_018C_WINDOW_TITLE_DRAG_THIS},
++{      WWT_PANEL,   RESIZE_NONE,  COLOUR_MAUVE,     0,   411,    14,    41, 0x0,                             STR_NULL},
++{      WWT_PANEL, RESIZE_BOTTOM,  COLOUR_MAUVE,     0,   399,    42,   215, 0x0,                             STR_NULL}, // PATCHSEL_OPTIONSPANEL
++{  WWT_SCROLLBAR, RESIZE_BOTTOM,  COLOUR_MAUVE,   400,   411,    42,   203, 0x0,                             STR_0190_SCROLL_BAR_SCROLLS_LIST}, // PATCHSEL_SCROLLBAR
++{  WWT_RESIZEBOX,     RESIZE_TB,  COLOUR_MAUVE,   400,   411,   204,   215, 0x0,                             STR_RESIZE_BUTTON}, // PATCHSEL_RESIZE
+ 
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_YELLOW,   10,   100,    16,    27, STR_CONFIG_PATCHES_GUI,          STR_NULL}, // PATCHSEL_INTERFACE
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_YELLOW,  101,   191,    16,    27, STR_CONFIG_PATCHES_CONSTRUCTION, STR_NULL}, // PATCHSEL_CONSTRUCTION
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_YELLOW,  192,   283,    16,    27, STR_CONFIG_PATCHES_VEHICLES,     STR_NULL}, // PATCHSEL_VEHICLES
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_YELLOW,  284,   375,    16,    27, STR_CONFIG_PATCHES_STATIONS,     STR_NULL}, // PATCHSEL_STATIONS
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_YELLOW,   10,   100,    28,    39, STR_CONFIG_PATCHES_ECONOMY,      STR_NULL}, // PATCHSEL_ECONOMY
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_YELLOW,  101,   191,    28,    39, STR_CONFIG_PATCHES_AI,           STR_NULL}, // PATCHSEL_COMPETITORS
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_YELLOW,   10,   107,    16,    27, STR_CONFIG_PATCHES_GUI,          STR_NULL}, // PATCHSEL_INTERFACE
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_YELLOW,  108,   205,    16,    27, STR_CONFIG_PATCHES_CONSTRUCTION, STR_NULL}, // PATCHSEL_CONSTRUCTION
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_YELLOW,  206,   303,    16,    27, STR_CONFIG_PATCHES_VEHICLES,     STR_NULL}, // PATCHSEL_VEHICLES
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_YELLOW,  304,   401,    16,    27, STR_CONFIG_PATCHES_STATIONS,     STR_NULL}, // PATCHSEL_STATIONS
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_YELLOW,   10,   107,    28,    39, STR_CONFIG_PATCHES_ECONOMY,      STR_NULL}, // PATCHSEL_ECONOMY
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_YELLOW,  108,   205,    28,    39, STR_CONFIG_PATCHES_AI,           STR_NULL}, // PATCHSEL_COMPETITORS
+ {   WIDGETS_END},
+ };
+ 
+ static const WindowDesc _patches_selection_desc = {
+-	WDP_CENTER, WDP_CENTER, 382, 216, 382, 216,
++	WDP_CENTER, WDP_CENTER, 412, 216, 412, 216,
+ 	WC_GAME_OPTIONS, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_RESIZABLE,
+ 	_patches_selection_widgets,

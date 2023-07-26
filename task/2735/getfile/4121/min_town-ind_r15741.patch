@@ -1,0 +1,220 @@
+Index: src/industry_cmd.cpp
+===================================================================
+--- src/industry_cmd.cpp	(revision 15741)
++++ src/industry_cmd.cpp	(working copy)
+@@ -1727,6 +1727,21 @@
+ 	{0, 2, 3, 4, 6, 7, 8, 9, 10, 10, 10},   // high
+ };
+ 
++/** This function checks to see if a given tile is within the specified 
++ * distance to any industry.
++ */
++static bool IsCloseToIndustry(TileIndex tile, uint dist)
++{
++	const Industry *i;
++
++	FOR_ALL_INDUSTRIES(i) {
++		if (DistanceManhattan(tile, i->xy) < dist) {
++			return true;
++		}
++	}
++	return false;
++}
++
+ /** This function is the one who really do the creation work
+  * of random industries during game creation
+  * @param type IndustryType of the desired industry
+@@ -1751,8 +1766,29 @@
+ 
+ 			IncreaseGeneratingWorldProgress(GWP_INDUSTRY);
+ 
++			TileIndex tile;
++			
+ 			for (i = 0; i < 2000; i++) {
+-				if (CreateNewIndustry(RandomTile(), type) != NULL) break;
++				tile = RandomTile();
++				
++				/* if bank or water tower, no need of checking */
++				if ((type != IT_WATER_TOWER ) &&
++					(type != IT_BANK_TEMP) &&
++					(type != IT_BANK_TROPIC_ARCTIC)) {
++						/* check, if not close to another industry */
++						if (_settings_game.economy.minimum_distance_industry > 0)
++						{
++							if (IsCloseToIndustry(tile, _settings_game.economy.minimum_distance_industry)) continue;
++						}
++
++						/* check, if not close to town */
++						if (_settings_game.economy.minimum_distance_ind_town > 0)
++						{
++							if (IsCloseToTown(tile, _settings_game.economy.minimum_distance_ind_town)) continue;
++						}
++				}
++
++				if (CreateNewIndustry(tile, type) != NULL) break;
+ 			}
+ 		} while (--num);
+ 
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 15741)
++++ src/lang/english.txt	(working copy)
+@@ -1111,6 +1111,9 @@
+ STR_CONFIG_SETTING_LARGER_TOWNS_DISABLED                        :{LTBLUE}Proportion of towns that will become cities: {ORANGE}None
+ STR_CONFIG_SETTING_CITY_SIZE_MULTIPLIER                         :{LTBLUE}Initial city size multiplier: {ORANGE}{STRING1}
+ STR_CONFIG_SETTING_MODIFIED_ROAD_REBUILD                        :{LTBLUE}Remove absurd road-elements during the road construction: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_MIN_DISTANCE_TOWN                            :{LTBLUE}Minimum distance between Towns: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_MIN_DISTANCE_INDUSTRY                        :{LTBLUE}Minimum distance between Industries: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_MIN_DISTANCE_IND_TOWN                        :{LTBLUE}Minimum distance between Industries and Towns: {ORANGE}{STRING1}
+ 
+ STR_CONFIG_SETTING_GUI                                          :{ORANGE}Interface
+ STR_CONFIG_SETTING_CONSTRUCTION                                 :{ORANGE}Construction
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 15741)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -40,7 +40,7 @@
+ 
+ #include "saveload_internal.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 115;
++extern const uint16 SAVEGAME_VERSION = 116;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 15741)
++++ src/settings.cpp	(working copy)
+@@ -1396,6 +1396,9 @@
+ 	     SDT_VAR(GameSettings, construction.raw_industry_construction, SLE_UINT8,                   0,MS,     0,     0,       2, 0, STR_CONFIG_SETTING_RAW_INDUSTRY_CONSTRUCTION_METHOD, InvalidateBuildIndustryWindow),
+ 	    SDT_BOOL(GameSettings, economy.multiple_industry_per_town,                                  0, 0, false,                    STR_CONFIG_SETTING_MULTIPINDTOWN,          NULL),
+ 	    SDT_BOOL(GameSettings, economy.same_industry_close,                                         0, 0, false,                    STR_CONFIG_SETTING_SAMEINDCLOSE,           NULL),
++	 SDT_CONDVAR(GameSettings, economy.minimum_distance_town,       SLE_UINT16,116, SL_MAX_VERSION, 0, 0,    20,    10,     500,10, STR_CONFIG_PATCHES_MIN_DISTANCE_TOWN,      NULL),
++	 SDT_CONDVAR(GameSettings, economy.minimum_distance_industry,   SLE_UINT16,116, SL_MAX_VERSION, 0, 0,     0,     0,     100,10, STR_CONFIG_PATCHES_MIN_DISTANCE_INDUSTRY,  NULL),
++	 SDT_CONDVAR(GameSettings, economy.minimum_distance_ind_town,   SLE_UINT16,116, SL_MAX_VERSION, 0, 0,    10,     0,     100,10, STR_CONFIG_PATCHES_MIN_DISTANCE_IND_TOWN,  NULL),
+ 	    SDT_BOOL(GameSettings, economy.bribe,                                                       0, 0,  true,                    STR_CONFIG_SETTING_BRIBE,                  NULL),
+ 	SDT_CONDBOOL(GameSettings, economy.exclusive_rights,                        79, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_SETTING_ALLOW_EXCLUSIVE,        NULL),
+ 	SDT_CONDBOOL(GameSettings, economy.give_money,                              79, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_SETTING_ALLOW_GIVE_MONEY,       NULL),
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 15741)
++++ src/settings_gui.cpp	(working copy)
+@@ -1110,6 +1110,7 @@
+ 	SettingEntry("economy.town_growth_rate"),
+ 	SettingEntry("economy.larger_towns"),
+ 	SettingEntry("economy.initial_city_size"),
++	SettingEntry("economy.minimum_distance_town"),
+ };
+ /** Towns sub-page */
+ static SettingsPage _settings_economy_towns_page = {_settings_economy_towns, lengthof(_settings_economy_towns)};
+@@ -1119,6 +1120,7 @@
+ 	SettingEntry("economy.multiple_industry_per_town"),
+ 	SettingEntry("economy.same_industry_close"),
+ 	SettingEntry("game_creation.oil_refinery_limit"),
++	SettingEntry("economy.minimum_distance_industry"),
+ };
+ /** Industries sub-page */
+ static SettingsPage _settings_economy_industries_page = {_settings_economy_industries, lengthof(_settings_economy_industries)};
+@@ -1128,6 +1130,7 @@
+ 	SettingEntry(&_settings_economy_industries_page, STR_CONFIG_SETTING_ECONOMY_INDUSTRIES),
+ 	SettingEntry("economy.inflation"),
+ 	SettingEntry("economy.smooth_economy"),
++	SettingEntry("economy.minimum_distance_ind_town"),
+ };
+ /** Economy sub-page */
+ static SettingsPage _settings_economy_page = {_settings_economy, lengthof(_settings_economy)};
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 15741)
++++ src/settings_type.h	(working copy)
+@@ -318,6 +318,9 @@
+ 	bool   mod_road_rebuild;                 ///< roadworks remove unneccesary RoadBits
+ 	bool   multiple_industry_per_town;       ///< allow many industries of the same type per town
+ 	bool   same_industry_close;              ///< allow same type industries to be built close to each other
++	uint16 minimum_distance_town;            ///< minimum distance between towns
++	uint16 minimum_distance_industry;        ///< minimum distance between industries
++	uint16 minimum_distance_ind_town;        ///< minimum distance between industries and towns
+ 	uint8  town_growth_rate;                 ///< town growth rate
+ 	uint8  larger_towns;                     ///< the number of cities to build. These start off larger and grow twice as fast
+ 	uint8  initial_city_size;                ///< multiplier for the initial size of the cities compared to towns
+Index: src/town.h
+===================================================================
+--- src/town.h	(revision 15741)
++++ src/town.h	(working copy)
+@@ -19,6 +19,7 @@
+ #include "economy_type.h"
+ #include "map_type.h"
+ #include "command_type.h"
++#include "tile_map.h"
+ 
+ enum {
+ 	HOUSE_NO_CLASS   = 0,
+@@ -368,6 +369,22 @@
+ bool GenerateTownName(uint32 *townnameparts);
+ 
+ /**
++* Determines if a town is close to a tile
++* @param tile TileIndex of the tile to query
++* @param dist maximum distance to be accepted
++* @returns true if the tile correspond to the distance criteria
++*/
++static bool IsCloseToTown(TileIndex tile, uint dist)
++{
++	const Town *t;
++
++	FOR_ALL_TOWNS(t) {
++		if (DistanceManhattan(tile, t->xy) < dist) return true;
++	}
++	return false;
++}
++
++/**
+  * Calculate a hash value from a tile position
+  *
+  * @param x The X coordinate
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revision 15741)
++++ src/town_cmd.cpp	(working copy)
+@@ -282,22 +282,6 @@
+ }
+ 
+ /**
+- * Determines if a town is close to a tile
+- * @param tile TileIndex of the tile to query
+- * @param dist maximum distance to be accepted
+- * @returns true if the tile correspond to the distance criteria
+- */
+-static bool IsCloseToTown(TileIndex tile, uint dist)
+-{
+-	const Town *t;
+-
+-	FOR_ALL_TOWNS(t) {
+-		if (DistanceManhattan(tile, t->xy) < dist) return true;
+-	}
+-	return false;
+-}
+-
+-/**
+  * Marks the town sign as needing a repaint.
+  *
+  * This function marks the area of the sign of a town as dirty for repaint.
+@@ -1566,7 +1550,7 @@
+ 	}
+ 
+ 	/* Check distance to all other towns. */
+-	if (IsCloseToTown(tile, 20)) {
++	if (IsCloseToTown(tile, _settings_game.economy.minimum_distance_town)) {
+ 		return_cmd_error(STR_0238_TOO_CLOSE_TO_ANOTHER_TOWN);
+ 	}
+ 
+@@ -1612,7 +1596,7 @@
+ 		if (!IsTileType(tile, MP_CLEAR) || GetTileSlope(tile, NULL) != SLOPE_FLAT) continue;
+ 
+ 		/* Check not too close to a town */
+-		if (IsCloseToTown(tile, 20)) continue;
++		if (IsCloseToTown(tile, _settings_game.economy.minimum_distance_town)) continue;
+ 
+ 		uint32 townnameparts;
+ 

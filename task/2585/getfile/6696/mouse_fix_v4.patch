@@ -1,0 +1,575 @@
+Index: src/video/cocoa/cocoa_v.h
+===================================================================
+--- src/video/cocoa/cocoa_v.h	(revision 20919)
++++ src/video/cocoa/cocoa_v.h	(working copy)
+@@ -87,9 +87,6 @@
+ 
+ void QZ_GameLoop();
+ 
+-void QZ_ShowMouse();
+-void QZ_HideMouse();
+-
+ uint QZ_ListModes(OTTD_Point *modes, uint max_modes, CGDirectDisplayID display_id, int display_depth);
+ 
+ #endif /* VIDEO_COCOA_H */
+Index: src/video/cocoa/cocoa_v.mm
+===================================================================
+--- src/video/cocoa/cocoa_v.mm	(revision 20919)
++++ src/video/cocoa/cocoa_v.mm	(working copy)
+@@ -368,7 +368,6 @@
+ 		return;
+ 	}
+ 
+-	QZ_ShowMouse();
+ 	NSRunAlertPanel([ NSString stringWithUTF8String:title ], [ NSString stringWithUTF8String:message ], [ NSString stringWithUTF8String:buttonLabel ], nil, nil);
+ 
+ 	if (!wasstarted && _video_driver != NULL) _video_driver->Stop();
+Index: src/video/cocoa/wnd_quartz.mm
+===================================================================
+--- src/video/cocoa/wnd_quartz.mm	(revision 20919)
++++ src/video/cocoa/wnd_quartz.mm	(working copy)
+@@ -72,17 +72,33 @@
+ - (BOOL)windowShouldClose:(id)sender;
+ @end
+ 
+-/* Subclass of NSView to fix Quartz rendering */
++/* Category of NSCursor to fix cursor showing/hiding */
++@interface NSCursor (OTTD_QuartzCursor)
+++ (NSCursor *) clearQZCursor;
++@end
++
++/* Subclass of NSView to fix mouse and Quartz rendering */
+ @interface OTTD_QuartzView : NSView {
+ 	WindowQuartzSubdriver *driver;
++	NSTrackingRectTag	trackingtag;
+ }
+ 
++- (id)initWithFrame:(NSRect)frameRect;
+ - (void)setDriver:(WindowQuartzSubdriver*)drv;
+-
++- (BOOL)acceptsFirstResponder;
++- (BOOL)becomeFirstResponder;
++- (void)setTrackingRect;
++- (void)clearTrackingRect;
++- (void)resetCursorRects;
++- (void)viewWillMoveToWindow:(NSWindow *)win;
++- (void)viewDidMoveToWindow;
++- (void)mouseEntered:(NSEvent *)theEvent;
++- (void)mouseExited:(NSEvent *)theEvent;
+ - (void)drawRect:(NSRect)rect;
+ - (BOOL)isOpaque;
+ @end
+ 
++
+ class WindowQuartzSubdriver: public CocoaSubdriver {
+ 	int device_width;
+ 	int device_height;
+@@ -185,7 +201,6 @@
+ 	driver = drv;
+ }
+ 
+-
+ /* we override these methods to fix the miniaturize animation/dock icon bug */
+ - (void)miniaturize:(id)sender
+ {
+@@ -195,8 +210,6 @@
+ 	/* window is hidden now */
+ 	driver->active = false;
+ 
+-	QZ_ShowMouse();
+-
+ 	[ super miniaturize:sender ];
+ }
+ 
+@@ -255,7 +268,6 @@
+ 	driver->active = true;
+ }
+ 
+-
+ - (id)initWithContentRect:(NSRect)contentRect styleMask:(NSUInteger)styleMask backing:(NSBackingStoreType)backingType defer:(BOOL)flag
+ {
+ 	/* Make our window subclass receive these application notifications */
+@@ -306,8 +318,32 @@
+ 
+ @end
+ 
++@implementation NSCursor (OTTD_QuartzCursor)
++
+++ (NSCursor *) clearQZCursor
++{
++	// RAW 16x16 transparent GIF
++	unsigned char clearGIFBytes[] = {
++		0x47, 0x49, 0x46, 0x38, 0x37, 0x61, 0x10, 0x00, 0x10, 0x00, 0x80, 0x00,
++		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x01, 0x00,
++		0x00, 0x01, 0x00, 0x2C, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x10, 0x00,
++		0x00, 0x02, 0x0E, 0x8C, 0x8F, 0xA9, 0xCB, 0xED, 0x0F, 0xA3, 0x9C, 0xB4,
++		0xDA, 0x8B, 0xB3, 0x3E, 0x05, 0x00, 0x3B};
++	NSData *clearGIFData = [NSData dataWithBytesNoCopy:&clearGIFBytes[0] length:55 freeWhenDone:NO];
++	NSImage *clearImg = [[NSImage alloc] initWithData:clearGIFData];
++	return [[NSCursor alloc] initWithImage:clearImg hotSpot:NSMakePoint(0.0,0.0)];
++}
++
++@end
++
+ @implementation OTTD_QuartzView
+ 
++- (id)initWithFrame:(NSRect)frameRect
++{
++	self = [super initWithFrame:frameRect];
++	return self;
++}
++
+ - (void)setDriver:(WindowQuartzSubdriver*)drv
+ {
+ 	driver = drv;
+@@ -319,6 +355,58 @@
+ 	return YES;
+ }
+ 
++-(BOOL)acceptsFirstResponder
++{
++	return YES;
++}
++
++-(BOOL)becomeFirstResponder
++{
++	return YES;
++}
++
++-(void)setTrackingRect
++{
++	NSPoint loc=[self convertPoint:[[self window] mouseLocationOutsideOfEventStream] fromView:nil];
++	BOOL inside=([self hitTest:loc]==self);
++	if(inside) [[self window] makeFirstResponder:self];
++	trackingtag=[self addTrackingRect:[self visibleRect] owner:self userData:nil assumeInside:inside];
++}
++
++-(void)clearTrackingRect
++{
++	[self removeTrackingRect:trackingtag];
++}
++
++-(void)resetCursorRects
++{
++	[super resetCursorRects];
++	[self clearTrackingRect];
++	[self setTrackingRect];
++    [self addCursorRect:[self bounds] cursor:[NSCursor clearQZCursor]];
++}
++
++-(void)viewWillMoveToWindow:(NSWindow *)win
++{
++	if (!win && [self window]) [self clearTrackingRect];
++}
++
++-(void)viewDidMoveToWindow
++{
++	if([self window]) [self setTrackingRect];
++}
++
++- (void)mouseEntered:(NSEvent *)theEvent
++{
++	_cursor.in_window = true;
++}
++
++- (void)mouseExited:(NSEvent *)theEvent
++{
++	if (_cocoa_subdriver != NULL) UndrawMouseCursor();
++	_cursor.in_window = false;
++}
++
+ - (void)drawRect:(NSRect)invalidRect
+ {
+ 	if (driver->cgcontext == NULL) return;
+@@ -504,6 +592,11 @@
+ 	bool ret = WindowResized();
+ 	this->UpdatePalette(0, 256);
+ 
++	QZ_GameSizeChanged();
++
++	/* Redraw screen */
++	this->num_dirty_rects = MAX_DIRTY_RECTS;
++	
+ 	this->setup = false;
+ 
+ 	return ret;
+@@ -545,8 +638,6 @@
+ 
+ WindowQuartzSubdriver::~WindowQuartzSubdriver()
+ {
+-	QZ_ShowMouse();
+-
+ 	/* Release window mode resources */
+ 	if (this->window != nil) [ this->window close ];
+ 
+Index: src/video/cocoa/event.mm
+===================================================================
+--- src/video/cocoa/event.mm	(revision 20919)
++++ src/video/cocoa/event.mm	(working copy)
+@@ -54,8 +54,6 @@
+ 	RMBE_OFF,
+ };
+ 
+-
+-static bool _show_mouse = true;
+ static unsigned int _current_mods;
+ static bool _tab_is_down;
+ static bool _emulating_right_button;
+@@ -63,7 +61,6 @@
+ static uint32 _tEvent;
+ #endif
+ 
+-
+ static uint32 GetTick()
+ {
+ 	struct timeval tim;
+@@ -72,34 +69,6 @@
+ 	return tim.tv_usec / 1000 + tim.tv_sec * 1000;
+ }
+ 
+-
+-void QZ_ShowMouse()
+-{
+-	if (!_show_mouse) {
+-		[ NSCursor unhide ];
+-		_show_mouse = true;
+-
+-		/* Hide the openttd cursor when leaving the window */
+-		if (_cocoa_subdriver != NULL) UndrawMouseCursor();
+-		_cursor.in_window = false;
+-	}
+-}
+-
+-void QZ_HideMouse()
+-{
+-	if (_show_mouse) {
+-		/* Don't hide the cursor when compiling in debug mode.
+-		 * Note: Not hiding the cursor will cause artefacts around it in 8bpp fullscreen mode. */
+-#ifndef _DEBUG
+-		[ NSCursor hide ];
+-#endif
+-		_show_mouse = false;
+-
+-		/* Show the openttd cursor again */
+-		_cursor.in_window = true;
+-	}
+-}
+-
+ static void QZ_WarpCursor(int x, int y)
+ {
+ 	assert(_cocoa_subdriver != NULL);
+@@ -403,7 +372,6 @@
+ 
+ 	if (event == nil) return false;
+ 	if (!_cocoa_subdriver->IsActive()) {
+-		QZ_ShowMouse();
+ 		[ NSApp sendEvent:event ];
+ 		return true;
+ 	}
+@@ -419,18 +387,15 @@
+ 		case NSLeftMouseDragged:
+ 			pt = _cocoa_subdriver->GetMouseLocation(event);
+ 			if (!_cocoa_subdriver->MouseIsInsideView(&pt) && !_emulating_right_button) {
+-				QZ_ShowMouse();
+ 				[ NSApp sendEvent:event ];
+ 				break;
+ 			}
+ 
+-			QZ_HideMouse();
+ 			QZ_MouseMovedEvent((int)pt.x, (int)pt.y);
+ 			break;
+ 
+ 		case NSRightMouseDragged:
+ 			pt = _cocoa_subdriver->GetMouseLocation(event);
+-			QZ_HideMouse();
+ 			QZ_MouseMovedEvent((int)pt.x, (int)pt.y);
+ 			break;
+ 
+@@ -446,12 +411,6 @@
+ 				[ NSApp sendEvent:event ];
+ 			}
+ 
+-			if (!_cocoa_subdriver->MouseIsInsideView(&pt)) {
+-				QZ_ShowMouse();
+-				break;
+-			}
+-
+-			QZ_HideMouse();
+ 			QZ_MouseMovedEvent((int)pt.x, (int)pt.y);
+ 
+ 			/* Right mouse button emulation */
+@@ -467,12 +426,7 @@
+ 			[ NSApp sendEvent:event ];
+ 
+ 			pt = _cocoa_subdriver->GetMouseLocation(event);
+-			if (!_cocoa_subdriver->MouseIsInsideView(&pt)) {
+-				QZ_ShowMouse();
+-				break;
+-			}
+ 
+-			QZ_HideMouse();
+ 			QZ_MouseMovedEvent((int)pt.x, (int)pt.y);
+ 
+ 			/* Right mouse button emulation */
+@@ -486,26 +440,24 @@
+ 
+ 		case NSRightMouseDown:
+ 			pt = _cocoa_subdriver->GetMouseLocation(event);
++
+ 			if (!_cocoa_subdriver->MouseIsInsideView(&pt)) {
+-				QZ_ShowMouse();
+ 				[ NSApp sendEvent:event ];
+ 				break;
+ 			}
+ 
+-			QZ_HideMouse();
+ 			QZ_MouseMovedEvent((int)pt.x, (int)pt.y);
+ 			QZ_MouseButtonEvent(1, YES);
+ 			break;
+ 
+ 		case NSRightMouseUp:
+ 			pt = _cocoa_subdriver->GetMouseLocation(event);
++			
+ 			if (!_cocoa_subdriver->MouseIsInsideView(&pt)) {
+-				QZ_ShowMouse();
+ 				[ NSApp sendEvent:event ];
+ 				break;
+ 			}
+ 
+-			QZ_HideMouse();
+ 			QZ_MouseMovedEvent((int)pt.x, (int)pt.y);
+ 			QZ_MouseButtonEvent(1, NO);
+ 			break;
+@@ -515,12 +467,10 @@
+ 		case NSOtherMouseDown:
+ 			pt = QZ_GetMouseLocation(event);
+ 			if (!QZ_MouseIsInsideView(&pt)) {
+-				QZ_ShowMouse();
+ 				[ NSApp sendEvent:event ];
+ 				break;
+ 			}
+ 
+-			QZ_HideMouse();
+ 			QZ_MouseMovedEvent((int)pt.x, (int)pt.y);
+ 			QZ_MouseButtonEvent([ event buttonNumber ], YES);
+ 			break;
+@@ -528,12 +478,10 @@
+ 		case NSOtherMouseUp:
+ 			pt = QZ_GetMouseLocation(event);
+ 			if (!QZ_MouseIsInsideView(&pt)) {
+-				QZ_ShowMouse();
+ 				[ NSApp sendEvent:event ];
+ 				break;
+ 			}
+ 
+-			QZ_HideMouse();
+ 			QZ_MouseMovedEvent((int)pt.x, (int)pt.y);
+ 			QZ_MouseButtonEvent([ event buttonNumber ], NO);
+ 			break;
+Index: src/video/cocoa/fullscreen.mm
+===================================================================
+--- src/video/cocoa/fullscreen.mm	(revision 20919)
++++ src/video/cocoa/fullscreen.mm	(working copy)
+@@ -332,10 +332,13 @@
+ 
+ 		/* If we don't hide menu bar, it will get events and interrupt the program */
+ 		HideMenuBar();
++		
++		/* Hide the OS cursor */
++		CGDisplayHideCursor(this->display_id);
+ 
+ 		/* Fade the display to original gamma */
+ 		if (!gamma_error) FadeGammaIn(&gamma_table);
+-
++		
+ 		/* There is a bug in Cocoa where NSScreen doesn't synchronize
+ 		 * with CGDirectDisplay, so the main screen's frame is wrong.
+ 		 * As a result, coordinate translation produces incorrect results.
+@@ -347,8 +350,9 @@
+ 
+ 		pt = [ NSEvent mouseLocation ];
+ 		pt.y = this->display_height - pt.y;
+-		if (this->MouseIsInsideView(&pt)) QZ_HideMouse();
+-
++		
++		_cursor.in_window = true;
++		
+ 		this->UpdatePalette(0, 256);
+ 
+ 		return true;
+@@ -379,6 +383,10 @@
+ 		/* Restore original screen resolution/bpp */
+ 		CGDisplaySwitchToMode(this->display_id, this->save_mode);
+ 		CGReleaseAllDisplays();
++		
++		/* Bring back the cursor */
++		CGDisplayShowCursor(this->display_id);
++		
+ 		ShowMenuBar();
+ 
+ 		/* Reset the main screen's rectangle
+@@ -386,8 +394,6 @@
+ 		NSRect screen_rect = NSMakeRect(0, 0, CGDisplayPixelsWide(this->display_id), CGDisplayPixelsHigh(this->display_id));
+ 		[ [ NSScreen mainScreen ] setFrame:screen_rect ];
+ 
+-		QZ_ShowMouse();
+-
+ 		/* Destroy the pixel buffer */
+ 		if (this->pixel_buffer != NULL) {
+ 			free(this->pixel_buffer);
+Index: src/video/cocoa/wnd_quickdraw.mm
+===================================================================
+--- src/video/cocoa/wnd_quickdraw.mm	(revision 20919)
++++ src/video/cocoa/wnd_quickdraw.mm	(working copy)
+@@ -72,6 +72,26 @@
+ - (BOOL)windowShouldClose:(id)sender;
+ @end
+ 
++/* Subclass of NSView to fix mouse */
++@interface OTTD_QuickdrawView : NSQuickDrawView {
++	NSTrackingRectTag	trackingtag;
++}
++- (BOOL)acceptsFirstResponder;
++- (BOOL)becomeFirstResponder;
++- (void)setTrackingRect;
++- (void)clearTrackingRect;
++- (void)resetCursorRects;
++- (void)viewWillMoveToWindow:(NSWindow *)win;
++- (void)viewDidMoveToWindow;
++- (void)mouseEntered:(NSEvent *)theEvent;
++- (void)mouseExited:(NSEvent *)theEvent;
++@end
++
++/* Category of NSCursor to fix cursor showing/hiding */
++@interface NSCursor (OTTD_QuickdrawCursor)
+++ (NSCursor *) clearQDCursor;
++@end
++
+ class WindowQuickdrawSubdriver: public CocoaSubdriver {
+ 	int device_width;
+ 	int device_height;
+@@ -99,7 +119,7 @@
+ 	bool active;
+ 	bool setup;
+ 
+-	NSQuickDrawView *qdview;
++	OTTD_QuickdrawView *qdview;
+ 
+ private:
+ 	void GetDeviceInfo();
+@@ -189,8 +209,6 @@
+ 	/* window is hidden now */
+ 	driver->active = false;
+ 
+-	QZ_ShowMouse();
+-
+ 	[ super miniaturize:sender ];
+ }
+ 
+@@ -249,7 +267,6 @@
+ 	driver->active = true;
+ }
+ 
+-
+ - (id)initWithContentRect:(NSRect)contentRect styleMask:(unsigned int)styleMask backing:(NSBackingStoreType)backingType defer:(BOOL)flag
+ {
+ 	/* Make our window subclass receive these application notifications */
+@@ -302,7 +319,80 @@
+ 
+ @end
+ 
++@implementation NSCursor (OTTD_QuickdrawCursor)
+ 
+++ (NSCursor *) clearQDCursor
++{
++	// RAW 16x16 transparent GIF
++	unsigned char clearGIFBytes[] = {
++		0x47, 0x49, 0x46, 0x38, 0x37, 0x61, 0x10, 0x00, 0x10, 0x00, 0x80, 0x00,
++		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x01, 0x00,
++		0x00, 0x01, 0x00, 0x2C, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x10, 0x00,
++		0x00, 0x02, 0x0E, 0x8C, 0x8F, 0xA9, 0xCB, 0xED, 0x0F, 0xA3, 0x9C, 0xB4,
++		0xDA, 0x8B, 0xB3, 0x3E, 0x05, 0x00, 0x3B};
++	NSData *clearGIFData = [NSData dataWithBytesNoCopy:&clearGIFBytes[0] length:55 freeWhenDone:NO];
++	NSImage *clearImg = [[NSImage alloc] initWithData:clearGIFData];
++	return [[NSCursor alloc] initWithImage:clearImg hotSpot:NSMakePoint(0.0,0.0)];
++}
++
++@end
++
++@implementation OTTD_QuickdrawView
++
++-(BOOL)acceptsFirstResponder
++{
++	return YES;
++}
++
++-(BOOL)becomeFirstResponder
++{
++	return YES;
++}
++
++-(void)setTrackingRect
++{
++	NSPoint loc=[self convertPoint:[[self window] mouseLocationOutsideOfEventStream] fromView:nil];
++	BOOL inside=([self hitTest:loc]==self);
++	if(inside) [[self window] makeFirstResponder:self];
++	trackingtag=[self addTrackingRect:[self visibleRect] owner:self userData:nil assumeInside:inside];
++}
++
++-(void)clearTrackingRect
++{
++	[self removeTrackingRect:trackingtag];
++}
++
++-(void)resetCursorRects
++{
++	[super resetCursorRects];
++	[self clearTrackingRect];
++	[self setTrackingRect];
++    [self addCursorRect:[self bounds] cursor:[NSCursor clearQDCursor]];
++}
++
++-(void)viewWillMoveToWindow:(NSWindow *)win
++{
++	if (!win && [self window]) [self clearTrackingRect];
++}
++
++-(void)viewDidMoveToWindow
++{
++	if([self window]) [self setTrackingRect];
++}
++
++- (void)mouseEntered:(NSEvent *)theEvent
++{
++	_cursor.in_window = true;
++}
++
++- (void)mouseExited:(NSEvent *)theEvent
++{
++	if (_cocoa_subdriver != NULL) UndrawMouseCursor();
++	_cursor.in_window = false;
++}
++
++@end
++
+ static const int _resize_icon_width  = 16;
+ static const int _resize_icon_height = 16;
+ 
+@@ -411,7 +501,7 @@
+ 
+ 	/* Only recreate the view if it doesn't already exist */
+ 	if (this->qdview == nil) {
+-		this->qdview = [ [ NSQuickDrawView alloc ] initWithFrame:contentRect ];
++		this->qdview = [ [ OTTD_QuickdrawView alloc ] initWithFrame:contentRect ];
+ 		if (this->qdview == nil) {
+ 			DEBUG(driver, 0, "Could not create the Quickdraw view.");
+ 			this->setup = false;
+@@ -541,8 +631,6 @@
+ 
+ WindowQuickdrawSubdriver::~WindowQuickdrawSubdriver()
+ {
+-	QZ_ShowMouse();
+-
+ 	/* Release window mode resources */
+ 	if (this->window != nil) [ this->window close ];
+ 

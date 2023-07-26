@@ -1,0 +1,260 @@
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 13346)
++++ src/lang/english.txt	(working copy)
+@@ -2857,6 +2857,12 @@
+ STR_886B_CAN_T_RENAME_TRAIN_VEHICLE                             :{WHITE}Can't rename train vehicle type...
+ STR_CLEAR_TIME                                                  :{BLACK}Clear Time
+ STR_RESET_LATENESS                                              :{BLACK}Reset Late Counter
++STR_CHANGE_WAYPOINT_NAME                                        :{BLACK}Change waypoint name
++STR_RESET_WAYPOINT                                              :{BLACK}Reset
++STR_RESET_WAYPOINT_TOOLTIP                                      :{BLACK}Reset Train Counter
++STR_WAYPOINT_TRAIN_COUNT                                        :{BLACK}Trains passed: {ORANGE}{COMMA} {BLACK}since {ORANGE}{DATE_LONG}
++STR_WAYPOINT_NAME                                               :{WHITE}{WAYPOINT}
++STR_CAN_T_RENAME_WAYPOINT                                       :{WHITE}Can't rename waypoint...
+ 
+ STR_TRAIN_STOPPING                                              :{RED}Stopping
+ STR_TRAIN_STOPPING_VEL                                          :{RED}Stopping, {VELOCITY}
+Index: src/rail_cmd.cpp
+===================================================================
+--- src/rail_cmd.cpp	(revision 13346)
++++ src/rail_cmd.cpp	(working copy)
+@@ -2166,7 +2166,8 @@
+ {
+ 	switch (GetRailTileType(tile)) {
+ 		case RAIL_TILE_DEPOT:    ShowDepotWindow(tile, VEH_TRAIN);                  break;
+-		case RAIL_TILE_WAYPOINT: ShowRenameWaypointWindow(GetWaypointByTile(tile)); break;
++		case RAIL_TILE_WAYPOINT: ShowWaypointWindow(GetWaypointByTile(tile)); break;
++		//case RAIL_TILE_WAYPOINT: ShowRenameWaypointWindow(GetWaypointByTile(tile)); break;
+ 		default: break;
+ 	}
+ }
+Index: src/order_cmd.cpp
+===================================================================
+--- src/order_cmd.cpp	(revision 13346)
++++ src/order_cmd.cpp	(working copy)
+@@ -1655,6 +1655,9 @@
+ 	if (v->current_order.IsType(OT_GOTO_WAYPOINT) && v->tile == v->dest_tile) {
+ 		UpdateVehicleTimetable(v, true);
+ 		v->cur_order_index++;
++/*        Waypoint *wp = GetWaypointByTile(v->tile);
++        wp->train_count++;
++        printf("aa\n");*/
+ 	}
+ 
+ 	/* Check if we've reached a non-stop station.. */
+Index: src/waypoint.cpp
+===================================================================
+--- src/waypoint.cpp	(revision 13346)
++++ src/waypoint.cpp	(working copy)
+@@ -33,6 +33,9 @@
+ #include "newgrf_station.h"
+ #include "oldpool_func.h"
+ #include "viewport_func.h"
++#include "window_gui.h"
++#include "gui.h"
++#include "textbuf_gui.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -438,9 +441,16 @@
+ 
+ Waypoint::Waypoint(TileIndex tile)
+ {
+-	this->xy = tile;
++    this->xy = tile;
++    this->reset_train_count(_date);
+ }
+ 
++/*Waypoint::reset_train_count()
++{
++    this->train_count = 0;
++    this->train_count_since = _date;
++}*/
++
+ Waypoint::~Waypoint()
+ {
+ 	free(this->name);
+@@ -518,3 +528,113 @@
+ extern const ChunkHandler _waypoint_chunk_handlers[] = {
+ 	{ 'CHKP', Save_WAYP, Load_WAYP, CH_ARRAY | CH_LAST},
+ };
++
++struct WaypointWindow : Window {
++private:
++	Waypoint *wp;
++
++	enum WaypointViewWidget {
++		WP_CAPTION = 1,
++		WP_STICKY,
++		WP_VIEWPORTPANEL,
++        WP_INFOPANEL=5,
++		WP_CENTERVIEW,
++        WP_RESET,
++		WP_CHANGENAME,
++	};
++
++public:
++	WaypointWindow(const WindowDesc *desc, WindowNumber window_number) : Window(desc, window_number)
++	{
++		this->wp = GetWaypoint(this->window_number);
++
++		this->flags4 |= WF_DISABLE_VP_SCROLL;
++		InitializeWindowViewport(this, 3, 17, 254, 86, this->wp->xy, ZOOM_LVL_MIN);
++
++		this->FindWindowPlacementAndResize(desc);
++	}
++
++	virtual void OnPaint()
++	{
++		SetDParam(0, this->wp->index);
++		this->DrawWidgets();
++
++		SetDParam(0, this->wp->train_count);
++		SetDParam(1, this->wp->train_count_since);
++		DrawString(2, 107, STR_WAYPOINT_TRAIN_COUNT, TC_FROMSTRING);
++		/*SetDParamStr(0, this->wp->name);
++		DrawString(11, 172, STR_WAYPOINT_NAME, TC_FROMSTRING);*/
++
++		this->DrawViewport();
++
++	}
++
++    virtual void OnClick(Point pt, int widget)
++    {
++//        static int _rename_id = 1; /* cargo cult programming at its finest */
++//        static int _rename_what = -1; /* these are declared in main_gui.cpp. what do they do? */
++        switch (widget) {
++            case WP_CENTERVIEW: /* scroll to location */
++                if (_ctrl_pressed) {
++                    ShowExtraViewPortWindow(this->wp->xy);
++                } else {
++                    ScrollMainWindowToTile(this->wp->xy);
++                }
++                break;
++            case WP_RESET: /* reset train counter */
++                this->wp->reset_train_count(_date);
++                this->SetDirty();
++                break;
++            case WP_CHANGENAME: /* rename */
++                /* Are we allowed to change the name of the waypoint? */
++                if (!CheckTileOwnership(this->wp->xy)) {
++                    ShowErrorMessage(_error_message, STR_CANT_CHANGE_WAYPOINT_NAME,
++                            TileX(this->wp->xy) * TILE_SIZE, TileY(this->wp->xy) * TILE_SIZE);
++                    break;
++                }
++                SetDParam(0, this->window_number);
++                ShowQueryString(STR_WAYPOINT_RAW, STR_EDIT_WAYPOINT_NAME, 30, 180, this, CS_ALPHANUMERAL);
++                break;
++  /*              int id = this->wp->index;
++                _rename_id = id;
++                _rename_what = 1;
++                SetDParam(0, id);
++                ShowQueryString(STR_WAYPOINT_RAW, STR_EDIT_WAYPOINT_NAME, 30, 180, NULL, CS_ALPHANUMERAL);
++                break;*/
++        }
++    }
++	virtual void OnQueryTextFinished(char *str)
++	{
++		if (!StrEmpty(str)) {
++			_cmd_text = str;
++			DoCommandP(0, this->window_number, 0, NULL,
++				CMD_RENAME_WAYPOINT | CMD_MSG(STR_2008_CAN_T_RENAME_TOWN));
++		}
++	}
++
++};
++
++static const Widget _waypoint_view_widgets[] = {
++{   WWT_CLOSEBOX,   RESIZE_NONE,    13,     0,    10,     0,    13, STR_00C5,                 STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,   RESIZE_NONE,    13,    11,   247,     0,    13, STR_WAYPOINT_NAME,        STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,   RESIZE_NONE,    13,   248,   259,     0,    13, 0x0,                      STR_STICKY_BUTTON},
++{      WWT_PANEL,   RESIZE_NONE,    13,     0,   259,    14,   105, 0x0,                      STR_NULL},
++{      WWT_INSET,   RESIZE_NONE,    13,     2,   257,    16,   103, 0x0,                      STR_NULL},
++{      WWT_PANEL,   RESIZE_NONE,    13,     0,   259,   106,   137, 0x0,                      STR_NULL},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    13,     0,    85,   138,   149, STR_00E4_LOCATION,        STR_3053_CENTER_MAIN_VIEW_ON_STATION},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    13,    86,   171,   138,   149, STR_RESET_WAYPOINT,       STR_RESET_WAYPOINT_TOOLTIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    13,   172,   259,   138,   149, STR_0130_RENAME,          STR_CHANGE_WAYPOINT_NAME},
++{   WIDGETS_END},
++};
++
++static const WindowDesc _waypoint_view_desc = {
++	WDP_AUTO, WDP_AUTO, 260, 150, 260, 150,
++	WC_WAYPOINT_VIEW, WC_NONE,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON,
++	_waypoint_view_widgets,
++};
++
++void ShowWaypointWindow(const Waypoint *cp)
++{
++	AllocateWindowDescFront<WaypointWindow>(&_waypoint_view_desc, cp->index);
++}
+Index: src/window_type.h
+===================================================================
+--- src/window_type.h	(revision 13346)
++++ src/window_type.h	(working copy)
+@@ -94,6 +94,7 @@
+ 	WC_BUILD_SIGNAL,
+ 	WC_COMPANY_PASSWORD_WINDOW,
+ 	WC_OSK,
++    WC_WAYPOINT_VIEW,
+ 
+ 	WC_INVALID = 0xFFFF
+ };
+Index: src/waypoint.h
+===================================================================
+--- src/waypoint.h	(revision 13346)
++++ src/waypoint.h	(working copy)
+@@ -20,6 +20,8 @@
+ 
+ 	TownID town_index; ///< Town associated with the waypoint
+ 	uint16 town_cn;    ///< The Nth waypoint for this town (consecutive number)
++	uint16 train_count;///< Number of trains that have passed by.
++    Date train_count_since; ///< Trains have been counted up from zero since this date
+ 	StringID string;   ///< C000-C03F have special meaning in old games
+ 	char *name;        ///< Custom name. If not set, town + town_cn is used for naming
+ 
+@@ -36,6 +38,11 @@
+ 	~Waypoint();
+ 
+ 	inline bool IsValid() const { return this->xy != 0; }
++	void reset_train_count(Date date)
++    {
++        this->train_count = 0;
++        this->train_count_since = date;
++    }
+ };
+ 
+ static inline bool IsValidWaypointID(WaypointID index)
+@@ -70,5 +77,6 @@
+ void FixOldWaypoints();
+ void UpdateAllWaypointSigns();
+ void AfterLoadWaypoints();
++void ShowWaypointWindow(const Waypoint *cp);
+ 
+ #endif /* WAYPOINT_H */
+Index: src/train_cmd.cpp
+===================================================================
+--- src/train_cmd.cpp	(revision 13346)
++++ src/train_cmd.cpp	(working copy)
+@@ -2639,6 +2639,7 @@
+ static void TrainEnterStation(Vehicle *v, StationID station)
+ {
+ 	v->last_station_visited = station;
++    printf("%d\n", station);
+ 
+ 	/* check if a train ever visited this station before */
+ 	Station *st = GetStation(station);
+@@ -3057,6 +3058,12 @@
+ 					assert(v->u.rail.track);
+ 				}
+ 
++                /* check if it has entered a waypoint */
++                if(IsTileType(v->tile, MP_RAILWAY) && IsRailWaypoint(v->tile)) {
++                    Waypoint *wp = GetWaypoint(GetWaypointIndex(v->tile));
++                    wp->train_count++;
++                }
++
+ 				/* We need to update signal status, but after the vehicle position hash
+ 				 * has been updated by AfterSetTrainPos() */
+ 				update_signals_crossing = true;

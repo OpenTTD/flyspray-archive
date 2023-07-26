@@ -1,0 +1,511 @@
+diff -r d333832c98df -r b0ae344435bd src/cargopacket.cpp
+--- a/src/cargopacket.cpp	Fri Nov 21 21:46:04 2008 +0100
++++ b/src/cargopacket.cpp	Sat Nov 22 10:03:08 2008 +0100
+ -6,6 +6,7 @@
+ #include "openttd.h"
+ #include "station_base.h"
+ #include "cargopacket.h"
++#include "company_base.h"
+ #include "saveload.h"
+ #include "oldpool_func.h"
+ 
+ -29,7 +30,9 @@
+ 
+ 	this->count           = count;
+ 	this->days_in_transit = 0;
+-	this->feeder_share    = 0;
++	const Company *c;
++	FOR_ALL_COMPANIES(c)
++		this->feeder_share[c->index] = 0;
+ 	this->paid_for        = false;
+ }
+ 
+ -49,7 +52,8 @@
+ 	SLE_VAR(CargoPacket, loaded_at_xy,    SLE_UINT32),
+ 	SLE_VAR(CargoPacket, count,           SLE_UINT16),
+ 	SLE_VAR(CargoPacket, days_in_transit, SLE_UINT8),
+-	SLE_VAR(CargoPacket, feeder_share,    SLE_INT64),
++SLE_CONDVAR(CargoPacket, feeder_share[0], SLE_INT64, 0, 103),
++SLE_CONDARR(CargoPacket, feeder_share,    SLE_INT64, MAX_COMPANIES, 104, SL_MAX_VERSION),
+ 	SLE_VAR(CargoPacket, paid_for,        SLE_BOOL),
+ 
+ 	SLE_END()
+ -72,6 +76,14 @@
+ 	while ((index = SlIterateArray()) != -1) {
+ 		CargoPacket *cp = new (index) CargoPacket();
+ 		SlObject(cp, _cargopacket_desc);
++		if(CheckSavegameVersion(104)) {
++			/* give the feeder shares a proper company */
++			uint cargoowner = cp->source != INVALID_STATION  && GetStation(cp->source)->owner < MAX_COMPANIES ? GetStation(cp->source)->owner : 0;
++			if (cargoowner != 0) {
++				cp->feeder_share[cargoowner] = cp->feeder_share[0];
++				cp->feeder_share[0] = 0;
++			}
++		}
+ 	}
+ }
+ 
+ -144,11 +156,13 @@
+ {
+ 	assert(cp != NULL);
+ 	assert(cp->IsValid());
++	const Company *c;
+ 
+ 	for (List::iterator it = packets.begin(); it != packets.end(); it++) {
+ 		if ((*it)->SameSource(cp) && (*it)->count + cp->count <= 65535) {
+ 			(*it)->count        += cp->count;
+-			(*it)->feeder_share += cp->feeder_share;
++			FOR_ALL_COMPANIES(c)
++				(*it)->feeder_share[c->index] += cp->feeder_share[c->index];
+ 			delete cp;
+ 
+ 			InvalidateCache();
+ -217,17 +231,20 @@
+ 		} else {
+ 			/* Can move only part of the packet, so split it into two pieces */
+ 			if (mta != MTA_FINAL_DELIVERY) {
++				const Company *c;
+ 				CargoPacket *cp_new = new CargoPacket();
+ 
+-				Money fs = cp->feeder_share * count / static_cast<uint>(cp->count);
+-				cp->feeder_share -= fs;
++				FOR_ALL_COMPANIES(c) {
++					Money fs = cp->feeder_share[c->index] * count / static_cast<uint>(cp->count);
++					cp->feeder_share[c->index]    -= fs;
++					cp_new->feeder_share[c->index] = fs;
++				}
+ 
+ 				cp_new->source          = cp->source;
+ 				cp_new->source_xy       = cp->source_xy;
+ 				cp_new->loaded_at_xy    = (mta == MTA_CARGO_LOAD) ? data : cp->loaded_at_xy;
+ 
+ 				cp_new->days_in_transit = cp->days_in_transit;
+-				cp_new->feeder_share    = fs;
+ 				/* When cargo is moved into another vehicle you have *always* paid for it */
+ 				cp_new->paid_for        = (mta == MTA_CARGO_LOAD) ? false : cp->paid_for;
+ 
+ -262,6 +279,7 @@
+ 	feeder_share = 0;
+ 	source = INVALID_STATION;
+ 	days_in_transit = 0;
++	const Company *c;
+ 
+ 	if (empty) return;
+ 
+ -270,7 +288,8 @@
+ 		count        += (*it)->count;
+ 		unpaid_cargo |= !(*it)->paid_for;
+ 		dit          += (*it)->days_in_transit * (*it)->count;
+-		feeder_share += (*it)->feeder_share;
++		FOR_ALL_COMPANIES(c)
++			feeder_share += (*it)->feeder_share[c->index];
+ 	}
+ 	days_in_transit = dit / count;
+ 	source = (*packets.begin())->source;
+diff -r d333832c98df -r b0ae344435bd src/cargopacket.h
+--- a/src/cargopacket.h	Fri Nov 21 21:46:04 2008 +0100
++++ b/src/cargopacket.h	Sat Nov 22 10:03:08 2008 +0100
+ -7,6 +7,7 @@
+ 
+ #include "oldpool.h"
+ #include "economy_type.h"
++#include "company_type.h"
+ #include "tile_type.h"
+ #include "station_type.h"
+ #include <list>
+ -22,7 +23,7 @@
+  * Container for cargo from the same location and time
+  */
+ struct CargoPacket : PoolItem<CargoPacket, CargoPacketID, &_CargoPacket_pool> {
+-	Money feeder_share;     ///< Value of feeder pickup to be paid for on delivery of cargo
++	Money feeder_share[MAX_COMPANIES]; ///< Value of feeder pickup to be paid for on delivery of cargo
+ 	TileIndex source_xy;    ///< The origin of the cargo (first station in feeder chain)
+ 	TileIndex loaded_at_xy; ///< Location where this cargo has been loaded into the vehicle
+ 	StationID source;       ///< The station where the cargo came from first
+diff -r d333832c98df -r b0ae344435bd src/economy.cpp
+--- a/src/economy.cpp	Fri Nov 21 21:46:04 2008 +0100
++++ b/src/economy.cpp	Sat Nov 22 10:03:08 2008 +0100
+ -358,6 +358,20 @@
+ 		t->ratings[old_owner] = RATING_INITIAL;
+ 		ClrBit(t->have_ratings, old_owner);
+ 	}
++	
++	{
++		CargoPacket *cp;
++		if (new_owner == INVALID_OWNER) {
++			FOR_ALL_CARGOPACKETS(cp)
++				cp->feeder_share[old_owner] = 0;
++		}
++		else {
++			FOR_ALL_CARGOPACKETS(cp) {
++				cp->feeder_share[new_owner] += cp->feeder_share[old_owner];
++				cp->feeder_share[old_owner] = 0;
++			}
++		}
++	}
+ 
+ 	{
+ 		int num_train = 0;
+ -1473,9 +1487,11 @@
+ {
+ 	int result = 0;
+ 
+-	Money vehicle_profit = 0; // Money paid to the train
+-	Money route_profit   = 0; // The grand total amount for the route. A-D of transfer chain A-B-C-D
+-	Money virtual_profit = 0; // The virtual profit for entire vehicle chain
++	Money vehicle_profit = 0;              // Money paid to the train
++	Money route_profit[MAX_COMPANIES] = {0}; // The grand total amount for the route. A-D of transfer chain A-B-C-D
++	Money virtual_profit = 0;              // The virtual profit for entire vehicle chain
++	bool route_profit_change = false;      // Anything changed at the route profit?
++	Company *c;
+ 
+ 	StationID last_visited = front_v->last_station_visited;
+ 	Station *st = GetStation(last_visited);
+ -1515,8 +1531,14 @@
+ 				/* handle end of route payment */
+ 				Money profit = DeliverGoods(cp->count, v->cargo_type, cp->source, last_visited, cp->source_xy, cp->days_in_transit);
+ 				cp->paid_for = true;
+-				route_profit   += profit; // display amount paid for final route delivery, A-D of a chain A-B-C-D
+-				vehicle_profit += profit - cp->feeder_share;                    // whole vehicle is not payed for transfers picked up earlier
++				
++				FOR_ALL_COMPANIES(c) {
++					route_profit[c->index] += cp->feeder_share[c->index];
++					profit -= cp->feeder_share[c->index]; // whole vehicle is not payed for transfers picked up earlier
++				}
++				route_profit[v->owner] += profit;
++				vehicle_profit += profit;
++				route_profit_change = true;
+ 
+ 				result |= 1;
+ 
+ -1531,9 +1553,9 @@
+ 						v->cargo_type);
+ 
+ 					front_v->profit_this_year += profit << 8;
+-					virtual_profit   += profit; // accumulate transfer profits for whole vehicle
+-					cp->feeder_share += profit; // account for the (virtual) profit already made for the cargo packet
+-					cp->paid_for      = true;   // record that the cargo has been paid for to eliminate double counting
++					virtual_profit                   += profit; // accumulate transfer profits for whole vehicle
++					cp->feeder_share[front_v->owner] += profit; // account for the (virtual) profit already made for the cargo packet
++					cp->paid_for                      = true;   // record that the cargo has been paid for to eliminate double counting
+ 				}
+ 				result |= 2;
+ 
+ -1547,11 +1569,14 @@
+ 		ShowFeederIncomeAnimation(front_v->x_pos, front_v->y_pos, front_v->z_pos, virtual_profit);
+ 	}
+ 
+-	if (route_profit != 0) {
++	if (route_profit_change) {
+ 		front_v->profit_this_year += vehicle_profit << 8;
+-		SubtractMoneyFromCompany(CommandCost(front_v->GetExpenseType(true), -route_profit));
++		ExpensesType vehicleExpensesType = front_v->GetExpenseType(true);
++		FOR_ALL_COMPANIES(c)
++			SubtractMoneyFromAnyCompany(c, CommandCost(vehicleExpensesType, -route_profit[c->index]));
+ 
+-		if (IsLocalCompany() && !PlayVehicleSound(front_v, VSE_LOAD_UNLOAD)) {
++
++		if (route_profit[_local_company] > 0 && !PlayVehicleSound(front_v, VSE_LOAD_UNLOAD)) {
+ 			SndPlayVehicleFx(SND_14_CASHTILL, front_v);
+ 		}
+ 
+diff -r d333832c98df -r b0ae344435bd src/station_cmd.cpp
+--- a/src/station_cmd.cpp	Fri Nov 21 21:46:04 2008 +0100
++++ b/src/station_cmd.cpp	Sat Nov 22 10:03:08 2008 +0100
+ -3403,10 +3403,9 @@
+ 				cp->source          = (CheckSavegameVersion(7) && _cargo_source == 0xFF) ? INVALID_STATION : _cargo_source;
+ 				cp->count           = GB(_waiting_acceptance, 0, 12);
+ 				cp->days_in_transit = _cargo_days;
+-				cp->feeder_share    = _cargo_feeder_share;
++				cp->feeder_share[cp->source != INVALID_STATION  && GetStation(cp->source)->owner < MAX_COMPANIES ? GetStation(cp->source)->owner : 0] = _cargo_feeder_share;
+ 				cp->source_xy       = _cargo_source_xy;
+ 				cp->days_in_transit = _cargo_days;
+-				cp->feeder_share    = _cargo_feeder_share;
+ 				SB(ge->acceptance_pickup, GoodsEntry::PICKUP, 1, 1);
+ 				ge->cargo.Append(cp);
+ 			}
+diff -r d333832c98df -r b0ae344435bd src/vehicle.cpp
+--- a/src/vehicle.cpp	Fri Nov 21 21:46:04 2008 +0100
++++ b/src/vehicle.cpp	Sat Nov 22 10:03:08 2008 +0100
+ -2464,7 +2464,7 @@
+ 			cp->source_xy       = _cargo_source_xy;
+ 			cp->count           = _cargo_count;
+ 			cp->days_in_transit = _cargo_days;
+-			cp->feeder_share    = _cargo_feeder_share;
++			cp->feeder_share[cp->source != INVALID_STATION  && GetStation(cp->source)->owner < MAX_COMPANIES ? GetStation(cp->source)->owner : 0] = _cargo_feeder_share;
+ 			cp->loaded_at_xy    = _cargo_loaded_at_xy;
+ 			v->cargo.Append(cp);
+ 		}
+diff -r 85a2010e5914 -r 46c5d57381a5 src/company_cmd.cpp
+--- a/src/company_cmd.cpp	Fri Nov 21 12:14:17 2008 +0100
++++ b/src/company_cmd.cpp	Fri Nov 21 14:00:07 2008 +0100
+@@ -231,7 +231,7 @@
+ 	return true;
+ }
+ 
+-static void SubtractMoneyFromAnyCompany(Company *c, CommandCost cost)
++void SubtractMoneyFromAnyCompany(Company *c, CommandCost cost)
+ {
+ 	if (cost.GetCost() == 0) return;
+ 	assert(cost.GetExpensesType() != INVALID_EXPENSES);
+diff -r 85a2010e5914 -r 46c5d57381a5 src/functions.h
+--- a/src/functions.h	Fri Nov 21 12:14:17 2008 +0100
++++ b/src/functions.h	Fri Nov 21 14:00:07 2008 +0100
+@@ -21,6 +21,7 @@
+ void SubtractMoneyFromCompanyFract(CompanyID company, CommandCost cost);
+ bool CheckOwnership(Owner owner);
+ bool CheckTileOwnership(TileIndex tile);
++void SubtractMoneyFromAnyCompany(Company *c, CommandCost cost);
+ 
+ void InitializeLandscapeVariables(bool only_constants);
+ 
+diff -r 5066718a9143 -r f514ac3ab876 src/saveload.cpp
+--- a/src/saveload.cpp	Fri Nov 21 10:57:45 2008 +0100
++++ b/src/saveload.cpp	Fri Nov 21 11:16:28 2008 +0100
+@@ -37,7 +37,7 @@
+ 
+ #include "table/strings.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 104;
++extern const uint16 SAVEGAME_VERSION = 105;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+diff -r d333832c98df -r b0ae344435bd src/cargopacket.cpp
+--- a/src/cargopacket.cpp	Fri Nov 21 21:46:04 2008 +0100
++++ b/src/cargopacket.cpp	Sat Nov 22 10:03:08 2008 +0100
+@@ -6,6 +6,7 @@
+ #include "openttd.h"
+ #include "station_base.h"
+ #include "cargopacket.h"
++#include "company_base.h"
+ #include "saveload.h"
+ #include "oldpool_func.h"
+ 
+@@ -29,7 +30,9 @@
+ 
+ 	this->count           = count;
+ 	this->days_in_transit = 0;
+-	this->feeder_share    = 0;
++	const Company *c;
++	FOR_ALL_COMPANIES(c)
++		this->feeder_share[c->index] = 0;
+ 	this->paid_for        = false;
+ }
+ 
+@@ -49,7 +52,8 @@
+ 	SLE_VAR(CargoPacket, loaded_at_xy,    SLE_UINT32),
+ 	SLE_VAR(CargoPacket, count,           SLE_UINT16),
+ 	SLE_VAR(CargoPacket, days_in_transit, SLE_UINT8),
+-	SLE_VAR(CargoPacket, feeder_share,    SLE_INT64),
++SLE_CONDVAR(CargoPacket, feeder_share[0], SLE_INT64, 0, 103),
++SLE_CONDARR(CargoPacket, feeder_share,    SLE_INT64, MAX_COMPANIES, 104, SL_MAX_VERSION),
+ 	SLE_VAR(CargoPacket, paid_for,        SLE_BOOL),
+ 
+ 	SLE_END()
+@@ -72,6 +76,14 @@
+ 	while ((index = SlIterateArray()) != -1) {
+ 		CargoPacket *cp = new (index) CargoPacket();
+ 		SlObject(cp, _cargopacket_desc);
++		if(CheckSavegameVersion(104)) {
++			/* give the feeder shares a proper company */
++			uint cargoowner = cp->source != INVALID_STATION  && GetStation(cp->source)->owner < MAX_COMPANIES ? GetStation(cp->source)->owner : 0;
++			if (cargoowner != 0) {
++				cp->feeder_share[cargoowner] = cp->feeder_share[0];
++				cp->feeder_share[0] = 0;
++			}
++		}
+ 	}
+ }
+ 
+@@ -144,11 +156,13 @@
+ {
+ 	assert(cp != NULL);
+ 	assert(cp->IsValid());
++	const Company *c;
+ 
+ 	for (List::iterator it = packets.begin(); it != packets.end(); it++) {
+ 		if ((*it)->SameSource(cp) && (*it)->count + cp->count <= 65535) {
+ 			(*it)->count        += cp->count;
+-			(*it)->feeder_share += cp->feeder_share;
++			FOR_ALL_COMPANIES(c)
++				(*it)->feeder_share[c->index] += cp->feeder_share[c->index];
+ 			delete cp;
+ 
+ 			InvalidateCache();
+@@ -217,17 +231,20 @@
+ 		} else {
+ 			/* Can move only part of the packet, so split it into two pieces */
+ 			if (mta != MTA_FINAL_DELIVERY) {
++				const Company *c;
+ 				CargoPacket *cp_new = new CargoPacket();
+ 
+-				Money fs = cp->feeder_share * count / static_cast<uint>(cp->count);
+-				cp->feeder_share -= fs;
++				FOR_ALL_COMPANIES(c) {
++					Money fs = cp->feeder_share[c->index] * count / static_cast<uint>(cp->count);
++					cp->feeder_share[c->index]    -= fs;
++					cp_new->feeder_share[c->index] = fs;
++				}
+ 
+ 				cp_new->source          = cp->source;
+ 				cp_new->source_xy       = cp->source_xy;
+ 				cp_new->loaded_at_xy    = (mta == MTA_CARGO_LOAD) ? data : cp->loaded_at_xy;
+ 
+ 				cp_new->days_in_transit = cp->days_in_transit;
+-				cp_new->feeder_share    = fs;
+ 				/* When cargo is moved into another vehicle you have *always* paid for it */
+ 				cp_new->paid_for        = (mta == MTA_CARGO_LOAD) ? false : cp->paid_for;
+ 
+@@ -262,6 +279,7 @@
+ 	feeder_share = 0;
+ 	source = INVALID_STATION;
+ 	days_in_transit = 0;
++	const Company *c;
+ 
+ 	if (empty) return;
+ 
+@@ -270,7 +288,8 @@
+ 		count        += (*it)->count;
+ 		unpaid_cargo |= !(*it)->paid_for;
+ 		dit          += (*it)->days_in_transit * (*it)->count;
+-		feeder_share += (*it)->feeder_share;
++		FOR_ALL_COMPANIES(c)
++			feeder_share += (*it)->feeder_share[c->index];
+ 	}
+ 	days_in_transit = dit / count;
+ 	source = (*packets.begin())->source;
+diff -r d333832c98df -r b0ae344435bd src/cargopacket.h
+--- a/src/cargopacket.h	Fri Nov 21 21:46:04 2008 +0100
++++ b/src/cargopacket.h	Sat Nov 22 10:03:08 2008 +0100
+@@ -7,6 +7,7 @@
+ 
+ #include "oldpool.h"
+ #include "economy_type.h"
++#include "company_type.h"
+ #include "tile_type.h"
+ #include "station_type.h"
+ #include <list>
+@@ -22,7 +23,7 @@
+  * Container for cargo from the same location and time
+  */
+ struct CargoPacket : PoolItem<CargoPacket, CargoPacketID, &_CargoPacket_pool> {
+-	Money feeder_share;     ///< Value of feeder pickup to be paid for on delivery of cargo
++	Money feeder_share[MAX_COMPANIES]; ///< Value of feeder pickup to be paid for on delivery of cargo
+ 	TileIndex source_xy;    ///< The origin of the cargo (first station in feeder chain)
+ 	TileIndex loaded_at_xy; ///< Location where this cargo has been loaded into the vehicle
+ 	StationID source;       ///< The station where the cargo came from first
+diff -r d333832c98df -r b0ae344435bd src/economy.cpp
+--- a/src/economy.cpp	Fri Nov 21 21:46:04 2008 +0100
++++ b/src/economy.cpp	Sat Nov 22 10:03:08 2008 +0100
+@@ -358,6 +358,20 @@
+ 		t->ratings[old_owner] = RATING_INITIAL;
+ 		ClrBit(t->have_ratings, old_owner);
+ 	}
++	
++	{
++		CargoPacket *cp;
++		if (new_owner == INVALID_OWNER) {
++			FOR_ALL_CARGOPACKETS(cp)
++				cp->feeder_share[old_owner] = 0;
++		}
++		else {
++			FOR_ALL_CARGOPACKETS(cp) {
++				cp->feeder_share[new_owner] += cp->feeder_share[old_owner];
++				cp->feeder_share[old_owner] = 0;
++			}
++		}
++	}
+ 
+ 	{
+ 		int num_train = 0;
+@@ -1473,9 +1487,11 @@
+ {
+ 	int result = 0;
+ 
+-	Money vehicle_profit = 0; // Money paid to the train
+-	Money route_profit   = 0; // The grand total amount for the route. A-D of transfer chain A-B-C-D
+-	Money virtual_profit = 0; // The virtual profit for entire vehicle chain
++	Money vehicle_profit = 0;              // Money paid to the train
++	Money route_profit[MAX_COMPANIES] = {0}; // The grand total amount for the route. A-D of transfer chain A-B-C-D
++	Money virtual_profit = 0;              // The virtual profit for entire vehicle chain
++	bool route_profit_change = false;      // Anything changed at the route profit?
++	Company *c;
+ 
+ 	StationID last_visited = front_v->last_station_visited;
+ 	Station *st = GetStation(last_visited);
+@@ -1515,8 +1531,14 @@
+ 				/* handle end of route payment */
+ 				Money profit = DeliverGoods(cp->count, v->cargo_type, cp->source, last_visited, cp->source_xy, cp->days_in_transit);
+ 				cp->paid_for = true;
+-				route_profit   += profit; // display amount paid for final route delivery, A-D of a chain A-B-C-D
+-				vehicle_profit += profit - cp->feeder_share;                    // whole vehicle is not payed for transfers picked up earlier
++				
++				FOR_ALL_COMPANIES(c) {
++					route_profit[c->index] += cp->feeder_share[c->index];
++					profit -= cp->feeder_share[c->index]; // whole vehicle is not payed for transfers picked up earlier
++				}
++				route_profit[v->owner] += profit;
++				vehicle_profit += profit;
++				route_profit_change = true;
+ 
+ 				result |= 1;
+ 
+@@ -1531,9 +1553,9 @@
+ 						v->cargo_type);
+ 
+ 					front_v->profit_this_year += profit << 8;
+-					virtual_profit   += profit; // accumulate transfer profits for whole vehicle
+-					cp->feeder_share += profit; // account for the (virtual) profit already made for the cargo packet
+-					cp->paid_for      = true;   // record that the cargo has been paid for to eliminate double counting
++					virtual_profit                   += profit; // accumulate transfer profits for whole vehicle
++					cp->feeder_share[front_v->owner] += profit; // account for the (virtual) profit already made for the cargo packet
++					cp->paid_for                      = true;   // record that the cargo has been paid for to eliminate double counting
+ 				}
+ 				result |= 2;
+ 
+@@ -1547,11 +1569,14 @@
+ 		ShowFeederIncomeAnimation(front_v->x_pos, front_v->y_pos, front_v->z_pos, virtual_profit);
+ 	}
+ 
+-	if (route_profit != 0) {
++	if (route_profit_change) {
+ 		front_v->profit_this_year += vehicle_profit << 8;
+-		SubtractMoneyFromCompany(CommandCost(front_v->GetExpenseType(true), -route_profit));
++		ExpensesType vehicleExpensesType = front_v->GetExpenseType(true);
++		FOR_ALL_COMPANIES(c)
++			SubtractMoneyFromAnyCompany(c, CommandCost(vehicleExpensesType, -route_profit[c->index]));
+ 
+-		if (IsLocalCompany() && !PlayVehicleSound(front_v, VSE_LOAD_UNLOAD)) {
++
++		if (route_profit[_local_company] > 0 && !PlayVehicleSound(front_v, VSE_LOAD_UNLOAD)) {
+ 			SndPlayVehicleFx(SND_14_CASHTILL, front_v);
+ 		}
+ 
+diff -r d333832c98df -r b0ae344435bd src/station_cmd.cpp
+--- a/src/station_cmd.cpp	Fri Nov 21 21:46:04 2008 +0100
++++ b/src/station_cmd.cpp	Sat Nov 22 10:03:08 2008 +0100
+@@ -3403,10 +3403,9 @@
+ 				cp->source          = (CheckSavegameVersion(7) && _cargo_source == 0xFF) ? INVALID_STATION : _cargo_source;
+ 				cp->count           = GB(_waiting_acceptance, 0, 12);
+ 				cp->days_in_transit = _cargo_days;
+-				cp->feeder_share    = _cargo_feeder_share;
++				cp->feeder_share[cp->source != INVALID_STATION  && GetStation(cp->source)->owner < MAX_COMPANIES ? GetStation(cp->source)->owner : 0] = _cargo_feeder_share;
+ 				cp->source_xy       = _cargo_source_xy;
+ 				cp->days_in_transit = _cargo_days;
+-				cp->feeder_share    = _cargo_feeder_share;
+ 				SB(ge->acceptance_pickup, GoodsEntry::PICKUP, 1, 1);
+ 				ge->cargo.Append(cp);
+ 			}
+diff -r d333832c98df -r b0ae344435bd src/vehicle.cpp
+--- a/src/vehicle.cpp	Fri Nov 21 21:46:04 2008 +0100
++++ b/src/vehicle.cpp	Sat Nov 22 10:03:08 2008 +0100
+@@ -2464,7 +2464,7 @@
+ 			cp->source_xy       = _cargo_source_xy;
+ 			cp->count           = _cargo_count;
+ 			cp->days_in_transit = _cargo_days;
+-			cp->feeder_share    = _cargo_feeder_share;
++			cp->feeder_share[cp->source != INVALID_STATION  && GetStation(cp->source)->owner < MAX_COMPANIES ? GetStation(cp->source)->owner : 0] = _cargo_feeder_share;
+ 			cp->loaded_at_xy    = _cargo_loaded_at_xy;
+ 			v->cargo.Append(cp);
+ 		}

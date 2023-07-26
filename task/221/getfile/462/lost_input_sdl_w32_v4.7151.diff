@@ -1,0 +1,361 @@
+Index: video/sdl_v.c
+===================================================================
+--- video/sdl_v.c	(revision 7151)
++++ video/sdl_v.c	(working copy)
+@@ -325,6 +325,7 @@
+ 				_cursor.pos.y = ev.motion.y;
+ 				_cursor.dirty = true;
+ 			}
++			HandleMouseEvents();
+ 			break;
+ 
+ 		case SDL_MOUSEBUTTONDOWN:
+@@ -347,6 +348,7 @@
+ 
+ 				default: break;
+ 			}
++			HandleMouseEvents();
+ 			break;
+ 
+ 		case SDL_MOUSEBUTTONUP:
+@@ -360,6 +362,7 @@
+ 			} else if (ev.button.button == SDL_BUTTON_RIGHT) {
+ 				_right_button_down = false;
+ 			}
++			HandleMouseEvents();
+ 			break;
+ 
+ 		case SDL_ACTIVEEVENT:
+@@ -381,8 +384,8 @@
+ 				ToggleFullScreen(!_fullscreen);
+ 			} else {
+ 				_pressed_key = ConvertSdlKeyIntoMy(&ev.key.keysym);
++				HandleKeyEvents();
+ 			}
+-
+ 			break;
+ 
+ 		case SDL_VIDEORESIZE: {
+Index: video/win32_v.c
+===================================================================
+--- video/win32_v.c	(revision 7151)
++++ video/win32_v.c	(working copy)
+@@ -266,23 +266,27 @@
+ 		case WM_LBUTTONDOWN:
+ 			SetCapture(hwnd);
+ 			_left_button_down = true;
++			HandleMouseEvents();
+ 			return 0;
+ 
+ 		case WM_LBUTTONUP:
+ 			ReleaseCapture();
+ 			_left_button_down = false;
+ 			_left_button_clicked = false;
++			HandleMouseEvents();
+ 			return 0;
+ 
+ 		case WM_RBUTTONDOWN:
+ 			SetCapture(hwnd);
+ 			_right_button_down = true;
+ 			_right_button_clicked = true;
++			HandleMouseEvents();
+ 			return 0;
+ 
+ 		case WM_RBUTTONUP:
+ 			ReleaseCapture();
+ 			_right_button_down = false;
++			HandleMouseEvents();
+ 			return 0;
+ 
+ 		case WM_MOUSELEAVE:
+@@ -290,6 +294,7 @@
+ 			_cursor.in_window = false;
+ 
+ 			if (!_left_button_down && !_right_button_down) MyShowCursor(true);
++			HandleMouseEvents();
+ 			return 0;
+ 
+ 		case WM_MOUSEMOVE: {
+@@ -337,6 +342,7 @@
+ 				_cursor.dirty = true;
+ 			}
+ 			MyShowCursor(false);
++			HandleMouseEvents();
+ 			return 0;
+ 		}
+ 
+@@ -363,6 +369,7 @@
+ 				ClientSizeChanged(_wnd.width, _wnd.height);
+ 				MarkWholeScreenDirty();
+ 			}
++			HandleKeyEvents();
+ 			break;
+ 		}
+ 
+@@ -378,10 +385,12 @@
+ 
+ 				case VK_F10: /* F10, ignore activation of menu */
+ 					_pressed_key = MapWindowsKey(wParam) << 16;
++					HandleKeyEvents();
+ 					return 0;
+ 
+ 				default: /* ALT in combination with something else */
+ 					_pressed_key = MapWindowsKey(wParam) << 16;
++					HandleKeyEvents();
+ 					break;
+ 			}
+ 			break;
+@@ -481,6 +490,7 @@
+ 			} else if (delta > 0) {
+ 				_cursor.wheel--;
+ 			}
++			HandleMouseEvents();
+ 			return 0;
+ 		}
+ 
+@@ -775,6 +785,24 @@
+ 	_wnd.running = true;
+ 
+ 	for (;;) {
++		/* get status of shift and ctrl buttons just before the message loop gets processed */
++		_ctrl_pressed = _wnd.has_focus && GetAsyncKeyState(VK_CONTROL) < 0;
++		_shift_pressed = _wnd.has_focus && GetAsyncKeyState(VK_SHIFT) < 0;
++#ifdef _DEBUG
++		_dbg_screen_rect = _wnd.has_focus && GetAsyncKeyState(VK_CAPITAL) < 0;
++#endif
++
++		// determine which directional keys are down
++		if (_wnd.has_focus) {
++			_dirkeys =
++				(GetAsyncKeyState(VK_LEFT) < 0 ? 1 : 0) +
++				(GetAsyncKeyState(VK_UP) < 0 ? 2 : 0) +
++				(GetAsyncKeyState(VK_RIGHT) < 0 ? 4 : 0) +
++				(GetAsyncKeyState(VK_DOWN) < 0 ? 8 : 0);
++		} else {
++			_dirkeys = 0;
++		}
++		/* Note that the following message loop now invokes InputLoop() whenever the user input is detected */
+ 		while (PeekMessage(&mesg, NULL, 0, 0, PM_REMOVE)) {
+ 			InteractiveRandom(); // randomness
+ 			TranslateMessage(&mesg);
+@@ -789,7 +817,7 @@
+ 		if (_wnd.has_focus && GetAsyncKeyState(VK_TAB) < 0) {
+ 			/* Disable speeding up game with ALT+TAB (if syskey is pressed, the
+ 			 * real key is in the upper 16 bits (see WM_SYSKEYDOWN in WndProcGdi()) */
+-			 if (GetAsyncKeyState(VK_MENU) >= 0 &&
++			if (GetAsyncKeyState(VK_MENU) >= 0 &&
+ #endif
+ 			    !_networking && _game_mode != GM_MENU)
+ 				_fast_forward |= 2;
+@@ -803,23 +831,7 @@
+ 
+ 		if (cur_ticks == next_tick) {
+ 			next_tick += 30;
+-			_ctrl_pressed = _wnd.has_focus && GetAsyncKeyState(VK_CONTROL)<0;
+-			_shift_pressed = _wnd.has_focus && GetAsyncKeyState(VK_SHIFT)<0;
+-#ifdef _DEBUG
+-			_dbg_screen_rect = _wnd.has_focus && GetAsyncKeyState(VK_CAPITAL)<0;
+-#endif
+ 
+-			// determine which directional keys are down
+-			if (_wnd.has_focus) {
+-				_dirkeys =
+-					(GetAsyncKeyState(VK_LEFT) < 0 ? 1 : 0) +
+-					(GetAsyncKeyState(VK_UP) < 0 ? 2 : 0) +
+-					(GetAsyncKeyState(VK_RIGHT) < 0 ? 4 : 0) +
+-					(GetAsyncKeyState(VK_DOWN) < 0 ? 8 : 0);
+-			} else {
+-				_dirkeys = 0;
+-			}
+-
+ 			GameLoop();
+ 			_cursor.delta.x = _cursor.delta.y = 0;
+ 
+Index: window.c
+===================================================================
+--- window.c	(revision 7151)
++++ window.c	(working copy)
+@@ -1447,8 +1447,48 @@
+ extern void UpdateTileSelection(void);
+ extern bool VpHandlePlaceSizingDrag(void);
+ 
+-static void MouseLoop(int click, int mousewheel)
++static int _input_events_this_tick = 0;
++
++void HandleAutoscroll()
+ {
++	Window *w;
++	ViewPort *vp;
++	int x = _cursor.pos.x;
++	int y = _cursor.pos.y;
++
++	if (_input_events_this_tick != 0) {
++		/* HandleAutoscroll is called only once per GameLoop() - so we can clear the counter here */
++		_input_events_this_tick = 0;
++		/* there were some inputs this tick, don't scroll ??? */
++		return;
++	}
++
++	if (_patches.autoscroll && _game_mode != GM_MENU && !IsGeneratingWorld()) {
++		w = FindWindowFromPt(x, y);
++		if (w == NULL || w->flags4 & WF_DISABLE_VP_SCROLL) return;
++		vp = IsPtInWindowViewport(w, x, y);
++		if (vp != NULL) {
++			x -= vp->left;
++			y -= vp->top;
++			//here allows scrolling in both x and y axis
++#define scrollspeed 3
++			if (x - 15 < 0) {
++				WP(w, vp_d).scrollpos_x += (x - 15) * scrollspeed << vp->zoom;
++			} else if (15 - (vp->width - x) > 0) {
++				WP(w, vp_d).scrollpos_x += (15 - (vp->width - x)) * scrollspeed << vp->zoom;
++			}
++			if (y - 15 < 0) {
++				WP(w, vp_d).scrollpos_y += (y - 15) * scrollspeed << vp->zoom;
++			} else if (15 - (vp->height - y) > 0) {
++				WP(w,vp_d).scrollpos_y += (15 - (vp->height - y)) * scrollspeed << vp->zoom;
++			}
++#undef scrollspeed
++		}
++	}
++}
++
++void MouseLoop(int click, int mousewheel)
++{
+ 	int x,y;
+ 	Window *w;
+ 	ViewPort *vp;
+@@ -1467,31 +1507,7 @@
+ 	x = _cursor.pos.x;
+ 	y = _cursor.pos.y;
+ 
+-	if (click == 0 && mousewheel == 0) {
+-		if (_patches.autoscroll && _game_mode != GM_MENU && !IsGeneratingWorld()) {
+-			w = FindWindowFromPt(x, y);
+-			if (w == NULL || w->flags4 & WF_DISABLE_VP_SCROLL) return;
+-			vp = IsPtInWindowViewport(w, x, y);
+-			if (vp != NULL) {
+-				x -= vp->left;
+-				y -= vp->top;
+-				//here allows scrolling in both x and y axis
+-#define scrollspeed 3
+-				if (x - 15 < 0) {
+-					WP(w, vp_d).scrollpos_x += (x - 15) * scrollspeed << vp->zoom;
+-				} else if (15 - (vp->width - x) > 0) {
+-					WP(w, vp_d).scrollpos_x += (15 - (vp->width - x)) * scrollspeed << vp->zoom;
+-				}
+-				if (y - 15 < 0) {
+-					WP(w, vp_d).scrollpos_y += (y - 15) * scrollspeed << vp->zoom;
+-				} else if (15 - (vp->height - y) > 0) {
+-					WP(w,vp_d).scrollpos_y += (15 - (vp->height - y)) * scrollspeed << vp->zoom;
+-				}
+-#undef scrollspeed
+-			}
+-		}
+-		return;
+-	}
++	if (click == 0 && mousewheel == 0) return;
+ 
+ 	w = FindWindowFromPt(x, y);
+ 	if (w == NULL) return;
+@@ -1548,48 +1564,72 @@
+ 	}
+ }
+ 
+-void InputLoop(void)
++void HandleMouseEvents(void)
+ {
+ 	int click;
+ 	int mousewheel;
+ 
+ 	/*
+-	 * During the generation of the world, there might be
+-	 * another thread that is currently building for example
+-	 * a road. To not interfere with those tasks, we should
+-	 * NOT change the _current_player here.
+-	 *
+-	 * This is not necessary either, as the only events that
+-	 * can be handled are the 'close application' events
+-	 */
++	* During the generation of the world, there might be
++	* another thread that is currently building for example
++	* a road. To not interfere with those tasks, we should
++	* NOT change the _current_player here.
++	*
++	* This is not necessary either, as the only events that
++	* can be handled are the 'close application' events
++	*/
+ 	if (!IsGeneratingWorld()) _current_player = _local_player;
+ 
+-	// Handle pressed keys
+-	if (_pressed_key != 0) {
+-		HandleKeypress(_pressed_key);
+-		_pressed_key = 0;
+-	}
+-
+ 	// Mouse event?
+ 	click = 0;
+ 	if (_left_button_down && !_left_button_clicked) {
+ 		_left_button_clicked = true;
+ 		click = 1;
++		_input_events_this_tick++;
+ 	} else if (_right_button_clicked) {
+ 		_right_button_clicked = false;
+ 		click = 2;
++		_input_events_this_tick++;
+ 	}
+ 
+ 	mousewheel = 0;
+ 	if (_cursor.wheel) {
+ 		mousewheel = _cursor.wheel;
+ 		_cursor.wheel = 0;
++		_input_events_this_tick++;
+ 	}
+ 
+ 	MouseLoop(click, mousewheel);
+ }
+ 
++void HandleKeyEvents(void)
++{
++	/*
++	* During the generation of the world, there might be
++	* another thread that is currently building for example
++	* a road. To not interfere with those tasks, we should
++	* NOT change the _current_player here.
++	*
++	* This is not necessary either, as the only events that
++	* can be handled are the 'close application' events
++	*/
++	if (!IsGeneratingWorld()) _current_player = _local_player;
++	/* Handle pressed keys */
++	if (_pressed_key != 0) {
++		HandleKeypress(_pressed_key);
++		_pressed_key = 0;
++		_input_events_this_tick++;
++	}
++}
+ 
++void InputLoop(void)
++{
++	HandleKeyEvents();
++	HandleMouseEvents();
++	HandleAutoscroll();
++}
++
++
+ static int _we4_timer;
+ 
+ void UpdateWindows(void)
+Index: window.h
+===================================================================
+--- window.h	(revision 7151)
++++ window.h	(working copy)
+@@ -801,6 +801,8 @@
+ void ResetWindowSystem(void);
+ int GetMenuItemIndex(const Window *w, int x, int y);
+ void InputLoop(void);
++void HandleMouseEvents(void);
++void HandleKeyEvents(void);
+ void UpdateWindows(void);
+ void InvalidateWidget(const Window *w, byte widget_index);
+ void InvalidateThisWindowData(Window *w);

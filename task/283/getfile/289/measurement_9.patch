@@ -1,0 +1,521 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 5930)
++++ lang/english.txt	(working copy)
+@@ -2878,4 +2878,12 @@
+ STR_LARGE_AIRPORTS                                              :{BLACK}Large airports
+ STR_HUB_AIRPORTS                                                :{BLACK}Hub airports
+ STR_HELIPORTS                                                   :{BLACK}Helicopter airports
++
++############ Tooltip measurment
++
++STR_MEASURE_LENGTH                                              :{BLACK}Length: {BLACK}{NUM}
++STR_MEASURE_AREA                                                :{BLACK}Area: {BLACK}{NUM} {BLACK}x {BLACK}{NUM}
++STR_MEASURE_LENGTH_HEIGHTDIFF                                   :{BLACK}Length: {BLACK}{NUM}{}{BLACK}Height difference: {BLACK}{NUM} {BLACK}m
++STR_MEASURE_AREA_HEIGHTDIFF                                     :{BLACK}Area: {BLACK}{NUM} {BLACK}x {BLACK}{NUM}{}{BLACK}Height difference: {BLACK}{NUM} {BLACK}m
++
+ ########
+Index: misc_gui.c
+===================================================================
+--- misc_gui.c	(revision 5930)
++++ misc_gui.c	(working copy)
+@@ -33,6 +33,8 @@
+ FiosItem *_fios_list;
+ int _saveload_mode;
+ 
++#include <stdarg.h>
++
+ static bool _fios_path_changed;
+ static bool _savegame_sort_dirty;
+ 
+@@ -631,34 +633,95 @@
+ static void TooltipsWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch (e->event) {
+-		case WE_PAINT:
++		case WE_PAINT: {
++			uint arg;
+ 			GfxFillRect(0, 0, w->width - 1, w->height - 1, 0);
+ 			GfxFillRect(1, 1, w->width - 2, w->height - 2, 0x44);
++			for (arg = 0; arg < WP(w,tooltips_d).params; arg++) {
++				SetDParam(arg, WP(w,tooltips_d).param[arg]);
++			}
+ 			DrawStringMultiCenter((w->width >> 1), (w->height >> 1) - 5, WP(w,tooltips_d).string_id, 197);
+ 			break;
++		}
+ 
+ 		case WE_MOUSELOOP:
+-			if (!_right_button_down) DeleteWindow(w);
++			if (WP(w,tooltips_d).params == 0) {
++				if (!_right_button_down) DeleteWindow(w);
++			} else {
++				if (!_left_button_down || !_shift_pressed) DeleteWindow(w);
++			}
++
+ 			break;
+ 	}
+ }
+ 
+-void GuiShowTooltips(StringID string_id)
++void GuiShowTooltips(StringID string_id, ...) //MEUSH
+ {
++	va_list va;
+ 	char buffer[512];
+ 	Window *w;
+ 	int right,bottom;
+-	int x,y;
++	int x = -1;
++	int y = -1;
++	uint32 param[5];
++	uint params = 0;
++	const char *string;
+ 
+ 	if (string_id == 0) return;
+ 
+ 	w = FindWindowById(WC_TOOLTIPS, 0);
+ 	if (w != NULL) {
+-		if (WP(w,tooltips_d).string_id == string_id)
+-			return;
++		if (WP(w,tooltips_d).string_id == string_id) {
++			x = w->left;
++			y = w->top;
++		}// else {
+ 		DeleteWindow(w);
++		//}
+ 	}
+ 
++	va_start(va, string_id);
++	for (string = GetStringPtr(string_id); *string != '\0'; string++) {
++		switch ((byte)*string) {
++			case 0x84:
++			case 0x8B:
++			case 0x8E:
++			case 0x8F:
++				param[params] = va_arg(va, int);
++				SetDParam(params, param[params]);
++				params++;
++				break;
++
++			case 0x85:
++				switch ((byte)*string++) {
++					case 3:
++					case 12:
++					case 16:
++					case 17:
++					case 18:
++					case 19:
++					case 20:
++						param[params] = va_arg(va, int);
++						SetDParam(params, param[params]);
++						params++;
++						break;
++
++					default:
++						break;
++				}
++
++			default:
++				break;
++		}
++
++		if (params == lengthof(param)) break;
++	}
++	va_end(va);
++
++	//no shift means no measurement
++	if (params != 0) //it's not a standard tooltip - it's a measurement
++		if (!_shift_pressed)
++			return;
++
+ 	GetString(buffer, string_id);
+ 
+ 	right = GetStringWidth(buffer) + 4;
+@@ -668,8 +731,13 @@
+ 		bottom += ((right - 4) / 176) * 10;
+ 		right = 200;
+ 	}
++	if (string_id == STR_MEASURE_LENGTH_HEIGHTDIFF || string_id == STR_MEASURE_AREA_HEIGHTDIFF) {
++		bottom += 10; //we need an extra line for these strings.
++	}
+ 
+ 	y = _cursor.pos.y + 30;
++	if (params != 0) //it's not a standard tooltip - it's a measurement
++		y += 15;
+ 	if (y < 22) y = 22;
+ 
+ 	if (y > (_screen.height - 44) && (y-=52) > (_screen.height - 44))
+@@ -679,11 +747,23 @@
+ 	if (x < 0) x = 0;
+ 	if (x > (_screen.width - right)) x = _screen.width - right;
+ 
++	/*if (w == NULL) { //it was used in the past, but as everything is working without this check, let it stay uncommented.
++		w = AllocateWindow(x, y, right, bottom, TooltipsWndProc, WC_TOOLTIPS, _tooltips_widgets);
++
++	} else if (WP(w,tooltips_d).string_id != string_id) {*/
+ 	w = AllocateWindow(x, y, right, bottom, TooltipsWndProc, WC_TOOLTIPS, _tooltips_widgets);
++	
+ 	WP(w,tooltips_d).string_id = string_id;
+-	w->flags4 &= ~WF_WHITE_BORDER_MASK;
++	if (x == -1 || y == -1) w->flags4 &= ~WF_WHITE_BORDER_MASK;
+ 	w->widget[0].right = right;
+ 	w->widget[0].bottom = bottom;
++
++	WP(w,tooltips_d).param[0] = param[0];
++	WP(w,tooltips_d).param[1] = param[1];
++	WP(w,tooltips_d).param[2] = param[2];
++	WP(w,tooltips_d).param[3] = param[3];
++	WP(w,tooltips_d).param[4] = param[4];
++	WP(w,tooltips_d).params = params;
+ }
+ 
+ 
+Index: network_client.c
+===================================================================
+--- network_client.c	(revision 5930)
++++ network_client.c	(working copy)
+@@ -2,6 +2,7 @@
+ 
+ #include "stdafx.h"
+ #include "debug.h"
++#include "openttd.h"
+ #include "string.h"
+ #include "strings.h"
+ #include "network_data.h"
+Index: network_server.c
+===================================================================
+--- network_server.c	(revision 5930)
++++ network_server.c	(working copy)
+@@ -2,6 +2,7 @@
+ 
+ #include "stdafx.h"
+ #include "debug.h"
++#include "openttd.h"
+ #include "string.h"
+ #include "strings.h"
+ #include "network_data.h"
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 5930)
++++ openttd.c	(working copy)
+@@ -6,13 +6,13 @@
+ #include "debug.h"
+ #include "driver.h"
+ #include "saveload.h"
+-#include "strings.h"
+ #include "map.h"
+ #include "tile.h"
+ #include "void_map.h"
+ 
+ #define VARDEF
+ #include "openttd.h"
++#include "strings.h"
+ #include "bridge_map.h"
+ #include "functions.h"
+ #include "mixer.h"
+Index: strings.c
+===================================================================
+--- strings.c	(revision 5930)
++++ strings.c	(working copy)
+@@ -159,7 +159,7 @@
+ // the indices will be reused.
+ static int _bind_index;
+ 
+-static const char *GetStringPtr(StringID string)
++const char *GetStringPtr(StringID string)
+ {
+ 	return _langpack_offs[_langtab_start[string >> 11] + (string & 0x7FF)];
+ }
+Index: strings.h
+===================================================================
+--- strings.h	(revision 5930)
++++ strings.h	(working copy)
+@@ -2,6 +2,7 @@
+ 
+ #ifndef STRINGS_H
+ #define STRINGS_H
++//#include "openttd.h"
+ 
+ static inline char* InlineString(char* buf, uint16 string)
+ {
+@@ -11,6 +12,7 @@
+ 	return buf;
+ }
+ 
++const char *GetStringPtr(StringID string);
+ char *GetString(char *buffr, uint16 string);
+ char *GetStringWithArgs(char *buffr, uint string, const int32 *argv);
+ 
+Index: variables.h
+===================================================================
+--- variables.h	(revision 5930)
++++ variables.h	(working copy)
+@@ -274,7 +274,7 @@
+ 
+ VARDEF uint32 _pressed_key; // Low 8 bits = ASCII, High 16 bits = keycode
+ VARDEF bool _ctrl_pressed;  // Is Ctrl pressed?
+-VARDEF bool _shift_pressed;  // Is Alt pressed?
++VARDEF bool _shift_pressed;  // Is Shift pressed?
+ VARDEF byte _dirkeys;				// 1=left, 2=up, 4=right, 8=down
+ 
+ VARDEF bool _fullscreen;
+Index: viewport.c
+===================================================================
+--- viewport.c	(revision 5930)
++++ viewport.c	(working copy)
+@@ -1925,11 +1925,28 @@
+ 
+ void VpSetPresizeRange(uint from, uint to)
+ {
++	int display_x;
++	int display_y;
+ 	_thd.selend.x = TileX(to) * TILE_SIZE;
+ 	_thd.selend.y = TileY(to) * TILE_SIZE;
+ 	_thd.selstart.x = TileX(from) * TILE_SIZE;
+ 	_thd.selstart.y = TileY(from) * TILE_SIZE;
++
++
+ 	_thd.next_drawstyle = HT_RECT;
++
++	//show length of tunnel/dock	
++	display_x = abs(TileX(to) - TileX(from))+1;
++	display_y = abs(TileY(to) - TileY(from))+1;
++
++	if (display_x > 1 ||  display_y > 1) { //show length only if there is any length
++	
++		if (display_x > display_y)
++			GuiShowTooltips(STR_MEASURE_LENGTH, display_x);
++		else
++			GuiShowTooltips(STR_MEASURE_LENGTH, display_y);
++
++	}
+ }
+ 
+ static void VpStartPreSizing(void)
+@@ -1972,6 +1989,11 @@
+ 	return 0; // avoids compiler warnings
+ }
+ 
++static int CalcHeightdiff(int ax, int ay, int bx, int by)
++{
++	int minimap_height_level = 50;
++	return (GetTileMaxZ(TileVirtXY(ax, ay)) * minimap_height_level / TILE_HEIGHT) - (GetTileMaxZ(TileVirtXY(bx, by)) * minimap_height_level / TILE_HEIGHT); // <-- minimap shows height in meters, let's do the same
++}
+ 
+ // while dragging
+ static void CalcRaildirsDrawstyle(TileHighlightData *thd, int x, int y, int method)
+@@ -1979,6 +2001,13 @@
+ 	int d;
+ 	byte b=6;
+ 	uint w,h;
++	int display_x; //length in x, converted to tile format
++	int display_y; //length in y, converted to tile format
++	int distance; //length ready to be put in the toolbox
++	int heightdiff; //difference in height of two tiles:
++	int sx; //start tile coordinates
++	int sy; //end tile coordinates
++	bool diagonal = false;
+ 
+ 	int dx = thd->selstart.x - (thd->selend.x&~0xF);
+ 	int dy = thd->selstart.y - (thd->selend.y&~0xF);
+@@ -1990,6 +2019,7 @@
+ 			b = GetAutorailHT(x, y);
+ 		} else { // rect for autosignals on one tile
+ 			b = HT_RECT;
++			diagonal = false;
+ 		}
+ 	} else if (h == 16) { // Is this in X direction?
+ 		if (dx == 16) { // 2x1 special handling
+@@ -1998,24 +2028,32 @@
+ 			b = (Check2x1AutoRail(2)) | HT_LINE;
+ 		} else {
+ 			b = HT_LINE | HT_DIR_X;
++			diagonal = false;
+ 		}
+ 		y = thd->selstart.y;
+ 	} else if (w == 16) { // Or Y direction?
+ 		if (dy == 16) { // 2x1 special handling
+ 			b = (Check2x1AutoRail(1)) | HT_LINE;
+-		} else if (dy == -16) { // 2x1 other direction
++		} else if (dy == -16) {// 2x1 other direction
+ 			b = (Check2x1AutoRail(0)) | HT_LINE;
+ 		} else {
+ 			b = HT_LINE | HT_DIR_Y;
++			diagonal = false;
+ 		}
+ 		x = thd->selstart.x;
+ 	} else if (w > h * 2) { // still count as x dir?
+ 		b = HT_LINE | HT_DIR_X;
+ 		y = thd->selstart.y;
++		diagonal = false;
+ 	} else if (h > w * 2) { // still count as y dir?
+ 		b = HT_LINE | HT_DIR_Y;
+ 		x = thd->selstart.x;
++		diagonal = false;
+ 	} else { // complicated direction
++		//problem: code below treats ANY 2x1 as complicated... I think
++		//if (_AutorailPiece[x & 0xF][y & 0xF] > 1) { //if it is NOT 0 or 1
++			diagonal = true;
++		//}
+ 		d = w - h;
+ 		thd->selend.x = thd->selend.x & ~0xF;
+ 		thd->selend.y = thd->selend.y & ~0xF;
+@@ -2077,6 +2115,40 @@
+ 	thd->selend.x = x;
+ 	thd->selend.y = y;
+ 	thd->next_drawstyle = b;
++	
++	sx = _thd.selstart.x;
++	sy = _thd.selstart.y;
++
++	heightdiff = CalcHeightdiff(x, y, sx, sy);
++
++	if (sx <= x) //player drags to the west (left)
++		display_x = x - sx + TILE_SIZE;
++	else //player drags to the east (right)
++		display_x = sx - x + 2*TILE_SIZE; // 2xTILE_SIZE will result in showing proper distance
++
++	if (sy <= y) //player drags to the south (down)
++		display_y = y - sy + TILE_SIZE;
++	else //player drags to the north (up)
++		display_y = sy - y + 2*TILE_SIZE;
++
++	display_x /= TILE_SIZE; //convert to distance in tiles
++	display_y /= TILE_SIZE; //convert to distance in tiles
++
++	if (diagonal) {
++		distance = DistanceManhattan(TileVirtXY(sx, sy), TileVirtXY(x, y));
++		//distance = 666; //just debugging... remove me!
++		distance += 2; //add 2 to show more proper measurement
++		distance /= 2; //divide, because we count one diagonal piece of rail like half of normal piece of rail
++		if (((sy - y == 1 || y - sy == 1) && x == sx) || ((sx - x == 1 || x - sx == 1) && y == sy)) {
++			distance += 1; //2x1 special handling. It will be 2, sorry for incovinence blahalalhalhlalba
++		}
++	} else { //player is dragging in X or Y axis (NW, NE, SW, SE)
++		distance = (myabs(sy - y) < myabs(sx - x)) ? display_x : display_y;
++	}	
++
++	heightdiff == 0
++		? GuiShowTooltips(STR_MEASURE_LENGTH, distance)
++		: GuiShowTooltips(STR_MEASURE_LENGTH_HEIGHTDIFF, distance, heightdiff);
+ }
+ 
+ // while dragging
+@@ -2084,6 +2156,9 @@
+ {
+ 	int sx;
+ 	int sy;
++	int display_x;
++	int display_y;
++	int heightdiff;
+ 
+ 	if (x == -1) {
+ 		_thd.selend.x = -1;
+@@ -2106,31 +2181,66 @@
+ 	sx = _thd.selstart.x;
+ 	sy = _thd.selstart.y;
+ 
++	if (sx <= x) //player drags to the west (left)
++		display_x = x - sx + TILE_SIZE;
++	else //player drags to the east (right)
++		display_x = sx - x + 2*TILE_SIZE; // +2*TILE_SIZE will result in showing proper distance
++
++	if (sy <= y) //player drags to the south (down)
++		display_y = y - sy + TILE_SIZE;
++	else //player drags to the north (up)
++		display_y = sy - y + 2*TILE_SIZE; // +2*TILE_SIZE will result in showing proper distance
++
++	display_x /= TILE_SIZE; //convert to distance in tiles
++	display_y /= TILE_SIZE; //convert to distance in tiles
++	
+ 	switch (method) {
+ 		case VPM_FIX_X:
+-			x = sx;
++			x = sx;	
++			heightdiff = CalcHeightdiff(x, y, sx, sy);			
++			heightdiff == 0
++				? GuiShowTooltips(STR_MEASURE_LENGTH, display_y)
++				: GuiShowTooltips(STR_MEASURE_LENGTH_HEIGHTDIFF, display_y, heightdiff);
+ 			break;
+-
+ 		case VPM_FIX_Y:
+ 			y = sy;
+-			break;
+-
++			heightdiff = CalcHeightdiff(x, y, sx, sy);
++			heightdiff == 0
++				? GuiShowTooltips(STR_MEASURE_LENGTH, display_x)
++				: GuiShowTooltips(STR_MEASURE_LENGTH_HEIGHTDIFF, display_x, heightdiff);
++				break;
+ 		case VPM_X_OR_Y:
+ 			if (myabs(sy - y) < myabs(sx - x)) {
+ 				y = sy;
++				heightdiff = CalcHeightdiff(x, y, sx, sy);
++				heightdiff == 0
++					? GuiShowTooltips(STR_MEASURE_LENGTH, display_x)
++					: GuiShowTooltips(STR_MEASURE_LENGTH_HEIGHTDIFF, display_x, heightdiff);
+ 			} else {
+ 				x = sx;
++				heightdiff = CalcHeightdiff(x, y, sx, sy);
++				heightdiff == 0
++					? GuiShowTooltips(STR_MEASURE_LENGTH, display_y)
++					: GuiShowTooltips(STR_MEASURE_LENGTH_HEIGHTDIFF, display_y, heightdiff);
+ 			}
+ 			break;
++		case VPM_X_AND_Y:
++			heightdiff = CalcHeightdiff(x, y, sx, sy);
++			heightdiff == 0
++				? GuiShowTooltips(STR_MEASURE_AREA, display_x, display_y)
++				: GuiShowTooltips(STR_MEASURE_AREA_HEIGHTDIFF, display_x, display_y, heightdiff);
+ 
+-		case VPM_X_AND_Y:
+ 			break;
+-
+ 		// limit the selected area to a 10x10 rect.
+ 		case VPM_X_AND_Y_LIMITED: {
+-			int limit = (_thd.sizelimit - 1) * 16;
++			int limit = (_thd.sizelimit - 1) * TILE_SIZE;
+ 			x = sx + clamp(x - sx, -limit, limit);
+ 			y = sy + clamp(y - sy, -limit, limit);
++
++			heightdiff = CalcHeightdiff(x, y, sx, sy);
++			heightdiff == 0
++				? GuiShowTooltips(STR_MEASURE_AREA, clamp(display_x, -limit, limit), clamp(display_y, -limit, limit))
++				: GuiShowTooltips(STR_MEASURE_AREA_HEIGHTDIFF, clamp(display_x, -limit, limit), clamp(display_y, -limit, limit), heightdiff);
+ 			break;
+ 		}
+ 	}
+Index: window.c
+===================================================================
+--- window.c	(revision 5930)
++++ window.c	(working copy)
+@@ -483,6 +483,8 @@
+ 
+ 	CallWindowEventNP(w, WE_CREATE);
+ 
++	if (cls == WC_TOOLTIPS) StartWindowDrag(w); //MEUSH
++
+ 	return w;
+ }
+ 
+Index: window.h
+===================================================================
+--- window.h	(revision 5930)
++++ window.h	(working copy)
+@@ -332,6 +332,8 @@
+ 
+ typedef struct {
+ 	StringID string_id;
++	uint params;
++	uint32 param[5];
+ } tooltips_d;
+ assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(tooltips_d));
+ 
+@@ -588,7 +590,7 @@
+ void UpdateWindows(void);
+ void InvalidateWidget(const Window *w, byte widget_index);
+ 
+-void GuiShowTooltips(StringID string_id);
++void GuiShowTooltips(StringID string_id, ...);
+ 
+ void UnclickWindowButtons(Window *w);
+ void UnclickSomeWindowButtons(Window *w, uint32 mask);

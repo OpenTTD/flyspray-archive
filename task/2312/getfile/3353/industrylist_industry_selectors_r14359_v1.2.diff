@@ -1,0 +1,950 @@
+Index: src/industry_gui.cpp
+===================================================================
+--- src/industry_gui.cpp	(revision 14359)
++++ src/industry_gui.cpp	(working copy)
+@@ -29,41 +29,13 @@
+ #include "sortlist_type.h"
+ #include "widgets/dropdown_func.h"
+ #include "player_base.h"
++#include "industry_gui.h"
+ 
+ #include "table/strings.h"
+ #include "table/sprites.h"
+ 
+ bool _ignore_restrictions;
+ 
+-enum CargoSuffixType {
+-	CST_FUND,
+-	CST_VIEW,
+-	CST_DIR,
+-};
+-
+-/**
+- * Gets the string to display after the cargo name (using callback 37)
+- * @param cargo the cargo for which the suffix is requested
+- * - 00 - first accepted cargo type
+- * - 01 - second accepted cargo type
+- * - 02 - third accepted cargo type
+- * - 03 - first produced cargo type
+- * - 04 - second produced cargo type
+- * @param cst the cargo suffix type (for which window is it requested)
+- * @param ind the industry (NULL if in fund window)
+- * @param ind_type the industry type
+- * @param indspec the industry spec
+- * @return the string to display
+- */
+-static StringID GetCargoSuffix(uint cargo, CargoSuffixType cst, Industry *ind, IndustryType ind_type, const IndustrySpec *indspec)
+-{
+-	if (HasBit(indspec->callback_flags, CBM_IND_CARGO_SUFFIX)) {
+-		uint16 callback = GetIndustryCallback(CBID_INDUSTRY_CARGO_SUFFIX, 0, (cst << 8) | cargo, ind, ind_type, (cst != CST_FUND) ? ind->xy : INVALID_TILE);
+-		if (GB(callback, 0, 8) != 0xFF) return GetGRFStringID(indspec->grf_prop.grffile->grfid, 0xD000 + callback);
+-	}
+-	return STR_EMPTY;
+-}
+-
+ /** Names of the widgets of the dynamic place industries gui */
+ enum DynamicPlaceIndustriesWidgets {
+ 	DPIW_CLOSEBOX = 0,
+@@ -687,315 +659,3 @@
+ {
+ 	AllocateWindowDescFront<IndustryViewWindow>(&_industry_view_desc, industry);
+ }
+-
+-/** Names of the widgets of the industry directory gui */
+-enum IndustryDirectoryWidgets {
+-	IDW_CLOSEBOX = 0,
+-	IDW_CAPTION,
+-	IDW_STICKY,
+-	IDW_DROPDOWN_ORDER,
+-	IDW_DROPDOWN_CRITERIA,
+-	IDW_SPACER,
+-	IDW_INDUSTRY_LIST,
+-	IDW_SCROLLBAR,
+-	IDW_RESIZE,
+-};
+-
+-/** Widget definition of the industy directory gui */
+-static const Widget _industry_directory_widgets[] = {
+-{   WWT_CLOSEBOX,   RESIZE_NONE,  COLOUR_BROWN,     0,    10,     0,    13, STR_00C5,                STR_018B_CLOSE_WINDOW},             // IDW_CLOSEBOX
+-{    WWT_CAPTION,  RESIZE_RIGHT,  COLOUR_BROWN,    11,   415,     0,    13, STR_INDUSTRYDIR_CAPTION, STR_018C_WINDOW_TITLE_DRAG_THIS},   // IDW_CAPTION
+-{  WWT_STICKYBOX,     RESIZE_LR,  COLOUR_BROWN,   416,   427,     0,    13, 0x0,                     STR_STICKY_BUTTON},                 // IDW_STICKY
+-
+-{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_BROWN,     0,    80,    14,    25, STR_SORT_BY,             STR_SORT_ORDER_TIP},                // IDW_DROPDOWN_ORDER
+-{   WWT_DROPDOWN,   RESIZE_NONE,  COLOUR_BROWN,    81,   243,    14,    25, 0x0,                     STR_SORT_CRITERIA_TIP},             // IDW_DROPDOWN_CRITERIA
+-{      WWT_PANEL,  RESIZE_RIGHT,  COLOUR_BROWN,   244,   415,    14,    25, 0x0,                     STR_NULL},                          // IDW_SPACER
+-
+-{      WWT_PANEL,     RESIZE_RB,  COLOUR_BROWN,     0,   415,    26,   189, 0x0,                     STR_INDUSTRYDIR_LIST_CAPTION},      // IDW_INDUSRTY_LIST
+-{  WWT_SCROLLBAR,    RESIZE_LRB,  COLOUR_BROWN,   416,   427,    14,   177, 0x0,                     STR_0190_SCROLL_BAR_SCROLLS_LIST},  // IDW_SCROLLBAR
+-{  WWT_RESIZEBOX,   RESIZE_LRTB,  COLOUR_BROWN,   416,   427,   178,   189, 0x0,                     STR_RESIZE_BUTTON},                 // IDW_RESIZE
+-{   WIDGETS_END},
+-};
+-
+-typedef GUIList<const Industry*> GUIIndustryList;
+-
+-
+-/**
+- * The list of industries.
+- */
+-class IndustryDirectoryWindow : public Window {
+-protected:
+-	/* Runtime saved values */
+-	static Listing last_sorting;
+-	static const Industry *last_industry;
+-
+-	/* Constants for sorting stations */
+-	static const StringID sorter_names[];
+-	static GUIIndustryList::SortFunction *const sorter_funcs[];
+-
+-	GUIIndustryList industries;
+-
+-	/** (Re)Build industries list */
+-	void BuildIndustriesList()
+-	{
+-		if (!this->industries.NeedRebuild()) return;
+-
+-		this->industries.Clear();
+-
+-		DEBUG(misc, 3, "Building industry list");
+-
+-		const Industry *i;
+-		FOR_ALL_INDUSTRIES(i) {
+-			*this->industries.Append() = i;
+-		}
+-
+-		this->industries.Compact();
+-		this->industries.RebuildDone();
+-	}
+-
+-	/**
+-	 * Returns percents of cargo transported if industry produces this cargo, else -1
+-	 *
+-	 * @param i industry to check
+-	 * @param id cargo slot
+-	 * @return percents of cargo transported, or -1 if industry doesn't use this cargo slot
+-	 */
+-	static inline int GetCargoTransportedPercentsIfValid(const Industry *i, uint id)
+-	{
+-		assert(id < lengthof(i->produced_cargo));
+-
+-		if (i->produced_cargo[id] == CT_INVALID) return 101;
+-		return i->last_month_pct_transported[id] * 100 >> 8;
+-	}
+-
+-	/**
+-	 * Returns value representing industry's transported cargo
+-	 *  percentage for industry sorting
+-	 *
+-	 * @param i industry to check
+-	 * @return value used for sorting
+-	 */
+-	static int GetCargoTransportedSortValue(const Industry *i)
+-	{
+-		int p1 = GetCargoTransportedPercentsIfValid(i, 0);
+-		int p2 = GetCargoTransportedPercentsIfValid(i, 1);
+-
+-		if (p1 > p2) Swap(p1, p2); // lower value has higher priority
+-
+-		return (p1 << 8) + p2;
+-	}
+-
+-	/** Sort industries by name */
+-	static int CDECL IndustryNameSorter(const Industry* const *a, const Industry* const *b)
+-	{
+-		static char buf_cache[96];
+-		static char buf[96];
+-
+-		SetDParam(0, (*a)->town->index);
+-		GetString(buf, STR_TOWN, lastof(buf));
+-
+-		if (*b != last_industry) {
+-			last_industry = *b;
+-			SetDParam(0, (*b)->town->index);
+-			GetString(buf_cache, STR_TOWN, lastof(buf_cache));
+-		}
+-
+-		return strcmp(buf, buf_cache);
+-	}
+-
+-	/** Sort industries by type and name */
+-	static int CDECL IndustryTypeSorter(const Industry* const *a, const Industry* const *b)
+-	{
+-		int r = (*a)->type - (*b)->type;
+-		return (r == 0) ? IndustryNameSorter(a, b) : r;
+-	}
+-
+-	/** Sort industries by production and name */
+-	static int CDECL IndustryProductionSorter(const Industry* const *a, const Industry* const *b)
+-	{
+-		int r = 0;
+-
+-		if ((*a)->produced_cargo[0] == CT_INVALID) {
+-			if ((*b)->produced_cargo[0] != CT_INVALID) return -1;
+-		} else {
+-			if ((*b)->produced_cargo[0] == CT_INVALID) return 1;
+-
+-			r = ((*a)->last_month_production[0] + (*a)->last_month_production[1]) -
+-			    ((*b)->last_month_production[0] + (*b)->last_month_production[1]);
+-		}
+-
+-		return (r == 0) ? IndustryNameSorter(a, b) : r;
+-	}
+-
+-	/** Sort industries by transported cargo and name */
+-	static int CDECL IndustryTransportedCargoSorter(const Industry* const *a, const Industry* const *b)
+-	{
+-		int r = GetCargoTransportedSortValue(*a) - GetCargoTransportedSortValue(*b);
+-		return (r == 0) ? IndustryNameSorter(a, b) : r;
+-	}
+-
+-	/** Sort the industries list */
+-	void SortIndustriesList()
+-	{
+-		if (!this->industries.Sort()) return;
+-
+-		/* Reset name sorter sort cache */
+-		this->last_industry = NULL;
+-
+-		/* Set the modified widget dirty */
+-		this->InvalidateWidget(IDW_INDUSTRY_LIST);
+-	}
+-
+-public:
+-	IndustryDirectoryWindow(const WindowDesc *desc, WindowNumber number) : Window(desc, number)
+-	{
+-		this->vscroll.cap = 16;
+-		this->resize.height = this->height - 6 * 10; // minimum 10 items
+-		this->resize.step_height = 10;
+-		this->FindWindowPlacementAndResize(desc);
+-
+-		this->industries.SetListing(this->last_sorting);
+-		this->industries.SetSortFuncs(this->sorter_funcs);
+-		this->industries.ForceRebuild();
+-		this->industries.NeedResort();
+-		this->SortIndustriesList();
+-
+-		this->widget[IDW_DROPDOWN_CRITERIA].data = this->sorter_names[this->industries.SortType()];
+-	}
+-
+-	~IndustryDirectoryWindow()
+-	{
+-		this->last_sorting = this->industries.GetListing();
+-	}
+-
+-	virtual void OnPaint()
+-	{
+-		BuildIndustriesList();
+-		SortIndustriesList();
+-
+-		SetVScrollCount(this, this->industries.Length());
+-
+-		this->DrawWidgets();
+-		this->DrawSortButtonState(IDW_DROPDOWN_ORDER, this->industries.IsDescSortOrder() ? SBS_DOWN : SBS_UP);
+-
+-		int max = min(this->vscroll.pos + this->vscroll.cap, this->industries.Length());
+-		int y = 28; // start of the list-widget
+-
+-		for (int n = this->vscroll.pos; n < max; ++n) {
+-			const Industry* i = this->industries[n];
+-			const IndustrySpec *indsp = GetIndustrySpec(i->type);
+-			byte p = 0;
+-
+-			/* Industry name */
+-			SetDParam(p++, i->index);
+-
+-			/* Industry productions */
+-			for (byte j = 0; j < lengthof(i->produced_cargo); j++) {
+-				if (i->produced_cargo[j] == CT_INVALID) continue;
+-				SetDParam(p++, i->produced_cargo[j]);
+-				SetDParam(p++, i->last_month_production[j]);
+-				SetDParam(p++, GetCargoSuffix(j + 3, CST_DIR, (Industry*)i, i->type, indsp));
+-			}
+-
+-			/* Transported productions */
+-			for (byte j = 0; j < lengthof(i->produced_cargo); j++) {
+-				if (i->produced_cargo[j] == CT_INVALID) continue;
+-				SetDParam(p++, i->last_month_pct_transported[j] * 100 >> 8);
+-			}
+-
+-			/* Drawing the right string */
+-			StringID str = STR_INDUSTRYDIR_ITEM_NOPROD;
+-			if (p != 1) str = (p == 5) ? STR_INDUSTRYDIR_ITEM : STR_INDUSTRYDIR_ITEM_TWO;
+-			DrawStringTruncated(4, y, str, TC_FROMSTRING, this->widget[IDW_INDUSTRY_LIST].right - 4);
+-
+-			y += 10;
+-		}
+-	}
+-
+-	virtual void OnClick(Point pt, int widget)
+-	{
+-		switch (widget) {
+-			case IDW_DROPDOWN_ORDER:
+-				this->industries.ToggleSortOrder();
+-				this->SetDirty();
+-				break;
+-
+-			case IDW_DROPDOWN_CRITERIA:
+-				ShowDropDownMenu(this, this->sorter_names, this->industries.SortType(), IDW_DROPDOWN_CRITERIA, 0, 0);
+-				break;
+-
+-			case IDW_INDUSTRY_LIST: {
+-				int y = (pt.y - 28) / 10;
+-				uint16 p;
+-
+-				if (!IsInsideMM(y, 0, this->vscroll.cap)) return;
+-				p = y + this->vscroll.pos;
+-				if (p < this->industries.Length()) {
+-					if (_ctrl_pressed) {
+-						ShowExtraViewPortWindow(this->industries[p]->xy);
+-					} else {
+-						ScrollMainWindowToTile(this->industries[p]->xy);
+-					}
+-				}
+-			} break;
+-		}
+-	}
+-
+-	virtual void OnDropdownSelect(int widget, int index)
+-	{
+-		if (this->industries.SortType() != index) {
+-			this->industries.SetSortType(index);
+-			this->widget[IDW_DROPDOWN_CRITERIA].data = this->sorter_names[this->industries.SortType()];
+-			this->SetDirty();
+-		}
+-	}
+-
+-	virtual void OnResize(Point new_size, Point delta)
+-	{
+-		this->vscroll.cap += delta.y / 10;
+-	}
+-
+-	virtual void OnInvalidateData(int data)
+-	{
+-		if (data == 0) {
+-			this->industries.ForceRebuild();
+-		} else {
+-			this->industries.ForceResort();
+-		}
+-		this->InvalidateWidget(IDW_INDUSTRY_LIST);
+-	}
+-};
+-
+-Listing IndustryDirectoryWindow::last_sorting = {false, 0};
+-const Industry *IndustryDirectoryWindow::last_industry = NULL;
+-
+-/* Availible station sorting functions */
+-GUIIndustryList::SortFunction* const IndustryDirectoryWindow::sorter_funcs[] = {
+-	&IndustryNameSorter,
+-	&IndustryTypeSorter,
+-	&IndustryProductionSorter,
+-	&IndustryTransportedCargoSorter
+-};
+-
+-/* Names of the sorting functions */
+-const StringID IndustryDirectoryWindow::sorter_names[] = {
+-	STR_SORT_BY_DROPDOWN_NAME,
+-	STR_SORT_BY_TYPE,
+-	STR_SORT_BY_PRODUCTION,
+-	STR_SORT_BY_TRANSPORTED,
+-	INVALID_STRING_ID
+-};
+-
+-
+-/** Window definition of the industy directory gui */
+-static const WindowDesc _industry_directory_desc = {
+-	WDP_AUTO, WDP_AUTO, 428, 190, 428, 190,
+-	WC_INDUSTRY_DIRECTORY, WC_NONE,
+-	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON | WDF_RESIZABLE,
+-	_industry_directory_widgets,
+-};
+-
+-void ShowIndustryDirectory()
+-{
+-	AllocateWindowDescFront<IndustryDirectoryWindow>(&_industry_directory_desc, 0);
+-}
+Index: src/rail_gui.cpp
+===================================================================
+--- src/rail_gui.cpp	(revision 14359)
++++ src/rail_gui.cpp	(working copy)
+@@ -1460,6 +1460,7 @@
+ 				if (_settings_client.gui.drag_signals_density < 20) {
+ 					_settings_client.gui.drag_signals_density++;
+ 					SetWindowDirty(FindWindowById(WC_GAME_OPTIONS, 0));
++					//boo!
+ 				}
+ 				break;
+ 
+Index: src/industry_list_gui.cpp
+===================================================================
+--- src/industry_list_gui.cpp	(revision 0)
++++ src/industry_list_gui.cpp	(revision 0)
+@@ -0,0 +1,512 @@
++
++
++#include "stdafx.h"
++#include "debug.h"
++#include "gui.h"
++#include "window_gui.h"
++#include "town.h"
++#include "town_type.h"
++#include "strings_func.h"
++#include "sortlist_type.h"
++#include "industry.h"
++#include "industry_gui.h"
++
++#include <math.h>
++
++#include "widgets/dropdown_func.h"
++
++#include "table/strings.h"
++
++#include "openttd.h"
++#include "viewport_func.h"
++#include "gfx_func.h"
++#include "variables.h"
++#include "cargotype.h"
++
++#include "table/sprites.h"
++
++/** Names of the widgets of the industry directory gui */
++enum IndustryDirectoryWidgets {
++	IDW_CLOSEBOX = 0,
++	IDW_CAPTION,
++	IDW_STICKY,
++	IDW_DROPDOWN_ORDER,
++	IDW_DROPDOWN_CRITERIA,
++	IDW_SPACER,
++	IDW_INDUSTRY_LIST,
++	IDW_SCROLLBAR,
++	IDW_INDSELECTION,
++	IDW_INDSELECTION_ENABLEDISABLE,
++	IDW_INDSELECTION_ENABLE,
++	IDW_INDSELECTION_DISABLE,
++	IDW_RESIZE,
++};
++
++/** Structure for holding relevant data for legends in industry list */
++struct IndustryLegend {
++	uint16 colour;     ///< color of the item on the map
++	StringID legend;   ///< string corresponding to the colored item
++	IndustryType type; ///< type of industry
++	bool show_in_list;  ///< for filtering industries, if true is shown on map in color
++	bool end;          ///< this is the end of the list
++};
++
++
++/** Widget definition of the industy directory gui */
++static const Widget _industry_directory_widgets[] = {
++{   WWT_CLOSEBOX,   RESIZE_NONE,  COLOUR_BROWN,     0,    10,     0,    13, STR_00C5,                STR_018B_CLOSE_WINDOW},             // IDW_CLOSEBOX
++{    WWT_CAPTION,  RESIZE_RIGHT,  COLOUR_BROWN,    11,   415,     0,    13, STR_INDUSTRYDIR_CAPTION, STR_018C_WINDOW_TITLE_DRAG_THIS},   // IDW_CAPTION
++{  WWT_STICKYBOX,     RESIZE_LR,  COLOUR_BROWN,   416,   427,     0,    13, 0x0,                     STR_STICKY_BUTTON},                 // IDW_STICKY
++
++{    WWT_TEXTBTN,   RESIZE_NONE,  COLOUR_BROWN,     0,    80,    14,    25, STR_SORT_BY,             STR_SORT_ORDER_TIP},                // IDW_DROPDOWN_ORDER
++{   WWT_DROPDOWN,   RESIZE_NONE,  COLOUR_BROWN,    81,   243,    14,    25, 0x0,                     STR_SORT_CRITERIA_TIP},             // IDW_DROPDOWN_CRITERIA
++{      WWT_PANEL,  RESIZE_RIGHT,  COLOUR_BROWN,   244,   415,    14,    25, 0x0,                     STR_NULL},                          // IDW_SPACER
++
++{      WWT_PANEL,     RESIZE_RB,  COLOUR_BROWN,     0,   415,    26,   189, 0x0,                     STR_INDUSTRYDIR_LIST_CAPTION},      // IDW_INDUSRTY_LIST
++{  WWT_SCROLLBAR,    RESIZE_LRB,  COLOUR_BROWN,   416,   427,    14,   189, 0x0,                     STR_0190_SCROLL_BAR_SCROLLS_LIST},  // IDW_SCROLLBAR
++{      WWT_PANEL,    RESIZE_RTB,  COLOUR_BROWN,     0,   427,   190,   233, 0x0,                     STR_NULL},                          // IDW_INDSELECTION
++{      WWT_PANEL,    RESIZE_RTB,  COLOUR_BROWN,     0,   427,   234,   246, 0x0,                     STR_NULL},                          // IDW_INDSELECTION_ENABLEDISABLE
++{   WWT_TEXTBTN,      RESIZE_TB,  COLOUR_BROWN,     0,    99,   234,   245, STR_MESSAGES_ENABLE_ALL, STR_NULL},                          // IDW_INDSELECTION_ENABLE
++{   WWT_TEXTBTN,      RESIZE_TB,  COLOUR_BROWN,   100,   201,   234,   245, STR_MESSAGES_DISABLE_ALL,STR_NULL},                          // IDW_INDSELECTION_DISABLE
++{  WWT_RESIZEBOX,   RESIZE_LRTB,  COLOUR_BROWN,   416,   427,   234,   245, 0x0,                     STR_RESIZE_BUTTON},                 // IDW_RESIZE
++{   WIDGETS_END},
++};
++
++typedef GUIList<const Industry*> GUIIndustryList;
++
++
++/**
++ * The list of industries.
++ */
++class IndustryDirectoryWindow : public Window {
++	static const int COLUMN_WIDTH = 119;
++	static const int MIN_LEGEND_HEIGHT = 6 * 7;
++protected:
++	/* Runtime saved values */
++	static Listing last_sorting;
++	static const Industry *last_industry;
++
++	/* Constants for sorting stations */
++	static const StringID sorter_names[];
++	static GUIIndustryList::SortFunction *const sorter_funcs[];
++	
++	static uint Industrytype_count;
++	
++	/** Allow room for all industry types, plus a terminator entry
++	* This is required in order to have the indutry slots all filled up */
++	static IndustryLegend Industrytype_legend[NUM_INDUSTRYTYPES+1];
++	
++	
++	/* For connecting industry type to position in industries type legend */
++	static uint Industrytype_toListPos[NUM_INDUSTRYTYPES];
++
++	GUIIndustryList industries;
++	
++	/**
++	* Fills an array for the industries legends.
++	*/
++	void BuildIndustriesListLegend()
++	{
++		const IndustrySpec *indsp;
++		uint j = 0;
++
++		/* Add each name */
++		for (IndustryType i = 0; i < NUM_INDUSTRYTYPES; i++) {
++			indsp = GetIndustrySpec(i);
++			if (indsp->enabled) {
++				this->Industrytype_legend[j].legend = indsp->name;
++				this->Industrytype_legend[j].colour = indsp->map_colour;
++				this->Industrytype_legend[j].type = i;
++				this->Industrytype_legend[j].show_in_list = true;
++				this->Industrytype_legend[j].end = false;
++
++				/* Store widget number for this industry type */
++				this->Industrytype_toListPos[i] = j;
++				j++;
++			}
++		}
++		/* Terminate the list */
++		this->Industrytype_legend[j].end = true;
++
++		/* Store number of enabled industries */
++		Industrytype_count = j;
++	}
++	
++	bool ShouldListIndustry(const Industry *ind)
++	{
++		return this->Industrytype_legend[this->Industrytype_toListPos[ind->type]].show_in_list;
++	}
++	
++	bool AllIndustryTypesOn()
++	{
++		for (uint i = 0; i != this->Industrytype_count; i++) {
++			if (!this->Industrytype_legend[i].show_in_list) return false;
++		}
++		return true;
++	}
++
++	bool AllIndustryTypesOff()
++	{
++		for (uint i = 0; i != this->Industrytype_count; i++) {
++			if (this->Industrytype_legend[i].show_in_list) return false;
++		}
++		return true;
++	}
++	
++	void ResizeLegend()
++	{
++		Widget *legend = &this->widget[IDW_INDSELECTION];
++		//Widget *list = &this->widget[IDW_INDUSTRY_LIST];
++		int rows = (legend->bottom - legend->top) - 1;
++		int columns = (legend->right - legend->left) / COLUMN_WIDTH;
++		int new_rows = ((this->Industrytype_count + columns - 1) / columns) * 6;
++
++		new_rows = max(new_rows, MIN_LEGEND_HEIGHT);
++
++		if (new_rows != rows) {
++			/* Avoid the problem of the area not being dirty when resizing upwards */
++			if (new_rows < rows) this->SetDirty();
++			
++			ResizeWindowForWidget(this, IDW_INDSELECTION, 0, new_rows - rows);
++		}
++	}
++
++	/** (Re)Build industries list */
++	void BuildIndustriesList()
++	{
++		if (!this->industries.NeedRebuild()) return;
++
++		this->industries.Clear();
++
++		DEBUG(misc, 3, "Building industry list");
++
++		const Industry *i;
++		FOR_ALL_INDUSTRIES(i) {
++			if (this->ShouldListIndustry(i)) *this->industries.Append() = i;
++		}
++
++		this->industries.Compact();
++		this->industries.RebuildDone();
++	}
++
++	/**
++	 * Returns percents of cargo transported if industry produces this cargo, else -1
++	 *
++	 * @param i industry to check
++	 * @param id cargo slot
++	 * @return percents of cargo transported, or -1 if industry doesn't use this cargo slot
++	 */
++	static inline int GetCargoTransportedPercentsIfValid(const Industry *i, uint id)
++	{
++		assert(id < lengthof(i->produced_cargo));
++
++		if (i->produced_cargo[id] == CT_INVALID) return 101;
++		return i->last_month_pct_transported[id] * 100 >> 8;
++	}
++
++	/**
++	 * Returns value representing industry's transported cargo
++	 *  percentage for industry sorting
++	 *
++	 * @param i industry to check
++	 * @return value used for sorting
++	 */
++	static int GetCargoTransportedSortValue(const Industry *i)
++	{
++		int p1 = GetCargoTransportedPercentsIfValid(i, 0);
++		int p2 = GetCargoTransportedPercentsIfValid(i, 1);
++
++		if (p1 > p2) Swap(p1, p2); // lower value has higher priority
++
++		return (p1 << 8) + p2;
++	}
++
++	/** Sort industries by name */
++	static int CDECL IndustryNameSorter(const Industry* const *a, const Industry* const *b)
++	{
++		static char buf_cache[96];
++		static char buf[96];
++
++		SetDParam(0, (*a)->town->index);
++		GetString(buf, STR_TOWN, lastof(buf));
++
++		if (*b != last_industry) {
++			last_industry = *b;
++			SetDParam(0, (*b)->town->index);
++			GetString(buf_cache, STR_TOWN, lastof(buf_cache));
++		}
++
++		return strcmp(buf, buf_cache);
++	}
++
++	/** Sort industries by type and name */
++	static int CDECL IndustryTypeSorter(const Industry* const *a, const Industry* const *b)
++	{
++		int r = (*a)->type - (*b)->type;
++		return (r == 0) ? IndustryNameSorter(a, b) : r;
++	}
++
++	/** Sort industries by production and name */
++	static int CDECL IndustryProductionSorter(const Industry* const *a, const Industry* const *b)
++	{
++		int r = 0;
++
++		if ((*a)->produced_cargo[0] == CT_INVALID) {
++			if ((*b)->produced_cargo[0] != CT_INVALID) return -1;
++		} else {
++			if ((*b)->produced_cargo[0] == CT_INVALID) return 1;
++
++			r = ((*a)->last_month_production[0] + (*a)->last_month_production[1]) -
++			    ((*b)->last_month_production[0] + (*b)->last_month_production[1]);
++		}
++
++		return (r == 0) ? IndustryNameSorter(a, b) : r;
++	}
++
++	/** Sort industries by transported cargo and name */
++	static int CDECL IndustryTransportedCargoSorter(const Industry* const *a, const Industry* const *b)
++	{
++		int r = GetCargoTransportedSortValue(*a) - GetCargoTransportedSortValue(*b);
++		return (r == 0) ? IndustryNameSorter(a, b) : r;
++	}
++
++	/** Sort the industries list */
++	void SortIndustriesList()
++	{
++		if (!this->industries.Sort()) return;
++
++		/* Reset name sorter sort cache */
++		this->last_industry = NULL;
++
++		/* Set the modified widget dirty */
++		this->InvalidateWidget(IDW_INDUSTRY_LIST);
++	}
++
++public:
++	IndustryDirectoryWindow(const WindowDesc *desc, WindowNumber number) : Window(desc, number)
++	{
++		this->vscroll.cap = 16;
++		this->resize.height = this->height - 6 * 10; // minimum 10 items
++		this->resize.step_height = 10;
++		this->FindWindowPlacementAndResize(desc);
++		
++		this->BuildIndustriesListLegend();
++
++		this->industries.SetListing(this->last_sorting);
++		this->industries.SetSortFuncs(this->sorter_funcs);
++		this->industries.ForceRebuild();
++		this->industries.NeedResort();
++		this->SortIndustriesList();
++
++		this->widget[IDW_DROPDOWN_CRITERIA].data = this->sorter_names[this->industries.SortType()];
++	}
++
++	~IndustryDirectoryWindow()
++	{
++		this->last_sorting = this->industries.GetListing();
++	}
++
++	virtual void OnPaint()
++	{
++		BuildIndustriesList();
++		SortIndustriesList();
++
++		SetVScrollCount(this, this->industries.Length());
++		
++		this->SetWidgetLoweredState(IDW_INDSELECTION_ENABLE, this->AllIndustryTypesOn());
++		this->SetWidgetLoweredState(IDW_INDSELECTION_DISABLE, this->AllIndustryTypesOff());
++		
++		this->ResizeLegend();
++
++		this->DrawWidgets();
++		this->DrawSortButtonState(IDW_DROPDOWN_ORDER, this->industries.IsDescSortOrder() ? SBS_DOWN : SBS_UP);
++		
++		//const Widget *industrylist = &this->widget[IDW_INDUSTRY_LIST];
++
++		int max = min(this->vscroll.pos + this->vscroll.cap, this->industries.Length());
++		int y = 28; // start of the list-widget
++
++		for (int n = this->vscroll.pos; n < max; ++n) {
++			const Industry* i = this->industries[n];
++			const IndustrySpec *indsp = GetIndustrySpec(i->type);
++			byte p = 0;
++
++			/* Industry name */
++			SetDParam(p++, i->index);
++
++			/* Industry productions */
++			for (byte j = 0; j < lengthof(i->produced_cargo); j++) {
++				if (i->produced_cargo[j] == CT_INVALID) continue;
++				SetDParam(p++, i->produced_cargo[j]);
++				SetDParam(p++, i->last_month_production[j]);
++				SetDParam(p++, GetCargoSuffix(j + 3, CST_DIR, (Industry*)i, i->type, indsp));
++			}
++
++			/* Transported productions */
++			for (byte j = 0; j < lengthof(i->produced_cargo); j++) {
++				if (i->produced_cargo[j] == CT_INVALID) continue;
++				SetDParam(p++, i->last_month_pct_transported[j] * 100 >> 8);
++			}
++
++			/* Drawing the right string */
++			StringID str = STR_INDUSTRYDIR_ITEM_NOPROD;
++			if (p != 1) str = (p == 5) ? STR_INDUSTRYDIR_ITEM : STR_INDUSTRYDIR_ITEM_TWO;
++			DrawStringTruncated(9, y, str, TC_FROMSTRING, this->widget[IDW_INDUSTRY_LIST].right - 9);
++			GfxFillRect(1, y + 2, 8, y + 8, 0); // outer border of the legend color
++			GfxFillRect(2, y + 3, 7, y + 7, indsp->map_colour); // legend color
++
++			y += 10;
++		}
++		
++		const Widget *legend = &this->widget[IDW_INDSELECTION];
++		
++		int y_org = legend->top + 1;
++		int x = 4;
++		y = y_org;
++		
++		for(const IndustryLegend *tbl = this->Industrytype_legend; !tbl->end; ++tbl) {
++			if (y >= legend->bottom) {
++				/* Column break needed, continue at top, COLUMN_WIDTH pixels
++				 * (one "row") to the right. */
++				x += COLUMN_WIDTH;
++				y = y_org;
++			}
++			/* Industry name must be formated, since it's not in tiny font in the specs.
++			 * So, draw with a parameter and use the STR_SMALLMAP_INDUSTRY string, which is tiny font.*/
++			SetDParam(0, tbl->legend);
++			assert(tbl->type < NUM_INDUSTRYTYPES);
++			SetDParam(1, _industry_counts[tbl->type]);
++			if (!tbl->show_in_list) {
++				/* Simply draw the string, not the black border of the legend color.
++				 * This will enforce the idea of the disabled item */
++				DrawString(x + 11, y, STR_SMALLMAP_INDUSTRY, TC_GREY);
++			} else {
++				DrawString(x + 11, y, STR_SMALLMAP_INDUSTRY, TC_BLACK);
++				GfxFillRect(x, y + 1, x + 8, y + 5, 0); // outer border of the legend color
++			}
++			GfxFillRect(x + 1, y + 2, x + 7, y + 4, tbl->colour); // legend color
++
++			y += 6;
++		}
++	}
++
++	virtual void OnClick(Point pt, int widget)
++	{
++		switch (widget) {
++			case IDW_DROPDOWN_ORDER:
++				this->industries.ToggleSortOrder();
++				this->SetDirty();
++				break;
++
++			case IDW_DROPDOWN_CRITERIA:
++				ShowDropDownMenu(this, this->sorter_names, this->industries.SortType(), IDW_DROPDOWN_CRITERIA, 0, 0);
++				break;
++
++			case IDW_INDUSTRY_LIST: {
++				int y = (pt.y - 28) / 10;
++				uint16 p;
++
++				if (!IsInsideMM(y, 0, this->vscroll.cap)) return;
++				p = y + this->vscroll.pos;
++				if (p < this->industries.Length()) {
++					if (_ctrl_pressed) {
++						ShowExtraViewPortWindow(this->industries[p]->xy);
++					} else {
++						ScrollMainWindowToTile(this->industries[p]->xy);
++					}
++				}
++			} break;
++			case IDW_INDSELECTION: {
++				/* if click on industries label, find right industry type and enable/disable it */
++				Widget *wi = &this->widget[IDW_INDSELECTION]; // label panel
++				uint column = (pt.x - 4) / COLUMN_WIDTH;
++				uint line = (pt.y - wi->top - 2) / 6;
++				uint rows_per_column = (wi->bottom - wi->top) / 6;
++
++				/* check if click is on industry label*/
++				uint industry_pos = (column * rows_per_column) + line;
++				if (industry_pos < this->Industrytype_count) {
++					this->Industrytype_legend[industry_pos].show_in_list = !this->Industrytype_legend[industry_pos].show_in_list;
++					this->industries.ForceRebuild();
++					this->SetDirty();
++				}
++
++			} break;
++			case IDW_INDSELECTION_ENABLE:
++				for (uint i = 0; i != this->Industrytype_count; i++) {
++					this->Industrytype_legend[i].show_in_list = true;
++				}
++				this->industries.ForceRebuild();
++				this->SetDirty();
++				break;
++			case IDW_INDSELECTION_DISABLE:
++				for (uint i = 0; i != this->Industrytype_count; i++) {
++					this->Industrytype_legend[i].show_in_list = false;
++				}
++				this->industries.ForceRebuild();
++				this->SetDirty();
++				break;
++		}
++	}
++
++	virtual void OnDropdownSelect(int widget, int index)
++	{
++		if (this->industries.SortType() != index) {
++			this->industries.SetSortType(index);
++			this->widget[IDW_DROPDOWN_CRITERIA].data = this->sorter_names[this->industries.SortType()];
++			this->SetDirty();
++		}
++	}
++
++	virtual void OnResize(Point new_size, Point delta)
++	{
++		this->vscroll.cap += delta.y / 10;
++	}
++
++	virtual void OnInvalidateData(int data)
++	{
++		if (data == 0) {
++			this->industries.ForceRebuild();
++		} else {
++			this->industries.ForceResort();
++		}
++		this->InvalidateWidget(IDW_INDUSTRY_LIST);
++	}
++};
++
++Listing IndustryDirectoryWindow::last_sorting = {false, 0};
++const Industry *IndustryDirectoryWindow::last_industry = NULL;
++uint IndustryDirectoryWindow::Industrytype_count = 0;
++IndustryLegend IndustryDirectoryWindow::Industrytype_legend[NUM_INDUSTRYTYPES+1];
++uint IndustryDirectoryWindow::Industrytype_toListPos[NUM_INDUSTRYTYPES];
++
++/* Availible station sorting functions */
++GUIIndustryList::SortFunction* const IndustryDirectoryWindow::sorter_funcs[] = {
++	&IndustryNameSorter,
++	&IndustryTypeSorter,
++	&IndustryProductionSorter,
++	&IndustryTransportedCargoSorter
++};
++
++/* Names of the sorting functions */
++const StringID IndustryDirectoryWindow::sorter_names[] = {
++	STR_SORT_BY_DROPDOWN_NAME,
++	STR_SORT_BY_TYPE,
++	STR_SORT_BY_PRODUCTION,
++	STR_SORT_BY_TRANSPORTED,
++	INVALID_STRING_ID
++};
++
++
++/** Window definition of the industy directory gui */
++static const WindowDesc _industry_directory_desc = {
++	WDP_AUTO, WDP_AUTO, 428, 247, 428, 247,
++	WC_INDUSTRY_DIRECTORY, WC_NONE,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON | WDF_RESIZABLE,
++	_industry_directory_widgets,
++};
++
++void ShowIndustryDirectory()
++{
++	AllocateWindowDescFront<IndustryDirectoryWindow>(&_industry_directory_desc, 0);
++}
+Index: src/industry_gui.h
+===================================================================
+--- src/industry_gui.h	(revision 0)
++++ src/industry_gui.h	(revision 0)
+@@ -0,0 +1,33 @@
++#include "newgrf.h"
++#include "newgrf_industries.h"
++#include "newgrf_text.h"
++#include "table/strings.h"
++
++enum CargoSuffixType {
++	CST_FUND,
++	CST_VIEW,
++	CST_DIR,
++};
++
++/**
++ * Gets the string to display after the cargo name (using callback 37)
++ * @param cargo the cargo for which the suffix is requested
++ * - 00 - first accepted cargo type
++ * - 01 - second accepted cargo type
++ * - 02 - third accepted cargo type
++ * - 03 - first produced cargo type
++ * - 04 - second produced cargo type
++ * @param cst the cargo suffix type (for which window is it requested)
++ * @param ind the industry (NULL if in fund window)
++ * @param ind_type the industry type
++ * @param indspec the industry spec
++ * @return the string to display
++ */
++static StringID GetCargoSuffix(uint cargo, CargoSuffixType cst, Industry *ind, IndustryType ind_type, const IndustrySpec *indspec)
++{
++	if (HasBit(indspec->callback_flags, CBM_IND_CARGO_SUFFIX)) {
++		uint16 callback = GetIndustryCallback(CBID_INDUSTRY_CARGO_SUFFIX, 0, (cst << 8) | cargo, ind, ind_type, (cst != CST_FUND) ? ind->xy : INVALID_TILE);
++		if (GB(callback, 0, 8) != 0xFF) return GetGRFStringID(indspec->grf_prop.grffile->grfid, 0xD000 + callback);
++	}
++	return STR_EMPTY;
++}
+Index: source.list
+===================================================================
+--- source.list	(revision 14359)
++++ source.list	(working copy)
+@@ -192,6 +192,7 @@
+ gui.h
+ heightmap.h
+ industry.h
++industry_gui.h
+ industry_type.h
+ ini_type.h
+ landscape.h
+@@ -386,6 +387,7 @@
+ graph_gui.cpp
+ group_gui.cpp
+ industry_gui.cpp
++industry_list_gui.cpp
+ intro_gui.cpp
+ main_gui.cpp
+ misc_gui.cpp

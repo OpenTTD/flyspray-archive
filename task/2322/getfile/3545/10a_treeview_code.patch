@@ -1,0 +1,437 @@
+diff -r 6368d72497ba src/settings_gui.cpp
+--- a/src/settings_gui.cpp	Sun Nov 02 13:06:12 2008 +0100
++++ b/src/settings_gui.cpp	Sun Nov 02 13:12:50 2008 +0100
+@@ -584,6 +584,433 @@
+ }
+ 
+ static const int SETTING_HEIGHT = 11;         ///< Height of a single patch setting in the tree view
++static const int TREE_LEVEL_WIDTH = 15;       ///< Width in pixels of 1 section level in the tree view
++static const int TREE_CIRCLE_OFFSET = 0;      ///< Horizontal offset in pixels of the (+) circle in the tree view
++static const int TREE_PATCH_TEXT_OFFSET = 25; ///< Offset of patch description
++
++/** Kinds of entries in the advanced settings tree view */
++enum TreeFieldFlags {
++	TFK_SUBTREE, ///< Field kind: Entry is a (sub) tree section
++	TFK_PATCH,   ///< Field kind: Entry is a patch name
++	TFK_KIND_MASK  = 0x07,    ///< Bitmask for getting the field kind
++
++	TFK_LAST_FIELD = 0x08,    ///< Bit denoting this field is the last field in the section, set during TreeField::Init()
++	TFK_LEFT_CLICKED = 0x10,  ///< (for numeric patch values) Left button is depressed
++	TFK_RIGHT_CLICKED = 0x20, ///< (for numeric patch values) Right button is depressed
++};
++
++struct TreeField; // Forward declaration
++
++/**
++ * A section of the tree view.
++ *
++ * A section has a name and a number of fields. The class does not delete its fields, it is assumed to be statically allocated memory.
++ */
++struct TreeSection {
++	StringID section_name; ///< Name of the section
++	TreeField *fields;     ///< List of field belonging to this section
++	uint8 num_fields;      ///< Number of tree fields in \a fields
++
++	TreeSection(StringID name, TreeField *flds, uint8 num_flds);
++	void Init(uint8 level = 0);
++	TreeField *FindField(uint search_row, uint *row);
++	int Length();
++	void ClearClicked();
++
++	int DrawRows(GameSettings *patches_ptr, int base_x, int base_y, int first_row, int max_row,
++			int row = 0, uint prefix_states = 0);
++};
++
++/** Data fields of the \c TFK_SUBTREE tree field kind */
++struct TreeFieldSubTree {
++	TreeSection *subtree; ///< Pointer to the subsection
++	bool unfolded;        ///< Subsection is unfolded (displayed to the user)
++};
++
++/** Data fields of the \c TFK_PATCH tree field kind */
++struct TreeFieldPatch {
++	const char *name;        ///< Name of the setting
++	const SettingDesc *desc; ///< Description of the setting
++	uint index;              ///< Index of the setting in the settings value table
++};
++
++/**
++ * A single field of a section of the tree view.
++ *
++ * A field is either a setting value, or a sub-section. The class does not
++ * delete its sub-sections, it is assumed to be statically allocated memory.
++ */
++struct TreeField {
++	uint8 flags;  ///< Kind of entry, last-field, left/right button depressed. @see TreeFieldFlags
++	uint8 level;  ///< Section level of this field. It decides the number of indents of this field
++	union {
++		TreeFieldSubTree sub; ///< Data fields for \c TFK_SUBTREE kind
++		TreeFieldPatch patch; ///< Data fields for \c TFK_PATCH kind
++	} df;  ///< Data fields
++
++
++	TreeField(TreeSection *sub);
++	TreeField(const char *patchname);
++	void Init(uint8 level, bool last_field);
++	TreeField *FindField(uint search_row, uint *row);
++	int Length();
++	void ClearClicked();
++
++	int DrawRows(GameSettings *patches_ptr, int base_x, int base_y, int first_row, int max_row,
++			int row = 0, uint prefix_states = 0);
++private:
++	void DrawCircle(int x, int y, bool folded);
++	void DrawPatch(GameSettings *patches_ptr, const SettingDesc *sd, int x, int y, byte state);
++};
++
++/**
++ * Tree section constructor.
++ * @param name     Name of the section
++ * @param flds     Pointer to the first field of the section
++ * @param num_flds Number of fields in the \a flds parameter
++ */
++TreeSection::TreeSection(StringID name, TreeField *flds, uint8 num_flds): section_name(name), fields(flds), num_fields(num_flds)
++{
++	assert(fields != NULL);
++	assert(num_fields > 0);
++}
++
++/**
++ * Initialize this tree section and (recursively) all its child sections.
++ * @param level (internal variable) Section level of this section.
++ */
++void TreeSection::Init(uint8 level)
++{
++	for (int fldnum = 0; fldnum < num_fields; fldnum++)
++		fields[fldnum].Init(level, fldnum == num_fields - 1);
++}
++
++/**
++ * Search the field that gets displayed at row \a search_row.
++ *
++ * @param search_row Row number of the field we are interested in
++ * @param row        Variable used for keeping track of the current row number. Should point to memory initialized to \c 0.
++ * @return The field at row \a search_row if it exists, otherwise \c NULL.
++ */
++TreeField *TreeSection::FindField(uint search_row, uint *row)
++{
++	TreeField *tf = NULL;
++	for (int fldnum = 0; fldnum < num_fields; fldnum++) {
++		tf = fields[fldnum].FindField(search_row, row);
++		if (tf != NULL) break;
++	}
++	return tf;
++}
++
++/**
++ * Count number of rows needed for displaying this section (and all its sub-sections).
++ *
++ * Intuitively, you may think that you need 1 row for the section name, and 1
++ * (or more, for unfolded subtrees) for each field. This is not true however,
++ * since you'd count the header twice (once for the section, and once for the
++ * field that points to the section).
++ * As a result, a section itself needs no row, only its fields. A consequence
++ * of this decision is that the name of the root section is never used.
++ */
++int TreeSection::Length()
++{
++	int length = 0;
++	for (int fldnum = 0; fldnum < num_fields; fldnum++)
++		length += fields[fldnum].Length();
++
++	return length;
++}
++
++/** Clear the 'clicked' flags of all fields */
++void TreeSection::ClearClicked()
++{
++	for (int fldnum = 0; fldnum < num_fields; fldnum++)
++		fields[fldnum].ClearClicked();
++}
++
++/**
++ * Draw some rows of the treeview.
++ *
++ * Top-left position is at (\a base_x, \a base_y). Row to draw at that position
++ * is \a first_row, then draw the next rows underneath, until \a max_row is
++ * reached.
++ * @param patches_ptr   Values of game settings to draw
++ * @param base_x        Horizontal screen start position of the rows
++ * @param base_y        Vertical screen position of the first row to draw
++ * @param first_row     Number of the first row to draw onto the screen (at \a base_x, \a base_y).
++ * @param max_row       Row number of the row below the last row visible at the screen.
++ * @param row           (internal variable of the method)
++ *                      Index number of current row (internal variable of the method)
++ * @param prefix_states (internal variable of the method)
++ *                      State of each parent section. Each level uses one bit (section level \e i (counted from the root) uses bit \e i).
++ *                      If set, a vertical bar should be rendered. If clear, nothing should be rendered.
++ * @return Row number below the last one drawn */
++int TreeSection::DrawRows(GameSettings *patches_ptr, int base_x, int base_y, int first_row, int max_row,
++				int row, uint prefix_states)
++{
++	for (int fldnum = 0; fldnum < num_fields; fldnum++) {
++		if (row >= max_row)
++			break;
++		row = fields[fldnum].DrawRows(patches_ptr, base_x, base_y, first_row, max_row, row, prefix_states);
++	}
++	return row;
++}
++
++/** Constructor for sub-tree entries */
++TreeField::TreeField(TreeSection *sub)
++{
++	flags = TFK_SUBTREE;
++	level = 0; // Initialized during Init()
++	df.sub.subtree = sub;
++	df.sub.unfolded = false;
++}
++
++/** Constructor for patch value entries */
++TreeField::TreeField(const char *patchname)
++{
++	flags = TFK_PATCH;
++	level = 0; // Initialized during Init()
++	df.patch.name = patchname;
++	df.patch.desc = NULL; // Initialized during Init()
++	df.patch.index = 0;   // Initialized during Init()
++}
++
++/**
++ * Initialized the field.
++ *
++ * The section level and whether this is the last field of the section (which is rendered slightly different) is stored.
++ * Also, the location of patch settings is retrieved or the sub-section is initialized.
++ * @param lvl        Section level of this field
++ * @param last_field Boolean indicating this is the last field of its section
++ */
++void TreeField::Init(uint8 lvl, bool last_field)
++{
++	level = lvl; // Store level nesting of the field
++	if (last_field)
++		flags |= TFK_LAST_FIELD; // Store whether this field is the last one in its section
++
++	/* Initialize the data structure itself */
++	switch (flags & TFK_KIND_MASK) {
++		case TFK_SUBTREE:
++			df.sub.subtree->Init(level + 1);
++			break;
++		case TFK_PATCH:
++			df.patch.desc = GetPatchFromName(df.patch.name, &df.patch.index);
++			assert(df.patch.desc != NULL);
++			break;
++		default: NOT_REACHED();
++	}
++}
++
++/** Clear the 'clicked' flags of this field and all its child sections */
++void TreeField::ClearClicked()
++{
++	switch (flags & TFK_KIND_MASK) {
++		case TFK_SUBTREE:
++			df.sub.subtree->ClearClicked();
++			break;
++		case TFK_PATCH:
++			flags &= ~(TFK_LEFT_CLICKED | TFK_RIGHT_CLICKED);
++			break;
++		default: NOT_REACHED();
++	}
++}
++
++/**
++ * Draw row(s) of the field in the treeview.
++ *
++ * Top-left position is at (\a base_x, \a base_y). First row to draw is \a first_row, until \a max_row is reached.
++ * @param patches_ptr   Values of game settings to draw
++ * @param base_x        Horizontal screen start position of the rows
++ * @param base_y        Vertical screen position of the first row to draw
++ * @param first_row     Number of the first row to draw onto the screen (at \a base_x, \a base_y).
++ * @param max_row       Row number of the row below the last row visible at the screen.
++ * @param row           (internal variable of the method)
++ *                      Index number of current row (internal variable of the method)
++ * @param prefix_states (internal variable of the method)
++ *                      State of each parent section. Each level uses one bit (section level \e i (counted from the root) uses bit \e i).
++ *                      If set, a vertical bar should be rendered. If clear, nothing should be rendered.
++ * @return Row number below the last one drawn */
++int TreeField::DrawRows(GameSettings *patches_ptr, int base_x, int base_y, int first_row, int max_row,
++				int row, uint prefix_states)
++{
++	if (row >= max_row)
++		return row; // Don't bother with rows below the bottom row we should draw
++
++	if ((flags & TFK_LAST_FIELD) == 0)
++		SetBit(prefix_states, level); // Add prefix_state bit for own level
++
++
++	if (row >= first_row) {
++		/* Condition (first_row <= row < max_row) holds. Render this row to the screen */
++		int colour = _colour_gradient[COLOUR_ORANGE][4];
++
++		int xpos = base_x;
++		int ypos = base_y + (row - first_row) * SETTING_HEIGHT;
++		/* draw vertical lines for each indenting level */
++		for (uint lvl = 0u; lvl < level; lvl++) {
++			/* draw vertical bar when prefix_state bit \a lvl is set */
++			if (HasBit(prefix_states, lvl)) {
++				GfxDrawLine(xpos + TREE_CIRCLE_OFFSET + 4, ypos,
++						xpos + TREE_CIRCLE_OFFSET + 4, ypos + SETTING_HEIGHT - 1, colour);
++			}
++			xpos += TREE_LEVEL_WIDTH;
++		}
++		/* draw own |- prefix */
++		int halfway_y = ypos + SETTING_HEIGHT / 2;
++		int bottom_y = (flags & TFK_LAST_FIELD) ? halfway_y : ypos + SETTING_HEIGHT - 1;
++		GfxDrawLine(xpos + TREE_CIRCLE_OFFSET + 4, ypos, xpos + TREE_CIRCLE_OFFSET + 4, bottom_y, colour);
++		/* Small horizontal line from the last vertical line */
++		GfxDrawLine(xpos + TREE_CIRCLE_OFFSET + 4, halfway_y, xpos + TREE_CIRCLE_OFFSET + 10, halfway_y, colour);
++		xpos += TREE_LEVEL_WIDTH;
++
++		switch (flags & TFK_KIND_MASK) {
++			case TFK_SUBTREE:
++				DrawCircle(xpos + TREE_CIRCLE_OFFSET, ypos, df.sub.unfolded);
++				DrawString(xpos + TREE_CIRCLE_OFFSET + 12, ypos, df.sub.subtree->section_name, TC_FROMSTRING);
++				row++;
++				if (df.sub.unfolded)
++					row = df.sub.subtree->DrawRows(patches_ptr, base_x, base_y, first_row, max_row, row, prefix_states);
++				break;
++			case TFK_PATCH: {
++				byte state = 0;
++				if (flags & TFK_LEFT_CLICKED) state = 1;
++				if (flags & TFK_RIGHT_CLICKED) state = 2;
++				DrawPatch(patches_ptr, df.patch.desc, xpos, ypos, state);
++				row++;
++				break;
++			}
++			default: NOT_REACHED();
++		}
++		return row;
++	} else {
++		/* row < first_row, only update variables */
++		switch (flags & TFK_KIND_MASK) {
++			case TFK_SUBTREE:
++				row++;
++				if (df.sub.unfolded)
++					row = df.sub.subtree->DrawRows(patches_ptr, base_x, base_y, first_row, max_row, row, prefix_states);
++				break;
++			case TFK_PATCH:
++				row++;
++				break;
++			default: NOT_REACHED();
++		}
++		return row;
++	}
++}
++
++/**
++ * Search the field that gets displayed at row \a search_row.
++ *
++ * @param search_row Row number of the field we are interested in
++ * @param row        Variable used for keeping track of the current row number. Should point to memory initialized to \c 0.
++ * @return The field at row \a search_row if it exists, otherwise \c NULL.
++ */
++TreeField *TreeField::FindField(uint search_row, uint *row)
++{
++	if (search_row == *row)
++		return this;
++
++	switch (flags & TFK_KIND_MASK) {
++		case TFK_SUBTREE:
++			(*row)++;
++			if (df.sub.unfolded)
++				return df.sub.subtree->FindField(search_row, row);
++			break;
++		case TFK_PATCH:
++			(*row)++;
++			break;
++		default: NOT_REACHED();
++	}
++	return NULL;
++}
++
++/** Count number of rows needed for display of the field */
++int TreeField::Length()
++{
++	switch (flags & TFK_KIND_MASK) {
++		case TFK_SUBTREE:
++			if (df.sub.unfolded)
++				return 1 + df.sub.subtree->Length();
++			return 1;
++		case TFK_PATCH:
++			return 1;
++		default: NOT_REACHED();
++	}
++	return 0; // Never used, but keeps compilers happy
++}
++
++/**
++ * Draw a \c (+) circle or a \c (-) circle.
++ * @param x_base   Left-most x position to start from for each line
++ * @param y        Y position of the first line
++ * @param unfolded Boolean indicating what circle to draw
++ *                 (\c false means draw an unfolded \c (-) circle, \c true means draw a folded \c (+) circle)
++ */
++void TreeField::DrawCircle(int x_base, int y, bool unfolded)
++{
++	static const int8 _FOLDED[] = {
++		-2,  5, 0,    // ..#####
++		-1,  7, 0,    // .#######
++		 4, -2, 4, 0, // ####.####
++		 4, -2, 4, 0, // ####.####
++		 2, -6, 2, 0, // ##.....##
++		 4, -2, 4, 0, // ####.####
++		 4, -2, 4, 0, // ####.####
++		-1,  7, 0,    // .#######
++		-2,  5, 0,    // ..#####
++		 0
++	};
++	static const int8 _UNFOLDED[] = {
++		-2,  5, 0,    // ..#####
++		-1,  7, 0,    // .#######
++		 9, 0,        // #########
++		 9, 0,        // #########
++		 2, -6, 2, 0, // ##.....##
++		 9, 0,        // #########
++		 9, 0,        // #########
++		-1,  7, 0,    // .#######
++		-2,  5, 0,    // ..#####
++		 0
++	};
++
++	/* Circle is defined as a sequence of lines, where a positive value \e
++	 * n means draw a line of length \e n, and a negative value \e m means
++	 * skip length \e m. Each line is \c 0 terminated. The line sequence is
++	 * terminated with an empty line
++	 */
++	int colour = _colour_gradient[COLOUR_ORANGE][4];
++	const int8 *circle_bytes = unfolded ? _UNFOLDED : _FOLDED;
++	while (*circle_bytes != 0) {
++		int x = x_base;
++		while (*circle_bytes != 0) {
++			if (*circle_bytes < 0) {
++				x += -(*circle_bytes);
++			} else {
++				int x2 = x + *circle_bytes - 1;
++				GfxDrawLine(x, y, x2, y, colour);
++				x = x2;
++			}
++			circle_bytes++;
++
++		}
++		circle_bytes++;
++		y++;
++	}
++};
++
++/**
++ * Draw a patch value
++ * @param patches_ptr Base pointer for the settings values
++ * @param sd          Pointer naar the description of the patch being drawn
++ * @param x           Left-most x position for drawing the patch value
++ * @param y           Top position for drawing the patch value
++ * @param state       For numeric values, the state of the \c [<] and \c [>] arrow buttons
++ */
++void TreeField::DrawPatch(GameSettings *patches_ptr, const SettingDesc *sd, int x, int y, byte state)
++{
++}
+ 
+ static const char *_patches_ui[] = {
+ 	"gui.vehicle_speed",

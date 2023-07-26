@@ -1,0 +1,299 @@
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revision 13265)
++++ src/command.cpp	(working copy)
+@@ -198,6 +198,8 @@
+ DEF_COMMAND(CmdChangeTimetable);
+ DEF_COMMAND(CmdSetVehicleOnTime);
+ DEF_COMMAND(CmdAutofillTimetable);
++
++DEF_COMMAND(CmdTerraformTileToHeight);
+ #undef DEF_COMMAND
+ 
+ /**
+@@ -346,6 +348,7 @@
+ 	{CmdChangeTimetable,                     0}, /* CMD_CHANGE_TIMETABLE */
+ 	{CmdSetVehicleOnTime,                    0}, /* CMD_SET_VEHICLE_ON_TIME */
+ 	{CmdAutofillTimetable,                   0}, /* CMD_AUTOFILL_TIMETABLE */
++	{CmdTerraformTileToHeight,        CMD_AUTO}, /* CMD_TERRAFORM_TILE_TO_HEIGHT */
+ };
+ 
+ /*!
+@@ -544,6 +547,7 @@
+ 	notest =
+ 		(cmd & 0xFF) == CMD_CLEAR_AREA ||
+ 		(cmd & 0xFF) == CMD_LEVEL_LAND ||
++		(cmd & 0xFF) == CMD_TERRAFORM_TILE_TO_HEIGHT ||
+ 		(cmd & 0xFF) == CMD_REMOVE_LONG_ROAD ||
+ 		(cmd & 0xFF) == CMD_CLONE_VEHICLE;
+ 
+Index: src/command_type.h
+===================================================================
+--- src/command_type.h	(revision 13265)
++++ src/command_type.h	(working copy)
+@@ -278,6 +278,8 @@
+ 	CMD_CHANGE_TIMETABLE,             ///< change the timetable for a vehicle
+ 	CMD_SET_VEHICLE_ON_TIME,          ///< set the vehicle on time feature (timetable)
+ 	CMD_AUTOFILL_TIMETABLE,           ///< autofill the timetable
++
++	CMD_TERRAFORM_TILE_TO_HEIGHT,     ///< set a single tile to target height
+ };
+ 
+ /**
+Index: src/terraform_cmd.cpp
+===================================================================
+--- src/terraform_cmd.cpp	(revision 13265)
++++ src/terraform_cmd.cpp	(working copy)
+@@ -397,3 +397,59 @@
+ 
+ 	return (cost.GetCost() == 0) ? CMD_ERROR : cost;
+ }
++
++/** Sets a single tile to target height (for raise/lower/level draw)
++ * @param tile tile to modify
++ * @param flags for this command type
++ * @param p1 target height (without modifier)
++ * @param p2 height modifier; eg raise (+1), lower (-1) or level (0)
++ * @return error or cost of terraforming
++ * @note don't confuse with CommandCost TerraformTileHeight!
++ */
++CommandCost CmdTerraformTileToHeight(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++{
++	_terraform_err_tile = 0;
++
++	if (p1 >= MapSize()) return CMD_ERROR;
++
++	/* Check range of destination height */
++	if (p1 == MAX_TILE_HEIGHT && p2 == 1) return_cmd_error(STR_1004_TOO_HIGH);
++	if (p1 == 0 && p2 == (uint32(-1))) return_cmd_error(STR_1003_ALREADY_AT_SEA_LEVEL);
++
++	uint curh = TileHeight(tile); // current height
++	uint h = p1 + p2; // target height
++
++	CommandCost cost(EXPENSES_CONSTRUCTION); // the total cost for the operation
++
++	/* if the tile already has the target height, return cost 0 */
++	if ((p2 == 1 || curh <= h) && (p2 == uint32(-1) || curh >= h)) return cost;
++
++	Money money = GetAvailableMoneyForCommand(); // the available money
++	_additional_cash_required = 0; // additional cash required if we run out of money
++	bool succeed = false; // did at least one sub-command succeed?
++
++	/* the different comparators are needed because we don't want to lower with the raise tool and vice versa */
++	while ((p2 != 1 && curh > h) || (p2 != uint32(-1) && curh < h)) {
++		/* first, calculate the outcome of one terraform step with a dry run */
++		CommandCost ret = DoCommand(tile, SLOPE_N, (curh > h) ? 0 : 1, flags & ~DC_EXEC, CMD_TERRAFORM_LAND);
++		if (CmdFailed(ret)) break; // the step failed
++		succeed = true;
++
++		money -= ret.GetCost();
++		/* if this command is executed and we have run out of money, add it to additional cash required */
++		if ((flags & DC_EXEC) && money < 0) {
++			_additional_cash_required += ret.GetCost();
++		} else {
++			/* if it's not executed OR we have enough money, add the sub-command's costs to total costs*/
++			cost.AddCost(ret);
++			/* we have enough money, so now really execute the step */
++			if (flags & DC_EXEC) DoCommand(tile, SLOPE_N, (curh > h) ? 0 : 1, flags, CMD_TERRAFORM_LAND);
++		}
++		/* the height has been lowered or raised */
++		curh += (curh > h) ? -1 : 1;
++	}
++
++	/* if we (at least partly) succeeded, return the costs, else an error */
++	if (succeed) return cost;
++	return CMD_ERROR;
++}
+Index: src/terraform_gui.cpp
+===================================================================
+--- src/terraform_gui.cpp	(revision 13265)
++++ src/terraform_gui.cpp	(working copy)
+@@ -102,6 +102,9 @@
+ 	if (success) SndPlayTileFx(SND_1F_SPLAT, end);
+ }
+ 
++static uint _draw_height;
++static TileIndex _draw_tile;
++
+ /**
+  * A central place to handle all X_AND_Y dragged GUI functions.
+  * @param e WindowEvent variable holding in its higher bits (excluding the lower
+@@ -144,6 +147,43 @@
+ 	return true;
+ }
+ 
++/**
++ * A central place to handle all drag&draw GUI functions.
++ * @param proc the process to be called
++ * @param tile the tile we are currently drawing on
++ * @return Returns true if the action was found and handled, and false otherwise.
++ **/
++bool GUIPlaceProcDraw(ViewportDragDropSelectionProcess proc, TileIndex tile)
++{
++	if (tile == _draw_tile) return true;
++
++	switch (proc) {
++		case DDSP_RAISE_AND_LEVEL_AREA:
++			if (TileHeight(tile) <= _draw_height)
++				DoCommandP(tile, _draw_height, 1, CcTerraform, CMD_TERRAFORM_TILE_TO_HEIGHT | CMD_MSG(STR_0808_CAN_T_RAISE_LAND_HERE));
++			break;
++		case DDSP_LOWER_AND_LEVEL_AREA:
++			if (TileHeight(tile) >= _draw_height)
++				DoCommandP(tile, _draw_height, (uint32)-1, CcTerraform, CMD_TERRAFORM_TILE_TO_HEIGHT | CMD_MSG(STR_0809_CAN_T_LOWER_LAND_HERE));
++			break;
++		default:
++			return false;
++	}
++
++	_draw_tile = tile;
++	return true;
++}
++
++/**
++ * Sets the current drawing tile to invalid tile and the drawing height to the starting tile height.
++ * @param tile the tile we will start drawing on
++ **/
++void PrepareDrawing(TileIndex tile)
++{
++	_draw_tile = INVALID_TILE;
++	_draw_height = TileHeight(tile);
++}
++
+ typedef void OnButtonClick(Window *w);
+ 
+ static const uint16 _terraform_keycodes[] = {
+@@ -363,10 +403,7 @@
+ 	uint h;
+ 
+ 	if (_terraform_size == 1) {
+-		StringID msg =
+-			mode ? STR_0808_CAN_T_RAISE_LAND_HERE : STR_0809_CAN_T_LOWER_LAND_HERE;
+-
+-		DoCommandP(tile, SLOPE_N, (uint32)mode, CcTerraform, CMD_TERRAFORM_LAND | CMD_MSG(msg));
++		VpStartPlaceSizing(tile, VPM_DRAW, mode ? DDSP_RAISE_AND_LEVEL_AREA : DDSP_LOWER_AND_LEVEL_AREA);
+ 	} else {
+ 		SndPlayTileFx(SND_1F_SPLAT, tile);
+ 
+@@ -698,7 +735,18 @@
+ 
+ 	virtual void OnPlaceDrag(ViewportPlaceMethod select_method, ViewportDragDropSelectionProcess select_proc, Point pt)
+ 	{
+-		VpSelectTilesWithMethod(pt.x, pt.y, select_method);
++		TileIndex tile = VpSelectTilesWithMethod(pt.x, pt.y, select_method);
++		if (select_method == VPM_DRAW) {
++			if (pt.x != -1) {
++				switch (select_proc) {
++					default: NOT_REACHED();
++					case DDSP_RAISE_AND_LEVEL_AREA:
++					case DDSP_LOWER_AND_LEVEL_AREA:
++						GUIPlaceProcDraw(select_proc, tile);
++						break;
++				}
++			}
++		}
+ 	}
+ 
+ 	virtual void OnPlaceMouseUp(ViewportPlaceMethod select_method, ViewportDragDropSelectionProcess select_proc, Point pt, TileIndex start_tile, TileIndex end_tile)
+Index: src/tilehighlight_func.h
+===================================================================
+--- src/tilehighlight_func.h	(revision 13265)
++++ src/tilehighlight_func.h	(working copy)
+@@ -13,13 +13,14 @@
+ typedef void PlaceProc(TileIndex tile);
+ void PlaceProc_DemolishArea(TileIndex tile);
+ bool GUIPlaceProcDragXY(ViewportDragDropSelectionProcess proc, TileIndex start_tile, TileIndex end_tile);
++void PrepareDrawing(TileIndex tile);
+ 
+ bool HandlePlacePushButton(Window *w, int widget, CursorID cursor, ViewportHighlightMode mode, PlaceProc *placeproc);
+ void SetObjectToPlaceWnd(CursorID icon, SpriteID pal, ViewportHighlightMode mode, Window *w);
+ void SetObjectToPlace(CursorID icon, SpriteID pal, ViewportHighlightMode mode, WindowClass window_class, WindowNumber window_num);
+ void ResetObjectToPlace();
+ 
+-void VpSelectTilesWithMethod(int x, int y, ViewportPlaceMethod method);
++TileIndex VpSelectTilesWithMethod(int x, int y, ViewportPlaceMethod method);
+ void VpStartPlaceSizing(TileIndex tile, ViewportPlaceMethod method, ViewportDragDropSelectionProcess process);
+ void VpSetPresizeRange(TileIndex from, TileIndex to);
+ void VpSetPlaceSizingLimit(int limit);
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 13265)
++++ src/viewport.cpp	(working copy)
+@@ -2216,6 +2216,8 @@
+ 		_thd.selstart.y += TILE_SIZE / 2;
+ 	}
+ 
++	if (method == VPM_DRAW) PrepareDrawing(tile);
++
+ 	if (_thd.place_mode == VHM_RECT) {
+ 		_thd.place_mode = VHM_SPECIAL;
+ 		_thd.next_drawstyle = HT_RECT;
+@@ -2543,15 +2545,16 @@
+  * @param x X coordinate of end of selection
+  * @param y Y coordinate of end of selection
+  * @param method modifies the way tiles are selected. Possible
+- * methods are VPM_* in viewport.h */
+-void VpSelectTilesWithMethod(int x, int y, ViewportPlaceMethod method)
++ * methods are VPM_* in viewport.h
++ * @return the end tile of the selection */
++TileIndex VpSelectTilesWithMethod(int x, int y, ViewportPlaceMethod method)
+ {
+ 	int sx, sy;
+ 	HighLightStyle style;
+ 
+ 	if (x == -1) {
+ 		_thd.selend.x = -1;
+-		return;
++		return INVALID_TILE;
+ 	}
+ 
+ 	/* Special handling of drag in any (8-way) direction */
+@@ -2559,7 +2562,7 @@
+ 		_thd.selend.x = x;
+ 		_thd.selend.y = y;
+ 		CalcRaildirsDrawstyle(&_thd, x, y, method);
+-		return;
++		return TileVirtXY(x, y);
+ 	}
+ 
+ 	/* Needed so level-land is placed correctly */
+@@ -2654,11 +2657,18 @@
+ 		break;
+ 
+ 		}
++		case VPM_DRAW:
++			/* set the selection start to the current tile as well so only the last tile is selected */
++			_thd.selstart.x = x;
++			_thd.selstart.y = y;
++			break;
+ 		default: NOT_REACHED();
+ 	}
+ 
+ 	_thd.selend.x = x;
+ 	_thd.selend.y = y;
++	
++	return TileVirtXY(x, y);
+ }
+ 
+ /**
+@@ -2698,6 +2708,9 @@
+ 	}
+ 	SetTileSelectSize(1, 1);
+ 
++	/* for drawing mode, nothing is done on mouseup, so return here */
++	if (_thd.select_method == VPM_DRAW) return false;
++
+ 	w->OnPlaceMouseUp(_thd.select_method, _thd.select_proc, _thd.selend, TileVirtXY(_thd.selstart.x, _thd.selstart.y), TileVirtXY(_thd.selend.x, _thd.selend.y));
+ 
+ 	return false;
+Index: src/viewport_type.h
+===================================================================
+--- src/viewport_type.h	(revision 13265)
++++ src/viewport_type.h	(working copy)
+@@ -56,6 +56,7 @@
+ 	VPM_X_AND_Y         = 4, ///< area of land in X and Y directions
+ 	VPM_X_AND_Y_LIMITED = 5, ///< area of land of limited size
+ 	VPM_SIGNALDIRS      = 6, ///< similiar to VMP_RAILDIRS, but with different cursor
++	VPM_DRAW            = 7, ///< free drawing
+ };
+ 
+ /** Drag and drop selection process, or, what to do with an area of land when

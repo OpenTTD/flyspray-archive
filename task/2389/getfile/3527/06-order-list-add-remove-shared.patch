@@ -1,0 +1,79 @@
+Change AddToShared and RemoveFromShared.
+
+diff -r 3e6956c59ed2 src/vehicle.cpp
+--- a/src/vehicle.cpp	Wed Oct 29 16:18:52 2008 +0100
++++ b/src/vehicle.cpp	Wed Oct 29 16:18:56 2008 +0100
+@@ -2671,47 +2671,51 @@ void Vehicle::SetNext(Vehicle *next)
+ 
+ void Vehicle::AddToShared(Vehicle *shared_chain)
+ {
+-	assert(!this->IsOrderListShared());
++	assert(this->previous_shared == NULL && this->next_shared == NULL);
++
++	if (!shared_chain->orders.list) {
++		assert(shared_chain->previous_shared == NULL);
++		assert(shared_chain->next_shared == NULL);
++		this->orders.list = shared_chain->orders.list = new OrderList(NULL, shared_chain);
++	}
+ 
+ 	this->next_shared     = shared_chain->next_shared;
+ 	this->previous_shared = shared_chain;
+-	this->first_shared    = shared_chain->first_shared;
+ 
+ 	shared_chain->next_shared = this;
+ 
+ 	if (this->next_shared != NULL) this->next_shared->previous_shared = this;
++
++	shared_chain->orders.list->AddVehicle(this);
+ }
+ 
+ void Vehicle::RemoveFromShared()
+ {
+-	Vehicle *new_first;
+-
+-	if (this->FirstShared() == this) {
+-		/* We are the first shared one, so update all the first pointers of our next shared ones. */
+-		new_first = this->NextShared();
+-		for (Vehicle *u = new_first; u != NULL; u = u->NextShared()) {
+-			u->first_shared = new_first;
+-		}
+-	} else {
++	/* Remember if we were first and the old window number before RemoveVehicle()
++	 * as this changes first if needed. */
++	bool were_first = (this->FirstShared() == this);
++	uint32 old_window_number = (this->FirstShared()->index << 16) | (this->type << 11) | VLW_SHARED_ORDERS | this->owner;
++
++	this->orders.list->RemoveVehicle(this);
++
++	if (!were_first) {
+ 		/* We are not the first shared one, so only relink our previous one. */
+-		new_first = this->FirstShared();
+ 		this->previous_shared->next_shared = this->NextShared();
+ 	}
+ 
+ 	if (this->next_shared != NULL) this->next_shared->previous_shared = this->previous_shared;
+ 
+-	uint32 old_window_number = (this->FirstShared()->index << 16) | (this->type << 11) | VLW_SHARED_ORDERS | this->owner;
+-
+-	if (new_first->NextShared() == NULL) {
++
++	if (this->orders.list->GetNumVehicles() == 1) {
+ 		/* When there is only one vehicle, remove the shared order list window. */
+ 		DeleteWindowById(GetWindowClassForVehicleType(this->type), old_window_number);
+-		InvalidateVehicleOrder(new_first, 0);
+-	} else if (this->FirstShared() == this) {
+-		/* If we were the first one, update to the new first one. */
+-		InvalidateWindowData(GetWindowClassForVehicleType(this->type), old_window_number, (new_first->index << 16) | (1 << 15));
+-	}
+-
+-	this->first_shared    = this;
++		InvalidateVehicleOrder(this->FirstShared(), 0);
++	} else if (were_first) {
++		/* If we were the first one, update to the new first one.
++		 * Note: FirstShared() is already the new first */
++		InvalidateWindowData(GetWindowClassForVehicleType(this->type), old_window_number, (this->FirstShared()->index << 16) | (1 << 15));
++	}
++
+ 	this->next_shared     = NULL;
+ 	this->previous_shared = NULL;
+ }

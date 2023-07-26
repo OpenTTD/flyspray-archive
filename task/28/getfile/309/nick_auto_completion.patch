@@ -1,0 +1,102 @@
+Index: network_gui.c
+===================================================================
+--- network_gui.c	(revision 5963)
++++ network_gui.c	(working copy)
+@@ -55,6 +55,7 @@
+ static NetworkGameSorting _ng_sorting;
+ 
+ static char _edit_str_buf[64];
++static char _chat_tab_completion_buf[lengthof(_edit_str_buf)];
+ 
+ static void ShowNetworkStartServerWindow(void);
+ static void ShowNetworkLobbyWindow(NetworkGameList *ngl);
+@@ -1488,7 +1489,63 @@
+ 	}
+ }
+ 
++static void ChatNickTabCompletion(Window *w)
++{
++	Textbuf *tb = &WP(w, querystr_d).text;
++	const NetworkClientInfo* ci;
++	int len, tb_len;
++	char *tb_buf;
++	bool second_scan = false;
+ 
++	tb_len = tb->length;
++	tb_buf = tb->buf;
++
++	for (ci = _network_client_info; ci != &_network_client_info[MAX_CLIENT_INFO]; ci++) {
++		/* Skip non-active items */
++		if (ci->client_index == NETWORK_EMPTY_INDEX) continue;
++
++		if (_chat_tab_completion_buf[0] != '\0') {
++			/* We are pressing TAB again on the same name, is there an other name
++			 *  that starts with this? */
++			if (!second_scan) {
++				/* Find the current match */
++				if (strlen(ci->client_name) == (uint)tb->length - 2 && strncmp(ci->client_name, tb->buf, tb->length - 2) == 0) second_scan = true;
++				continue;
++			}
++
++			/* Now any match we make on _chat_tab_completion_buf after this, is perfect */
++			tb_len = strlen(_chat_tab_completion_buf);
++			tb_buf = _chat_tab_completion_buf;
++		}
++
++		len = strlen(ci->client_name);
++		if (tb_len < len && strncasecmp(ci->client_name, tb_buf, tb_len) == 0) {
++			/* Save the data it was before completion */
++			if (!second_scan) snprintf(_chat_tab_completion_buf, lengthof(_chat_tab_completion_buf), "%s", tb_buf);
++
++			/* Change to the found nick */
++			snprintf(tb->buf, lengthof(_edit_str_buf), "%s: ", ci->client_name);
++
++			/* Update the textbuffer */
++			UpdateTextBufferSize(&WP(w, querystr_d).text);
++
++			SetWindowDirty(w);
++			return;
++		}
++	}
++
++	if (second_scan) {
++		/* We walked all posibilities, and the user presses tab again.. revert to original text */
++		strcpy(tb->buf, _chat_tab_completion_buf);
++		_chat_tab_completion_buf[0] = '\0';
++
++		/* Update the textbuffer */
++		UpdateTextBufferSize(&WP(w, querystr_d).text);
++
++		SetWindowDirty(w);
++	}
++}
++
+ /* uses querystr_d WP macro */
+ static void ChatWindowWndProc(Window *w, WindowEvent *e)
+ {
+@@ -1515,9 +1572,14 @@
+ 		break;
+ 
+ 	case WE_KEYPRESS:
+-		switch (HandleEditBoxKey(w, &WP(w, querystr_d), 1, e, CS_ALPHANUMERAL)) {
+-			case 1: /* Return */ SendChat(WP(w, querystr_d).text.buf); /* FALLTHROUGH */
+-			case 2: /* Escape */ DeleteWindow(w); break;
++		if (e->keypress.keycode == WKC_TAB) {
++			ChatNickTabCompletion(w);
++		} else {
++			_chat_tab_completion_buf[0] = '\0';
++			switch (HandleEditBoxKey(w, &WP(w, querystr_d), 1, e, CS_ALPHANUMERAL)) {
++				case 1: /* Return */ SendChat(WP(w, querystr_d).text.buf); /* FALLTHROUGH */
++				case 2: /* Escape */ DeleteWindow(w); break;
++			}
+ 		}
+ 		break;
+ 
+@@ -1555,6 +1617,7 @@
+ 	DeleteWindowById(WC_SEND_NETWORK_MSG, 0);
+ 
+ 	_edit_str_buf[0] = '\0';
++	_chat_tab_completion_buf[0] = '\0';
+ 
+ 	w = AllocateWindowDesc(&_chat_window_desc);
+ 

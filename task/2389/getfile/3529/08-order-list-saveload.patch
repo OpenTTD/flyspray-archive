@@ -1,0 +1,312 @@
+Save and load related stuff of OrderList
+
+diff -r 770ac5cd0e6d src/oldloader.cpp
+--- a/src/oldloader.cpp	Wed Oct 29 16:19:07 2008 +0100
++++ b/src/oldloader.cpp	Wed Oct 29 16:19:15 2008 +0100
+@@ -341,12 +341,9 @@ static StringID *_old_vehicle_names = NU
+ 
+ static void FixOldVehicles()
+ {
+-	/* Check for shared orders, and link them correctly */
+ 	Vehicle* v;
+ 
+ 	FOR_ALL_VEHICLES(v) {
+-		Vehicle *u;
+-
+ 		v->name = CopyFromOldName(_old_vehicle_names[v->index]);
+ 
+ 		/* We haven't used this bit for stations for ages */
+@@ -368,14 +365,7 @@ static void FixOldVehicles()
+ 			v->current_order.MakeDummy();
+ 		}
+ 
+-		FOR_ALL_VEHICLES_FROM(u, v->index + 1) {
+-			/* If a vehicle has the same orders, add the link to eachother
+-			 * in both vehicles */
+-			if (v->orders == u->orders) {
+-				u->AddToShared(v);
+-				break;
+-			}
+-		}
++		/* Shared orders are fixed in AfterLoadVehicles now */
+ 	}
+ }
+ 
+@@ -1164,7 +1154,7 @@ static const OldChunks vehicle_chunk[] =
+ 	OCL_VAR ( OC_UINT32,   1, &_old_order_ptr ),
+ 	OCL_VAR ( OC_UINT16,   1, &_old_order ),
+ 
+-	OCL_SVAR(  OC_UINT8, Vehicle, num_orders ),
++	OCL_NULL ( 1 ), ///< num_orders, now calculated
+ 	OCL_SVAR(  OC_UINT8, Vehicle, cur_order_index ),
+ 	OCL_SVAR(   OC_TILE, Vehicle, dest_tile ),
+ 	OCL_SVAR( OC_UINT16, Vehicle, load_unload_time_rem ),
+@@ -1270,7 +1260,7 @@ bool LoadOldVehicle(LoadgameState *ls, i
+ 			 * we go over that limit something is very wrong. In that case
+ 			 * we just assume there are no orders for the vehicle.
+ 			 */
+-			if (old_id < 5000) v->orders = GetOrder(old_id);
++			if (old_id < 5000) v->orders.old = GetOrder(old_id);
+ 		}
+ 		v->current_order.AssignOrder(UnpackOldOrder(_old_order));
+ 
+diff -r 770ac5cd0e6d src/openttd.cpp
+--- a/src/openttd.cpp	Wed Oct 29 16:19:07 2008 +0100
++++ b/src/openttd.cpp	Wed Oct 29 16:19:15 2008 +0100
+@@ -2301,7 +2301,11 @@ bool AfterLoadGame()
+ 
+ 		Vehicle *v;
+ 		FOR_ALL_VEHICLES(v) {
+-			if (v->orders != NULL && !v->orders->IsValid()) v->orders = NULL;
++			// TODO: How to treat with OrderList???
++			if (v->orders.list != NULL && v->orders.list->GetFirstOrder() != NULL && !v->orders.list->GetFirstOrder()->IsValid()) {
++				v->orders.list->FreeChain();
++				v->orders.list = NULL;
++			}
+ 
+ 			v->current_order.ConvertFromOldSavegame();
+ 			if (v->type == VEH_ROAD && v->IsPrimaryVehicle() && v->FirstShared() == v) {
+diff -r 770ac5cd0e6d src/order_base.h
+--- a/src/order_base.h	Wed Oct 29 16:19:07 2008 +0100
++++ b/src/order_base.h	Wed Oct 29 16:19:15 2008 +0100
+@@ -263,7 +263,8 @@ static inline VehicleOrderID GetNumOrder
+  */
+ struct OrderList : PoolItem<OrderList, OrderListID, &_OrderList_pool> {
+ private:
+-	friend void AfterLoadVehicles(bool clear_te_id); ///< For instantiating the shared vehicle chain
++	friend void AfterLoadVehicles(bool part_of_load); ///< For instantiating the shared vehicle chain
++	friend const struct SaveLoad *GetOrderListDescription(); ///< Saving and loading of order lists.
+ 
+ 	Order *first;                   ///< First order of the order list
+ 	VehicleOrderID num_orders;      ///< NOSAVE: How many orders there are in the list
+diff -r 770ac5cd0e6d src/order_cmd.cpp
+--- a/src/order_cmd.cpp	Wed Oct 29 16:19:07 2008 +0100
++++ b/src/order_cmd.cpp	Wed Oct 29 16:19:15 2008 +0100
+@@ -2006,6 +2006,37 @@ static void Load_ORDR()
+ 	}
+ }
+ 
++const SaveLoad *GetOrderListDescription() {
++static const SaveLoad _orderlist_desc[] = {
++	SLE_REF(OrderList, first,              REF_ORDER),
++	SLE_END()
++};
++	return _orderlist_desc;
++}
++
++static void Save_ORDL()
++{
++	OrderList *list;
++
++	for (list = GetOrderList(0); list != NULL; list = (list->index + 1U < GetOrderListPoolSize()) ? GetOrderList(list->index + 1U) : NULL) {
++		if (list->IsValid()) {
++			SlSetArrayIndex(list->index);
++			SlObject(list, GetOrderListDescription());
++		}
++	}
++}
++
++static void Load_ORDL()
++{
++	int index;
++
++	while ((index = SlIterateArray()) != -1) {
++		OrderList *list = new (index) OrderList();
++		SlObject(list, GetOrderListDescription());
++	}
++}
++
+ extern const ChunkHandler _order_chunk_handlers[] = {
+-	{ 'ORDR', Save_ORDR, Load_ORDR, CH_ARRAY | CH_LAST},
++	{ 'ORDR', Save_ORDR, Load_ORDR, CH_ARRAY},
++	{ 'ORDL', Save_ORDL, Load_ORDL, CH_ARRAY | CH_LAST},
+ };
+diff -r 770ac5cd0e6d src/saveload.cpp
+--- a/src/saveload.cpp	Wed Oct 29 16:19:07 2008 +0100
++++ b/src/saveload.cpp	Wed Oct 29 16:19:15 2008 +0100
+@@ -1365,6 +1365,7 @@ static uint ReferenceToInt(const void *o
+ 		case REF_ROADSTOPS: return ((const RoadStop*)obj)->index + 1;
+ 		case REF_ENGINE_RENEWS: return ((const EngineRenew*)obj)->index + 1;
+ 		case REF_CARGO_PACKET:  return ((const CargoPacket*)obj)->index + 1;
++		case REF_ORDERLIST:     return ((const   OrderList*)obj)->index + 1;
+ 		default: NOT_REACHED();
+ 	}
+ 
+@@ -1397,6 +1398,10 @@ static void *IntToReference(uint index, 
+ 	index--; // correct for the NULL index
+ 
+ 	switch (rt) {
++		case REF_ORDERLIST:
++			if (_OrderList_pool.AddBlockIfNeeded(index)) return GetOrderList(index);
++			error("Orders: failed loading savegame: too many order lists");
++
+ 		case REF_ORDER:
+ 			if (_Order_pool.AddBlockIfNeeded(index)) return GetOrder(index);
+ 			error("Orders: failed loading savegame: too many orders");
+diff -r 770ac5cd0e6d src/saveload.h
+--- a/src/saveload.h	Wed Oct 29 16:19:07 2008 +0100
++++ b/src/saveload.h	Wed Oct 29 16:19:16 2008 +0100
+@@ -65,9 +65,11 @@ enum SLRefType {
+ 	REF_ROADSTOPS     = 5,
+ 	REF_ENGINE_RENEWS = 6,
+ 	REF_CARGO_PACKET  = 7,
++	REF_ORDERLIST     = 8,
+ };
+ 
+ #define SL_MAX_VERSION 255
++#define SL_OL_VER (SL_MAX_VERSION)
+ 
+ enum {
+ 	INC_VEHICLE_COMMON = 0,
+diff -r 770ac5cd0e6d src/vehicle.cpp
+--- a/src/vehicle.cpp	Wed Oct 29 16:19:07 2008 +0100
++++ b/src/vehicle.cpp	Wed Oct 29 16:19:16 2008 +0100
+@@ -3,6 +3,7 @@
+ /** @file vehicle.cpp Base implementations of all vehicles. */
+ 
+ #include "stdafx.h"
++#include <map> // Must be after stdafx.h otherwise INT32_MIN etc. breaks
+ #include "openttd.h"
+ #include "road_map.h"
+ #include "roadveh.h"
+@@ -218,7 +219,7 @@ void VehiclePositionChanged(Vehicle *v)
+ }
+ 
+ /** Called after load to update coordinates */
+-void AfterLoadVehicles(bool clear_te_id)
++void AfterLoadVehicles(bool part_of_load)
+ {
+ 	Vehicle *v;
+ 
+@@ -229,12 +230,44 @@ void AfterLoadVehicles(bool clear_te_id)
+ 
+ 		v->UpdateDeltaXY(v->direction);
+ 
+-		if (clear_te_id) v->fill_percent_te_id = INVALID_TE_ID;
++		if (part_of_load) v->fill_percent_te_id = INVALID_TE_ID;
+ 		v->first = NULL;
+ 		if (v->type == VEH_TRAIN) v->u.rail.first_engine = INVALID_ENGINE;
+ 		if (v->type == VEH_ROAD)  v->u.road.first_engine = INVALID_ENGINE;
+ 
+ 		v->cargo.InvalidateCache();
++	}
++
++	/* AfterLoadVehicles may also be called in case of NewGRF reload, in this
++	 * case we may not convert orders again. */
++	if (part_of_load) {
++		/* Create shared vehicle chain for very old games (pre 5,2) and create
++		 * OrderList from shared vehicle chains. For this to work correctly, the
++		 * following conditions must be fulfilled:
++		 * a) both next_shared and previous_shared are not set for pre 5,2 games
++		 * b) both next_shared and previous_shared are set for later games
++		 */
++		std::map<Order*,OrderList*> mapping;
++
++		FOR_ALL_VEHICLES(v) {
++			if (v->orders.old != NULL) {
++				if (CheckSavegameVersion(SL_OL_VER)) { // Pre-104 didn't save an OrderList
++					if (mapping[v->orders.old] == NULL) {
++						/* This adds the whole shared vehicle chain for case b */
++						v->orders.list = mapping[v->orders.old] = new OrderList(v->orders.old, v);
++					} else {
++						v->orders.list = mapping[v->orders.old];
++						/* For old games (case a) we must create the shared vehicle chain */
++						if (CheckSavegameVersionOldStyle(5, 2)) {
++							v->AddToShared(v->orders.list->GetFirstSharedVehicle());
++						}
++					}
++				} else { // OrderList was saved as such, only recalculate not saved values
++					if (v->PreviousShared() == NULL)
++						new (v->orders.list) OrderList(v->orders.list->GetFirstOrder(), v);
++				}
++			}
++		}
+ 	}
+ 
+ 	FOR_ALL_VEHICLES(v) {
+@@ -242,13 +275,6 @@ void AfterLoadVehicles(bool clear_te_id)
+ 		if (v->Previous() == NULL) {
+ 			for (Vehicle *u = v; u != NULL; u = u->Next()) {
+ 				u->first = v;
+-			}
+-
+-			/* Shared orders are only valid for first vehicles in chains. */
+-			if (v->previous_shared == NULL) {
+-				for (Vehicle *u = v; u != NULL; u = u->NextShared()) {
+-					u->first_shared = v;
+-				}
+ 			}
+ 		}
+ 	}
+@@ -2189,7 +2215,8 @@ static const SaveLoad _common_veh_desc[]
+ 	SLE_CONDVAR(Vehicle, running_ticks,        SLE_UINT8,                   88, SL_MAX_VERSION),
+ 
+ 	    SLE_VAR(Vehicle, cur_order_index,      SLE_UINT8),
+-	    SLE_VAR(Vehicle, num_orders,           SLE_UINT8),
++	/* num_orders is now part of OrderList and is not saved but counted */
++	SLE_CONDNULL(1,                                                          0, SL_OL_VER-1),
+ 
+ 	/* This next line is for version 4 and prior compatibility.. it temporarily reads
+ 	    type and flags (which were both 4 bits) into type. Later on this is
+@@ -2210,7 +2237,8 @@ static const SaveLoad _common_veh_desc[]
+ 	SLE_CONDVARX(cpp_offsetof(Vehicle, current_order) + cpp_offsetof(Order, wait_time),      SLE_UINT16, 67, SL_MAX_VERSION),
+ 	SLE_CONDVARX(cpp_offsetof(Vehicle, current_order) + cpp_offsetof(Order, travel_time),    SLE_UINT16, 67, SL_MAX_VERSION),
+ 
+-	    SLE_REF(Vehicle, orders,               REF_ORDER),
++	SLE_CONDREF(Vehicle, orders,               REF_ORDER,                   0, SL_OL_VER-1),
++	SLE_CONDREF(Vehicle, orders,               REF_ORDERLIST,              SL_OL_VER, SL_MAX_VERSION),
+ 
+ 	SLE_CONDVAR(Vehicle, age,                  SLE_FILE_U16 | SLE_VAR_I32,  0, 30),
+ 	SLE_CONDVAR(Vehicle, age,                  SLE_INT32,                  31, SL_MAX_VERSION),
+@@ -2428,7 +2456,6 @@ void Load_VEHS()
+ void Load_VEHS()
+ {
+ 	int index;
+-	Vehicle *v;
+ 
+ 	_cargo_count = 0;
+ 
+@@ -2474,22 +2501,6 @@ void Load_VEHS()
+ 
+ 		/* Advanced vehicle lists got added */
+ 		if (CheckSavegameVersion(60)) v->group_id = DEFAULT_GROUP;
+-	}
+-
+-	/* Check for shared order-lists (we now use pointers for that) */
+-	if (CheckSavegameVersionOldStyle(5, 2)) {
+-		FOR_ALL_VEHICLES(v) {
+-			Vehicle *u;
+-
+-			FOR_ALL_VEHICLES_FROM(u, v->index + 1) {
+-				/* If a vehicle has the same orders, add the link to eachother
+-				 *  in both vehicles */
+-				if (v->orders == u->orders) {
+-					u->AddToShared(v);
+-					break;
+-				}
+-			}
+-		}
+ 	}
+ }
+ 
+diff -r 770ac5cd0e6d src/vehicle_base.h
+--- a/src/vehicle_base.h	Wed Oct 29 16:19:07 2008 +0100
++++ b/src/vehicle_base.h	Wed Oct 29 16:19:16 2008 +0100
+@@ -193,7 +193,7 @@ DECLARE_OLD_POOL(Vehicle, Vehicle, 9, 12
+ /* Some declarations of functions, so we can make them friendly */
+ struct SaveLoad;
+ extern const SaveLoad *GetVehicleDescription(VehicleType vt);
+-extern void AfterLoadVehicles(bool clear_te_id);
++extern void AfterLoadVehicles(bool part_of_load);
+ struct LoadgameState;
+ extern bool LoadOldVehicle(LoadgameState *ls, int num);
+ 
+@@ -207,7 +207,7 @@ private:
+ 	Vehicle *previous_shared; ///< NOSAVE: pointer to the previous vehicle in the shared order chain
+ public:
+ 	friend const SaveLoad *GetVehicleDescription(VehicleType vt); ///< So we can use private/protected variables in the saveload code
+-	friend void AfterLoadVehicles(bool clear_te_id);              ///< So we can set the previous and first pointers while loading
++	friend void AfterLoadVehicles(bool part_of_load);              ///< So we can set the previous and first pointers while loading
+ 	friend bool LoadOldVehicle(LoadgameState *ls, int num);       ///< So we can set the proper next pointer while loading
+ 
+ 	Vehicle *depot_list;     ///< NOSAVE: linked list to tell what vehicles entered a depot during the last tick. Used by autoreplace

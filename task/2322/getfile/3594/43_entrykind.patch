@@ -1,0 +1,111 @@
+diff -r 7a02afa6d25a src/settings_gui.cpp
+--- a/src/settings_gui.cpp	Sun Nov 16 12:05:36 2008 +0100
++++ b/src/settings_gui.cpp	Sun Nov 16 12:39:19 2008 +0100
+@@ -590,14 +590,23 @@
+ enum PatchEntryFlags {
+ 	PEF_LEFT_DEPRESSED  = 0x01, ///< Of a numeric patch entry, the left button is depressed
+ 	PEF_RIGHT_DEPRESSED = 0x02, ///< Of a numeric patch entry, the right button is depressed
++
++	/* Entry kind */
++	PEF_SETTING_KIND = 0x10, ///< Entry kind: Entry is a setting
++	PEF_SUBTREE_KIND = 0x20, ///< Entry kind: Entry is a sub-tree
++	PEF_KIND_MASK    = (PEF_SETTING_KIND | PEF_SUBTREE_KIND) ///< Bit-mask for fetching entry kind
+ };
+ 
+ /** Data structure describing a single patch in a tab */
+ struct PatchEntry {
+ 	uint16 flags;               ///< Flags of the pach entry. @see PatchEntryFlags
+-	const char *name;           ///< Name of the setting
+-	const SettingDesc *setting; ///< Setting description of the patch
+-	uint index;                 ///< Index of the setting in the settings table
++	union {
++		struct {
++			const char *name;           ///< Name of the setting
++			const SettingDesc *setting; ///< Setting description of the patch
++			uint index;                 ///< Index of the setting in the settings table
++		} entry;
++	} d;
+ 
+ 	PatchEntry(const char *nm);
+ 
+@@ -624,13 +633,24 @@
+ /* == PatchEntry methods == */
+ 
+ /** Constructor a patch setting */
+-PatchEntry::PatchEntry(const char *nm): flags(0), name(nm), setting(NULL), index(0) { }
++PatchEntry::PatchEntry(const char *nm)
++{
++	flags = PEF_SETTING_KIND;
++	d.entry.name = nm;
++	d.entry.setting = NULL;
++	d.entry.index = 0;
++}
+ 
+ /** Initialization of a patch entry */
+ void PatchEntry::Init()
+ {
+-	setting = GetPatchFromName(name, &index);
+-	assert(setting != NULL);
++	switch(flags & PEF_KIND_MASK) {
++		case PEF_SETTING_KIND:
++			d.entry.setting = GetPatchFromName(d.entry.name, &d.entry.index);
++			assert(d.entry.setting != NULL);
++			break;
++		default: NOT_REACHED();
++	}
+ }
+ 
+ /**
+@@ -641,8 +661,14 @@
+  */
+ void PatchEntry::Draw(GameSettings *patches_ptr, int x, int y)
+ {
+-	int state = flags & (PEF_LEFT_DEPRESSED | PEF_RIGHT_DEPRESSED);
+-	DrawPatch(patches_ptr, setting, x, y, state);
++	switch(flags & PEF_KIND_MASK) {
++		case PEF_SETTING_KIND: {
++			int state = flags & (PEF_LEFT_DEPRESSED | PEF_RIGHT_DEPRESSED);
++			DrawPatch(patches_ptr, d.entry.setting, x, y, state);
++			break;
++		}
++		default: NOT_REACHED();
++	}
+ }
+ 
+ /**
+@@ -977,7 +1003,8 @@
+ 
+ 				if (pe == NULL) return;  // Clicked below the last setting of the page
+ 
+-				const SettingDesc *sd = pe->setting;
++				assert((pe->flags & PEF_KIND_MASK) == PEF_SETTING_KIND);
++				const SettingDesc *sd = pe->d.entry.setting;
+ 
+ 				/* return if action is only active in network, or only settable by server */
+ 				if (!(sd->save.conv & SLF_NETWORK_NO) && _networking && !_network_server) return;
+@@ -1032,7 +1059,7 @@
+ 					}
+ 
+ 					if (value != oldvalue) {
+-						SetPatchValue(pe->index, value);
++						SetPatchValue(pe->d.entry.index, value);
+ 						this->SetDirty();
+ 					}
+ 				} else {
+@@ -1077,13 +1104,14 @@
+ 	{
+ 		if (!StrEmpty(str)) {
+ 			assert(valuewindow_entry != NULL);
+-			const SettingDesc *sd = valuewindow_entry->setting;
++			assert((valuewindow_entry->flags & PEF_KIND_MASK) == PEF_SETTING_KIND);
++			const SettingDesc *sd = valuewindow_entry->d.entry.setting;
+ 			int32 value = atoi(str);
+ 
+ 			/* Save the correct currency-translated value */
+ 			if (sd->desc.flags & SGF_CURRENCY) value /= _currency->rate;
+ 
+-			SetPatchValue(valuewindow_entry->index, value);
++			SetPatchValue(valuewindow_entry->d.entry.index, value);
+ 			this->SetDirty();
+ 		}
+ 	}

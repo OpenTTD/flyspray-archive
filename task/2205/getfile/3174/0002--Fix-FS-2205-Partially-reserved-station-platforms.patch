@@ -1,0 +1,105 @@
+From e3ebf7db7f76c0e62a84a3ce0f8a5f94987c7e75 Mon Sep 17 00:00:00 2001
+From: Michael Lutz <michi@icosahedron.de>
+Date: Thu, 7 Aug 2008 20:02:19 +0200
+Subject: -Fix [FS#2205]: Partially reserved station platforms weren't handled correctly by YAPF/YAPP.
+
+---
+ src/yapf/follow_track.hpp   |   16 +++++++++++++++-
+ src/yapf/yapf_costrail.hpp  |   20 ++++++++++++++++----
+ src/yapf/yapf_node_rail.hpp |    3 ++-
+ 3 files changed, 33 insertions(+), 6 deletions(-)
+
+diff --git a/src/yapf/follow_track.hpp b/src/yapf/follow_track.hpp
+index c642b20..677bbcd 100644
+--- a/src/yapf/follow_track.hpp
++++ b/src/yapf/follow_track.hpp
+@@ -14,6 +14,8 @@
+ template <TransportType Ttr_type_, bool T90deg_turns_allowed_ = true, bool Tmask_reserved_tracks = false>
+ struct CFollowTrackT
+ {
++	typedef CFollowTrackT<Ttr_type_, T90deg_turns_allowed_, false> BaseNoMask;
++
+ 	enum ErrorCode {
+ 		EC_NONE,
+ 		EC_OWNER,
+@@ -77,7 +79,7 @@ struct CFollowTrackT
+ 	FORCEINLINE bool IsTram() {return IsRoadTT() && HasBit(m_veh->u.road.compatible_roadtypes, ROADTYPE_TRAM);}
+ 	FORCEINLINE static bool IsRoadTT() {return TT() == TRANSPORT_ROAD;}
+ 	FORCEINLINE static bool Allow90degTurns() {return T90deg_turns_allowed_;}
+-	FORCEINLINE static bool MaskReservedTracks() {return Tmask_reserved_tracks;}
++	FORCEINLINE static bool MaskReservedTracks() {return IsRailTT() && Tmask_reserved_tracks;}
+ 
+ 	/** Tests if a tile is a road tile with a single tramtrack (tram can reverse) */
+ 	FORCEINLINE DiagDirection GetSingleTramBit(TileIndex tile)
+@@ -123,6 +125,18 @@ struct CFollowTrackT
+ 			}
+ 		}
+ 		if (MaskReservedTracks()) {
++			if (m_is_station) {
++				/* Check skipped station tiles as well. */
++				TileIndexDiff diff = TileOffsByDiagDir(m_exitdir);
++				for (TileIndex tile = m_new_tile - diff * m_tiles_skipped; tile != m_new_tile; tile += diff) {
++					if (GetRailwayStationReservation(tile)) {
++						m_new_td_bits = TRACKDIR_BIT_NONE;
++						m_err = EC_RESERVED;
++						return false;
++					}
++				}
++			}
++
+ 			TrackBits reserved = GetReservedTrackbits(m_new_tile);
+ 			/* Mask already reserved trackdirs. */
+ 			m_new_td_bits &= ~TrackBitsToTrackdirBits(reserved);
+diff --git a/src/yapf/yapf_costrail.hpp b/src/yapf/yapf_costrail.hpp
+index c19353f..18d3662 100644
+--- a/src/yapf/yapf_costrail.hpp
++++ b/src/yapf/yapf_costrail.hpp
+@@ -139,15 +139,27 @@ public:
+ 		return cost;
+ 	}
+ 
++	/** Check for a reserved station platform. */
++	FORCEINLINE bool IsAnyStationTileReserved(TileIndex tile, Trackdir trackdir, int skipped)
++	{
++		TileIndexDiff diff = TileOffsByDiagDir(TrackdirToExitdir(ReverseTrackdir(trackdir)));
++		for (; skipped >= 0; skipped--, tile += diff) {
++			if (GetRailwayStationReservation(tile)) return true;
++		}
++		return false;
++	}
++
+ 	/** The cost for reserved tiles, including skipped ones. */
+-	FORCEINLINE int ReservationCost(Node& n, TileIndex& tile, Trackdir trackdir, int skipped)
++	FORCEINLINE int ReservationCost(Node& n, TileIndex tile, Trackdir trackdir, int skipped)
+ 	{
+ 		if (n.m_num_signals_passed >= m_sig_look_ahead_costs.Size() / 2) return 0;
+ 
+-		if (TrackOverlapsTracks(GetReservedTrackbits(tile), TrackdirToTrack(trackdir))) {
+-			int cost = IsRailwayStationTile(tile) ? Yapf().PfGetSettings().rail_pbs_station_penalty : Yapf().PfGetSettings().rail_pbs_cross_penalty;
++		if (IsRailwayStationTile(tile) && IsAnyStationTileReserved(tile, trackdir, skipped)) {
++			return Yapf().PfGetSettings().rail_pbs_station_penalty * (skipped + 1);
++		} else if (TrackOverlapsTracks(GetReservedTrackbits(tile), TrackdirToTrack(trackdir))) {
++			int cost = Yapf().PfGetSettings().rail_pbs_cross_penalty;
+ 			if (!IsDiagonalTrackdir(trackdir)) cost = (cost * YAPF_TILE_CORNER_LENGTH) / YAPF_TILE_LENGTH;
+-			return cost * (skipped + 1);
++			return cost;
+ 		}
+ 		return 0;
+ 	}
+diff --git a/src/yapf/yapf_node_rail.hpp b/src/yapf/yapf_node_rail.hpp
+index 192bce2..171a307 100644
+--- a/src/yapf/yapf_node_rail.hpp
++++ b/src/yapf/yapf_node_rail.hpp
+@@ -182,7 +182,8 @@ struct CYapfRailNodeT
+ 	template <class Tbase, class Tfunc, class Tpf>
+ 	bool IterateTiles(const Vehicle *v, Tpf &yapf, Tbase &obj, bool (Tfunc::*func)(TileIndex, Trackdir)) const
+ 	{
+-		typename Tbase::TrackFollower ft(v, yapf.GetCompatibleRailTypes());
++		typedef typename Tbase::TrackFollower TrackFollower;
++		typename TrackFollower::BaseNoMask ft(v, yapf.GetCompatibleRailTypes());
+ 		TileIndex cur = base::GetTile();
+ 		Trackdir  cur_td = base::GetTrackdir();
+ 
+-- 
+1.5.6.4
+

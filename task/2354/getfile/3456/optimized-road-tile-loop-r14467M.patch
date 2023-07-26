@@ -1,0 +1,132 @@
+Index: src/station_cmd.cpp
+===================================================================
+--- src/station_cmd.cpp	(revision 14467)
++++ src/station_cmd.cpp	(working copy)
+@@ -1590,7 +1590,7 @@
+ 		/* Rebuild the drive throuhg road stop. As a road stop can only be
+ 		 * removed by the owner of the roadstop, _current_company is the
+ 		 * owner of the road stop. */
+-		MakeRoadNormal(tile, road_bits, rts, is_towns_road ? ClosestTownFromTile(tile, UINT_MAX)->index : 0,
++		MakeRoadNormal(tile, road_bits, rts, ClosestTownFromTile(tile, UINT_MAX)->index,
+ 				is_towns_road ? OWNER_TOWN : _current_company, _current_company, _current_company);
+ 	}
+ 
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revision 14467)
++++ src/town_cmd.cpp	(working copy)
+@@ -8,6 +8,7 @@
+ #include "debug.h"
+ #include "road_map.h"
+ #include "road_internal.h" /* Cleaning up road bits */
++#include "road_cmd.h"
+ #include "landscape.h"
+ #include "town_map.h"
+ #include "tunnel_map.h"
+@@ -1512,6 +1513,7 @@
+ 	t->num_houses -= x;
+ 	UpdateTownRadius(t);
+ 	UpdateTownMaxPass(t);
++	if (_game_mode == GM_EDITOR) UpdateTownForRoadTile();
+ }
+ 
+ /** Create a new town.
+@@ -2460,6 +2462,12 @@
+ 				IsRoadOwner(tile, ROADTYPE_ROAD, OWNER_TOWN)
+ 			)) {
+ 		return GetTownByTile(tile);
++	} else if (IsTileType(tile, MP_ROAD) && HasTileRoadType(tile, ROADTYPE_ROAD)) {
++		TownID town_id = GetTownIndex(tile);
++		Town *town = (town_id == INVALID_TOWN) ? NULL : GetTown(town_id);
++
++		if (town != NULL && town->IsValid() && DistanceManhattan(tile, town->xy) < threshold) return town;
++		return NULL;
+ 	} else {
+ 		return CalcClosestTownFromTile(tile, threshold);
+ 	}
+Index: src/road_cmd.cpp
+===================================================================
+--- src/road_cmd.cpp	(revision 14467)
++++ src/road_cmd.cpp	(working copy)
+@@ -4,6 +4,7 @@
+ 
+ #include "stdafx.h"
+ #include "openttd.h"
++#include "map_func.h"
+ #include "bridge_map.h"
+ #include "bridge.h"
+ #include "cmd_helper.h"
+@@ -476,6 +477,10 @@
+ 	/* Road pieces are max 4 bitset values (NE, NW, SE, SW) and town can only be non-zero
+ 	 * if a non-company is building the road */
+ 	if ((IsValidCompanyID(_current_company) && p2 != 0) || (_current_company == OWNER_TOWN && !IsValidTownID(p2))) return CMD_ERROR;
++	if (_current_company != OWNER_TOWN) {
++		Town *town = CalcClosestTownFromTile(tile, UINT_MAX);
++		p2 = town ? town->index : (uint32)INVALID_TOWN;
++	}
+ 
+ 	RoadBits pieces = Extract<RoadBits, 0>(p1);
+ 
+@@ -651,7 +656,7 @@
+ 				if (existing == ROAD_NONE || rtt == ROAD_TILE_CROSSING) {
+ 					SetRoadTypes(tile, GetRoadTypes(tile) | RoadTypeToRoadTypes(rt));
+ 					SetRoadOwner(tile, rt, _current_company);
+-					if (_current_company == OWNER_TOWN && rt == ROADTYPE_ROAD) SetTownIndex(tile, p2);
++					if (rt == ROADTYPE_ROAD) SetTownIndex(tile, p2);
+ 				}
+ 				if (rtt != ROAD_TILE_CROSSING) SetRoadBits(tile, existing | pieces, rt);
+ 			} break;
+@@ -1259,6 +1264,20 @@
+ 	}
+ }
+ 
++void UpdateTownForRoadTile()
++{
++	TileIndex map_size = MapSize();
++
++	for (TileIndex t = 0; t < map_size; t++) {
++		if (IsTileType(t, MP_ROAD)) {
++			if (GetRoadOwner(t, ROADTYPE_ROAD) != OWNER_TOWN) {
++				Town *town = CalcClosestTownFromTile(t, UINT_MAX);
++				SetTownIndex(t, town ? town->index : (TownID)INVALID_TOWN);
++			}
++		}
++	}
++}
++
+ static uint GetSlopeZ_Road(TileIndex tile, uint x, uint y)
+ {
+ 	uint z;
+Index: src/road_cmd.h
+===================================================================
+--- src/road_cmd.h	(revision 14467)
++++ src/road_cmd.h	(working copy)
+@@ -8,5 +8,6 @@
+ #include "direction_type.h"
+ 
+ void DrawRoadDepotSprite(int x, int y, DiagDirection dir, RoadType rt);
++void UpdateTownForRoadTile();
+ 
+ #endif /* ROAD_CMD_H */
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 14467)
++++ src/openttd.cpp	(working copy)
+@@ -71,6 +71,7 @@
+ #include "tree_map.h"
+ #include "rail_map.h"
+ #include "road_map.h"
++#include "road_cmd.h"
+ #include "station_map.h"
+ #include "town_map.h"
+ #include "industry_map.h"
+@@ -2560,6 +2561,9 @@
+ 	}
+ 
+ 	if (CheckSavegameVersion(103)) {
++		/* Non-town-owned roads now store the closest town */
++		UpdateTownForRoadTile();
++
+ 		/* signs with invalid owner left from older savegames */
+ 		Sign *si;
+ 		FOR_ALL_SIGNS(si) {

@@ -1,0 +1,116 @@
+commit 830d2d32a8ff09023f2745aa9be669476c92a33b
+Author: Michael Lutz <michi@icosahedron.de>
+Date:   Thu Sep 24 03:03:02 2009 +0200
+
+    -Change: [OSX] Assure that the minimal OSX version is defined in all cases.
+    -Codechange: [OSX] Improve conditional defines for OS version dependant code.
+
+diff --git a/config.lib b/config.lib
+index f184b97..86201f4 100644
+--- a/config.lib
++++ b/config.lib
+@@ -1240,8 +1240,21 @@ make_cflags_and_ldflags() {
+ 			CFLAGS="$CFLAGS -DNO_QUICKTIME"
+ 		fi
+ 
+-		if [ "$cpu_type" = "64" ]; then
+-			CFLAGS="$CFLAGS -mmacosx-version-min=10.5"
++		if [ "$enable_universal" = "0" -a $cc_version -ge 40 ]; then
++			# Only set the min version when not doing an universal build.
++			# Universal builds set the version elsewhere.
++			if [ "$cpu_type" = "64" ]; then
++				CFLAGS="$CFLAGS -mmacosx-version-min=10.5"
++			else
++				gcc_cpu=`$cc_host -dumpmachine`
++				if [ "`echo $gcc_cpu | cut -c 1-3`" = "ppc" -o "`echo $gcc_cpu | cut -c 1-7`" = "powerpc" ]; then
++					# PowerPC build can run on 10.3
++					CFLAGS="$CFLAGS -mmacosx-version-min=10.3"
++				else
++					# Intel is only available starting from 10.4
++					CFLAGS="$CFLAGS -mmacosx-version-min=10.4"
++				fi
++			fi
+ 		fi
+ 	fi
+ 
+@@ -1690,8 +1703,8 @@ set_universal_binary_flags() {
+ 	fi
+ 
+ 	if [ "$with_osx_sysroot" = "3" ]; then
+-		CFLAGS="$CFLAGS -isysroot /Developer/SDKs/MacOSX$osx_sysroot_version.sdk -mmacosx-version-min=$osx_target_version"
+-		LDFLAGS="$LDFLAGS -Wl,-syslibroot,/Developer/SDKs/MacOSX$osx_sysroot_version.sdk -mmacosx-version-min=$osx_target_version"
++		CFLAGS="$CFLAGS -isysroot /Developer/SDKs/MacOSX$osx_sysroot_version.sdk"
++		LDFLAGS="$LDFLAGS -Wl,-syslibroot,/Developer/SDKs/MacOSX$osx_sysroot_version.sdk"
+ 	fi
+ }
+ 
+diff --git a/src/os/macosx/macos.h b/src/os/macosx/macos.h
+index 3bdcbe3..247f442 100644
+--- a/src/os/macosx/macos.h
++++ b/src/os/macosx/macos.h
+@@ -25,6 +25,10 @@
+ #define MAC_OS_X_VERSION_10_5 1050
+ #endif
+ 
++#ifndef MAC_OS_X_VERSION_10_6
++#define MAC_OS_X_VERSION_10_6 1060
++#endif
++
+ 
+ /*
+  * Functions to show the popup window
+diff --git a/src/os/macosx/macos.mm b/src/os/macosx/macos.mm
+index 7c67e00..88cc71a 100644
+--- a/src/os/macosx/macos.mm
++++ b/src/os/macosx/macos.mm
+@@ -182,21 +182,16 @@ const char *GetCurrentLocale(const char *)
+ 
+ 	/* Since Apple introduced encoding to CString in OSX 10.4 we have to make a few conditions
+ 	 * to get the right code for the used version of OSX. */
+-#if (MAC_OS_X_VERSION_MAX_ALLOWED == MAC_OS_X_VERSION_10_4)
+-	/* 10.4 can compile both versions just fine and will select the correct version at runtime based
+-	 * on the version of OSX at execution time. */
++#if (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_4)
+ 	if (MacOSVersionIsAtLeast(10, 4, 0)) {
+ 		[ preferredLang getCString:retbuf maxLength:32 encoding:NSASCIIStringEncoding ];
+ 	} else
+ #endif
+ 	{
+-		[ preferredLang getCString:retbuf maxLength:32
+-#if (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5)
+-		/* If 10.5+ is used to compile then encoding is needed here.
+-		 * If 10.3 or 10.4 is used for compiling then this line is used by 10.3 and encoding should not be present here. */
+-		encoding:NSASCIIStringEncoding
++#if (MAC_OS_X_VERSION_MIN_REQUIRED < MAC_OS_X_VERSION_10_4)
++		/* maxLength does not include the \0 char in contrast to the call above. */
++		[ preferredLang getCString:retbuf maxLength:31 ];
+ #endif
+-		];
+ 	}
+ 	return retbuf;
+ }
+diff --git a/src/os/macosx/osx_stdafx.h b/src/os/macosx/osx_stdafx.h
+index 3dab349..00b9ddb 100644
+--- a/src/os/macosx/osx_stdafx.h
++++ b/src/os/macosx/osx_stdafx.h
+@@ -30,7 +30,6 @@
+ #	error "Compiling 64 bits without _SQ64 set! (or vice versa)"
+ #endif
+ 
+-#define MAC_OS_X_VERSION_MIN_REQUIRED MAC_OS_X_VERSION_10_3
+ #include <AvailabilityMacros.h>
+ 
+ /* Name conflict */
+diff --git a/src/video/cocoa/wnd_quickdraw.mm b/src/video/cocoa/wnd_quickdraw.mm
+index 561126f..b3618cf 100644
+--- a/src/video/cocoa/wnd_quickdraw.mm
++++ b/src/video/cocoa/wnd_quickdraw.mm
+@@ -16,7 +16,7 @@
+ #ifdef WITH_COCOA
+ #ifdef ENABLE_COCOA_QUICKDRAW
+ 
+-#define MAC_OS_X_VERSION_MAX_ALLOWED MAC_OS_X_VERSION_10_3
++#define MAC_OS_X_VERSION_MIN_REQUIRED MAC_OS_X_VERSION_10_3
+ #include "../../stdafx.h"
+ 
+ #define Rect  OTTDRect

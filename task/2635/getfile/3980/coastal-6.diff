@@ -1,0 +1,327 @@
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revision 15508)
++++ src/town_cmd.cpp	(working copy)
+@@ -1586,22 +1586,142 @@
+ 	return CommandCost();
+ }
+ 
++CommandCost CmdPlaceSign(TileIndex tile, DoCommandFlag flags, uint32 p1, uint32 p2, const char *text);
++void debug(char *str, TileIndex tile)
++{
++	if (tile != INVALID_TILE)
++		CmdPlaceSign(tile, DC_EXEC, 0, 0, str);
++}
++
++/*
++ * Towns must all be placed on the same grid or when they eventually
++ * interpenetrate their road networks will not mesh nicely; this
++ * function adjusts a tile so that it aligns properly.
++ *
++ * @param tile the tile to start at
++ * @param layout which town layout algo is in effect
++ * @return the adjusted tile
++ */
++TileIndex AlignTileToGrid(TileIndex tile, TownLayout layout)
++{
++	switch (layout) {
++		case TL_2X2_GRID: return TileXY(TileX(tile) - TileX(tile) % 3, TileY(tile) - TileY(tile) % 3);
++		case TL_3X3_GRID: return TileXY(TileX(tile) & ~3, TileY(tile) & ~3);
++		default:          return tile;
++	}
++}
++
++/*
++ * Towns must all be placed on the same grid or when they eventually
++ * interpenetrate their road networks will not mesh nicely; this
++ * function tells you if a tile is properly aligned.
++ *
++ * @param tile the tile to start at
++ * @param layout which town layout algo is in effect
++ * @return true if the tile is in the correct location
++ */
++bool IsTileAlignedToGrid(TileIndex tile, TownLayout layout)
++{
++	switch (layout) {
++		case TL_2X2_GRID: return TileX(tile) % 3 == 0 && TileY(tile) % 3 == 0;
++		case TL_3X3_GRID: return TileX(tile) % 4 == 0 && TileY(tile) % 4 == 0;
++		default:          return true;
++	}
++}
++
++/**
++ * used as the user_data for FindFurthestFromWater
++ */
++struct SpotData
++{
++	TileIndex tile; ///< holds the tile that was found
++	uint max_dist;	///< holds the distance that tile is from the water
++	TownLayout layout; ///< tells us what kind of town we're building
++};
++
++/**
++ * CircularTileSearch callback; finds the tile furthest from any
++ * water. slightly bit tricky, since it has to do a search of it's own
++ * in order to find the distance to the water from each square in the
++ * radius.
++ *
++ * Also, this never returns true, because it needs to take into
++ * account all locations being searched before it knows which is the
++ * furthest.
++ *
++ * @param tile Start looking from this tile
++ * @param user_data Storage area for data that must last across calls;
++ * must be a pointer to struct SpotData
++ *
++ * @return always false
++ */
++static bool FindFurthestFromWater(TileIndex tile, void *user_data)
++{
++	SpotData *sp = (SpotData*)user_data;
++	uint dist = GetClosestWaterDistance(tile, true);
++
++	if (IsTileType(tile, MP_CLEAR) &&
++			GetTileSlope(tile, NULL) == SLOPE_FLAT &&
++			IsTileAlignedToGrid(tile, sp->layout) &&
++			dist > sp->max_dist) {
++		sp->tile = tile;
++		sp->max_dist = dist;
++	}
++
++	return false;
++}
++
++/**
++ * CircularTileSearch callback; finds the nearest land tile
++ *
++ * @param tile Start looking from this tile
++ * @param user_data not used
++ */
++inline bool FindNearestEmptyLand(TileIndex tile, void *user_data)
++{
++	return IsTileType(tile, MP_CLEAR);
++}
++
++/**
++ * Given a spot on the map (presumed to be a water tile), find a good
++ * coastal spot to build a city. We don't want to build too close to
++ * the edge if we can help it (since that retards city growth) hence
++ * the search within a search within a search. O(n*m^2), where n is
++ * how far to search for land, and m is how far inland to look for a
++ * flat spot.
++ *
++ * @param tile Start looking from this spot.
++ * @return tile that was found
++ */
++static TileIndex FindNearestGoodCoastalTownSpot(TileIndex tile, TownLayout layout)
++{
++  SpotData sp = { INVALID_TILE, 0, layout };
++
++	TileIndex coast = tile;
++	if (CircularTileSearch(&coast, 40, FindNearestEmptyLand, NULL)) {
++		CircularTileSearch(&coast, 10, FindFurthestFromWater, &sp);
++		return sp.tile;
++	}
++
++	/* if we get here just give up */
++	return INVALID_TILE;
++}
++
+ Town *CreateRandomTown(uint attempts, TownSize size, bool city, TownLayout layout)
+ {
+ 	if (!Town::CanAllocateItem()) return NULL;
+ 
+ 	do {
+ 		/* Generate a tile index not too close from the edge */
+-		TileIndex tile = RandomTile();
+-		switch (layout) {
+-			case TL_2X2_GRID:
+-				tile = TileXY(TileX(tile) - TileX(tile) % 3, TileY(tile) - TileY(tile) % 3);
+-				break;
+-			case TL_3X3_GRID:
+-				tile = TileXY(TileX(tile) & ~3, TileY(tile) & ~3);
+-				break;
+-			default: break;
++		TileIndex tile = AlignTileToGrid(RandomTile(), layout);
++
++		/* if we tried to place the town on water, slide it over onto
++		 * the nearest likely-looking spot */
++		if (IsTileType(tile, MP_WATER)) {
++		  tile = FindNearestGoodCoastalTownSpot(tile, layout);
++			if (tile == INVALID_TILE) continue;
+ 		}
++
+ 		if (DistanceFromEdge(tile) < 20) continue;
+ 
+ 		/* Make sure the tile is plain */
+@@ -1619,7 +1739,12 @@
+ 		Town *t = new Town(tile);
+ 
+ 		DoCreateTown(t, tile, townnameparts, size, city, layout);
+-		return t;
++
++		/* if the population is still 0 at the point, then the
++		 * placement is so bad it couldn't grow at all */
++		if (t->population > 0)
++			return t;
++		delete t;
+ 	} while (--attempts != 0);
+ 
+ 	return NULL;
+Index: src/map_func.h
+===================================================================
+--- src/map_func.h	(revision 15508)
++++ src/map_func.h	(working copy)
+@@ -416,4 +416,13 @@
+  */
+ #define RandomTile() RandomTileSeed(Random())
+ 
++/**
++ * Finds the distance for the closest tile with water/land given a tile
++ * @param tile  the tile to find the distance too
++ * @param water whether to find water or land
++ * @return distance to nearest water (max 0x7F) / land (max 0x1FF; 0x200 if there is no land)
++ * @note FAILS when an industry should be seen as water
++ */
++uint GetClosestWaterDistance(TileIndex tile, bool water);
++
+ #endif /* MAP_FUNC_H */
+Index: src/map.cpp
+===================================================================
+--- src/map.cpp	(revision 15508)
++++ src/map.cpp	(working copy)
+@@ -8,6 +8,7 @@
+ #include "core/alloc_func.hpp"
+ #include "core/math_func.hpp"
+ #include "map_func.h"
++#include "tile_map.h"
+ 
+ #if defined(_MSC_VER)
+ /* Why the hell is that not in all MSVC headers?? */
+@@ -332,3 +333,59 @@
+ 	*tile = INVALID_TILE;
+ 	return false;
+ }
++
++/**
++ * Finds the distance for the closest tile with water/land given a tile
++ * @param tile  the tile to find the distance too
++ * @param water whether to find water or land
++ * @return distance to nearest water (max 0x7F) / land (max 0x1FF; 0x200 if there is no land)
++ * @note FAILS when an industry should be seen as water
++ */
++uint GetClosestWaterDistance(TileIndex tile, bool water)
++{
++	if (IsTileType(tile, MP_WATER) == water) return 0;
++
++	uint max_dist = water ? 0x7F : 0x200;
++
++	int x = TileX(tile);
++	int y = TileY(tile);
++
++	uint max_x = MapMaxX();
++	uint max_y = MapMaxY();
++	uint min_xy = _settings_game.construction.freeform_edges ? 1 : 0;
++
++	/* go in a 'spiral' with increasing manhattan distance in each iteration */
++	for (uint dist = 1; dist < max_dist; dist++) {
++		/* next 'diameter' */
++		y--;
++
++		/* going counter-clockwise around this square */
++		for (DiagDirection dir = DIAGDIR_BEGIN; dir < DIAGDIR_END; dir++) {
++			static const int8 ddx[DIAGDIR_END] = { -1,  1,  1, -1};
++			static const int8 ddy[DIAGDIR_END] = {  1,  1, -1, -1};
++
++			int dx = ddx[dir];
++			int dy = ddy[dir];
++
++			/* each side of this square has length 'dist' */
++			for (uint a = 0; a < dist; a++) {
++				/* MP_VOID tiles are not checked (interval is [min; max) for IsInsideMM())*/
++				if (IsInsideMM(x, min_xy, max_x) && IsInsideMM(y, min_xy, max_y)) {
++					TileIndex t = TileXY(x, y);
++					if (IsTileType(t, MP_WATER) == water) return dist;
++				}
++				x += dx;
++				y += dy;
++			}
++		}
++	}
++
++	if (!water) {
++		/* no land found - is this a water-only map? */
++		for (TileIndex t = 0; t < MapSize(); t++) {
++			if (!IsTileType(t, MP_VOID) && !IsTileType(t, MP_WATER)) return 0x1FF;
++		}
++	}
++
++	return max_dist;
++}
+Index: src/newgrf_industries.cpp
+===================================================================
+--- src/newgrf_industries.cpp	(revision 15508)
++++ src/newgrf_industries.cpp	(working copy)
+@@ -36,62 +36,6 @@
+ 	return _industry_mngr.GetID(GB(grf_type, 0, 6), grf_id);
+ }
+ 
+-/**
+- * Finds the distance for the closest tile with water/land given a tile
+- * @param tile  the tile to find the distance too
+- * @param water whether to find water or land
+- * @return distance to nearest water (max 0x7F) / land (max 0x1FF; 0x200 if there is no land)
+- * @note FAILS when an industry should be seen as water
+- */
+-static uint GetClosestWaterDistance(TileIndex tile, bool water)
+-{
+-	if (IsTileType(tile, MP_WATER) == water) return 0;
+-
+-	uint max_dist = water ? 0x7F : 0x200;
+-
+-	int x = TileX(tile);
+-	int y = TileY(tile);
+-
+-	uint max_x = MapMaxX();
+-	uint max_y = MapMaxY();
+-	uint min_xy = _settings_game.construction.freeform_edges ? 1 : 0;
+-
+-	/* go in a 'spiral' with increasing manhattan distance in each iteration */
+-	for (uint dist = 1; dist < max_dist; dist++) {
+-		/* next 'diameter' */
+-		y--;
+-
+-		/* going counter-clockwise around this square */
+-		for (DiagDirection dir = DIAGDIR_BEGIN; dir < DIAGDIR_END; dir++) {
+-			static const int8 ddx[DIAGDIR_END] = { -1,  1,  1, -1};
+-			static const int8 ddy[DIAGDIR_END] = {  1,  1, -1, -1};
+-
+-			int dx = ddx[dir];
+-			int dy = ddy[dir];
+-
+-			/* each side of this square has length 'dist' */
+-			for (uint a = 0; a < dist; a++) {
+-				/* MP_VOID tiles are not checked (interval is [min; max) for IsInsideMM())*/
+-				if (IsInsideMM(x, min_xy, max_x) && IsInsideMM(y, min_xy, max_y)) {
+-					TileIndex t = TileXY(x, y);
+-					if (IsTileType(t, MP_WATER) == water) return dist;
+-				}
+-				x += dx;
+-				y += dy;
+-			}
+-		}
+-	}
+-
+-	if (!water) {
+-		/* no land found - is this a water-only map? */
+-		for (TileIndex t = 0; t < MapSize(); t++) {
+-			if (!IsTileType(t, MP_VOID) && !IsTileType(t, MP_WATER)) return 0x1FF;
+-		}
+-	}
+-
+-	return max_dist;
+-}
+-
+ /** Make an analysis of a tile and check for its belonging to the same
+  * industry, and/or the same grf file
+  * @param tile TileIndex of the tile to query

@@ -1,0 +1,112 @@
+Index: src/network/network_gui.cpp
+===================================================================
+--- src/network/network_gui.cpp	(revision 14004)
++++ src/network/network_gui.cpp	(working copy)
+@@ -130,6 +130,7 @@
+ 	byte field;                  ///< selected text-field
+ 	NetworkGameList *server;     ///< selected server
+ 	GUIGameServerList servers;   ///< list with game servers.
++	uint server_pos;             ///< position of the selected server
+ 
+ 	/**
+ 	 * (Re)build the network game list as its amount has changed because
+@@ -220,12 +221,15 @@
+ 
+ 		/* After sorting ngl->sort_list contains the sorted items. Put these back
+ 		 * into the original list. Basically nothing has changed, we are only
+-		 * shuffling the ->next pointers */
++		 * shuffling the ->next pointers. While iterating, look for the
++		 * currently selected server and set server_pos to its position */
++		this->server_pos = 0;
+ 		_network_game_list = this->servers[0];
+ 		NetworkGameList *item = _network_game_list;
+ 		for (uint i = 1; i != this->servers.Length(); i++) {
+ 			item->next = this->servers[i];
+ 			item = item->next;
++			if (item == this->server) server_pos = i;
+ 		}
+ 		item->next = NULL;
+ 	}
+@@ -287,6 +291,24 @@
+ 		}
+ 	}
+ 
++	/**
++	 * Scroll the list up or down to the currently selected server.
++	 * If the server is below the currently displayed servers, it will
++	 * scroll down an amount so that the server appears at the bottom.
++	 * If the server is above the currently displayed servers, it will
++	 * scroll up so that the server appears at the top.
++	 */
++	void ScrollToSelectedServer()
++	{
++		if (this->server_pos < this->vscroll.pos) {
++			/* scroll up to the server */
++			this->vscroll.pos = this->server_pos;
++		} else if (this->server_pos >= this->vscroll.pos + this->vscroll.cap) {
++			/* scroll down so that the server is at the bottom */
++			this->vscroll.pos = this->server_pos - this->vscroll.cap + 1;
++		}
++	}
++
+ public:
+ 	NetworkGameWindow(const WindowDesc *desc) : QueryStringBaseWindow(desc)
+ 	{
+@@ -301,6 +323,7 @@
+ 
+ 		this->field = NGWW_PLAYER;
+ 		this->server = NULL;
++		this->server_pos = 0;
+ 
+ 		this->servers.SetListing(this->last_sorting);
+ 		this->servers.SetSortFuncs(this->sorter_funcs);
+@@ -484,6 +507,7 @@
+ 				id_v += this->vscroll.pos;
+ 
+ 				this->server = (id_v < this->servers.Length()) ? this->servers[id_v] : NULL;
++				if (this->server != NULL) this->server_pos = id_v;
+ 				this->SetDirty();
+ 			} break;
+ 
+@@ -491,6 +515,15 @@
+ 				NetworkGameList *last_joined = NetworkGameListAddItem(inet_addr(_settings_client.network.last_host), _settings_client.network.last_port);
+ 				if (last_joined != NULL) {
+ 					this->server = last_joined;
++
++					/* search the position of the newly selected server */
++					for (uint i = 0; i < this->servers.Length(); i++) {
++						if (this->servers[i] == this->server) {
++							this->server_pos = i;
++							break;
++						}
++					}
++					this->ScrollToSelectedServer();
+ 					this->SetDirty();
+ 				}
+ 			} break;
+@@ -563,6 +596,25 @@
+ 	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+ 	{
+ 		EventState state = ES_NOT_HANDLED;
++
++		/* scroll through server list */
++		if (keycode == WKC_UP || keycode == WKC_DOWN) {
++			/* if no server is currently selected, return */
++			if (this->server == NULL) return ES_HANDLED;
++			
++			/* go up or down by one respectively */
++			if (keycode == WKC_UP && this->server_pos > 0) this->server_pos--;
++			if (keycode == WKC_DOWN && this->server_pos < this->servers.Length() - 1) this->server_pos++;
++			this->server = this->servers[server_pos];
++
++			/* scroll to the new server if it is outside the current range */
++			this->ScrollToSelectedServer();
++
++			/* redraw window */
++			this->SetDirty();
++			return ES_HANDLED;
++		}
++
+ 		if (this->field != NGWW_PLAYER) {
+ 			if (this->server != NULL) {
+ 				if (keycode == WKC_DELETE) { // Press 'delete' to remove servers

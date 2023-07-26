@@ -1,0 +1,259 @@
+Index: src/music_gui.cpp
+===================================================================
+--- src/music_gui.cpp	(revision 14286)
++++ src/music_gui.cpp	(working copy)
+@@ -15,6 +15,7 @@
+ #include "gfx_func.h"
+ #include "core/math_func.hpp"
+ #include "core/random_func.hpp"
++#include "settings_type.h"
+ 
+ #include "table/strings.h"
+ #include "table/sprites.h"
+@@ -486,10 +487,19 @@
+ 					x -= 106;
+ 				}
+ 
+-				new_vol = min(max(x - 21, 0) * 2, 127);
++				new_vol = min(max(x - 21, 0) * 2, 128);
+ 				if (new_vol != *vol) {
+ 					*vol = new_vol;
+-					if (vol == &msf.music_vol) MusicVolumeChanged(new_vol);
++					if (vol == &msf.music_vol)
++					{
++						MusicVolumeChanged(new_vol);
++						_settings_client.gui.volume_music = new_vol * 100 / 128;
++					}
++					else
++					{
++						_settings_client.gui.volume_effects_main = new_vol * 100 / 128;
++					}
++					InvalidateWindowClasses(WC_GAME_OPTIONS);
+ 					this->SetDirty();
+ 				}
+ 
+Index: src/openttd.cpp
+===================================================================
+--- src/openttd.cpp	(revision 14286)
++++ src/openttd.cpp	(working copy)
+@@ -1,5 +1,3 @@
+-/* $Id$ */
+-
+ /** @file openttd.cpp Functions related to starting OpenTTD. */
+ 
+ #include "stdafx.h"
+@@ -602,6 +600,10 @@
+ 	/* Initialize the zoom level of the screen to normal */
+ 	_screen.zoom = ZOOM_LVL_NORMAL;
+ 
++	/* overwrite the volume values from advanced settings to keep values in sync */
++	msf.effect_vol = _settings_client.gui.volume_effects_main * 128 / 100;
++	msf.music_vol = _settings_client.gui.volume_music * 128 / 100;
++
+ 	/* restore saved music volume */
+ 	_music_driver->SetVolume(msf.music_vol);
+ 
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 14286)
++++ src/settings.cpp	(working copy)
+@@ -1087,6 +1087,21 @@
+ 	return 0;
+ }
+ 
++static int32 MusicVolumeUpdate(int i)
++{
++	msf.music_vol = i * 128 / 100;
++	_music_driver->SetVolume(msf.music_vol);
++	InvalidateWindowClasses(WC_MUSIC_WINDOW);
++	return 0;
++}
++
++static int32 EffectsMainVolumeUpdate(int i)
++{
++	msf.effect_vol = i * 128 / 100;
++	InvalidateWindowClasses(WC_MUSIC_WINDOW);
++	return 0;
++}
++
+ #ifdef ENABLE_NETWORK
+ 
+ static int32 UpdateMinPlayers(int32 p1)
+@@ -1130,8 +1145,8 @@
+ 
+ static const SettingDesc _music_settings[] = {
+ 	 SDT_VAR(MusicFileSettings, playlist,   SLE_UINT8, S, 0,   0, 0,   5, 1,  STR_NULL, NULL),
+-	 SDT_VAR(MusicFileSettings, music_vol,  SLE_UINT8, S, 0, 128, 0, 100, 1,  STR_NULL, NULL),
+-	 SDT_VAR(MusicFileSettings, effect_vol, SLE_UINT8, S, 0, 128, 0, 100, 1,  STR_NULL, NULL),
++	 SDT_VAR(MusicFileSettings, music_vol,  SLE_UINT8, S, 0, 128, 0, 128, 1,  STR_NULL, NULL),
++	 SDT_VAR(MusicFileSettings, effect_vol, SLE_UINT8, S, 0, 128, 0, 128, 1,  STR_NULL, NULL),
+ 	SDT_LIST(MusicFileSettings, custom_1,   SLE_UINT8, S, 0, NULL,            STR_NULL, NULL),
+ 	SDT_LIST(MusicFileSettings, custom_2,   SLE_UINT8, S, 0, NULL,            STR_NULL, NULL),
+ 	SDT_BOOL(MusicFileSettings, playing,               S, 0, true,            STR_NULL, NULL),
+@@ -1456,6 +1471,12 @@
+ 	  SDTC_VAR(gui.default_signal_type,       SLE_UINT8, S, MS,     0,        0,        2, 1, STR_CONFIG_PATCHES_DEFAULT_SIGNAL_TYPE,         NULL),
+ 	  SDTC_VAR(gui.cycle_signal_types,        SLE_UINT8, S, MS,     0,        0,        2, 1, STR_CONFIG_PATCHES_CYCLE_SIGNAL_TYPES,          NULL),
+ 
++	  SDTC_VAR(gui.volume_music,              SLE_UINT8, S,  0,   100,        0,      100, 10, STR_CONFIG_PATCHES_VOLUME_MUSIC,               MusicVolumeUpdate),
++	  SDTC_VAR(gui.volume_effects_main,       SLE_UINT8, S,  0,   100,        0,      100, 10, STR_CONFIG_PATCHES_VOLUME_EFFECTS_MAIN,        EffectsMainVolumeUpdate),
++	  SDTC_VAR(gui.volume_effects_vehicles,   SLE_UINT8, S,  0,   100,        0,      100, 10, STR_CONFIG_PATCHES_VOLUME_EFFECTS_VEHICLES,    NULL),
++	  SDTC_VAR(gui.volume_effects_tiles,      SLE_UINT8, S,  0,   100,        0,      100, 10, STR_CONFIG_PATCHES_VOLUME_EFFECTS_TILES,       NULL),
++	  SDTC_VAR(gui.volume_effects_misc,       SLE_UINT8, S,  0,   100,        0,      100, 10, STR_CONFIG_PATCHES_VOLUME_EFFECTS_MISC,        NULL),
++
+ 	  SDTC_VAR(gui.console_backlog_timeout,  SLE_UINT16, S,  0,   100,       10,    65500, 0, STR_NULL,                                       NULL),
+ 	  SDTC_VAR(gui.console_backlog_length,   SLE_UINT16, S,  0,   100,       10,    65500, 0, STR_NULL,                                       NULL),
+ #ifdef ENABLE_NETWORK
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 14286)
++++ src/settings_gui.cpp	(working copy)
+@@ -614,6 +614,11 @@
+ 	"gui.default_rail_type",
+ 	"gui.always_build_infrastructure",
+ 	"gui.show_track_reservation",
++	"gui.volume_music",
++	"gui.volume_effects_main",
++	"gui.volume_effects_vehicles",
++	"gui.volume_effects_tiles",
++	"gui.volume_effects_misc",
+ };
+ 
+ static const char *_patches_construction[] = {
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 14286)
++++ src/settings_type.h	(working copy)
+@@ -83,6 +83,12 @@
+ 	uint8  default_signal_type;              ///< the signal type to build by default.
+ 	uint8  cycle_signal_types;               ///< what signal types to cycle with the build signal tool.
+ 
++	uint8 volume_music;                      ///< music volume (percent)
++	uint8 volume_effects_main;               ///< main effect volume (percent)
++	uint8 volume_effects_vehicles;           ///< volume of effects played by SndPlayVehicleFx() (percent)
++	uint8 volume_effects_tiles;              ///< volume of effects played by SndPlayTileFx() (percent)
++	uint8 volume_effects_misc;               ///< volume of effects played by SndPlayFx() (percent)
++
+ 	uint16 console_backlog_timeout;          ///< the minimum amount of time items should be in the console backlog before they will be removed in ~3 seconds granularity.
+ 	uint16 console_backlog_length;           ///< the minimum amount of items in the console backlog before items will be removed.
+ #ifdef ENABLE_NETWORK
+Index: src/sound.cpp
+===================================================================
+--- src/sound.cpp	(revision 14286)
++++ src/sound.cpp	(working copy)
+@@ -15,6 +15,7 @@
+ #include "map_func.h"
+ #include "vehicle_base.h"
+ #include "debug.h"
++#include "settings_type.h"
+ 
+ static uint _file_count;
+ static FileEntry *_files;
+@@ -214,12 +215,13 @@
+  * @param right  Right edge of virtual coordinates where the sound is produced
+  * @param top    Top edge of virtual coordinates where the sound is produced
+  * @param bottom Bottom edge of virtual coordinates where the sound is produced
++ * @param volume Volume of the sound effect in percent (0..100)
+  */
+-static void SndPlayScreenCoordFx(SoundFx sound, int left, int right, int top, int bottom)
++static void SndPlayScreenCoordFx(SoundFx sound, int left, int right, int top, int bottom, uint8 volume)
+ {
+ 	Window* const *wz;
+ 
+-	if (msf.effect_vol == 0) return;
++	if (msf.effect_vol == 0 || volume == 0) return;
+ 
+ 	FOR_ALL_WINDOWS(wz) {
+ 		const ViewPort *vp = (*wz)->viewport;
+@@ -234,7 +236,7 @@
+ 			StartSound(
+ 				sound,
+ 				panning,
+-				(msf.effect_vol * _vol_factor_by_zoom[vp->zoom - ZOOM_LVL_BEGIN]) / 256
++				(msf.effect_vol * _vol_factor_by_zoom[vp->zoom - ZOOM_LVL_BEGIN]) / 256 * volume / 100
+ 			);
+ 			return;
+ 		}
+@@ -243,6 +245,7 @@
+ 
+ void SndPlayTileFx(SoundFx sound, TileIndex tile)
+ {
++	if (msf.effect_vol == 0 || _settings_client.gui.volume_effects_tiles == 0) return;
+ 	/* emits sound from center of the tile */
+ 	int x = TileX(tile) * TILE_SIZE + TILE_SIZE / 2;
+ 	int y = TileY(tile) * TILE_SIZE - TILE_SIZE / 2;
+@@ -250,18 +253,21 @@
+ 	Point pt = RemapCoords(x, y, z);
+ 	y += 2 * TILE_SIZE;
+ 	Point pt2 = RemapCoords(x, y, GetSlopeZ(x, y));
+-	SndPlayScreenCoordFx(sound, pt.x, pt2.x, pt.y, pt2.y);
++	SndPlayScreenCoordFx(sound, pt.x, pt2.x, pt.y, pt2.y, _settings_client.gui.volume_effects_tiles);
+ }
+ 
+ void SndPlayVehicleFx(SoundFx sound, const Vehicle *v)
+ {
++	if (msf.effect_vol == 0 || _settings_client.gui.volume_effects_vehicles == 0) return;
+ 	SndPlayScreenCoordFx(sound,
+ 		v->left_coord, v->right_coord,
+-		v->top_coord, v->top_coord
++		v->top_coord, v->top_coord,
++		_settings_client.gui.volume_effects_vehicles
+ 	);
+ }
+ 
+ void SndPlayFx(SoundFx sound)
+ {
+-	StartSound(sound, 0, msf.effect_vol);
++	if (msf.effect_vol == 0 || _settings_client.gui.volume_effects_misc == 0) return;
++	StartSound(sound, 0, msf.effect_vol * _settings_client.gui.volume_effects_misc / 100);
+ }
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 14286)
++++ src/lang/english.txt	(working copy)
+@@ -1237,6 +1237,12 @@
+ STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS_NPF                     :NPF
+ STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS_YAPF                    :YAPF {RED}(Not recommended)
+ 
++STR_CONFIG_PATCHES_VOLUME_MUSIC                                 :{LTBLUE}Main volume for music: {ORANGE}{STRING1}%
++STR_CONFIG_PATCHES_VOLUME_EFFECTS_MAIN                          :{LTBLUE}Main volume for sound effects: {ORANGE}{STRING1}%
++STR_CONFIG_PATCHES_VOLUME_EFFECTS_VEHICLES                      :{LTBLUE}Volume of vehicle sound effects: {ORANGE}{STRING1}%
++STR_CONFIG_PATCHES_VOLUME_EFFECTS_TILES                         :{LTBLUE}Volume of world sound effects: {ORANGE}{STRING1}%
++STR_CONFIG_PATCHES_VOLUME_EFFECTS_MISC                          :{LTBLUE}Volume of miscellaneous sound effects: {ORANGE}{STRING1}%
++
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :Sub-tropical landscape
+Index: src/lang/english_US.txt
+===================================================================
+--- src/lang/english_US.txt	(revision 14286)
++++ src/lang/english_US.txt	(working copy)
+@@ -1194,6 +1194,12 @@
+ STR_CONFIG_PATCHES_QUERY_CAPT                                   :{WHITE}Change setting value
+ STR_CONFIG_PATCHES_SERVICE_INTERVAL_INCOMPATIBLE                :{WHITE}Some or all of the default service interval(s) below are incompatible with chosen setting! 5-90% and 30-800 days are valid
+ 
++STR_CONFIG_PATCHES_VOLUME_MUSIC                                 :{LTBLUE}Main volume for music: {ORANGE}{STRING1}%
++STR_CONFIG_PATCHES_VOLUME_EFFECTS_MAIN                          :{LTBLUE}Main volume for sound effects: {ORANGE}{STRING1}%
++STR_CONFIG_PATCHES_VOLUME_EFFECTS_VEHICLES                      :{LTBLUE}Volume of vehicle sound effects: {ORANGE}{STRING1}%
++STR_CONFIG_PATCHES_VOLUME_EFFECTS_TILES                         :{LTBLUE}Volume of world sound effects: {ORANGE}{STRING1}%
++STR_CONFIG_PATCHES_VOLUME_EFFECTS_MISC                          :{LTBLUE}Volume of miscellaneous sound effects: {ORANGE}{STRING1}%
++
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :Sub-tropical landscape
+Index: src/lang/hungarian.txt
+===================================================================
+--- src/lang/hungarian.txt	(revision 14286)
++++ src/lang/hungarian.txt	(working copy)
+@@ -1277,6 +1277,12 @@
+ STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS_NPF                     :NPF
+ STR_CONFIG_PATCHES_PATHFINDER_FOR_SHIPS_YAPF                    :YAPF {RED}(Ellenjavallt)
+ 
++STR_CONFIG_PATCHES_VOLUME_MUSIC                                 :{LTBLUE}Zene hangereje: {ORANGE}{STRING1}%
++STR_CONFIG_PATCHES_VOLUME_EFFECTS_MAIN                          :{LTBLUE}Hangeffektek fő hangereje: {ORANGE}{STRING1}%
++STR_CONFIG_PATCHES_VOLUME_EFFECTS_VEHICLES                      :{LTBLUE}Járművek hangereje: {ORANGE}{STRING1}%
++STR_CONFIG_PATCHES_VOLUME_EFFECTS_TILES                         :{LTBLUE}Világ és települések hangereje: {ORANGE}{STRING1}%
++STR_CONFIG_PATCHES_VOLUME_EFFECTS_MISC                          :{LTBLUE}Egyéb hangok hangereje: {ORANGE}{STRING1}%
++
+ STR_TEMPERATE_LANDSCAPE                                         :mérsékelt táj
+ STR_SUB_ARCTIC_LANDSCAPE                                        :sarkköri táj
+ STR_SUB_TROPICAL_LANDSCAPE                                      :trópusi táj

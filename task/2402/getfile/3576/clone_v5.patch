@@ -1,0 +1,310 @@
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revision 14574)
++++ src/command.cpp	(working copy)
+@@ -21,6 +21,7 @@
+ #include "company_func.h"
+ #include "company_base.h"
+ #include "signal_func.h"
++#include "depot_type.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -543,11 +544,12 @@
+ 	_docommand_recursive = 1;
+ 
+ 	/* cost estimation only? */
+-	if (!IsGeneratingWorld() &&
++	if (((cmd & 0xFF) == CMD_CLONE_VEHICLE && (p2 & 3) == CLONE_METHOD_ESTIMATE) ||
++			(!IsGeneratingWorld() &&
+ 			_shift_pressed &&
+ 			IsLocalCompany() &&
+ 			!(cmd & (CMD_NETWORK_COMMAND | CMD_SHOW_NO_ERROR)) &&
+-			(cmd & 0xFF) != CMD_PAUSE) {
++			(cmd & 0xFF) != CMD_PAUSE)) {
+ 		/* estimate the cost. */
+ 		SetTownRatingTestMode(true);
+ 		res = proc(tile, flags, p1, p2);
+Index: src/depot_gui.cpp
+===================================================================
+--- src/depot_gui.cpp	(revision 14574)
++++ src/depot_gui.cpp	(working copy)
+@@ -56,6 +56,7 @@
+ 	DEPOT_WIDGET_STOP_ALL,
+ 	DEPOT_WIDGET_START_ALL,
+ 	DEPOT_WIDGET_RESIZE,
++	DEPOT_WIDGET_CLONE_PROMPT,
+ };
+ 
+ /* Widget array for all depot windows.
+@@ -243,13 +244,21 @@
+ 	bool generate_list;
+ 	VehicleList vehicle_list;
+ 	VehicleList wagon_list;
+-
++	DepotWindowWidgets query_widget;
++	
++	const Vehicle *clone_veh;
++	CloneMethods clone_method;
++	StringID clone_error_id;
++	uint mouse_events_since_cloning;
++	
+ 	DepotWindow(const WindowDesc *desc, WindowNumber window_number) : Window(desc, window_number)
+ 	{
+ 		this->sel = INVALID_VEHICLE;
+ 		this->generate_list = true;
+ 
+ 		this->FindWindowPlacementAndResize(desc);
++
++		this->mouse_events_since_cloning = 0;
+ 	}
+ 
+ 	~DepotWindow()
+@@ -552,15 +561,58 @@
+ 		}
+ 	}
+ 
++	virtual void OnQueryTextFinished(char *str)
++	{
++		if (str == NULL) return;
++
++		switch (this->query_widget) {
++			default: NOT_REACHED();
++
++			case DEPOT_WIDGET_CLONE_PROMPT:
++				if (str[0] < '0'|| str[0] > '9') break;
++				uint num;
++				sscanf(str, "%u", &num);
++				if (num > 0) this->HandleCloneVeh(clone_veh, num, clone_method);
++				break;
++		}
++	}
++
++	enum {
++		MAX_LENGTH_CLONE_VEH_BYTES  = 3,
++		MAX_LENGTH_CLONE_VEH_PIXELS = 50,
++	};
++
+ 	/**
+ 	* Clones a vehicle
+ 	* @param *v is the original vehicle to clone
+-	* @param *w is the window of the depot where the clone is build
++	* @param num is the number of clones to build
++	* @param method tells how to clone
+ 	*/
++	void HandleCloneVeh(const Vehicle *v, uint num, CloneMethods method)
++	{
++		/* Player might lose the vehicle he is trying to clone */
++		if (v == NULL || !v->IsValid()) {
++			ShowErrorMessage(this->clone_error_id, 0, 0, 0);
++			return;
++		}
++
++		if (!v->IsPrimaryVehicle()) {
++			v = v->First();
++			/* Do nothing when clicking on a train in depot with no loc attached */
++			if (v->type == VEH_TRAIN && !IsFrontEngine(v)) return;
++		}
++
++		uint error_str = CMD_MSG(this->clone_error_id);
++		DoCommandP(this->window_number, v->index, ((num - 1) << 2) + method, CcCloneVehicle, CMD_CLONE_VEHICLE | error_str);
++	}
++
++	/**
++	* Shows the clone vehicles prompt on double click, otherwise use the old method
++	* @param *v is the original vehicle to clone
++	* @param *w is the window of the depot where the clone is to be built
++	*/
+ 	void HandleCloneVehClick(const Vehicle *v, const Window *w)
+ 	{
+-		uint error_str;
+-
+ 		if (v == NULL) return;
+ 
+ 		if (!v->IsPrimaryVehicle()) {
+@@ -570,15 +622,32 @@
+ 		}
+ 
+ 		switch (v->type) {
+-			case VEH_TRAIN:    error_str = CMD_MSG(STR_882B_CAN_T_BUILD_RAILROAD_VEHICLE); break;
+-			case VEH_ROAD:     error_str = CMD_MSG(STR_9009_CAN_T_BUILD_ROAD_VEHICLE);     break;
+-			case VEH_SHIP:     error_str = CMD_MSG(STR_980D_CAN_T_BUILD_SHIP);             break;
+-			case VEH_AIRCRAFT: error_str = CMD_MSG(STR_A008_CAN_T_BUILD_AIRCRAFT);         break;
++			case VEH_TRAIN:    this->clone_error_id = STR_882B_CAN_T_BUILD_RAILROAD_VEHICLE; break;
++			case VEH_ROAD:     this->clone_error_id = STR_9009_CAN_T_BUILD_ROAD_VEHICLE;     break;
++			case VEH_SHIP:     this->clone_error_id = STR_980D_CAN_T_BUILD_SHIP;             break;
++			case VEH_AIRCRAFT: this->clone_error_id = STR_A008_CAN_T_BUILD_AIRCRAFT;         break;
+ 			default: return;
+ 		}
+ 
+-		DoCommandP(this->window_number, v->index, _ctrl_pressed ? 1 : 0, CcCloneVehicle, CMD_CLONE_VEHICLE | error_str);
++		this->clone_veh = v;
++		this->clone_method = _shift_pressed ? CLONE_METHOD_ESTIMATE : _ctrl_pressed ? CLONE_METHOD_REAL_SHARED : CLONE_METHOD_REAL;
+ 
++		StringID caption;
++		switch (this->clone_method) {
++			case CLONE_METHOD_REAL:        caption = STR_CLONE_VEH_CAPTION_REAL;        break;
++			case CLONE_METHOD_REAL_SHARED: caption = STR_CLONE_VEH_CAPTION_REAL_SHARED; break;
++			case CLONE_METHOD_ESTIMATE:    caption = STR_CLONE_VEH_CAPTION_ESTIMATE;    break;
++			default: NOT_REACHED();
++		}
++		
++		this->query_widget = DEPOT_WIDGET_CLONE_PROMPT;
++		if (this->mouse_events_since_cloning < 2) {
++			this->HandleCloneVeh(this->clone_veh, 1, this->clone_method);
++		} else {
++			ShowQueryString(STR_EMPTY, caption, MAX_LENGTH_CLONE_VEH_BYTES, MAX_LENGTH_CLONE_VEH_PIXELS, this, CS_NUMERAL, QSF_ACCEPT_UNCHANGED);
++		}
++		this->mouse_events_since_cloning = 0;
++
+ 		ResetObjectToPlace();
+ 	}
+ 
+@@ -763,7 +832,7 @@
+ 		DrawDepotWindow(this);
+ 	}
+ 
+-	virtual void OnClick(Point pt, int widget)
++	void HandleClick(Point pt, int widget, bool double_click)
+ 	{
+ 		switch (widget) {
+ 			case DEPOT_WIDGET_MATRIX: // List
+@@ -785,12 +854,15 @@
+ 						SPR_CURSOR_CLONE_SHIP, SPR_CURSOR_CLONE_AIRPLANE
+ 					};
+ 
++					/* combine fast consecutive single clicks into a double click */
++					this->mouse_events_since_cloning += uint(double_click) + 1;
++					
+ 					_place_clicked_vehicle = NULL;
+ 					SetObjectToPlaceWnd(clone_icons[this->type], PAL_NONE, VHM_RECT, this);
+ 				} else {
+ 					ResetObjectToPlace();
+ 				}
+-					break;
++				break;
+ 
+ 			case DEPOT_WIDGET_LOCATION:
+ 				if (_ctrl_pressed) {
+@@ -838,6 +910,16 @@
+ 		}
+ 	}
+ 
++	virtual void OnClick(Point pt, int widget)
++	{
++		this->HandleClick(pt, widget, false);
++	}
++
++	virtual void OnDoubleClick(Point pt, int widget)
++	{
++		this->HandleClick(pt, widget, true);
++	}
++
+ 	virtual void OnRightClick(Point pt, int widget)
+ 	{
+ 		if (widget != DEPOT_WIDGET_MATRIX) return;
+Index: src/depot_type.h
+===================================================================
+--- src/depot_type.h	(revision 14574)
++++ src/depot_type.h	(working copy)
+@@ -8,4 +8,10 @@
+ typedef uint16 DepotID;
+ struct Depot;
+ 
++enum CloneMethods {
++	CLONE_METHOD_REAL = 0,
++	CLONE_METHOD_REAL_SHARED = 1,
++	CLONE_METHOD_ESTIMATE = 2,
++};
++
+ #endif /* DEPOT_TYPE_H */
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 14574)
++++ src/lang/english.txt	(working copy)
+@@ -2814,13 +2814,16 @@
+ STR_881E_NEW_MAGLEV_VEHICLES                                    :{WHITE}New Maglev Vehicles
+ STR_ALL_AVAIL_RAIL_VEHICLES                                     :{WHITE}Rail Vehicles
+ 
++STR_CLONE_VEH_CAPTION_REAL                                      :{BLACK}Clone
++STR_CLONE_VEH_CAPTION_REAL_SHARED                               :{BLACK}Clone with shared orders
++STR_CLONE_VEH_CAPTION_ESTIMATE                                  :{BLACK}Estimate cost of cloning
+ STR_881F_BUILD_VEHICLE                                          :{BLACK}Build Vehicle
+ STR_CLONE_ROAD_VEHICLE                                          :{BLACK}Clone Vehicle
+ STR_CLONE_ROAD_VEHICLE_INFO                                     :{BLACK}This will build a copy of the road vehicle. Control-click will share the orders
+-STR_CLONE_ROAD_VEHICLE_DEPOT_INFO                               :{BLACK}This will build a copy of a road vehicle. Click this button and then on a road vehicle inside or outside the depot. Control-click will share the orders
++STR_CLONE_ROAD_VEHICLE_DEPOT_INFO                               :{BLACK}This will build a copy of a road vehicle. Click this button and then on a road vehicle inside or outside the depot. Control-click will share the orders. Double-click to build N clones.
+ STR_CLONE_TRAIN                                                 :{BLACK}Clone Train
+ STR_CLONE_TRAIN_INFO                                            :{BLACK}This will build a copy of the train including all cars. Control-click will share the orders
+-STR_CLONE_TRAIN_DEPOT_INFO                                      :{BLACK}This will build a copy of a train including all cars. Click this button and then on a train inside or outside the depot. Control-click will share the orders
++STR_CLONE_TRAIN_DEPOT_INFO                                      :{BLACK}This will build a copy of a train including all cars. Click this button and then on a train inside or outside the depot. Control-click will share the orders. Double-click to build N clones.
+ STR_8820_RENAME                                                 :{BLACK}Rename
+ STR_8823_SKIP                                                   :{BLACK}Skip
+ STR_8824_DELETE                                                 :{BLACK}Delete
+@@ -3022,7 +3025,7 @@
+ STR_9809_BUILD_SHIP                                             :{BLACK}Build Ship
+ STR_CLONE_SHIP                                                  :{BLACK}Clone Ship
+ STR_CLONE_SHIP_INFO                                             :{BLACK}This will build a copy of the ship. Control-click will share the orders
+-STR_CLONE_SHIP_DEPOT_INFO                                       :{BLACK}This will build a copy of a ship. Click this button and then on a ship inside or outside the depot. Control-click will share the orders
++STR_CLONE_SHIP_DEPOT_INFO                                       :{BLACK}This will build a copy of a ship. Click this button and then on a ship inside or outside the depot. Control-click will share the orders. Double-click to build N clones.
+ STR_980B_SHIP_MUST_BE_STOPPED_IN                                :{WHITE}Ship must be stopped in depot
+ STR_980C_CAN_T_SELL_SHIP                                        :{WHITE}Can't sell ship...
+ STR_980D_CAN_T_BUILD_SHIP                                       :{WHITE}Can't build ship...
+@@ -3089,7 +3092,7 @@
+ STR_A003_NEW_AIRCRAFT                                           :{BLACK}New Aircraft
+ STR_CLONE_AIRCRAFT                                              :{BLACK}Clone Aircraft
+ STR_CLONE_AIRCRAFT_INFO                                         :{BLACK}This will build a copy of the aircraft. Control-click will share the orders
+-STR_CLONE_AIRCRAFT_INFO_HANGAR_WINDOW                           :{BLACK}This will build a copy of an aircraft. Click this button and then on an aircraft inside or outside the hangar. Control-click will share the orders
++STR_CLONE_AIRCRAFT_INFO_HANGAR_WINDOW                           :{BLACK}This will build a copy of an aircraft. Click this button and then on an aircraft inside or outside the hangar. Control-click will share the orders. Double-click to build N clones.
+ STR_A005_NEW_AIRCRAFT                                           :{WHITE}New Aircraft
+ STR_A006_BUILD_AIRCRAFT                                         :{BLACK}Build Aircraft
+ STR_A008_CAN_T_BUILD_AIRCRAFT                                   :{WHITE}Can't build aircraft...
+Index: src/vehicle.cpp
+===================================================================
+--- src/vehicle.cpp	(revision 14574)
++++ src/vehicle.cpp	(working copy)
+@@ -1315,10 +1315,15 @@
+  * @param tile tile of the depot where the cloned vehicle is build
+  * @param flags type of operation
+  * @param p1 the original vehicle's index
+- * @param p2 1 = shared orders, else copied orders
++ * @param p2: bit0 = shared orders or not
++              bit1 = just estimating cost (irrelevant here)
++			  others = number of clones - 1
+  */
+ CommandCost CmdCloneVehicle(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
+ {
++	uint num_clones = (p2 >> 2) + 1;
++	p2 &= 1;
++
+ 	CommandCost total_cost(EXPENSES_NEW_VEHICLES);
+ 	uint32 build_argument = 2;
+ 
+@@ -1465,7 +1470,8 @@
+ 
+ 	/* Since we can't estimate the cost of cloning a vehicle accurately we must
+ 	 * check whether the company has enough money manually. */
+-	if (!CheckCompanyHasMoney(total_cost)) {
++	CommandCost all_clones = total_cost;
++	if (!CheckCompanyHasMoney(all_clones.MultiplyCost(num_clones))) {
+ 		if (flags & DC_EXEC) {
+ 			/* The vehicle has already been bought, so now it must be sold again. */
+ 			DoCommand(w_front->tile, w_front->index, 1, flags, GetCmdSellVeh(w_front));
+@@ -1473,6 +1479,17 @@
+ 		return CMD_ERROR;
+ 	}
+ 
++	/* Recursively try to build all num_clones clones. If one of them fails then undo all */
++	if (num_clones > 1) {
++		p2 = ((num_clones - 2) << 2) + p2;
++		CommandCost extra_cost = CmdCloneVehicle(tile, flags, p1, p2);
++		if (!extra_cost.Succeeded()) {
++			DoCommand(w_front->tile, w_front->index, 1, flags, GetCmdSellVeh(w_front));
++			return CMD_ERROR;
++		} else {
++			total_cost.AddCost(extra_cost);
++		}
++	}
+ 	return total_cost;
+ }
+ 

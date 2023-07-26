@@ -1,0 +1,132 @@
+Index: video/cocoa_v.m
+===================================================================
+--- video/cocoa_v.m	(revision 3307)
++++ video/cocoa_v.m	(working copy)
+@@ -175,11 +175,12 @@
+ 	uint32 palette32[256];
+ } _cocoa_video_data;
+ 
++static bool _cocoa_video_started = false;
++static bool _cocoa_video_dialog = false;
+ 
+ 
+ 
+ 
+-
+ /******************************************************************************************
+  *                             Game loop and accessories                                  *
+  ******************************************************************************************/
+@@ -1872,7 +1873,7 @@
+ /* Called when the internal event loop has just started running */
+ - (void) applicationDidFinishLaunching: (NSNotification *) note
+ {
+-    /* Hand off to main application code */
++	/* Hand off to main application code */
+ 	QZ_GameLoop();
+ 
+ 	/* We're done, thank you for playing */
+@@ -2007,10 +2008,15 @@
+ {
+ 	DEBUG(driver, 1)("cocoa_v: CocoaVideoStop");
+ 
++	if(!_cocoa_video_started)
++		return;
++
+ 	if(_cocoa_video_data.isset)
+ 		QZ_UnsetVideoMode();
+ 
+ 	[_ottd_main release];
++
++	_cocoa_video_started = false;
+ }
+ 
+ static const char *CocoaVideoStart(const char * const *parm)
+@@ -2019,8 +2025,18 @@
+ 
+ 	DEBUG(driver, 1)("cocoa_v: CocoaVideoStart");
+ 
++	if(_cocoa_video_started)
++		return "Already started";
++	_cocoa_video_started = true;
++
++	memset(&_cocoa_video_data, 0, sizeof(_cocoa_video_data));
++
+ 	setupApplication();
+ 
++	/* Don't create a window or enter fullscreen if we're just going to show a dialog. */
++	if(_cocoa_video_dialog)
++		return NULL;
++
+ 	QZ_VideoInit();
+ 
+ 	ret = QZ_SetVideoMode(_cur_resolution[0], _cur_resolution[1], _fullscreen);
+@@ -2086,6 +2102,31 @@
+ };
+ 
+ 
++
++
++/* This is needed since sometimes assert is called before the videodriver is initialized */
++void CocoaDialog ( const char *title, const char *message, const char *buttonLabel )
++{
++	bool wasstarted;
++
++	_cocoa_video_dialog = true;
++
++	wasstarted = _cocoa_video_started;
++	if(!_cocoa_video_started && CocoaVideoStart(NULL) != NULL) {
++		fprintf(stderr, "%s: %s\n", title, message);
++		return;
++	}
++
++
++	NSRunAlertPanel([NSString stringWithCString: title], [NSString stringWithCString: message], [NSString stringWithCString: buttonLabel], nil, nil);
++
++	if(!wasstarted)
++		CocoaVideoStop();
++
++	_cocoa_video_dialog = false;
++}
++
++
+ /* This is needed since OS X applications are started with the working dir set to / when double-clicked */
+ void cocoaSetWorkingDirectory(void)
+ {
+Index: os/macosx/macos.m
+===================================================================
+--- os/macosx/macos.m	(revision 3307)
++++ os/macosx/macos.m	(working copy)
+@@ -8,11 +8,33 @@
+  * To insure that the crosscompiler still works, let him try any changes before they are committed
+  */
+ 
++
++#ifdef WITH_SDL
++
+ void ShowMacDialog ( const char *title, const char *message, const char *buttonLabel )
+ {
+ 	NSRunAlertPanel([NSString stringWithCString: title], [NSString stringWithCString: message], [NSString stringWithCString: buttonLabel], nil, nil);
+ }
+ 
++#elif defined WITH_COCOA
++
++void CocoaDialog ( const char *title, const char *message, const char *buttonLabel );
++
++void ShowMacDialog ( const char *title, const char *message, const char *buttonLabel )
++{
++	CocoaDialog(title, message, buttonLabel);
++}
++
++
++#else
++
++void ShowMacDialog ( const char *title, const char *message, const char *buttonLabel )
++{
++	fprintf(stderr, "%s: %s\n", title, message);
++}
++
++#endif
++
+ void ShowMacAssertDialog ( const char *function, const char *file, const int line, const char *expression )
+ {
+ 	const char *buffer =

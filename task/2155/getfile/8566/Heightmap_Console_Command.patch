@@ -1,0 +1,138 @@
+Index: console_cmds.cpp
+===================================================================
+--- console_cmds.cpp	(revision 24510)
++++ console_cmds.cpp	(working copy)
+@@ -351,7 +351,29 @@
+ 	return NULL;
+ }
+ 
++/**
++ * Get heightmap file informations. It Only considers given paths.
++ * @param file The heightmap filename to return information about.
++ *
++ * @return FiosItem The information on the file.
++ */
++static const FiosItem *GetFiosHeightmapItem(const char *file)
++{
++	_saveload_mode = SLD_LOAD_HEIGHTMAP;
++	BuildFileList();
+ 
++	for (const FiosItem *item = _fios_items.Begin(); item != _fios_items.End(); item++) {
++		if (strcmp(file, item->name) == 0) return item;
++		if (strcmp(file, item->title) == 0) return item;
++	}
++
++	return NULL;
++}
++
++
+ DEF_CONSOLE_CMD(ConLoad)
+ {
+ 	if (argc == 0) {
+@@ -1049,7 +1071,59 @@
+ 	StartNewGameWithoutGUI((argc == 2) ? strtoul(argv[1], NULL, 10) : GENERATE_NEW_SEED);
+ 	return true;
+ }
++// starts a new game based on a given heightmap 
++// argc: Counts given parameters
++// argv: array of parameters 
++DEF_CONSOLE_CMD(ConNewHeightmapGame)
++{
++	if (argc == 0) {
++		IConsoleHelp("Start a new gameusing a heightmap. Usage: 'newgame <file in your heightmap folder>'");
++		IConsoleHelp("The server can force a new game using 'newheightmapgame'; any client joined will rejoin after the server is done generating the new game.");
++		return true;
++	}
++	if (argc == 2) {
++	const char *file = argv[1];
++	_saveload_mode = SLD_LOAD_HEIGHTMAP;
++	const FiosItem *item = GetFiosHeightmapItem(file);
++	if (item != NULL) {
++		IConsolePrintF(CC_INFO, "Loading file: %s", file);
++	}
++	else {
++		IConsolePrintF(CC_INFO, "Could not load file: %s", file);
++	}
++	if (item != NULL) {
++		switch (item->type) {
++		case FIOS_TYPE_PNG:
++		case FIOS_TYPE_BMP:
++				{
++				SetFiosType(item->type);
++				strecpy(_file_to_saveload.name, FiosBrowseTo(item), lastof(_file_to_saveload.name));
++				strecpy(_file_to_saveload.title, item->title, lastof(_file_to_saveload.title));
++				break;
++				}
++			default: {
++						IConsolePrintF(CC_ERROR, "%s: Not a valid heightmap.", file);
++						return false;
++					 }
++		}
++	} else {
++		IConsolePrintF(CC_ERROR, "%s: No such file or directory.", file);
++		return false;
++	}
+ 
++	//StartNewHeightMapGameWithoutGUI((argc == 2) ? strtoul(argv[1], NULL, 10) : GENERATE_NEW_SEED);
++	}
++	if (argc >= 1) {
++		StartNewHeightMapGameWithoutGUI((argc == 2) ? strtoul(argv[1], NULL, 10) : GENERATE_NEW_SEED);
++	}
++	
++	return true;
++}
++
+ DEF_CONSOLE_CMD(ConRestart)
+ {
+ 	if (argc == 0) {
+@@ -1892,6 +1966,7 @@
+ 	IConsoleCmdRegister("list_cmds",    ConListCommands);
+ 	IConsoleCmdRegister("list_aliases", ConListAliases);
+ 	IConsoleCmdRegister("newgame",      ConNewGame);
++	IConsoleCmdRegister("newheightmapgame",		ConNewHeightmapGame);
+ 	IConsoleCmdRegister("restart",      ConRestart);
+ 	IConsoleCmdRegister("getseed",      ConGetSeed);
+ 	IConsoleCmdRegister("getdate",      ConGetDate);
+Index: genworld.h
+===================================================================
+--- genworld.h	(revision 24510)
++++ genworld.h	(working copy)
+@@ -87,6 +87,7 @@
+ void PrepareGenerateWorldProgress();
+ void ShowGenerateWorldProgress();
+ void StartNewGameWithoutGUI(uint seed);
++void StartNewHeightMapGameWithoutGUI(uint seed);
+ void ShowCreateScenario();
+ void StartScenarioEditor();
+ 
+Index: genworld_gui.cpp
+===================================================================
+--- genworld_gui.cpp	(revision 24510)
++++ genworld_gui.cpp	(working copy)
+@@ -879,6 +879,32 @@
+ 	StartGeneratingLandscape(GLWM_GENERATE);
+ }
+ 
++
++
++/**
++ * Start a normal game without the GUI.
++ * @param seed The seed of the new game.
++ */
++void StartNewHeightMapGameWithoutGUI(uint seed)
++{
++	/* GenerateWorld takes care of the possible GENERATE_NEW_SEED value in 'seed' */
++	_settings_newgame.game_creation.generation_seed = seed;
++	uint x = 0;
++	uint y = 0;s
++	/* Always give a new seed if not editor */
++	if (_game_mode != GM_EDITOR) _settings_newgame.game_creation.generation_seed = InteractiveRandom();
++	/* If the function returns negative, it means there was a problem loading the heightmap */
++	if (!GetHeightmapDimensions(_file_to_saveload.name, &x, &y)) return;
++
++	StartGeneratingLandscape(GLWM_HEIGHTMAP);
++}
++
+ struct CreateScenarioWindow : public Window
+ {
+ 	uint widget_id;

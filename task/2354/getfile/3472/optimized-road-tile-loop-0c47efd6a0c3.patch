@@ -1,0 +1,268 @@
+diff -r 0c47efd6a0c3 docs/landscape.html
+--- a/docs/landscape.html	Sun Oct 19 09:51:19 2008 +0000
++++ b/docs/landscape.html	Sun Oct 19 17:48:34 2008 +0200
+@@ -513,6 +513,7 @@
+    <td valign=top nowrap>&nbsp;</td>
+    <td>
+     <ul>
++     <li>m2: Index into the array of towns (owning town for town roads; closest town otherwise, INVALID_TOWN if not yet calculated)</li>
+      <li>m3 bit 7 set = on snow or desert</li>
+      <li>m7 bits 7..5: present road types
+       <table>
+@@ -534,7 +535,6 @@
+      </li>
+      <li>m5 bits 7 clear: road or level-crossing
+       <ul>
+-       <li>m2: Index into the array of towns, 0 for non-town roads</li>
+        <li>m3 bits 6..4:
+         <table>
+          <tr>
+diff -r 0c47efd6a0c3 docs/landscape_grid.html
+--- a/docs/landscape_grid.html	Sun Oct 19 09:51:19 2008 +0000
++++ b/docs/landscape_grid.html	Sun Oct 19 17:48:34 2008 +0200
+@@ -157,7 +157,7 @@ the array so you can quickly see what is
+       <td class="caption">road depot</td>
+       <td class="bits">-inherit-</td>
+       <td class="bits">-inherit-</td>
+-      <td class="bits"><span class="free">OOOO OOOO OOOO OOOO</span></td>
++      <td class="bits">-inherit-</td>
+       <td class="bits">X<span class="free">OOO OOOO</span></td>
+       <td class="bits"><span class="free">OOOO OOOO</span></td>
+       <td class="bits">XX<span class="free">OO OO</span>XX</td>
+diff -r 0c47efd6a0c3 src/openttd.cpp
+--- a/src/openttd.cpp	Sun Oct 19 09:51:19 2008 +0000
++++ b/src/openttd.cpp	Sun Oct 19 17:48:34 2008 +0200
+@@ -71,6 +71,7 @@
+ #include "tree_map.h"
+ #include "rail_map.h"
+ #include "road_map.h"
++#include "road_cmd.h"
+ #include "station_map.h"
+ #include "town_map.h"
+ #include "industry_map.h"
+@@ -2560,6 +2561,9 @@ bool AfterLoadGame()
+ 	}
+ 
+ 	if (CheckSavegameVersion(103)) {
++		/* Non-town-owned roads now store the closest town */
++		InvalidateTownForRoadTile();
++
+ 		/* signs with invalid owner left from older savegames */
+ 		Sign *si;
+ 		FOR_ALL_SIGNS(si) {
+diff -r 0c47efd6a0c3 src/road_cmd.cpp
+--- a/src/road_cmd.cpp	Sun Oct 19 09:51:19 2008 +0000
++++ b/src/road_cmd.cpp	Sun Oct 19 17:48:34 2008 +0200
+@@ -4,6 +4,7 @@
+ 
+ #include "stdafx.h"
+ #include "openttd.h"
++#include "map_func.h"
+ #include "bridge_map.h"
+ #include "bridge.h"
+ #include "cmd_helper.h"
+@@ -314,6 +315,11 @@ static CommandCost RemoveRoad(TileIndex 
+ 						/* Includes MarkTileDirtyByTile() */
+ 						DoClearSquare(tile);
+ 					} else {
++						if (rt == ROADTYPE_ROAD && IsRoadOwner(tile, ROADTYPE_ROAD, OWNER_TOWN)) {
++							/* Promote ownership from tram or highway and invalidate town index */
++							SetRoadOwner(tile, ROADTYPE_ROAD, GetRoadOwner(tile, (HasBit(rts, ROADTYPE_TRAM) ? ROADTYPE_TRAM : ROADTYPE_HWAY)));
++							SetTownIndex(tile, (TownID)INVALID_TOWN);
++						}
+ 						SetRoadBits(tile, ROAD_NONE, rt);
+ 						SetRoadTypes(tile, rts);
+ 						MarkTileDirtyByTile(tile);
+@@ -351,6 +357,7 @@ static CommandCost RemoveRoad(TileIndex 
+ 					if (reserved) SetTrackReservation(tile, tracks);
+ 				} else {
+ 					SetRoadTypes(tile, rts);
++					/* If we ever get HWAY and it is possible without road then we will need to promote ownership and invalidate town index here, too */
+ 				}
+ 				MarkTileDirtyByTile(tile);
+ 				YapfNotifyTrackLayoutChange(tile, FindFirstTrack(GetTrackBits(tile)));
+@@ -476,6 +483,10 @@ CommandCost CmdBuildRoad(TileIndex tile,
+ 	/* Road pieces are max 4 bitset values (NE, NW, SE, SW) and town can only be non-zero
+ 	 * if a non-company is building the road */
+ 	if ((IsValidCompanyID(_current_company) && p2 != 0) || (_current_company == OWNER_TOWN && !IsValidTownID(p2))) return CMD_ERROR;
++	if (_current_company != OWNER_TOWN) {
++		const Town *town = CalcClosestTownFromTile(tile, UINT_MAX);
++		p2 = (town != NULL) ? town->index : (uint32)INVALID_TOWN;
++	}
+ 
+ 	RoadBits pieces = Extract<RoadBits, 0>(p1);
+ 
+@@ -651,7 +662,7 @@ do_clear:;
+ 				if (existing == ROAD_NONE || rtt == ROAD_TILE_CROSSING) {
+ 					SetRoadTypes(tile, GetRoadTypes(tile) | RoadTypeToRoadTypes(rt));
+ 					SetRoadOwner(tile, rt, _current_company);
+-					if (_current_company == OWNER_TOWN && rt == ROADTYPE_ROAD) SetTownIndex(tile, p2);
++					if (rt == ROADTYPE_ROAD) SetTownIndex(tile, p2);
+ 				}
+ 				if (rtt != ROAD_TILE_CROSSING) SetRoadBits(tile, existing | pieces, rt);
+ 			} break;
+@@ -883,7 +894,7 @@ CommandCost CmdBuildRoadDepot(TileIndex 
+ 		Depot *dep = new Depot(tile);
+ 		dep->town_index = ClosestTownFromTile(tile, UINT_MAX)->index;
+ 
+-		MakeRoadDepot(tile, _current_company, dir, rt);
++		MakeRoadDepot(tile, _current_company, dir, rt, dep->town_index);
+ 		MarkTileDirtyByTile(tile);
+ 	}
+ 	return cost.AddCost(_price.build_road_depot);
+@@ -1256,6 +1267,18 @@ void DrawRoadDepotSprite(int x, int y, D
+ 		SpriteID image = dtss->image.sprite;
+ 
+ 		DrawSprite(image, HasBit(image, PALETTE_MODIFIER_COLOR) ? palette : PAL_NONE, x + pt.x, y + pt.y);
++	}
++}
++
++void InvalidateTownForRoadTile()
++{
++	TileIndex map_size = MapSize();
++
++	for (TileIndex t = 0; t < map_size; t++) {
++		if (IsTileType(t, MP_ROAD) && GetRoadOwner(t, ROADTYPE_ROAD) != OWNER_TOWN) {
++			/* GetRoadOwner(t, ROADTYPE_ROAD) is valid for road tiles even when there is no road */
++			SetTownIndex(t, (TownID)INVALID_TOWN);
++		}
+ 	}
+ }
+ 
+diff -r 0c47efd6a0c3 src/road_cmd.h
+--- a/src/road_cmd.h	Sun Oct 19 09:51:19 2008 +0000
++++ b/src/road_cmd.h	Sun Oct 19 17:48:34 2008 +0200
+@@ -8,5 +8,6 @@
+ #include "direction_type.h"
+ 
+ void DrawRoadDepotSprite(int x, int y, DiagDirection dir, RoadType rt);
++void InvalidateTownForRoadTile();
+ 
+ #endif /* ROAD_CMD_H */
+diff -r 0c47efd6a0c3 src/road_map.h
+--- a/src/road_map.h	Sun Oct 19 09:51:19 2008 +0000
++++ b/src/road_map.h	Sun Oct 19 17:48:34 2008 +0200
+@@ -189,7 +189,7 @@ static inline void SetRoadOwner(TileInde
+ 
+ static inline bool IsRoadOwner(TileIndex t, RoadType rt, Owner o)
+ {
+-	assert(HasTileRoadType(t, rt));
++	assert(rt == ROADTYPE_ROAD || HasTileRoadType(t, rt));
+ 	return (GetRoadOwner(t, rt) == o);
+ }
+ 
+@@ -451,11 +451,11 @@ static inline void MakeRoadCrossing(Tile
+ }
+ 
+ 
+-static inline void MakeRoadDepot(TileIndex t, Owner owner, DiagDirection dir, RoadType rt)
++static inline void MakeRoadDepot(TileIndex t, Owner owner, DiagDirection dir, RoadType rt, TownID town)
+ {
+ 	SetTileType(t, MP_ROAD);
+ 	SetTileOwner(t, owner);
+-	_m[t].m2 = 0;
++	_m[t].m2 = town;
+ 	_m[t].m3 = 0;
+ 	_m[t].m4 = 0;
+ 	_m[t].m5 = ROAD_TILE_DEPOT << 6 | dir;
+diff -r 0c47efd6a0c3 src/station_cmd.cpp
+--- a/src/station_cmd.cpp	Sun Oct 19 09:51:19 2008 +0000
++++ b/src/station_cmd.cpp	Sun Oct 19 17:48:34 2008 +0200
+@@ -1590,7 +1590,7 @@ CommandCost CmdRemoveRoadStop(TileIndex 
+ 		/* Rebuild the drive throuhg road stop. As a road stop can only be
+ 		 * removed by the owner of the roadstop, _current_company is the
+ 		 * owner of the road stop. */
+-		MakeRoadNormal(tile, road_bits, rts, is_towns_road ? ClosestTownFromTile(tile, UINT_MAX)->index : 0,
++		MakeRoadNormal(tile, road_bits, rts, ClosestTownFromTile(tile, UINT_MAX)->index,
+ 				is_towns_road ? OWNER_TOWN : _current_company, _current_company, _current_company);
+ 	}
+ 
+diff -r 0c47efd6a0c3 src/town_cmd.cpp
+--- a/src/town_cmd.cpp	Sun Oct 19 09:51:19 2008 +0000
++++ b/src/town_cmd.cpp	Sun Oct 19 17:48:34 2008 +0200
+@@ -8,6 +8,7 @@
+ #include "debug.h"
+ #include "road_map.h"
+ #include "road_internal.h" /* Cleaning up road bits */
++#include "road_cmd.h"
+ #include "landscape.h"
+ #include "town_map.h"
+ #include "tunnel_map.h"
+@@ -93,6 +94,12 @@ Town::~Town()
+ 				break;
+ 
+ 			case MP_ROAD:
++				if (!IsRoadOwner(tile, ROADTYPE_ROAD, OWNER_TOWN) && GetTownIndex(tile) == this->index) {
++					/* Town-owned roads get cleared soon, anyway */
++					SetTownIndex(tile, (TownID)INVALID_TOWN);
++					break;
++				}
++				/* Fall-through */
+ 			case MP_TUNNELBRIDGE:
+ 				if (IsTileOwner(tile, OWNER_TOWN) &&
+ 						ClosestTownFromTile(tile, UINT_MAX) == this)
+@@ -1555,6 +1562,7 @@ CommandCost CmdBuildTown(TileIndex tile,
+ 		Town *t = new Town(tile);
+ 		_generating_world = true;
+ 		DoCreateTown(t, tile, townnameparts, (TownSizeMode)p2, p1);
++		InvalidateTownForRoadTile();
+ 		_generating_world = false;
+ 	}
+ 	return CommandCost();
+@@ -2460,6 +2468,19 @@ Town *ClosestTownFromTile(TileIndex tile
+ 				IsRoadOwner(tile, ROADTYPE_ROAD, OWNER_TOWN)
+ 			)) {
+ 		return GetTownByTile(tile);
++	} else if (IsTileType(tile, MP_ROAD)) {
++		TownID town_id = GetTownIndex(tile);
++		Town *town;
++
++		if (town_id == INVALID_TOWN) {
++			town = CalcClosestTownFromTile(tile, UINT_MAX);
++			if (town != NULL) SetTownIndex(tile, town->index);
++		} else {
++			town = GetTown(town_id);
++		}
++
++		if (town != NULL && town->IsValid() && DistanceManhattan(tile, town->xy) < threshold) return town;
++		return NULL;
+ 	} else {
+ 		return CalcClosestTownFromTile(tile, threshold);
+ 	}
+diff -r 0c47efd6a0c3 src/town_gui.cpp
+--- a/src/town_gui.cpp	Sun Oct 19 09:51:19 2008 +0000
++++ b/src/town_gui.cpp	Sun Oct 19 17:48:34 2008 +0200
+@@ -25,6 +25,7 @@
+ #include "tilehighlight_func.h"
+ #include "string_func.h"
+ #include "sortlist_type.h"
++#include "road_cmd.h"
+ 
+ #include "table/sprites.h"
+ #include "table/strings.h"
+@@ -731,6 +732,7 @@ public:
+ 					ShowErrorMessage(STR_NO_SPACE_FOR_TOWN, STR_CANNOT_GENERATE_TOWN, 0, 0);
+ 				} else {
+ 					ScrollMainWindowToTile(t->xy);
++					InvalidateTownForRoadTile();
+ 				}
+ 			} break;
+ 
+@@ -738,7 +740,11 @@ public:
+ 				this->HandleButtonClick(TSEW_MANYRANDOMTOWNS);
+ 
+ 				_generating_world = true;
+-				if (!GenerateTowns()) ShowErrorMessage(STR_NO_SPACE_FOR_TOWN, STR_CANNOT_GENERATE_TOWN, 0, 0);
++				if (!GenerateTowns()) {
++					ShowErrorMessage(STR_NO_SPACE_FOR_TOWN, STR_CANNOT_GENERATE_TOWN, 0, 0);
++				} else {
++					InvalidateTownForRoadTile();
++				}
+ 				_generating_world = false;
+ 				break;
+ 
+@@ -783,4 +789,3 @@ void ShowBuildTownWindow()
+ 	if (_game_mode != GM_EDITOR && !IsValidCompanyID(_current_company)) return;
+ 	AllocateWindowDescFront<ScenarioEditorTownGenerationWindow>(&_scen_edit_town_gen_desc, 0);
+ }
+-

@@ -1,0 +1,574 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 6405)
++++ lang/english.txt	(working copy)
+@@ -1069,6 +1069,7 @@
+ STR_CONFIG_PATCHES_SERVICEATHELIPAD                             :{LTBLUE}Service helicopters at helipads automatically: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_LINK_TERRAFORM_TOOLBAR                       :{LTBLUE}Link landscape toolbar to rail/road/water/airport toolbars: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_REVERSE_SCROLLING                            :{LTBLUE}Reverse scroll direction: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_MEASURE_TOOLTIP                              :{LTBLUE}Show a measurement tooltip when using various build-tools: {ORANGE}{STRING1}
+ 
+ STR_CONFIG_PATCHES_MAX_TRAINS                                   :{LTBLUE}Max trains per player: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_MAX_ROADVEH                                  :{LTBLUE}Max road vehicles per player: {ORANGE}{STRING1}
+@@ -2986,4 +2987,12 @@
+ STR_LARGE_AIRPORTS                                              :{BLACK}Large airports
+ STR_HUB_AIRPORTS                                                :{BLACK}Hub airports
+ STR_HELIPORTS                                                   :{BLACK}Helicopter airports
++
++############ Tooltip measurment
++
++STR_MEASURE_LENGTH                                              :{BLACK}Length: {NUM}
++STR_MEASURE_AREA                                                :{BLACK}Area: {NUM} x {NUM}
++STR_MEASURE_LENGTH_HEIGHTDIFF                                   :{BLACK}Length: {NUM}{}Height difference: {NUM} m
++STR_MEASURE_AREA_HEIGHTDIFF                                     :{BLACK}Area: {NUM} x {NUM}{}Height difference: {NUM} m
++
+ ########
+Index: macros.h
+===================================================================
+--- macros.h	(revision 6405)
++++ macros.h	(working copy)
+@@ -148,6 +148,7 @@
+ static inline void swap_byte(byte *a, byte *b) { byte t = *a; *a = *b; *b = t; }
+ static inline void swap_uint16(uint16 *a, uint16 *b) { uint16 t = *a; *a = *b; *b = t; }
+ static inline void swap_int16(int16 *a, int16 *b) { int16 t = *a; *a = *b; *b = t; }
++static inline void swap_uint32(uint32 *a, uint32 *b) { uint32 t = *a; *a = *b; *b = t; }
+ static inline void swap_int32(int32 *a, int32 *b) { int32 t = *a; *a = *b; *b = t; }
+ static inline void swap_tile(TileIndex *a, TileIndex *b) { TileIndex t = *a; *a = *b; *b = t; }
+ 
+Index: misc_gui.c
+===================================================================
+--- misc_gui.c	(revision 6405)
++++ misc_gui.c	(working copy)
+@@ -2,6 +2,7 @@
+ 
+ #include "stdafx.h"
+ #include "openttd.h"
++#include <stdarg.h>
+ #include "hal.h"
+ #include "heightmap.h"
+ #include "debug.h"
+@@ -636,40 +637,77 @@
+ static void TooltipsWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch (e->event) {
+-		case WE_PAINT:
++		case WE_PAINT: {
++			uint arg;
+ 			GfxFillRect(0, 0, w->width - 1, w->height - 1, 0);
+ 			GfxFillRect(1, 1, w->width - 2, w->height - 2, 0x44);
+-			DrawStringMultiCenter((w->width >> 1), (w->height >> 1) - 5, WP(w,tooltips_d).string_id, 197);
++
++			for (arg = 0; arg < WP(w, tooltips_d).params; arg++) {
++				SetDParam(arg, WP(w, tooltips_d).param[arg]);
++			}
++			DrawStringMultiCenter((w->width >> 1), (w->height >> 1) - 5, WP(w, tooltips_d).string_id, 197);
+ 			break;
++		}
+ 
+ 		case WE_MOUSELOOP:
+-			if (!_right_button_down) DeleteWindow(w);
++			/* We can show tooltips while dragging tools. These are shown as long as
++			 * we are dragging the tool. Normal tooltips work with rmb */
++			if (WP(w, tooltips_d).params == 0 ) {
++				if (!_right_button_down) DeleteWindow(w);
++			} else {
++				if (!_left_button_down) DeleteWindow(w);
++			}
++
+ 			break;
+ 	}
+ }
+ 
+-void GuiShowTooltips(StringID string_id)
++extern const char *GetStringPtr(StringID string); // strings.c hijack
++
++/** Shows a tooltip
++* @param str String to be displayed
++* @param params (optional) up to 5 pieces of additional information that may be
++* added to a tooltip; currently only supports parameters of {NUM} (integer) */
++void GuiShowTooltips(StringID str, ...)
+ {
++	const char *s;
+ 	char buffer[512];
+-	Window *w;
+-	int right,bottom;
+-	int x,y;
++	va_list va;
++	byte params = 0;
++	uint32 param[5]; // use for optional arguments to tooltip string
++	int right, bottom;
++	int x, y;
+ 
+-	if (string_id == 0) return;
++	Window *w = FindWindowById(WC_TOOLTIPS, 0);
++	if (w != NULL) DeleteWindow(w);
+ 
+-	w = FindWindowById(WC_TOOLTIPS, 0);
+-	if (w != NULL) {
+-		if (WP(w,tooltips_d).string_id == string_id)
+-			return;
+-		DeleteWindow(w);
++	/* Let's parse StringID format for additional string parameters and
++	 * newline count to increase tooltip window size */
++	bottom = 14;
++	va_start(va, str);
++	for (s = GetStringPtr(str); *s != '\0'; s++) {
++		switch ((byte)*s) {
++			case 0x8E: // {NUM}
++				assert(params <= lengthof(param));
++				param[params] = va_arg(va, int);
++				SetDParam(params, param[params]);
++				params++;
++				break;
++			case '\n': // ASCII_NL
++				bottom += 14;
++				break;
++		}
+ 	}
++	va_end(va);
+ 
+-	GetString(buffer, string_id);
++	/* We only show measurement tooltips with shift pressed down */
++	if (params != 0 && !_patches.measure_tooltip) return;
+ 
++	GetString(buffer, str);
++
+ 	right = GetStringWidth(buffer) + 6;
+ 
+ 	/* Cut tooltip length to 200 pixels max, wrap to new line if longer */
+-	bottom = 14;
+ 	if (right > 200) {
+ 		bottom += ((right - 4) / 176) * 10;
+ 		right = 200;
+@@ -683,7 +721,11 @@
+ 	x = clamp(_cursor.pos.x - (right >> 1), 0, _screen.width - right);
+ 
+ 	w = AllocateWindow(x, y, right, bottom, TooltipsWndProc, WC_TOOLTIPS, _tooltips_widgets);
+-	WP(w,tooltips_d).string_id = string_id;
++	
++	WP(w, tooltips_d).string_id = str;
++	memcpy(WP(w, tooltips_d).param, &param, sizeof(WP(w, tooltips_d).param));
++	WP(w, tooltips_d).params = params;
++
+ 	w->flags4 &= ~WF_WHITE_BORDER_MASK; // remove white-border from tooltip
+ 	w->widget[0].right = right;
+ 	w->widget[0].bottom = bottom;
+Index: settings.c
+===================================================================
+--- settings.c	(revision 6405)
++++ settings.c	(working copy)
+@@ -1253,6 +1253,7 @@
+ 	SDT_BOOL(Patches, show_finances,                 S, 0,  true,        STR_CONFIG_PATCHES_SHOWFINANCES,          NULL),
+ 	SDT_BOOL(Patches, autoscroll,                    S, 0, false,        STR_CONFIG_PATCHES_AUTOSCROLL,            NULL),
+ 	SDT_BOOL(Patches, reverse_scroll,                S, 0, false,        STR_CONFIG_PATCHES_REVERSE_SCROLLING,     NULL),
++	SDT_BOOL(Patches, measure_tooltip,               S, 0, false,        STR_CONFIG_PATCHES_MEASURE_TOOLTIP,       NULL),
+ 	 SDT_VAR(Patches, errmsg_duration,    SLE_UINT8, S, 0,  5, 0, 20, 0, STR_CONFIG_PATCHES_ERRMSG_DURATION,       NULL),
+ 	 SDT_VAR(Patches, toolbar_pos,        SLE_UINT8, S,MS,  0, 0,  2, 0, STR_CONFIG_PATCHES_TOOLBAR_POS,           v_PositionMainToolbar),
+ 	 SDT_VAR(Patches, window_snap_radius, SLE_UINT8, S,D0, 10, 1, 32, 0, STR_CONFIG_PATCHES_SNAP_RADIUS,           NULL),
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 6405)
++++ settings_gui.c	(working copy)
+@@ -565,6 +565,7 @@
+ 	"reverse_scroll",
+ 	"errmsg_duration",
+ 	"toolbar_pos",
++	"measure_tooltip",
+ 	"window_snap_radius",
+ 	"invisible_trees",
+ 	"population_in_label",
+Index: strings.c
+===================================================================
+--- strings.c	(revision 6405)
++++ strings.c	(working copy)
+@@ -159,7 +159,7 @@
+ // the indices will be reused.
+ static int _bind_index;
+ 
+-static const char *GetStringPtr(StringID string)
++const char *GetStringPtr(StringID string)
+ {
+ 	return _langpack_offs[_langtab_start[string >> 11] + (string & 0x7FF)];
+ }
+Index: variables.h
+===================================================================
+--- variables.h	(revision 6405)
++++ variables.h	(working copy)
+@@ -126,6 +126,7 @@
+ 	bool no_servicing_if_no_breakdowns; // dont send vehicles to depot when breakdowns are disabled
+ 	bool link_terraform_toolbar;        // display terraform toolbar when displaying rail, road, water and airport toolbars
+ 	bool reverse_scroll;                // Right-Click-Scrolling scrolls in the opposite direction
++	bool measure_tooltip;               // Show a permanent tooltip when dragging tools
+ 
+ 	uint8 toolbar_pos;                  // position of toolbars, 0=left, 1=center, 2=right
+ 	uint8 window_snap_radius;           // Windows snap at each other if closer than this
+Index: viewport.c
+===================================================================
+--- viewport.c	(revision 6405)
++++ viewport.c	(working copy)
+@@ -1937,13 +1937,22 @@
+ 	_thd.sizelimit = limit;
+ }
+ 
+-void VpSetPresizeRange(uint from, uint to)
++/**
++* Highlights all tiles between a set of two tiles. Used in dock and tunnel placement
++* @param from TileIndex of the first tile to highlight
++* @param to TileIndex of the last tile to highlight */
++void VpSetPresizeRange(TileIndex from, TileIndex to)
+ {
++	uint distance = DistanceManhattan(from, to);
++
+ 	_thd.selend.x = TileX(to) * TILE_SIZE;
+ 	_thd.selend.y = TileY(to) * TILE_SIZE;
+ 	_thd.selstart.x = TileX(from) * TILE_SIZE;
+ 	_thd.selstart.y = TileY(from) * TILE_SIZE;
+ 	_thd.next_drawstyle = HT_RECT;
++
++	/* show measurement only if there is any length to speak of */
++	if (distance > 0) GuiShowTooltips(STR_MEASURE_LENGTH, distance + 1);
+ }
+ 
+ static void VpStartPreSizing(void)
+@@ -1986,16 +1995,120 @@
+ 	return 0; // avoids compiler warnings
+ }
+ 
++/** Check if the direction of start and end tile should be swapped based on
++ * the dragging-style. Default directions are:
++ * in the case of a line (HT_RAIL, HT_LINE):  DIR_NE, DIR_NW, DIR_N, DIR_E
++ * in the case of a rect (HT_RECT, HT_POINT): DIR_S, DIR_E
++ * @param style HighLightStyle dragging style
++ * @param start_tile, end_tile start and end tile of drag
++ * @param boolean value which when true means start/end should be swapped */
++static bool SwapDirection(HighLightStyle style, TileIndex start_tile, TileIndex end_tile)
++{
++	uint start_x = TileX(start_tile);
++	uint start_y = TileY(start_tile);
++	uint end_x = TileX(end_tile);
++	uint end_y = TileY(end_tile);
+ 
++	switch (style & HT_DRAG_MASK) {
++		case HT_RAIL:
++		case HT_LINE: return (end_x > start_x || (end_x == start_x && end_y > start_y));
++
++		case HT_RECT:
++		case HT_POINT: return (end_x != start_x && end_y < start_y);
++		default: NOT_REACHED();
++	}
++
++	return false;
++}
++
++/** Calculates height difference between one tile and another
++* Multiplies the result to suit the standard given by minimap - 50 meters high
++* To correctly get the height difference we need the direction we are dragging
++* in, as well as with what kind of tool we are dragging. For example a horizontal
++* autorail tool that starts in bottom and ends in top of a tile will need the
++* maximum of SW,S and SE,N respectively. This is handled by the lookup table below
++* @param style HightlightStyle of drag. This includes direction and style (autorail, rect, etc.)
++* @param distance amount of distance dragged, important for horizontal/vertical drags
++*        ignored for others
++* @param start_tile, end_tile start and end tile of drag operation
++* @return height difference between two tiles. Tile measurement tool utilizes
++* this value in its tooltips */
++static int CalcHeightdiff(HighLightStyle style, uint distance, TileIndex start_tile, TileIndex end_tile)
++{
++	static const TileIndexDiffC _heightdiff_by_dir[] = {
++		/* Start */ {1, 0}, {1, 1}, /* HT_DIR_X  */ {0, 1}, {1, 1}, /* HT_DIR_Y  */
++		/* Start */ {1, 0}, {0, 0}, /* HT_DIR_HU */ {1, 0}, {1, 1}, /* HT_DIR_HL */
++		/* Start */ {1, 0}, {1, 1}, /* HT_DIR_VL */ {0, 1}, {1, 1}, /* HT_DIR_VR */
++
++		/* Start */ {0, 1}, {0, 0}, /* HT_DIR_X  */ {1, 0}, {0, 0}, /* HT_DIR_Y  */
++		/* End   */ {0, 1}, {0, 0}, /* HT_DIR_HU */ {1, 1}, {0, 1}, /* HT_DIR_HL */
++		/* End   */ {1, 0}, {0, 0}, /* HT_DIR_VL */ {0, 0}, {0, 1}, /* HT_DIR_VR */
++	};
++	bool swap = SwapDirection(style, start_tile, end_tile);
++	byte mode_t;
++	uint h0, h1, ht; // start heigth, end height, and temp variable
++	
++	if (start_tile == end_tile) return 0;
++
++	/* Handle area dragging styles */
++	if ((style & HT_RECT) || (style & HT_POINT)) {
++		static const TileIndexDiffC _heightdiff_area_by_dir[] = {
++			/* Start */ {1, 0}, /* Dragging east */ {0, 0}, /* Dragging south */
++			/* End   */ {0, 1}, /* Dragging east */ {1, 1}  /* Dragging south */
++		};
++
++		/* The point-tool is off by one to show the 'dot' in the south corner; correct */
++		if (style & HT_POINT) end_tile -= TileOffsByDir(DIR_S);
++
++		if (swap) swap_tile(&start_tile, &end_tile);
++
++		mode_t = (byte)(TileX(end_tile) > TileX(start_tile));
++		h0 = TileHeight(TILE_ADD(start_tile, ToTileIndexDiff(_heightdiff_area_by_dir[mode_t])));
++		h1 = TileHeight(TILE_ADD(end_tile, ToTileIndexDiff(_heightdiff_area_by_dir[2 + mode_t])));
++		goto end_of_calcheightdiff_function;
++	}
++
++	distance %= 2;
++	style &= HT_DIR_MASK;
++
++	/* Handle autorail, we do some magic to be able to use the lookup table.
++	 * Firstly if we drag the other way around, we switch start&end, and if needed
++	 * also flip the drag-position. Eg if it was on the left, and the distance is even
++	 * that means the end, which is now the start is on the right */
++	if (swap) {
++		swap_tile(&start_tile, &end_tile);
++		style += (distance == 0 && style > HT_DIR_Y) ? ((style % 2 == 0) ? 1 : -1) : 0;
++	}
++
++	/* Use lookup table for start-tile based on HighLightStyle direction */
++	mode_t = style * 2;
++	assert(mode_t < lengthof(_heightdiff_by_dir) - 13);
++	h0 = TileHeight(TILE_ADD(start_tile, ToTileIndexDiff(_heightdiff_by_dir[mode_t])));
++	ht = TileHeight(TILE_ADD(start_tile, ToTileIndexDiff(_heightdiff_by_dir[mode_t + 1])));
++	h0 = maxu(h0, ht);
++
++	/* Use lookup table for end-tile based on HighLightStyle direction
++	 * flip around side (lower/upper, left/right) based on distance */
++	mode_t += ((distance == 0 && style > HT_DIR_Y) ? ((style % 2 == 0) ? 1 : -1) : 0) * 2;
++	assert(mode_t < lengthof(_heightdiff_by_dir) - 13);
++	h1 = TileHeight(TILE_ADD(end_tile, ToTileIndexDiff(_heightdiff_by_dir[12 + mode_t])));
++	ht = TileHeight(TILE_ADD(end_tile, ToTileIndexDiff(_heightdiff_by_dir[12 + mode_t + 1])));
++	h1 = maxu(h1, ht);
++
++end_of_calcheightdiff_function:
++	if (swap) swap_uint32(&h0, &h1);
++	/* Minimap shows height in intervals of 50 meters, let's do the same */
++	return (int)(h1 - h0) * 50;
++}
++
+ // while dragging
+ static void CalcRaildirsDrawstyle(TileHighlightData *thd, int x, int y, int method)
+ {
+-	int d;
+-	byte b=6;
+-	uint w,h;
++	HighLightStyle b;
++	uint w, h;
+ 
+-	int dx = thd->selstart.x - (thd->selend.x&~0xF);
+-	int dy = thd->selstart.y - (thd->selend.y&~0xF);
++	int dx = thd->selstart.x - (thd->selend.x & ~0xF);
++	int dy = thd->selstart.y - (thd->selend.y & ~0xF);
+ 	w = myabs(dx) + 16;
+ 	h = myabs(dy) + 16;
+ 
+@@ -2030,7 +2143,7 @@
+ 		b = HT_LINE | HT_DIR_Y;
+ 		x = thd->selstart.x;
+ 	} else { // complicated direction
+-		d = w - h;
++		int d = w - h;
+ 		thd->selend.x = thd->selend.x & ~0xF;
+ 		thd->selend.y = thd->selend.y & ~0xF;
+ 
+@@ -2088,23 +2201,49 @@
+ 			}
+ 		}
+ 	}
++
++	{
++		TileIndex t0 = TileVirtXY(thd->selstart.x, thd->selstart.y);
++		TileIndex t1 = TileVirtXY(x, y);
++		uint distance = DistanceManhattan(t0, t1) + 1;
++		int heightdiff = CalcHeightdiff(b, distance, t0, t1);
++
++		/* If we are showing a tooltip for horizontal or vertical drags,
++		 * 2 tiles have a length of 1. To bias towards the ceiling we add
++		 * one before division. It feels more natural to count 3 lengths as 2 */
++		if ((b & HT_DIR_MASK) != HT_DIR_X && (b & HT_DIR_MASK) != HT_DIR_Y) {
++			distance = (distance + 1) / 2;
++		}
++
++		if (heightdiff == 0) {
++			GuiShowTooltips(STR_MEASURE_LENGTH, distance);
++		} else {
++			GuiShowTooltips(STR_MEASURE_LENGTH_HEIGHTDIFF, distance, heightdiff);
++		}
++	}
++
+ 	thd->selend.x = x;
+ 	thd->selend.y = y;
+ 	thd->next_drawstyle = b;
+ }
+ 
+-// while dragging
++/**
++ * Selects tiles while dragging
++ * @param x X coordinate of end of selection
++ * @param y Y coordinate of end of selection
++ * @param method modifies the way tiles are selected. Possible
++ * methods are VPM_* in viewport.h */
+ void VpSelectTilesWithMethod(int x, int y, int method)
+ {
+-	int sx;
+-	int sy;
++	int sx, sy;
++	HighLightStyle style;
+ 
+ 	if (x == -1) {
+ 		_thd.selend.x = -1;
+ 		return;
+ 	}
+ 
+-	// allow drag in any rail direction
++	/* Specially handle drag in any (8-way) direction */
+ 	if (method == VPM_RAILDIRS || method == VPM_SIGNALDIRS) {
+ 		_thd.selend.x = x;
+ 		_thd.selend.y = y;
+@@ -2113,42 +2252,75 @@
+ 	}
+ 
+ 	if (_thd.next_drawstyle == HT_POINT) {
+-		x += 8;
+-		y += 8;
++		x += TILE_SIZE / 2;
++		y += TILE_SIZE / 2;
+ 	}
+ 
+ 	sx = _thd.selstart.x;
+ 	sy = _thd.selstart.y;
+ 
+ 	switch (method) {
+-		case VPM_FIX_X:
+-			x = sx;
+-			break;
+-
+-		case VPM_FIX_Y:
+-			y = sy;
+-			break;
+-
+-		case VPM_X_OR_Y:
++		case VPM_X_OR_Y: /* drag in X or Y direction */
+ 			if (myabs(sy - y) < myabs(sx - x)) {
+ 				y = sy;
++				style = HT_DIR_X;
+ 			} else {
+ 				x = sx;
++				style = HT_DIR_Y;
+ 			}
+ 			break;
+-
+-		case VPM_X_AND_Y:
++		case VPM_FIX_X: /* drag in Y direction */
++			x = sx;
++			style = HT_DIR_Y;
+ 			break;
++		case VPM_FIX_Y: /* drag in X direction */
++			y = sy;
++			style = HT_DIR_X;
++			break;
+ 
+-		// limit the selected area to a 10x10 rect.
+-		case VPM_X_AND_Y_LIMITED: {
+-			int limit = (_thd.sizelimit - 1) * 16;
++		case VPM_X_AND_Y_LIMITED: { /* drag an X by Y constrained rect area */
++			int limit = (_thd.sizelimit - 1) * TILE_SIZE;
+ 			x = sx + clamp(x - sx, -limit, limit);
+ 			y = sy + clamp(y - sy, -limit, limit);
+-			break;
++			/* Fallthrough */
++		case VPM_X_AND_Y: { /* drag an X by Y area */
++			TileIndex t0 = TileVirtXY(sx, sy);
++			TileIndex t1 = TileVirtXY(x, y);
++			uint dx = abs(TileX(t0) - TileX(t1)) + 1;
++			uint dy = abs(TileY(t0) - TileY(t1)) + 1;
++			HighLightStyle style = _thd.next_drawstyle;
++			int heightdiff;
++
++			if (dx == 1) { style = HT_LINE | HT_DIR_Y;}
++			else if (dy == 1) { style = HT_LINE | HT_DIR_X;}
++			heightdiff = CalcHeightdiff(style, 0, t0, t1);
++
++			if (heightdiff == 0) {
++				GuiShowTooltips(STR_MEASURE_AREA, dx, dy);
++			} else {
++				GuiShowTooltips(STR_MEASURE_AREA_HEIGHTDIFF, dx, dy, heightdiff);
++			}
++
++		} break;
++
+ 		}
++		default: NOT_REACHED();
+ 	}
+ 
++	if (method == VPM_X_OR_Y || method == VPM_FIX_X || method == VPM_FIX_Y) {
++		// works with dragging in single direction
++		TileIndex t0 = TileVirtXY(sx, sy);
++		TileIndex t1 = TileVirtXY(x, y);
++		uint distance = DistanceManhattan(t0, t1) + 1;
++		int heightdiff = CalcHeightdiff((_thd.next_drawstyle & HT_DRAG_MASK) | style, 0, t0, t1);
++
++		if (heightdiff == 0) {
++			GuiShowTooltips(STR_MEASURE_LENGTH, distance);
++		} else {
++			GuiShowTooltips(STR_MEASURE_LENGTH_HEIGHTDIFF, distance, heightdiff);
++		}
++	}
++
+ 	_thd.selend.x = x;
+ 	_thd.selend.y = y;
+ }
+Index: viewport.h
+===================================================================
+--- viewport.h	(revision 6405)
++++ viewport.h	(working copy)
+@@ -71,7 +71,8 @@
+ void VpSelectTilesWithMethod(int x, int y, int method);
+ 
+ // highlighting draw styles
+-enum {
++typedef byte HighLightStyle;
++enum HighLightStyles {
+ 	HT_NONE   = 0x00,
+ 	HT_RECT   = 0x80,
+ 	HT_POINT  = 0x40,
+@@ -79,15 +80,17 @@
+ 	                   * (uses lower bits to indicate direction) */
+ 	HT_RAIL   = 0x10, /* autorail (one piece)
+ 	                  * (uses lower bits to indicate direction) */
++	HT_DRAG_MASK = 0xF0, ///< masks the drag-type
+ 
+ 	/* lower bits (used with HT_LINE and HT_RAIL):
+ 	 * (see ASCII art in autorail.h for a visual interpretation) */
+-	HT_DIR_X  = 0,  // X direction
+-	HT_DIR_Y  = 1,  // Y direction
+-	HT_DIR_HU = 2, // horizontal upper
+-	HT_DIR_HL = 3, // horizontal lower
+-	HT_DIR_VL = 4, // vertical left
+-	HT_DIR_VR = 5, // vertical right
++	HT_DIR_X  = 0,    ///< X direction
++	HT_DIR_Y  = 1,    ///< Y direction
++	HT_DIR_HU = 2,    ///< horizontal upper
++	HT_DIR_HL = 3,    ///< horizontal lower
++	HT_DIR_VL = 4,    ///< vertical left
++	HT_DIR_VR = 5,    ///< vertical right
++	HT_DIR_MASK = 0x7 ///< masks the drag-direction
+ };
+ 
+ typedef struct TileHighlightData {
+Index: window.h
+===================================================================
+--- window.h	(revision 6405)
++++ window.h	(working copy)
+@@ -357,6 +357,8 @@
+ 
+ typedef struct {
+ 	StringID string_id;
++	byte params;
++	uint32 param[5];
+ } tooltips_d;
+ assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(tooltips_d));
+ 
+@@ -611,7 +613,7 @@
+ void UpdateWindows(void);
+ void InvalidateWidget(const Window *w, byte widget_index);
+ 
+-void GuiShowTooltips(StringID string_id);
++void GuiShowTooltips(StringID str, ...);
+ 
+ void UnclickWindowButtons(Window *w);
+ void UnclickSomeWindowButtons(Window *w, uint32 mask);

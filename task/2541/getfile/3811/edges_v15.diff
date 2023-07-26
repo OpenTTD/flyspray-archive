@@ -1,0 +1,1414 @@
+Index: src/ai/api/ai_tile.cpp
+===================================================================
+--- src/ai/api/ai_tile.cpp	(revision 15116)
++++ src/ai/api/ai_tile.cpp	(working copy)
+@@ -190,22 +190,22 @@
+ 
+ /* static */ bool AITile::RaiseTile(TileIndex tile, int32 slope)
+ {
+-	EnforcePrecondition(false, ::IsValidTile(tile));
++	EnforcePrecondition(false, tile < ::MapSize());
+ 
+ 	return AIObject::DoCommand(tile, slope, 1, CMD_TERRAFORM_LAND);
+ }
+ 
+ /* static */ bool AITile::LowerTile(TileIndex tile, int32 slope)
+ {
+-	EnforcePrecondition(false, ::IsValidTile(tile));
++	EnforcePrecondition(false, tile < ::MapSize());
+ 
+ 	return AIObject::DoCommand(tile, slope, 0, CMD_TERRAFORM_LAND);
+ }
+ 
+ /* static */ bool AITile::LevelTiles(TileIndex start_tile, TileIndex end_tile)
+ {
+-	EnforcePrecondition(false, ::IsValidTile(start_tile));
+-	EnforcePrecondition(false, ::IsValidTile(end_tile));
++	EnforcePrecondition(false, start_tile < ::MapSize());
++	EnforcePrecondition(false, end_tile < ::MapSize());
+ 
+ 	return AIObject::DoCommand(end_tile, start_tile, 0, CMD_LEVEL_LAND);
+ }
+Index: src/ai/api/ai_tile.hpp
+===================================================================
+--- src/ai/api/ai_tile.hpp	(revision 15116)
++++ src/ai/api/ai_tile.hpp	(working copy)
+@@ -291,7 +291,7 @@
+ 	 *  for example: SLOPE_N | SLOPE_W (= SLOPE_NW)
+ 	 * @param tile The tile to raise.
+ 	 * @param slope Corners to raise (SLOPE_xxx).
+-	 * @pre AIMap::IsValidTile(tile).
++	 * @pre tile < AIMap::GetMapSize().
+ 	 * @exception AIError::ERR_AREA_NOT_CLEAR
+ 	 * @exception AIError::ERR_TOO_CLOSE_TO_EDGE
+ 	 * @exception AITile::ERR_TILE_TOO_HIGH
+@@ -304,7 +304,7 @@
+ 	 *  for example: SLOPE_N | SLOPE_W (= SLOPE_NW)
+ 	 * @param tile The tile to lower.
+ 	 * @param slope Corners to lower (SLOPE_xxx).
+-	 * @pre AIMap::IsValidTile(tile).
++	 * @pre tile < AIMap::GetMapSize().
+ 	 * @exception AIError::ERR_AREA_NOT_CLEAR
+ 	 * @exception AIError::ERR_TOO_CLOSE_TO_EDGE
+ 	 * @exception AITile::ERR_TILE_TOO_LOW
+Index: src/clear_cmd.cpp
+===================================================================
+--- src/clear_cmd.cpp	(revision 15116)
++++ src/clear_cmd.cpp	(working copy)
+@@ -18,6 +18,7 @@
+ #include "economy_func.h"
+ #include "viewport_func.h"
+ #include "settings_type.h"
++#include "water.h"
+ 
+ #include "table/strings.h"
+ #include "table/sprites.h"
+@@ -216,6 +217,16 @@
+ 
+ static void TileLoop_Clear(TileIndex tile)
+ {
++	if (_game_mode != GM_EDITOR && _settings_game.construction.freeform_edges && 
++			(TileX(tile) == 1 || TileY(tile) == 1 || TileX(tile) == MapMaxX() - 1 || TileY(tile) == MapMaxY() - 1)) {
++		uint z;
++		Slope slope = GetTileSlope(tile, &z);
++		if (z == 0 && slope == SLOPE_FLAT) {
++			DoFloodTile(tile);
++			MarkTileDirtyByTile(tile);
++			return;
++		}
++	}
+ 	TileLoopClearHelper(tile);
+ 
+ 	switch (_settings_game.game_creation.landscape) {
+@@ -295,7 +306,7 @@
+ 		IncreaseGeneratingWorldProgress(GWP_ROUGH_ROCKY);
+ 		if (IsTileType(tile, MP_CLEAR) && !IsClearGround(tile, CLEAR_DESERT)) {
+ 			uint j = GB(r, 16, 4) + 5;
+-			for (;;) {
++			while (IsValidTile(tile)) {
+ 				TileIndex tile_new;
+ 
+ 				SetClearGroundDensity(tile, CLEAR_ROCKS, 3);
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revision 15116)
++++ src/command.cpp	(working copy)
+@@ -214,7 +214,7 @@
+ 	{CmdBuildTrainDepot,      CMD_NO_WATER | CMD_AUTO}, /* CMD_BUILD_TRAIN_DEPOT */
+ 	{CmdBuildSingleSignal,                   CMD_AUTO}, /* CMD_BUILD_SIGNALS */
+ 	{CmdRemoveSingleSignal,                  CMD_AUTO}, /* CMD_REMOVE_SIGNALS */
+-	{CmdTerraformLand,                       CMD_AUTO}, /* CMD_TERRAFORM_LAND */
++	{CmdTerraformLand,       CMD_ALL_TILES | CMD_AUTO}, /* CMD_TERRAFORM_LAND */
+ 	{CmdPurchaseLandArea,     CMD_NO_WATER | CMD_AUTO}, /* CMD_PURCHASE_LAND_AREA */
+ 	{CmdSellLandArea,                               0}, /* CMD_SELL_LAND_AREA */
+ 	{CmdBuildTunnel,                         CMD_AUTO}, /* CMD_BUILD_TUNNEL */
+@@ -311,7 +311,7 @@
+ 	{CmdBuildCanal,                          CMD_AUTO}, /* CMD_BUILD_CANAL */
+ 	{CmdCompanyCtrl,                                0}, /* CMD_COMPANY_CTRL */
+ 
+-	{CmdLevelLand,             CMD_NO_TEST | CMD_AUTO}, /* CMD_LEVEL_LAND; test run might clear tiles multiple times, in execution that only happens once */
++	{CmdLevelLand, CMD_ALL_TILES | CMD_NO_TEST | CMD_AUTO}, /* CMD_LEVEL_LAND; test run might clear tiles multiple times, in execution that only happens once */
+ 
+ 	{CmdRefitRailVehicle,                           0}, /* CMD_REFIT_RAIL_VEHICLE */
+ 	{CmdRestoreOrderIndex,                          0}, /* CMD_RESTORE_ORDER_INDEX */
+@@ -403,7 +403,7 @@
+ 	CommandCost res;
+ 
+ 	/* Do not even think about executing out-of-bounds tile-commands */
+-	if (!IsValidTile(tile)) return CMD_ERROR;
++	if (tile != 0 && (tile >= MapSize() || (!IsValidTile(tile) && (flags & DC_ALL_TILES) == 0))) return CMD_ERROR;
+ 
+ 	CommandProc *proc = _command_proc_table[cmd].proc;
+ 
+@@ -497,8 +497,20 @@
+ {
+ 	assert(_docommand_recursive == 0);
+ 
++	/* get pointer to command handler */
++	byte cmd_id = cmd & CMD_ID_MASK;
++	assert(cmd_id < lengthof(_command_proc_table));
++
++	CommandProc *proc = _command_proc_table[cmd_id].proc;
++	if (proc == NULL) return false;
++
++	/* Command flags are used internally */
++	uint cmd_flags = GetCommandFlags(cmd);
++	/* Flags get send to the DoCommand */
++	uint32 flags = CommandFlagsToDCFlags(cmd_flags);
++
+ 	/* Do not even think about executing out-of-bounds tile-commands */
+-	if (!IsValidTile(tile)) return false;
++	if (tile != 0 && (tile >= MapSize() || (!IsValidTile(tile) && (cmd_flags & CMD_ALL_TILES) == 0))) return false;
+ 
+ 	CommandCost res, res2;
+ 
+@@ -516,18 +528,6 @@
+ 		return false;
+ 	}
+ 
+-	/* get pointer to command handler */
+-	byte cmd_id = cmd & CMD_ID_MASK;
+-	assert(cmd_id < lengthof(_command_proc_table));
+-
+-	CommandProc *proc = _command_proc_table[cmd_id].proc;
+-	if (proc == NULL) return false;
+-
+-	/* Command flags are used internally */
+-	uint cmd_flags = GetCommandFlags(cmd);
+-	/* Flags get send to the DoCommand */
+-	uint32 flags = CommandFlagsToDCFlags(cmd_flags);
+-
+ 	bool notest = (cmd_flags & CMD_NO_TEST) != 0;
+ 
+ 	_docommand_recursive = 1;
+Index: src/command_func.h
+===================================================================
+--- src/command_func.h	(revision 15116)
++++ src/command_func.h	(working copy)
+@@ -96,6 +96,7 @@
+ 	uint32 flags = 0;
+ 	if (cmd_flags & CMD_NO_WATER) flags |= DC_NO_WATER;
+ 	if (cmd_flags & CMD_AUTO) flags |= DC_AUTO;
++	if (cmd_flags & CMD_ALL_TILES) flags |= DC_ALL_TILES;
+ 	return flags;
+ }
+ 
+Index: src/command_type.h
+===================================================================
+--- src/command_type.h	(revision 15116)
++++ src/command_type.h	(working copy)
+@@ -304,6 +304,7 @@
+ 	DC_NO_TOWN_RATING  = 0x020, ///< town rating does not disallow you from building
+ 	DC_BANKRUPT        = 0x040, ///< company bankrupts, skip money check, skip vehicle on tile check in some cases
+ 	DC_AUTOREPLACE     = 0x080, ///< autoreplace/autorenew is in progress, this shall disable vehicle limits when building, and ignore certain restrictions when undoing things (like vehicle attach callback)
++	DC_ALL_TILES       = 0x100, ///< allow this command also on MP_VOID tiles
+ };
+ 
+ /**
+@@ -340,6 +341,7 @@
+ 	CMD_AUTO     = 0x04, ///< set the DC_AUTO flag on this command
+ 	CMD_NO_TEST  = 0x08, ///< the command's output may differ between test and execute due to town rating changes etc.
+ 	CMD_NO_WATER = 0x10, ///< set the DC_NO_WATER flag on this command
++	CMD_ALL_TILES= 0x20, ///< allow this command also on MP_VOID tiles
+ };
+ 
+ /**
+Index: src/genworld.cpp
+===================================================================
+--- src/genworld.cpp	(revision 15116)
++++ src/genworld.cpp	(working copy)
+@@ -28,6 +28,7 @@
+ #include "blitter/factory.hpp"
+ #include "tilehighlight_func.h"
+ #include "saveload/saveload.h"
++#include "void_map.h"
+ 
+ #include "table/sprites.h"
+ 
+@@ -106,6 +107,11 @@
+ 		if (_gw.mode == GW_EMPTY) {
+ 			SetGeneratingWorldProgress(GWP_UNMOVABLE, 1);
+ 
++			if (_settings_game.construction.freeform_edges) {
++				for (uint row = 0; row < MapSizeY(); row++) MakeVoid(TileXY(0, row));
++				for (uint col = 0; col < MapSizeX(); col++) MakeVoid(TileXY(col, 0));
++			}
++
+ 			/* Make the map the height of the patch setting */
+ 			if (_game_mode != GM_MENU) FlatEmptyWorld(_settings_game.game_creation.se_flat_world_height);
+ 
+Index: src/genworld_gui.cpp
+===================================================================
+--- src/genworld_gui.cpp	(revision 15116)
++++ src/genworld_gui.cpp	(working copy)
+@@ -98,13 +98,14 @@
+ 	GLAND_WATER_TEXT,
+ 	GLAND_WATER_PULLDOWN,
+ 	GLAND_SMOOTHNESS_TEXT,
+-	GLAND_SMOOTHNESS_PULLDOWN
++	GLAND_SMOOTHNESS_PULLDOWN,
++	GLAND_WATER_BORDERS_PULLDOWN
+ };
+ 
+ static const Widget _generate_landscape_widgets[] = {
+ {  WWT_CLOSEBOX,  RESIZE_NONE, COLOUR_BROWN,    0,  10,   0,  13, STR_00C5,                     STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION, RESIZE_NONE, COLOUR_BROWN,   11, 337,   0,  13, STR_WORLD_GENERATION_CAPTION, STR_NULL},
+-{      WWT_PANEL, RESIZE_NONE, COLOUR_BROWN,    0, 337,  14, 267, 0x0,                          STR_NULL},
++{      WWT_PANEL, RESIZE_NONE, COLOUR_BROWN,    0, 337,  14, 285, 0x0,                          STR_NULL},
+ 
+ /* Landscape selection */
+ {   WWT_IMGBTN_2, RESIZE_NONE, COLOUR_ORANGE,  10,  86,  24,  78, SPR_SELECT_TEMPERATE,         STR_030E_SELECT_TEMPERATE_LANDSCAPE},    // GLAND_TEMPERATE
+@@ -133,7 +134,7 @@
+ {    WWT_TEXTBTN, RESIZE_NONE, COLOUR_ORANGE, 216, 326, 152, 163, STR_RANDOM,                   STR_RANDOM_HELP},                        // GLAND_RANDOM_BUTTON
+ 
+ /* Generate button */
+-{    WWT_TEXTBTN, RESIZE_NONE, COLOUR_GREEN, 243, 326, 228, 257, STR_GENERATE,                 STR_NULL},                                // GLAND_GENERATE_BUTTON
++{    WWT_TEXTBTN, RESIZE_NONE, COLOUR_GREEN, 243, 326, 246, 275, STR_GENERATE,                 STR_NULL},                                // GLAND_GENERATE_BUTTON
+ 
+ /* Start date */
+ {       WWT_TEXT, RESIZE_NONE, COLOUR_ORANGE, 182, 212, 113, 123, STR_DATE,                     STR_NULL},                               // GLAND_START_DATE_TEXT1
+@@ -166,6 +167,9 @@
+ /* Map smoothness */
+ {       WWT_TEXT, RESIZE_NONE, COLOUR_ORANGE,  12, 110, 245, 257, STR_SMOOTHNESS,               STR_NULL},                               // GLAND_SMOOTHNESS_TEXT
+ {   WWT_DROPDOWN, RESIZE_NONE, COLOUR_ORANGE, 114, 231, 246, 257, 0x0,                          STR_NULL},                               // GLAND_SMOOTHNESS_PULLDOWN
++
++/* Water borders */
++{   WWT_DROPDOWN, RESIZE_NONE, COLOUR_ORANGE,  12, 231, 264, 275, 0x0,                          STR_NULL},                               // GLAND_WATER_BORDERS_PULLDOWN
+ {   WIDGETS_END},
+ };
+ 
+@@ -269,6 +273,25 @@
+ static const StringID _landscape[]   = {STR_CONFIG_PATCHES_LAND_GENERATOR_ORIGINAL, STR_CONFIG_PATCHES_LAND_GENERATOR_TERRA_GENESIS, INVALID_STRING_ID};
+ static const StringID _num_towns[]   = {STR_NUM_VERY_LOW, STR_6816_LOW, STR_6817_NORMAL, STR_6818_HIGH, INVALID_STRING_ID};
+ static const StringID _num_inds[]    = {STR_NONE, STR_NUM_VERY_LOW, STR_6816_LOW, STR_6817_NORMAL, STR_6818_HIGH, INVALID_STRING_ID};
++static const StringID _water_borders[]    = {
++	STR_CONFIG_PATCHES_WATER_BORDER_NONE,
++	STR_CONFIG_PATCHES_WATER_BORDER_NE,
++	STR_CONFIG_PATCHES_WATER_BORDER_SE,
++	STR_CONFIG_PATCHES_WATER_BORDER_SE_NE,
++	STR_CONFIG_PATCHES_WATER_BORDER_SW,
++	STR_CONFIG_PATCHES_WATER_BORDER_SW_NE,
++	STR_CONFIG_PATCHES_WATER_BORDER_SW_SE,
++	STR_CONFIG_PATCHES_WATER_BORDER_SW_SE_NE,
++	STR_CONFIG_PATCHES_WATER_BORDER_NW,
++	STR_CONFIG_PATCHES_WATER_BORDER_NW_NE,
++	STR_CONFIG_PATCHES_WATER_BORDER_NW_SE,
++	STR_CONFIG_PATCHES_WATER_BORDER_NW_SE_NE,
++	STR_CONFIG_PATCHES_WATER_BORDER_NW_SW,
++	STR_CONFIG_PATCHES_WATER_BORDER_NW_SW_NE,
++	STR_CONFIG_PATCHES_WATER_BORDER_NW_SW_SE,
++	STR_CONFIG_PATCHES_WATER_BORDER_NW_SW_SE_NE,
++	INVALID_STRING_ID
++};
+ 
+ struct GenerateLandscapeWindow : public QueryStringBaseWindow {
+ 	uint widget_id;
+@@ -294,9 +317,10 @@
+ 
+ 	virtual void OnPaint()
+ 	{
+-		/* You can't select smoothness if not terragenesis */
++		/* You can't select smoothness / non-water borders if not terragenesis */
+ 		if (mode == GLWP_GENERATE) {
+ 			this->SetWidgetDisabledState(GLAND_SMOOTHNESS_PULLDOWN, _settings_newgame.game_creation.land_generator == 0);
++			this->SetWidgetDisabledState(GLAND_WATER_BORDERS_PULLDOWN, _settings_newgame.game_creation.land_generator == 0 || !_settings_newgame.construction.freeform_edges);
+ 		}
+ 		/* Disable snowline if not hilly */
+ 		this->SetWidgetDisabledState(GLAND_SNOW_LEVEL_TEXT, _settings_newgame.game_creation.landscape != LT_ARCTIC);
+@@ -324,11 +348,12 @@
+ 		}
+ 
+ 		if (mode == GLWP_GENERATE) {
+-			this->widget[GLAND_LANDSCAPE_PULLDOWN].data  = _landscape[_settings_newgame.game_creation.land_generator];
+-			this->widget[GLAND_TREE_PULLDOWN].data       = _tree_placer[_settings_newgame.game_creation.tree_placer];
+-			this->widget[GLAND_TERRAIN_PULLDOWN].data    = _elevations[_settings_newgame.difficulty.terrain_type];
+-			this->widget[GLAND_WATER_PULLDOWN].data      = _sea_lakes[_settings_newgame.difficulty.quantity_sea_lakes];
+-			this->widget[GLAND_SMOOTHNESS_PULLDOWN].data = _smoothness[_settings_newgame.game_creation.tgen_smoothness];
++			this->widget[GLAND_LANDSCAPE_PULLDOWN].data     = _landscape[_settings_newgame.game_creation.land_generator];
++			this->widget[GLAND_TREE_PULLDOWN].data          = _tree_placer[_settings_newgame.game_creation.tree_placer];
++			this->widget[GLAND_TERRAIN_PULLDOWN].data       = _elevations[_settings_newgame.difficulty.terrain_type];
++			this->widget[GLAND_WATER_PULLDOWN].data         = _sea_lakes[_settings_newgame.difficulty.quantity_sea_lakes];
++			this->widget[GLAND_SMOOTHNESS_PULLDOWN].data    = _smoothness[_settings_newgame.game_creation.tgen_smoothness];
++			this->widget[GLAND_WATER_BORDERS_PULLDOWN].data = _settings_newgame.construction.freeform_edges ? _water_borders[_settings_newgame.game_creation.water_borders] : STR_CONFIG_PATCHES_WATER_BORDER_NW_SW_SE_NE;
+ 		} else {
+ 			this->widget[GLAND_TREE_PULLDOWN].data               = _tree_placer[_settings_newgame.game_creation.tree_placer];
+ 			this->widget[GLAND_HEIGHTMAP_ROTATION_PULLDOWN].data = _rotation[_settings_newgame.game_creation.heightmap_rotation];
+@@ -483,6 +508,10 @@
+ 			case GLAND_SMOOTHNESS_PULLDOWN: // Map smoothness
+ 				ShowDropDownMenu(this, _smoothness, _settings_newgame.game_creation.tgen_smoothness, GLAND_SMOOTHNESS_PULLDOWN, 0, 0);
+ 				break;
++
++			case GLAND_WATER_BORDERS_PULLDOWN: // Water borders
++				ShowDropDownMenu(this, _water_borders, _settings_newgame.game_creation.water_borders, GLAND_WATER_BORDERS_PULLDOWN, 0, 0);
++				break;
+ 		}
+ 	}
+ 
+@@ -507,10 +536,11 @@
+ 	virtual void OnDropdownSelect(int widget, int index)
+ 	{
+ 		switch (widget) {
+-			case GLAND_MAPSIZE_X_PULLDOWN:  _settings_newgame.game_creation.map_x = index; break;
+-			case GLAND_MAPSIZE_Y_PULLDOWN:  _settings_newgame.game_creation.map_y = index; break;
+-			case GLAND_TREE_PULLDOWN:       _settings_newgame.game_creation.tree_placer = index; break;
+-			case GLAND_SMOOTHNESS_PULLDOWN: _settings_newgame.game_creation.tgen_smoothness = index;  break;
++			case GLAND_MAPSIZE_X_PULLDOWN:     _settings_newgame.game_creation.map_x = index; break;
++			case GLAND_MAPSIZE_Y_PULLDOWN:     _settings_newgame.game_creation.map_y = index; break;
++			case GLAND_TREE_PULLDOWN:          _settings_newgame.game_creation.tree_placer = index; break;
++			case GLAND_SMOOTHNESS_PULLDOWN:    _settings_newgame.game_creation.tgen_smoothness = index;  break;
++			case GLAND_WATER_BORDERS_PULLDOWN: _settings_newgame.game_creation.water_borders = index;  break;
+ 
+ 			case GLAND_TOWN_PULLDOWN:
+ 				_settings_newgame.difficulty.number_towns = index;
+@@ -571,7 +601,7 @@
+ };
+ 
+ static const WindowDesc _generate_landscape_desc = {
+-	WDP_CENTER, WDP_CENTER, 338, 268, 338, 268,
++	WDP_CENTER, WDP_CENTER, 338, 286, 338, 286,
+ 	WC_GENERATE_LANDSCAPE, WC_NONE,
+ 	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS,
+ 	_generate_landscape_widgets,
+Index: src/heightmap.cpp
+===================================================================
+--- src/heightmap.cpp	(revision 15116)
++++ src/heightmap.cpp	(working copy)
+@@ -319,9 +319,14 @@
+ 		col_pad = (1 + width - ((img_width * img_scale) / num_div)) / 2;
+ 	}
+ 
++	if (_settings_game.construction.freeform_edges) {
++		for (uint x = 0; x < MapSizeX(); x++) MakeVoid(TileXY(x, 0));
++		for (uint y = 0; y < MapSizeY(); y++) MakeVoid(TileXY(0, y));
++	}
++
+ 	/* Form the landscape */
+-	for (row = 0; row < height - 1; row++) {
+-		for (col = 0; col < width - 1; col++) {
++	for (row = 0; row < height; row++) {
++		for (col = 0; col < width; col++) {
+ 			switch (_settings_game.game_creation.heightmap_rotation) {
+ 				default: NOT_REACHED();
+ 				case HM_COUNTER_CLOCKWISE: tile = TileXY(col, row); break;
+@@ -329,7 +334,7 @@
+ 			}
+ 
+ 			/* Check if current tile is within the 1-pixel map edge or padding regions */
+-			if ((DistanceFromEdge(tile) <= 1) ||
++			if ((!_settings_game.construction.freeform_edges && DistanceFromEdge(tile) <= 1) ||
+ 					(row < row_pad) || (row >= (height - row_pad - 1)) ||
+ 					(col < col_pad) || (col >= (width  - col_pad - 1))) {
+ 				SetTileHeight(tile, 0);
+@@ -353,7 +358,7 @@
+ 				/* Color scales from 0 to 255, OpenTTD height scales from 0 to 15 */
+ 				SetTileHeight(tile, map[img_row * img_width + img_col] / 16);
+ 			}
+-			MakeClear(tile, CLEAR_GRASS, 3);
++			if (IsValidTile(tile)) MakeClear(tile, CLEAR_GRASS, 3);
+ 		}
+ 	}
+ }
+@@ -365,7 +370,7 @@
+ static void FixSlopes()
+ {
+ 	uint width, height;
+-	uint row, col;
++	int row, col;
+ 	byte current_tile;
+ 
+ 	/* Adjust height difference to maximum one horizontal/vertical change. */
+@@ -373,13 +378,18 @@
+ 	height  = MapSizeY();
+ 
+ 	/* Top and left edge */
+-	for (row = 1; row < height - 2; row++) {
+-		for (col = 1; col < width - 2; col++) {
+-			/* Find lowest tile; either the top or left one */
+-			current_tile = TileHeight(TileXY(col - 1, row)); // top edge
+-			if (TileHeight(TileXY(col, row - 1)) < current_tile) {
+-				current_tile = TileHeight(TileXY(col, row - 1)); // left edge
++	for (row = 0; (uint)row < height; row++) {
++		for (col = 0; (uint)col < width; col++) {
++			current_tile = MAX_TILE_HEIGHT;
++			if (col != 0) {
++				/* Find lowest tile; either the top or left one */
++				current_tile = TileHeight(TileXY(col - 1, row)); // top edge
+ 			}
++			if (row != 0) {
++				if (TileHeight(TileXY(col, row - 1)) < current_tile) {
++					current_tile = TileHeight(TileXY(col, row - 1)); // left edge
++				}
++			}
+ 
+ 			/* Does the height differ more than one? */
+ 			if (TileHeight(TileXY(col, row)) >= (uint)current_tile + 2) {
+@@ -390,14 +400,20 @@
+ 	}
+ 
+ 	/* Bottom and right edge */
+-	for (row = height - 2; row > 0; row--) {
+-		for (col = width - 2; col > 0; col--) {
+-			/* Find lowest tile; either the bottom and right one */
+-			current_tile = TileHeight(TileXY(col + 1, row)); // bottom edge
+-			if (TileHeight(TileXY(col, row + 1)) < current_tile) {
+-				current_tile = TileHeight(TileXY(col, row + 1)); // right edge
++	for (row = height - 1; row >= 0; row--) {
++		for (col = width - 1; col >= 0; col--) {
++			current_tile = MAX_TILE_HEIGHT;
++			if ((uint)col != width - 1) {
++				/* Find lowest tile; either the bottom and right one */
++				current_tile = TileHeight(TileXY(col + 1, row)); // bottom edge
+ 			}
+ 
++			if ((uint)row != height - 1) {
++				if (TileHeight(TileXY(col, row + 1)) < current_tile) {
++					current_tile = TileHeight(TileXY(col, row + 1)); // right edge
++				}
++			}
++
+ 			/* Does the height differ more than one? */
+ 			if (TileHeight(TileXY(col, row)) >= (uint)current_tile + 2) {
+ 				/* Then change the height to be no more than one */
+@@ -447,14 +463,9 @@
+ 
+ void FlatEmptyWorld(byte tile_height)
+ {
+-	uint width, height;
+-	uint row, col;
+-
+-	width  = MapSizeX();
+-	height = MapSizeY();
+-
+-	for (row = 2; row < height - 2; row++) {
+-		for (col = 2; col < width - 2; col++) {
++	int edge_distance = _settings_game.construction.freeform_edges ? 0 : 2;
++	for (uint row = edge_distance; row < MapSizeY() - edge_distance; row++) {
++		for (uint col = edge_distance; col < MapSizeX() - edge_distance; col++) {
+ 			SetTileHeight(TileXY(col, row), tile_height);
+ 		}
+ 	}
+Index: src/industry_cmd.cpp
+===================================================================
+--- src/industry_cmd.cpp	(revision 15116)
++++ src/industry_cmd.cpp	(working copy)
+@@ -930,6 +930,8 @@
+ 	/* offset tile to match size */
+ 	tile -= TileDiffXY(size_x / 2, size_y / 2);
+ 
++	if (TileX(tile) + size_x >= MapSizeX() || TileY(tile) + size_y >= MapSizeY()) return;
++
+ 	/* check the amount of bad tiles */
+ 	count = 0;
+ 	BEGIN_TILE_LOOP(cur_tile, size_x, size_y, tile)
+@@ -1179,19 +1181,6 @@
+ 	CheckNewIndustry_OilRig
+ };
+ 
+-static bool CheckSuitableIndustryPos(TileIndex tile)
+-{
+-	uint x = TileX(tile);
+-	uint y = TileY(tile);
+-
+-	if (x < 2 || y < 2 || x > MapMaxX() - 3 || y > MapMaxY() - 3) {
+-		_error_message = STR_0239_SITE_UNSUITABLE;
+-		return false;
+-	}
+-
+-	return true;
+-}
+-
+ static const Town *CheckMultipleIndustryInTown(TileIndex tile, int type)
+ {
+ 	const Town *t;
+@@ -1237,6 +1226,8 @@
+ 
+ 	do {
+ 		IndustryGfx gfx = GetTranslatedIndustryTileID(it->gfx);
++		if (TileX(tile) + it->ti.x >= MapSizeX()) return false;
++		if (TileY(tile) + it->ti.y >= MapSizeY()) return false;
+ 		TileIndex cur_tile = tile + ToTileIndexDiff(it->ti);
+ 
+ 		if (!IsValidTile(cur_tile)) {
+@@ -1342,7 +1333,7 @@
+ 		 *  has to be correct too (in level, or almost in level)
+ 		 *  else you get a chain-reaction of terraforming. */
+ 		if (internal == 0 && curh != height) {
+-			if (!CheckCanTerraformSurroundingTiles(tile_walk + TileDiffXY(-1, -1), height, internal + 1))
++			if (TileX(tile_walk) == 0 || TileY(tile_walk) == 0 || !CheckCanTerraformSurroundingTiles(tile_walk + TileDiffXY(-1, -1), height, internal + 1))
+ 				return false;
+ 		}
+ 	} END_TILE_LOOP(tile_walk, size_x, size_y, tile);
+@@ -1373,6 +1364,7 @@
+ 	/* Remember level height */
+ 	h = TileHeight(tile);
+ 
++	if (TileX(tile) <= 1 || TileY(tile) <= 1) return false;
+ 	/* Check that all tiles in area and surrounding are clear
+ 	 * this determines that there are no obstructing items */
+ 	cur_tile = tile + TileDiffXY(-1, -1);
+@@ -1380,7 +1372,7 @@
+ 	size_y = max_y + 4;
+ 
+ 	/* Check if we don't leave the map */
+-	if (TileX(cur_tile) == 0 || TileY(cur_tile) == 0 || TileX(cur_tile) + size_x >= MapMaxX() || TileY(cur_tile) + size_y >= MapMaxY()) return false;
++	if (TileX(cur_tile) + size_x >= MapMaxX() || TileY(cur_tile) + size_y >= MapMaxY()) return false;
+ 
+ 	/* _current_company is OWNER_NONE for randomly generated industries and in editor, or the company who funded or prospected the industry.
+ 	 * Perform terraforming as OWNER_TOWN to disable autoslope. */
+@@ -1632,7 +1624,6 @@
+ 	if (t == NULL) return NULL;
+ 
+ 	if (!CheckIfIndustryIsAllowed(tile, type, t)) return NULL;
+-	if (!CheckSuitableIndustryPos(tile)) return NULL;
+ 
+ 	if (!Industry::CanAllocateItem()) return NULL;
+ 
+Index: src/landscape.cpp
+===================================================================
+--- src/landscape.cpp	(revision 15116)
++++ src/landscape.cpp	(working copy)
+@@ -690,9 +690,9 @@
+ 	uint sizex = MapSizeX();
+ 
+ 	uint y;
+-	for (y = 0; y < maxy; y++) {
++	for (y = _settings_game.construction.freeform_edges ? 1 : 0; y < maxy; y++) {
+ 		uint x;
+-		for (x = 0; x < maxx; x++) {
++		for (x = _settings_game.construction.freeform_edges ? 1 : 0; x < maxx; x++) {
+ 			MakeClear(sizex * y + x, CLEAR_GRASS, 3);
+ 			SetTileHeight(sizex * y + x, 0);
+ 			SetTropicZone(sizex * y + x, TROPICZONE_NORMAL);
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 15116)
++++ src/lang/english.txt	(working copy)
+@@ -1090,7 +1090,30 @@
+ STR_CONFIG_PATCHES_HEIGHTMAP_ROTATION_COUNTER_CLOCKWISE         :Counter clockwise
+ STR_CONFIG_PATCHES_HEIGHTMAP_ROTATION_CLOCKWISE                 :Clockwise
+ STR_CONFIG_PATCHES_SE_FLAT_WORLD_HEIGHT                         :{LTBLUE}The height level a flat scenario map gets: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_ENABLE_FREEFORM_EDGES                        :{LTBLUE}Enable terraforming the tiles at the map borders
++STR_CONFIG_PATCHES_EDGES_NOT_EMPTY                              :{WHITE}One or more tiles at the northern edge are not empty.
++STR_CONFIG_PATCHES_EDGES_NOT_WATER                              :{WHITE}One or more tiles at on of the edges is not water
+ 
++# Start of map water border strings.
++# DON'T ADD OR REMOVE LINES HERE
++STR_CONFIG_PATCHES_WATER_BORDER_NONE                            :Land at all borders
++STR_CONFIG_PATCHES_WATER_BORDER_NE                              :Water at north-east border only
++STR_CONFIG_PATCHES_WATER_BORDER_SE                              :Water at south-east border only
++STR_CONFIG_PATCHES_WATER_BORDER_SE_NE                           :Water at north-east and south-east borders
++STR_CONFIG_PATCHES_WATER_BORDER_SW                              :Water at south-west border only
++STR_CONFIG_PATCHES_WATER_BORDER_SW_NE                           :Water at north-east and south-west borders
++STR_CONFIG_PATCHES_WATER_BORDER_SW_SE                           :Water at south-east and south-west borders
++STR_CONFIG_PATCHES_WATER_BORDER_SW_SE_NE                        :Land only at north-west border
++STR_CONFIG_PATCHES_WATER_BORDER_NW                              :Water at north-west border only
++STR_CONFIG_PATCHES_WATER_BORDER_NW_NE                           :Water at north-west and north-east borders
++STR_CONFIG_PATCHES_WATER_BORDER_NW_SE                           :Water at north-west and south-east borders
++STR_CONFIG_PATCHES_WATER_BORDER_NW_SE_NE                        :Land only at south-west border
++STR_CONFIG_PATCHES_WATER_BORDER_NW_SW                           :Water at north-west and south-west borders
++STR_CONFIG_PATCHES_WATER_BORDER_NW_SW_NE                        :Land only at south-east border
++STR_CONFIG_PATCHES_WATER_BORDER_NW_SW_SE                        :Land only at north-east border
++STR_CONFIG_PATCHES_WATER_BORDER_NW_SW_SE_NE                     :Water at all borders
++# End of map water border strings.
++
+ STR_CONFIG_PATCHES_STATION_SPREAD                               :{LTBLUE}Max station spread: {ORANGE}{STRING1} {RED}Warning: High setting slows game
+ STR_CONFIG_PATCHES_SERVICEATHELIPAD                             :{LTBLUE}Service helicopters at helipads automatically: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_LINK_TERRAFORM_TOOLBAR                       :{LTBLUE}Link landscape toolbar to rail/road/water/airport toolbars: {ORANGE}{STRING1}
+@@ -2117,6 +2140,7 @@
+ STR_5000_TRAIN_IN_TUNNEL                                        :{WHITE}Train in tunnel
+ STR_5001_ROAD_VEHICLE_IN_TUNNEL                                 :{WHITE}Road vehicle in tunnel
+ STR_5003_ANOTHER_TUNNEL_IN_THE_WAY                              :{WHITE}Another tunnel in the way
++STR_TUNNEL_THROUGH_MAP_BORDER                                   :{WHITE}Tunnel would end out of the map
+ STR_5005_UNABLE_TO_EXCAVATE_LAND                                :{WHITE}Unable to excavate land for other end of tunnel
+ STR_5006_MUST_DEMOLISH_TUNNEL_FIRST                             :{WHITE}Must demolish tunnel first
+ STR_5007_MUST_DEMOLISH_BRIDGE_FIRST                             :{WHITE}Must demolish bridge first
+Index: src/map.cpp
+===================================================================
+--- src/map.cpp	(revision 15116)
++++ src/map.cpp	(working copy)
+@@ -9,6 +9,7 @@
+ #include "core/alloc_func.hpp"
+ #include "core/math_func.hpp"
+ #include "map_func.h"
++#include "settings_type.h"
+ 
+ #if defined(_MSC_VER) && _MSC_VER >= 1400 /* VStudio 2005 is stupid! */
+ /* Why the hell is that not in all MSVC headers?? */
+@@ -244,10 +245,14 @@
+  */
+ uint DistanceFromEdge(TileIndex tile)
+ {
+-	const uint xl = TileX(tile);
+-	const uint yl = TileY(tile);
++	uint xl = TileX(tile);
++	uint yl = TileY(tile);
+ 	const uint xh = MapSizeX() - 1 - xl;
+ 	const uint yh = MapSizeY() - 1 - yl;
++	if (_settings_game.construction.freeform_edges) {
++		xl--;
++		yl--;
++	}
+ 	const uint minl = min(xl, yl);
+ 	const uint minh = min(xh, yh);
+ 	return min(minl, minh);
+Index: src/newgrf_industries.cpp
+===================================================================
+--- src/newgrf_industries.cpp	(revision 15116)
++++ src/newgrf_industries.cpp	(working copy)
+@@ -59,6 +59,7 @@
+ 
+ 	uint max_x = MapMaxX();
+ 	uint max_y = MapMaxY();
++	uint min_xy = _settings_game.construction.freeform_edges ? 1 : 0;
+ 
+ 	/* go in a 'spiral' with increasing manhattan distance in each iteration */
+ 	for (uint dist = 1; dist < max_dist; dist++) {
+@@ -75,8 +76,8 @@
+ 
+ 			/* each side of this square has length 'dist' */
+ 			for (uint a = 0; a < dist; a++) {
+-				/* MP_VOID tiles are not checked (interval is [0; max) for IsInsideMM())*/
+-				if (IsInsideMM(x, 0, max_x) && IsInsideMM(y, 0, max_y)) {
++				/* MP_VOID tiles are not checked (interval is [min; max) for IsInsideMM())*/
++				if (IsInsideMM(x, min_xy, max_x) && IsInsideMM(y, min_xy, max_y)) {
+ 					TileIndex t = TileXY(x, y);
+ 					if (IsTileType(t, MP_WATER) == water) return dist;
+ 				}
+Index: src/saveload/afterload.cpp
+===================================================================
+--- src/saveload/afterload.cpp	(revision 15116)
++++ src/saveload/afterload.cpp	(working copy)
+@@ -640,6 +640,11 @@
+ 		}
+ 	}
+ 
++	/* Force the freeform edges to false for old savegames. */
++	if (CheckSavegameVersion(110)) {
++		_settings_game.construction.freeform_edges = false;
++	}
++
+ 	/* From version 9.0, we update the max passengers of a town (was sometimes negative
+ 	 *  before that. */
+ 	if (CheckSavegameVersion(9)) {
+Index: src/saveload/saveload.cpp
+===================================================================
+--- src/saveload/saveload.cpp	(revision 15116)
++++ src/saveload/saveload.cpp	(working copy)
+@@ -42,7 +42,7 @@
+ 
+ #include <list>
+ 
+-extern const uint16 SAVEGAME_VERSION = 109;
++extern const uint16 SAVEGAME_VERSION = 110;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 15116)
++++ src/settings.cpp	(working copy)
+@@ -68,6 +68,10 @@
+ #include "ai/ai_config.hpp"
+ #include "ai/ai_info.hpp"
+ 
++#include "tile_map.h"
++#include "void_map.h"
++#include "station_base.h"
++
+ #include "table/strings.h"
+ 
+ ClientSettings _settings_client;
+@@ -1079,6 +1083,71 @@
+ 	return 0;
+ }
+ 
++static int32 CheckFreeformEdges(int32 p1)
++{
++	if (_game_mode == GM_MENU) return 0;
++	if (p1) {
++		Vehicle *v;
++		FOR_ALL_VEHICLES(v) {
++			if (v->type == VEH_SHIP && (TileX(v->tile) == 0 || TileY(v->tile) == 0)) {
++				ShowErrorMessage(INVALID_STRING_ID, STR_CONFIG_PATCHES_EDGES_NOT_EMPTY, 0, 0);
++				_settings_game.construction.freeform_edges = false;
++				return 0;
++			}
++		}
++		Station *st;
++		FOR_ALL_STATIONS(st) {
++			if (TileX(st->xy) == 0 || TileY(st->xy) == 0) {
++				ShowErrorMessage(INVALID_STRING_ID, STR_CONFIG_PATCHES_EDGES_NOT_EMPTY, 0, 0);
++				_settings_game.construction.freeform_edges = false;
++				return 0;
++			}
++		}
++		for (uint i = 0; i < MapSizeX(); i++) MakeVoid(TileXY(i, 0));
++		for (uint i = 0; i < MapSizeY(); i++) MakeVoid(TileXY(0, i));
++	} else {
++		for (uint i = 0; i < MapMaxX(); i++) {
++			if (TileHeight(TileXY(i, 1)) != 0) {
++				ShowErrorMessage(INVALID_STRING_ID, STR_CONFIG_PATCHES_EDGES_NOT_WATER, 0, 0);
++				_settings_game.construction.freeform_edges = true;
++				return 0;
++			}
++		}
++		for (uint i = 1; i < MapMaxX(); i++) {
++			if (!IsTileType(TileXY(i, MapMaxY() - 1), MP_WATER) || TileHeight(TileXY(1, MapMaxY())) != 0) {
++				ShowErrorMessage(INVALID_STRING_ID, STR_CONFIG_PATCHES_EDGES_NOT_WATER, 0, 0);
++				_settings_game.construction.freeform_edges = true;
++				return 0;
++			}
++		}
++		for (uint i = 0; i < MapMaxY(); i++) {
++			if (TileHeight(TileXY(1, i)) != 0) {
++				ShowErrorMessage(INVALID_STRING_ID, STR_CONFIG_PATCHES_EDGES_NOT_WATER, 0, 0);
++				_settings_game.construction.freeform_edges = true;
++				return 0;
++			}
++		}
++		for (uint i = 1; i < MapMaxY(); i++) {
++			if (!IsTileType(TileXY(MapMaxX() - 1, i), MP_WATER) || TileHeight(TileXY(MapMaxX(), i)) != 0) {
++				ShowErrorMessage(INVALID_STRING_ID, STR_CONFIG_PATCHES_EDGES_NOT_WATER, 0, 0);
++				_settings_game.construction.freeform_edges = true;
++				return 0;
++			}
++		}
++		/* Make tiles at the border water again. */
++		for (uint i = 0; i < MapMaxX(); i++) {
++			SetTileHeight(TileXY(i, 0), 0);
++			SetTileType(TileXY(i, 0), MP_WATER);
++		}
++		for (uint i = 0; i < MapMaxY(); i++) {
++			SetTileHeight(TileXY(0, i), 0);
++			SetTileType(TileXY(0, i), MP_WATER);
++		}
++	}
++	MarkWholeScreenDirty();
++	return 0;
++}
++
+ #ifdef ENABLE_NETWORK
+ 
+ static int32 UpdateMinActiveClients(int32 p1)
+@@ -1396,6 +1465,8 @@
+ 
+ 	     SDT_VAR(GameSettings, game_creation.map_x,                           SLE_UINT8,                     S, 0,     8,                     6,      11, 0, STR_CONFIG_PATCHES_MAP_X,                 NULL),
+ 	     SDT_VAR(GameSettings, game_creation.map_y,                           SLE_UINT8,                     S, 0,     8,                     6,      11, 0, STR_CONFIG_PATCHES_MAP_Y,                 NULL),
++	SDT_CONDBOOL(GameSettings, construction.freeform_edges,                             110, SL_MAX_VERSION, 0, 0, false,                                    STR_CONFIG_PATCHES_ENABLE_FREEFORM_EDGES, CheckFreeformEdges),
++	 SDT_CONDVAR(GameSettings, game_creation.water_borders,                   SLE_UINT8,110, SL_MAX_VERSION, 0, 0,    15,                     0,      15, 0, STR_NULL,                                 NULL),
+ 
+  SDT_CONDOMANY(GameSettings, locale.currency,                               SLE_UINT8, 97, SL_MAX_VERSION, N, 0, 0, CUSTOM_CURRENCY_ID, "GBP|USD|EUR|YEN|ATS|BEF|CHF|CZK|DEM|DKK|ESP|FIM|FRF|GRD|HUF|ISK|ITL|NLG|NOK|PLN|ROL|RUR|SIT|SEK|YTL|SKK|BRR|custom", STR_NULL, NULL, NULL),
+  SDT_CONDOMANY(GameSettings, locale.units,                                  SLE_UINT8, 97, SL_MAX_VERSION, N, 0, 1, 2, "imperial|metric|si", STR_NULL, NULL, NULL),
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 15116)
++++ src/settings_gui.cpp	(working copy)
+@@ -1060,6 +1060,7 @@
+ 	PatchEntry("construction.extra_dynamite"),
+ 	PatchEntry("construction.longbridges"),
+ 	PatchEntry("station.always_small_airport"),
++	PatchEntry("construction.freeform_edges"),
+ };
+ /** Construction sub-page */
+ static PatchPage _patches_construction_page = {_patches_construction, lengthof(_patches_construction)};
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 15116)
++++ src/settings_type.h	(working copy)
+@@ -156,6 +156,7 @@
+ 	byte   town_name;                        ///< the town name generator used for town names
+ 	byte   landscape;                        ///< the landscape we're currently in
+ 	byte   snow_line;                        ///< the snowline level in this game
++	byte   water_borders;                    ///< bitset of the borders that are water
+ };
+ 
+ /** Settings related to construction in-game */
+@@ -167,6 +168,7 @@
+ 	bool   extra_dynamite;                   ///< extra dynamite
+ 	bool   road_stop_on_town_road;           ///< allow building of drive-through road stops on town owned roads
+ 	uint8  raw_industry_construction;        ///< type of (raw) industry construction (none, "normal", prospecting)
++	bool   freeform_edges;                   ///< allow terraforming the tiles at the map edges
+ };
+ 
+ /** Settings related to the AI. */
+Index: src/terraform_cmd.cpp
+===================================================================
+--- src/terraform_cmd.cpp	(revision 15116)
++++ src/terraform_cmd.cpp	(working copy)
+@@ -130,9 +130,9 @@
+  */
+ static void TerraformAddDirtyTileAround(TerraformerState *ts, TileIndex tile)
+ {
+-	TerraformAddDirtyTile(ts, tile + TileDiffXY( 0, -1));
+-	TerraformAddDirtyTile(ts, tile + TileDiffXY(-1, -1));
+-	TerraformAddDirtyTile(ts, tile + TileDiffXY(-1,  0));
++	if (TileY(tile) >= 1) TerraformAddDirtyTile(ts, tile + TileDiffXY( 0, -1));
++	if (TileY(tile) >= 1 && TileX(tile) >= 1) TerraformAddDirtyTile(ts, tile + TileDiffXY(-1, -1));
++	if (TileX(tile) >= 1) TerraformAddDirtyTile(ts, tile + TileDiffXY(-1,  0));
+ 	TerraformAddDirtyTile(ts, tile);
+ }
+ 
+@@ -162,7 +162,7 @@
+ 	/* Check "too close to edge of map" */
+ 	uint x = TileX(tile);
+ 	uint y = TileY(tile);
+-	if ((x <= 1) || (y <= 1) || (x >= MapMaxX() - 1) || (y >= MapMaxY() - 1)) {
++	if (!_settings_game.construction.freeform_edges && ((x <= 1) || (y <= 1) || (x >= MapMaxX() - 1) || (y >= MapMaxY() - 1))) {
+ 		/*
+ 		 * Determine a sensible error tile
+ 		 * Note: If x and y are both zero this will disable the error tile. (Tile 0 cannot be highlighted :( )
+@@ -188,6 +188,7 @@
+ 	{
+ 		const TileIndexDiffC *ttm;
+ 
++		TileIndex orig_tile = tile;
+ 		static const TileIndexDiffC _terraform_tilepos[] = {
+ 			{ 1,  0}, // move to tile in SE
+ 			{-2,  0}, // undo last move, and move to tile in NW
+@@ -198,6 +199,10 @@
+ 		for (ttm = _terraform_tilepos; ttm != endof(_terraform_tilepos); ttm++) {
+ 			tile += ToTileIndexDiff(*ttm);
+ 
++			if (tile >= MapSize()) continue;
++			if ((uint)abs((int)TileX(orig_tile) - (int)TileX(tile)) == MapSizeX() - 1) continue;
++			if ((uint)abs((int)TileY(orig_tile) - (int)TileY(tile)) == MapSizeY() - 1) continue;
++
+ 			/* Get TileHeight of neighboured tile as of current terraform progress */
+ 			int r = TerraformGetHeightOfTile(ts, tile);
+ 			int height_diff = height - r;
+@@ -226,7 +231,7 @@
+ CommandCost CmdTerraformLand(TileIndex tile, uint32 flags, uint32 p1, uint32 p2, const char *text)
+ {
+ 	/* Make an extra check for map-bounds cause we add tiles to the originating tile */
+-	if (tile + TileDiffXY(1, 1) >= MapSize()) return CMD_ERROR;
++	if (tile >= MapSize()) return CMD_ERROR;
+ 
+ 	_terraform_err_tile = INVALID_TILE;
+ 
+@@ -272,6 +277,8 @@
+ 		for (int count = ts.tile_table_count; count != 0; count--, ti++) {
+ 			TileIndex tile = *ti;
+ 
++			if (!IsValidTile(tile)) continue;
++
+ 			/* Find new heights of tile corners */
+ 			uint z_N = TerraformGetHeightOfTile(&ts, tile + TileDiffXY(0, 0));
+ 			uint z_W = TerraformGetHeightOfTile(&ts, tile + TileDiffXY(1, 0));
+Index: src/terraform_gui.cpp
+===================================================================
+--- src/terraform_gui.cpp	(revision 15116)
++++ src/terraform_gui.cpp	(working copy)
+@@ -33,7 +33,9 @@
+ void CcTerraform(bool success, TileIndex tile, uint32 p1, uint32 p2)
+ {
+ 	if (success) {
+-		SndPlayTileFx(SND_1F_SPLAT, tile);
++		int x = Clamp(TileX(tile), 0, MapMaxX() - 1);
++		int y = Clamp(TileY(tile), 0, MapMaxY() - 1);
++		SndPlayTileFx(SND_1F_SPLAT, TileXY(x, y));
+ 	} else {
+ 		extern TileIndex _terraform_err_tile;
+ 		SetRedErrorSquare(_terraform_err_tile);
+@@ -113,10 +115,12 @@
+  **/
+ bool GUIPlaceProcDragXY(ViewportDragDropSelectionProcess proc, TileIndex start_tile, TileIndex end_tile)
+ {
+-	/* When end_tile is MP_VOID, the DoCommandP checks will deny this command without any
+-	 * user-visible reason. This happens when terraforming at the southern border. */
+-	if (TileX(end_tile) == MapMaxX()) end_tile += TileDiffXY(-1, 0);
+-	if (TileY(end_tile) == MapMaxY()) end_tile += TileDiffXY(0, -1);
++	if (!_settings_game.construction.freeform_edges) {
++		/* When end_tile is MP_VOID, the DoCommandP checks will deny this command without any
++		 * user-visible reason. This happens when terraforming at the southern border. */
++		if (TileX(end_tile) == MapMaxX()) end_tile += TileDiffXY(-1, 0);
++		if (TileY(end_tile) == MapMaxY()) end_tile += TileDiffXY(0, -1);
++	}
+ 
+ 	switch (proc) {
+ 		case DDSP_DEMOLISH_AREA:
+@@ -378,12 +382,12 @@
+ 	} else {
+ 		assert(_terraform_size != 0);
+ 		/* check out for map overflows */
+-		sizex = min(MapSizeX() - TileX(tile) - 1, _terraform_size);
+-		sizey = min(MapSizeY() - TileY(tile) - 1, _terraform_size);
++		sizex = min(MapSizeX() - TileX(tile), _terraform_size);
++		sizey = min(MapSizeY() - TileY(tile), _terraform_size);
+ 
+ 		if (sizex == 0 || sizey == 0) return;
+ 
+-		SndPlayTileFx(SND_1F_SPLAT, tile);
++		SndPlayTileFx(SND_1F_SPLAT, TileXY(min(MapMaxX() - 1, TileX(tile)), min(MapMaxY() - 1, TileY(tile))));
+ 
+ 		if (mode != 0) {
+ 			/* Raise land */
+Index: src/tgp.cpp
+===================================================================
+--- src/tgp.cpp	(revision 15116)
++++ src/tgp.cpp	(working copy)
+@@ -552,6 +552,13 @@
+ 
+ static double perlin_coast_noise_2D(const double x, const double y, const double p, const int prime);
+ 
++enum Borders {
++	BORDER_NE = 0,
++	BORDER_SE = 1,
++	BORDER_SW = 2,
++	BORDER_NW = 3,
++};
++
+ /**
+  * This routine sculpts in from the edge a random amount, again a Perlin
+  * sequence, to avoid the rigid flat-edge slopes that were present before. The
+@@ -572,7 +579,7 @@
+  * Please note that all the small numbers; 53, 101, 167, etc. are small primes
+  * to help give the perlin noise a bit more of a random feel.
+  */
+-static void HeightMapCoastLines()
++static void HeightMapCoastLines(uint8 water_borders)
+ {
+ 	int smallest_size = min(_settings_game.game_creation.map_x, _settings_game.game_creation.map_y);
+ 	const int margin = 4;
+@@ -582,40 +589,47 @@
+ 
+ 	/* Lower to sea level */
+ 	for (y = 0; y <= _height_map.size_y; y++) {
+-		/* Top right */
+-		max_x = abs((perlin_coast_noise_2D(_height_map.size_y - y, y, 0.9, 53) + 0.25) * 5 + (perlin_coast_noise_2D(y, y, 0.35, 179) + 1) * 12);
+-		max_x = max((smallest_size * smallest_size / 16) + max_x, (smallest_size * smallest_size / 16) + margin - max_x);
+-		if (smallest_size < 8 && max_x > 5) max_x /= 1.5;
+-		for (x = 0; x < max_x; x++) {
+-			_height_map.height(x, y) = 0;
++		if (HasBit(water_borders, BORDER_NE)) {
++			/* Top right */
++			max_x = abs((perlin_coast_noise_2D(_height_map.size_y - y, y, 0.9, 53) + 0.25) * 5 + (perlin_coast_noise_2D(y, y, 0.35, 179) + 1) * 12);
++			max_x = max((smallest_size * smallest_size / 16) + max_x, (smallest_size * smallest_size / 16) + margin - max_x);
++			if (smallest_size < 8 && max_x > 5) max_x /= 1.5;
++			for (x = 0; x < max_x; x++) {
++				_height_map.height(x, y) = 0;
++			}
+ 		}
+ 
+-		/* Bottom left */
+-		max_x = abs((perlin_coast_noise_2D(_height_map.size_y - y, y, 0.85, 101) + 0.3) * 6 + (perlin_coast_noise_2D(y, y, 0.45,  67) + 0.75) * 8);
+-		max_x = max((smallest_size * smallest_size / 16) + max_x, (smallest_size * smallest_size / 16) + margin - max_x);
+-		if (smallest_size < 8 && max_x > 5) max_x /= 1.5;
+-		for (x = _height_map.size_x; x > (_height_map.size_x - 1 - max_x); x--) {
+-			_height_map.height(x, y) = 0;
++		if (HasBit(water_borders, BORDER_SW)) {
++			/* Bottom left */
++			max_x = abs((perlin_coast_noise_2D(_height_map.size_y - y, y, 0.85, 101) + 0.3) * 6 + (perlin_coast_noise_2D(y, y, 0.45,  67) + 0.75) * 8);
++			max_x = max((smallest_size * smallest_size / 16) + max_x, (smallest_size * smallest_size / 16) + margin - max_x);
++			if (smallest_size < 8 && max_x > 5) max_x /= 1.5;
++			for (x = _height_map.size_x; x > (_height_map.size_x - 1 - max_x); x--) {
++				_height_map.height(x, y) = 0;
++			}
+ 		}
+ 	}
+ 
+ 	/* Lower to sea level */
+ 	for (x = 0; x <= _height_map.size_x; x++) {
+-		/* Top left */
+-		max_y = abs((perlin_coast_noise_2D(x, _height_map.size_y / 2, 0.9, 167) + 0.4) * 5 + (perlin_coast_noise_2D(x, _height_map.size_y / 3, 0.4, 211) + 0.7) * 9);
+-		max_y = max((smallest_size * smallest_size / 16) + max_y, (smallest_size * smallest_size / 16) + margin - max_y);
+-		if (smallest_size < 8 && max_y > 5) max_y /= 1.5;
+-		for (y = 0; y < max_y; y++) {
+-			_height_map.height(x, y) = 0;
++		if (HasBit(water_borders, BORDER_NW)) {
++			/* Top left */
++			max_y = abs((perlin_coast_noise_2D(x, _height_map.size_y / 2, 0.9, 167) + 0.4) * 5 + (perlin_coast_noise_2D(x, _height_map.size_y / 3, 0.4, 211) + 0.7) * 9);
++			max_y = max((smallest_size * smallest_size / 16) + max_y, (smallest_size * smallest_size / 16) + margin - max_y);
++			if (smallest_size < 8 && max_y > 5) max_y /= 1.5;
++			for (y = 0; y < max_y; y++) {
++				_height_map.height(x, y) = 0;
++			}
+ 		}
+ 
+-
+-		/* Bottom right */
+-		max_y = abs((perlin_coast_noise_2D(x, _height_map.size_y / 3, 0.85, 71) + 0.25) * 6 + (perlin_coast_noise_2D(x, _height_map.size_y / 3, 0.35, 193) + 0.75) * 12);
+-		max_y = max((smallest_size * smallest_size / 16) + max_y, (smallest_size * smallest_size / 16) + margin - max_y);
+-		if (smallest_size < 8 && max_y > 5) max_y /= 1.5;
+-		for (y = _height_map.size_y; y > (_height_map.size_y - 1 - max_y); y--) {
+-			_height_map.height(x, y) = 0;
++		if (HasBit(water_borders, BORDER_SE)) {
++			/* Bottom right */
++			max_y = abs((perlin_coast_noise_2D(x, _height_map.size_y / 3, 0.85, 71) + 0.25) * 6 + (perlin_coast_noise_2D(x, _height_map.size_y / 3, 0.35, 193) + 0.75) * 12);
++			max_y = max((smallest_size * smallest_size / 16) + max_y, (smallest_size * smallest_size / 16) + margin - max_y);
++			if (smallest_size < 8 && max_y > 5) max_y /= 1.5;
++			for (y = _height_map.size_y; y > (_height_map.size_y - 1 - max_y); y--) {
++				_height_map.height(x, y) = 0;
++			}
+ 		}
+ 	}
+ }
+@@ -658,18 +672,18 @@
+ }
+ 
+ /** Smooth coasts by modulating height of tiles close to map edges with cosine of distance from edge */
+-static void HeightMapSmoothCoasts()
++static void HeightMapSmoothCoasts(uint8 water_borders)
+ {
+ 	uint x, y;
+ 	/* First Smooth NW and SE coasts (y close to 0 and y close to size_y) */
+ 	for (x = 0; x < _height_map.size_x; x++) {
+-		HeightMapSmoothCoastInDirection(x, 0, 0, 1);
+-		HeightMapSmoothCoastInDirection(x, _height_map.size_y - 1, 0, -1);
++		if (HasBit(water_borders, BORDER_NW)) HeightMapSmoothCoastInDirection(x, 0, 0, 1);
++		if (HasBit(water_borders, BORDER_SE)) HeightMapSmoothCoastInDirection(x, _height_map.size_y - 1, 0, -1);
+ 	}
+ 	/* First Smooth NE and SW coasts (x close to 0 and x close to size_x) */
+ 	for (y = 0; y < _height_map.size_y; y++) {
+-		HeightMapSmoothCoastInDirection(0, y, 1, 0);
+-		HeightMapSmoothCoastInDirection(_height_map.size_x - 1, y, -1, 0);
++		if (HasBit(water_borders, BORDER_NE)) HeightMapSmoothCoastInDirection(0, y, 1, 0);
++		if (HasBit(water_borders, BORDER_SW)) HeightMapSmoothCoastInDirection(_height_map.size_x - 1, y, -1, 0);
+ 	}
+ }
+ 
+@@ -683,15 +697,15 @@
+ static void HeightMapSmoothSlopes(height_t dh_max)
+ {
+ 	int x, y;
+-	for (y = 1; y <= (int)_height_map.size_y; y++) {
+-		for (x = 1; x <= (int)_height_map.size_x; x++) {
+-			height_t h_max = min(_height_map.height(x - 1, y), _height_map.height(x, y - 1)) + dh_max;
++	for (y = 0; y <= (int)_height_map.size_y; y++) {
++		for (x = 0; x <= (int)_height_map.size_x; x++) {
++			height_t h_max = min(_height_map.height(x > 0 ? x - 1 : x, y), _height_map.height(x, y > 0 ? y - 1 : y)) + dh_max;
+ 			if (_height_map.height(x, y) > h_max) _height_map.height(x, y) = h_max;
+ 		}
+ 	}
+-	for (y = _height_map.size_y - 1; y >= 0; y--) {
+-		for (x = _height_map.size_x - 1; x >= 0; x--) {
+-			height_t h_max = min(_height_map.height(x + 1, y), _height_map.height(x, y + 1)) + dh_max;
++	for (y = _height_map.size_y; y >= 0; y--) {
++		for (x = _height_map.size_x; x >= 0; x--) {
++			height_t h_max = min(_height_map.height((uint)x < _height_map.size_x ? x + 1 : x, y), _height_map.height(x, (uint)y < _height_map.size_y ? y + 1 : y)) + dh_max;
+ 			if (_height_map.height(x, y) > h_max) _height_map.height(x, y) = h_max;
+ 		}
+ 	}
+@@ -710,10 +724,12 @@
+ 
+ 	HeightMapAdjustWaterLevel(water_percent, h_max_new);
+ 
+-	HeightMapCoastLines();
++	byte water_borders = _settings_game.construction.freeform_edges ? _settings_game.game_creation.water_borders : 0xF;
++
++	HeightMapCoastLines(water_borders);
+ 	HeightMapSmoothSlopes(roughness);
+ 
+-	HeightMapSmoothCoasts();
++	HeightMapSmoothCoasts(water_borders);
+ 	HeightMapSmoothSlopes(roughness);
+ 
+ 	HeightMapSineTransform(12, h_max_new);
+@@ -817,7 +833,7 @@
+ static void TgenSetTileHeight(TileIndex tile, int height)
+ {
+ 	SetTileHeight(tile, height);
+-	MakeClear(tile, CLEAR_GRASS, 3);
++	if (TileX(tile) != MapMaxX() && TileY(tile) != MapMaxY() && (!_settings_game.construction.freeform_edges || (TileX(tile) != 0 && TileY(tile) != 0))) MakeClear(tile, CLEAR_GRASS, 3);
+ }
+ 
+ /**
+@@ -842,9 +858,14 @@
+ 
+ 	IncreaseGeneratingWorldProgress(GWP_LANDSCAPE);
+ 
++	if (_settings_game.construction.freeform_edges) {
++		for (y = 0; y < _height_map.size_y - 1; y++) MakeVoid(_height_map.size_x * y);
++		for (x = 0; x < _height_map.size_x;     x++) MakeVoid(x);
++	}
++
+ 	/* Transfer height map into OTTD map */
+-	for (y = 2; y < _height_map.size_y - 2; y++) {
+-		for (x = 2; x < _height_map.size_x - 2; x++) {
++	for (y = 0; y < _height_map.size_y; y++) {
++		for (x = 0; x < _height_map.size_x; x++) {
+ 			int height = H2I(_height_map.height(x, y));
+ 			if (height < 0) height = 0;
+ 			if (height > 15) height = 15;
+@@ -854,10 +875,6 @@
+ 
+ 	IncreaseGeneratingWorldProgress(GWP_LANDSCAPE);
+ 
+-	/* Recreate void tiles at the border in case they have been affected by generation */
+-	for (y = 0; y < _height_map.size_y - 1; y++) MakeVoid(_height_map.size_x * y + _height_map.size_x - 1);
+-	for (x = 0; x < _height_map.size_x;     x++) MakeVoid(_height_map.size_x * y + x);
+-
+ 	FreeHeightMap();
+ 	GenerateWorldSetAbortCallback(NULL);
+ }
+Index: src/tile_map.cpp
+===================================================================
+--- src/tile_map.cpp	(revision 15116)
++++ src/tile_map.cpp	(working copy)
+@@ -16,8 +16,9 @@
+ {
+ 	assert(tile < MapSize());
+ 
+-	if (TileX(tile) == MapMaxX() || TileY(tile) == MapMaxY()) {
+-		if (h != NULL) *h = 0;
++	if (TileX(tile) == MapMaxX() || TileY(tile) == MapMaxY() || 
++			(_settings_game.construction.freeform_edges && (TileX(tile) == 0 || TileY(tile) == 0))) {
++		if (h != NULL) *h = TileHeight(tile) * TILE_HEIGHT;
+ 		return SLOPE_FLAT;
+ 	}
+ 
+Index: src/tile_map.h
+===================================================================
+--- src/tile_map.h	(revision 15116)
++++ src/tile_map.h	(working copy)
+@@ -10,6 +10,7 @@
+ #include "company_type.h"
+ #include "map_func.h"
+ #include "core/bitmath_func.hpp"
++#include "settings_type.h"
+ 
+ /**
+  * Returns the height of a tile
+@@ -87,8 +88,9 @@
+ {
+ 	assert(tile < MapSize());
+ 	/* VOID tiles (and no others) are exactly allowed at the lower left and right
+-	 * edges of the map */
+-	assert((TileX(tile) == MapMaxX() || TileY(tile) == MapMaxY()) == (type == MP_VOID));
++	 * edges of the map. If _settings_game.construction.freeform_edges is true,
++	 * the upper edges of the map are also VOID tiles. */
++	assert((TileX(tile) == MapMaxX() || TileY(tile) == MapMaxY() || (_settings_game.construction.freeform_edges && (TileX(tile) == 0 || TileY(tile) == 0))) == (type == MP_VOID));
+ 	SB(_m[tile].type_height, 4, 4, type);
+ }
+ 
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revision 15116)
++++ src/town_cmd.cpp	(working copy)
+@@ -747,7 +747,7 @@
+ 		if (pos & 2) cur += tid_lt[2];
+ 
+ 		cur = (uint)(pos / 4) * cur; // Multiply for the fitting distance
+-		if (GetTownRoadBits(TILE_ADD(tile, cur)) & DiagDirToRoadBits((pos & 2) ? dir : ReverseDiagDir(dir))) return true;
++		if (IsValidTile(tile + TileXY(TileX(cur) / 2, TileY(cur) / 2)) && IsValidTile(tile + cur) && GetTownRoadBits(TILE_ADD(tile, cur)) & DiagDirToRoadBits((pos & 2) ? dir : ReverseDiagDir(dir))) return true;
+ 	}
+ 	return false;
+ }
+@@ -1123,6 +1123,8 @@
+ 		/* Don't walk into water. */
+ 		if (IsWaterTile(house_tile)) return;
+ 
++		if (!IsValidTile(house_tile) || !IsValidTile(house_tile + TileOffsByDiagDir(target_dir))) return;
++
+ 		switch (t1->GetActiveLayout()) {
+ 			default: NOT_REACHED();
+ 
+Index: src/tunnel_map.cpp
+===================================================================
+--- src/tunnel_map.cpp	(revision 15116)
++++ src/tunnel_map.cpp	(working copy)
+@@ -47,6 +47,7 @@
+ 
+ 	do {
+ 		tile -= delta;
++		if (!IsValidTile(tile)) return false;
+ 		height = GetTileZ(tile);
+ 	} while (z < height);
+ 
+Index: src/tunnelbridge_cmd.cpp
+===================================================================
+--- src/tunnelbridge_cmd.cpp	(revision 15116)
++++ src/tunnelbridge_cmd.cpp	(working copy)
+@@ -527,6 +527,7 @@
+ 
+ 	for (;;) {
+ 		end_tile += delta;
++		if (!IsValidTile(end_tile)) return_cmd_error(STR_TUNNEL_THROUGH_MAP_BORDER);
+ 		end_tileh = GetTileSlope(end_tile, &end_z);
+ 
+ 		if (start_z == end_z) break;
+Index: src/unmovable_cmd.cpp
+===================================================================
+--- src/unmovable_cmd.cpp	(revision 15116)
++++ src/unmovable_cmd.cpp	(working copy)
+@@ -367,11 +367,13 @@
+ /* checks, if a radio tower is within a 9x9 tile square around tile */
+ static bool IsRadioTowerNearby(TileIndex tile)
+ {
+-	TileIndex tile_s = tile - TileDiffXY(4, 4);
++	TileIndex tile_s = tile - TileDiffXY(min(TileX(tile), 4U), min(TileY(tile), 4U));
++	uint w = min(TileX(tile), 4U) + 1 + min(MapMaxX() - TileX(tile), 4U);
++	uint h = min(TileY(tile), 4U) + 1 + min(MapMaxY() - TileY(tile), 4U);
+ 
+-	BEGIN_TILE_LOOP(tile, 9, 9, tile_s)
++	BEGIN_TILE_LOOP(tile, w, h, tile_s)
+ 		if (IsTransmitterTile(tile)) return true;
+-	END_TILE_LOOP(tile, 9, 9, tile_s)
++	END_TILE_LOOP(tile, w, h, tile_s)
+ 
+ 	return false;
+ }
+@@ -383,6 +385,23 @@
+ 	/* add radio tower */
+ 	int radiotowser_to_build = ScaleByMapSize(15); // maximum number of radio towers on the map
+ 	int lighthouses_to_build = _settings_game.game_creation.landscape == LT_TROPIC ? 0 : ScaleByMapSize1D((Random() & 3) + 7);
++
++	/* Scale the amount of lighthouses with the amount of land at the borders. */
++	if (_settings_game.construction.freeform_edges) {
++		uint num_water_tiles = 0;
++		for (uint x = 0; x < MapMaxX(); x++) {
++			if (IsTileType(TileXY(x, 1), MP_WATER)) num_water_tiles++;
++			if (IsTileType(TileXY(x, MapMaxY() - 1), MP_WATER)) num_water_tiles++;
++		}
++		for (uint y = 1; y < MapMaxY() - 1; y++) {
++			if (IsTileType(TileXY(1, y), MP_WATER)) num_water_tiles++;
++			if (IsTileType(TileXY(MapMaxX() - 1, y), MP_WATER)) num_water_tiles++;
++		}
++		/* The -6 is because the top borders are MP_VOID (-2) and all corners
++		 * are counted twice (-4). */
++		lighthouses_to_build = lighthouses_to_build * num_water_tiles / (2 * MapMaxY() + 2 * MapMaxX() - 6);
++	}
++
+ 	SetGeneratingWorldProgress(GWP_UNMOVABLE, radiotowser_to_build + lighthouses_to_build);
+ 
+ 	for (uint i = ScaleByMapSize(1000); i != 0; i--) {
+@@ -416,13 +435,16 @@
+ 		TileIndex tile;
+ 		switch (dir) {
+ 			default:
+-			case DIAGDIR_NE: tile = TileXY(maxx,     r % maxy); break;
+-			case DIAGDIR_SE: tile = TileXY(r % maxx, 0);        break;
+-			case DIAGDIR_SW: tile = TileXY(0,        r % maxy); break;
+-			case DIAGDIR_NW: tile = TileXY(r % maxx, maxy);     break;
++			case DIAGDIR_NE: tile = TileXY(maxx - 1, r % maxy); break;
++			case DIAGDIR_SE: tile = TileXY(r % maxx, 1); break;
++			case DIAGDIR_SW: tile = TileXY(1,        r % maxy); break;
++			case DIAGDIR_NW: tile = TileXY(r % maxx, maxy - 1); break;
+ 		}
+ 
+-		for (int j = 0; j < 20; j++) {
++		/* Only build lighthouses at tiles where the border is sea. */
++		if (!IsTileType(tile, MP_WATER)) continue;
++
++		for (int j = 0; j < 19; j++) {
+ 			uint h;
+ 			if (IsTileType(tile, MP_CLEAR) && GetTileSlope(tile, &h) == SLOPE_FLAT && h <= TILE_HEIGHT * 2 && !IsBridgeAbove(tile)) {
+ 				MakeLighthouse(tile);
+Index: src/viewport.cpp
+===================================================================
+--- src/viewport.cpp	(revision 15116)
++++ src/viewport.cpp	(working copy)
+@@ -382,8 +382,8 @@
+ 	/* we need to move variables in to the valid range, as the
+ 	 * GetTileZoomCenterWindow() function can call here with invalid x and/or y,
+ 	 * when the user tries to zoom out along the sides of the map */
+-	a = Clamp(a, 0, (int)(MapMaxX() * TILE_SIZE) - 1);
+-	b = Clamp(b, 0, (int)(MapMaxY() * TILE_SIZE) - 1);
++	a = Clamp(a, -4 * TILE_SIZE, (int)(MapMaxX() * TILE_SIZE) - 1);
++	b = Clamp(b, -4 * TILE_SIZE, (int)(MapMaxY() * TILE_SIZE) - 1);
+ 
+ 	/* (a, b) is the X/Y-world coordinate that belongs to (x,y) if the landscape would be completely flat on height 0.
+ 	 * Now find the Z-world coordinate by fix point iteration.
+@@ -393,13 +393,16 @@
+ 	 * So give it a z-malus of 4 in the first iterations.
+ 	 */
+ 	z = 0;
+-	for (int i = 0; i < 5; i++) z = GetSlopeZ(a + max(z, 4u) - 4, b + max(z, 4u) - 4) / 2;
+-	for (uint malus = 3; malus > 0; malus--) z = GetSlopeZ(a + max(z, malus) - malus, b + max(z, malus) - malus) / 2;
+-	for (int i = 0; i < 5; i++) z = GetSlopeZ(a + z, b + z) / 2;
+ 
+-	pt.x = a + z;
+-	pt.y = b + z;
++	int min_coord = _settings_game.construction.freeform_edges ? TILE_SIZE : 0;
+ 
++	for (int i = 0; i < 5; i++) z = GetSlopeZ(Clamp(a + (int)max(z, 4u) - 4, min_coord, MapMaxX() * TILE_SIZE - 1), Clamp(b + (int)max(z, 4u) - 4, min_coord, MapMaxY() * TILE_SIZE - 1)) / 2;
++	for (uint malus = 3; malus > 0; malus--) z = GetSlopeZ(Clamp(a + (int)max(z, malus) - (int)malus, min_coord, MapMaxX() * TILE_SIZE - 1), Clamp(b + (int)max(z, malus) - (int)malus, min_coord, MapMaxY() * TILE_SIZE - 1)) / 2;
++	for (int i = 0; i < 5; i++) z = GetSlopeZ(Clamp(a + (int)z, min_coord, MapMaxX() * TILE_SIZE - 1), Clamp(b + (int)z, min_coord, MapMaxY() * TILE_SIZE - 1)) / 2;
++
++	pt.x = Clamp(a + (int)z, min_coord, MapMaxX() * TILE_SIZE - 1);
++	pt.y = Clamp(b + (int)z, min_coord, MapMaxY() * TILE_SIZE - 1);
++
+ 	return pt;
+ }
+ 
+@@ -967,27 +970,33 @@
+ 		int y_cur = y;
+ 
+ 		do {
+-			TileType tt;
++			TileType tt = MP_VOID;
+ 
+ 			ti.x = x_cur;
+ 			ti.y = y_cur;
++			ti.z = 0;
++
++			ti.tileh = SLOPE_FLAT;
++			ti.tile = 0;
++
+ 			if (0 <= x_cur && x_cur < (int)MapMaxX() * TILE_SIZE &&
+ 					0 <= y_cur && y_cur < (int)MapMaxY() * TILE_SIZE) {
+ 				TileIndex tile = TileVirtXY(x_cur, y_cur);
+ 
+-				ti.tile = tile;
+-				ti.tileh = GetTileSlope(tile, &ti.z);
+-				tt = GetTileType(tile);
+-			} else {
+-				ti.tileh = SLOPE_FLAT;
+-				ti.tile = 0;
+-				ti.z = 0;
+-				tt = MP_VOID;
++				if (!_settings_game.construction.freeform_edges || (TileX(tile) != 0 && TileY(tile) != 0)) {
++					if (x_cur == ((int)MapMaxX() - 1) * TILE_SIZE || y_cur == ((int)MapMaxY() - 1) * TILE_SIZE) {
++						uint maxh = max<uint>(TileHeight(tile), 1);
++						for (uint h = 0; h < maxh; h++) {
++							DrawGroundSpriteAt(SPR_SHADOW_CELL, PAL_NONE, ti.x, ti.y, h * TILE_HEIGHT);
++						}
++					}
++
++					ti.tile = tile;
++					ti.tileh = GetTileSlope(tile, &ti.z);
++					tt = GetTileType(tile);
++				}
+ 			}
+ 
+-			y_cur += 0x10;
+-			x_cur -= 0x10;
+-
+ 			_vd.foundation_part = FOUNDATION_PART_NONE;
+ 			_vd.foundation[0] = -1;
+ 			_vd.foundation[1] = -1;
+@@ -995,7 +1004,17 @@
+ 			_vd.last_foundation_child[1] = NULL;
+ 
+ 			_tile_type_procs[tt]->draw_tile_proc(&ti);
++			if ((x_cur == (int)MapMaxX() * TILE_SIZE && 0 <= y_cur && y_cur <= (int)MapMaxY() * TILE_SIZE) || 
++				(y_cur == (int)MapMaxY() * TILE_SIZE && 0 <= x_cur && x_cur <= (int)MapMaxX() * TILE_SIZE)) {
++				TileIndex tile = TileVirtXY(x_cur, y_cur);
++				ti.tile = tile;
++				ti.tileh = GetTileSlope(tile, &ti.z);
++				tt = GetTileType(tile);
++			}
+ 			DrawTileSelection(&ti);
++
++			y_cur += 0x10;
++			x_cur -= 0x10;
+ 		} while (--width_cur);
+ 
+ 		if ((direction ^= 1) != 0) {
+Index: src/water.h
+===================================================================
+--- src/water.h	(revision 15116)
++++ src/water.h	(working copy)
+@@ -7,6 +7,7 @@
+ 
+ void TileLoop_Water(TileIndex tile);
+ bool FloodHalftile(TileIndex t);
++void DoFloodTile(TileIndex target);
+ 
+ void ConvertGroundTilesIntoWaterTiles();
+ 
+Index: src/water_cmd.cpp
+===================================================================
+--- src/water_cmd.cpp	(revision 15116)
++++ src/water_cmd.cpp	(working copy)
+@@ -358,9 +358,9 @@
+ 		case WATER_TILE_CLEAR:
+ 			if (flags & DC_NO_WATER) return_cmd_error(STR_3807_CAN_T_BUILD_ON_WATER);
+ 
+-			/* Make sure it's not an edge tile. */
+-			if (!IsInsideMM(TileX(tile), 1, MapMaxX() - 1) ||
+-					!IsInsideMM(TileY(tile), 1, MapMaxY() - 1)) {
++			/* Make sure freeform edges are allowed or it's not an edge tile. */
++			if (!_settings_game.construction.freeform_edges && (!IsInsideMM(TileX(tile), 1, MapMaxX() - 1) ||
++					!IsInsideMM(TileY(tile), 1, MapMaxY() - 1))) {
+ 				return_cmd_error(STR_0002_TOO_CLOSE_TO_EDGE_OF_MAP);
+ 			}
+ 
+@@ -905,7 +905,7 @@
+ /**
+  * Floods a tile.
+  */
+-static void DoFloodTile(TileIndex target)
++void DoFloodTile(TileIndex target)
+ {
+ 	assert(!IsTileType(target, MP_WATER));
+ 

@@ -1,0 +1,444 @@
+diff -r 8d4bdf14adb4 src/order_base.h
+--- a/src/order_base.h	Tue Oct 28 23:34:42 2008 +0000
++++ b/src/order_base.h	Wed Oct 29 16:18:18 2008 +0100
+@@ -15,6 +15,7 @@
+ #include "waypoint_type.h"
+ 
+ DECLARE_OLD_POOL(Order, Order, 6, 1000)
++DECLARE_OLD_POOL(OrderList, OrderList, 4, 500)
+ 
+ /* If you change this, keep in mind that it is saved on 3 places:
+  * - Load_ORDR, all the global orders
+@@ -206,6 +207,14 @@ public:
+ 
+ 	bool ShouldStopAtStation(const Vehicle *v, StationID station) const;
+ 
++	/** Checks if this order has travel_time and if needed wait_time set. */
++	inline bool IsCompletelyTimetabled() const
++	{
++		if (this->travel_time == 0 && !this->IsType(OT_CONDITIONAL)) return false;
++		if (this->wait_time == 0 && this->IsType(OT_GOTO_STATION) && !(this->GetNonStopType() & ONSF_NO_STOP_AT_DESTINATION_STATION)) return false;
++		return true;
++	}
++
+ 	/**
+ 	 * Assign the given order to this one.
+ 	 * @param other the data to copy (except next pointer).
+@@ -249,6 +258,175 @@ static inline VehicleOrderID GetNumOrder
+ 	return GetOrderPoolSize();
+ }
+ 
++/** Shared order list linking together the linked list of orders and the list
++ *  of vehicles sharing this order list.
++ */
++struct OrderList : PoolItem<OrderList, OrderListID, &_OrderList_pool> {
++private:
++	friend void AfterLoadVehicles(bool clear_te_id); ///< For instantiating the shared vehicle chain
++
++	Order *first;                   ///< First order of the order list
++	VehicleOrderID num_orders;      ///< NOSAVE: How many orders there are in the list
++	unsigned num_vehicles;          ///< NOSAVE: Number of vehicles that share this order list
++	Vehicle *first_shared;          ///< NOSAVE: pointer to the first vehicle in the shared order chain
++
++	unsigned timetable_duration;    ///< NOSAVE: Total duration of the order list
++
++public:
++	/** Default constructor producing an invalid order list. */
++	OrderList()
++		: first(NULL), num_orders(INVALID_VEH_ORDER_ID), num_vehicles(0), first_shared(NULL),
++		  timetable_duration(0) { }
++
++	/** Create an order list with the given order chain for the given vehicle.
++	 *  @param chain is the pointer to the first order of the order chain
++	 *  @param v is any vehicle of the shared order vehicle chain (does not need to be the first)
++	 */
++	OrderList(Order *chain, Vehicle *v);
++
++	/** Destructor. Invalidates OrderList for re-usage by the pool. */
++	~OrderList() { num_orders = INVALID_VEH_ORDER_ID; }
++
++	/** Checks, if this is a valid order list. */
++	inline bool IsValid() const { return num_orders != INVALID_VEH_ORDER_ID; }
++
++	/**
++	 * Get the first order of the order chain.
++	 * @return the first order of the chain.
++	 */
++	inline Order *GetFirstOrder() const { return this->first; }
++
++	/**
++	 * Get a certain order of the order chain.
++	 * @param index zero-based index of the order within the chain.
++	 * @return the order at position index.
++	 */
++	Order *GetOrderAt(int index) const;
++
++	/**
++	 * Get the last order of the order chain.
++	 * @return the last order of the chain.
++	 */
++	inline Order *GetLastOrder() const { return this->GetOrderAt(this->num_orders - 1); }
++
++	/**
++	 * Get number of orders in the order list.
++	 * @return number of orders in the chain. */
++	inline VehicleOrderID GetNumOrders() const { return this->num_orders; }
++
++	/**
++	 * Insert a new order into the order chain.
++	 * @param new_order is the order to insert into the chain.
++	 * @param index is the position where the order is supposed to be inserted. */
++	void InsertOrderAt(Order *new_order, int index);
++
++	/**
++	 * Remove an order from the order list and delete it.
++	 * @param index is the position of the order which is to be deleted.
++	 */
++	void DeleteOrderAt(int index);
++
++	/**
++	 * Move an order to another position within the order list.
++	 * @param from is the zero-based position of the order to move.
++	 * @param to is the zero-based position where the order is moved to. */
++	void MoveOrder(int from, int to);
++
++	/**
++	 * Is this a shared order list?
++	 * @return whether this order list is shared among multiple vehicles
++	 */
++	inline bool IsShared() const { return this->num_vehicles > 1; };
++
++	/**
++	 * Get the first vehicle of this vehicle chain.
++	 * @return the first vehicle of the chain.
++	 */
++	inline Vehicle *GetFirstSharedVehicle() const { return this->first_shared; }
++
++	/**
++	 * Return the number of vehicles that share this orders list
++	 * @return the count of vehicles that use this shared orders list
++	 */
++	inline unsigned GetNumVehicles() const { return this->num_vehicles; }
++
++	/**
++	 * Checks whether a vehicle is part of the shared vehicle chain.
++	 * @param v is the vehicle to search in the shared vehicle chain.
++	 */
++	bool IsVehicleInSharedOrdersList(const Vehicle *v) const;
++
++	/**
++	 * Gets the position of the given vehicle within the shared order vehicle list.
++	 * @param v is the vehicle of which to get the position
++	 * @return position of v within the shared vehicle chain.
++	 */
++	int GetPositionInSharedOrderList(const Vehicle *v) const;
++
++	/**
++	 * Adds the given vehicle to this shared order list.
++	 * @note This is supposed to be called after the vehicle has been inserted
++	 *       into the shared vehicle chain.
++	 * @param v vehicle to add to the list
++	 */
++	inline void AddVehicle(Vehicle *v) { ++this->num_vehicles; }
++
++	/**
++	 * Removes the vehicle from the shared order list.
++	 * @note This is supposed to be called when the vehicle is still in the chain
++	 * @param v vehicle to remove from the list
++	 */
++	void RemoveVehicle(Vehicle *v);
++
++	/**
++	 * Checks whether all orders of the list have a filled timetable.
++	 * @return whether all orders have a filled timetable.
++	 */
++	bool IsCompleteTimetable() const;
++
++	/**
++	 * Gets the total duration of the vehicles timetable or -1 is the timetable is not complete.
++	 * @return total timetable duration or -1 for incomplete timetables
++	 */
++	inline int GetTimetableTotalDuration() const { return this->IsCompleteTimetable() ? this->timetable_duration : -1; }
++
++	/**
++	 * Gets the known duration of the vehicles timetable even if the timetable is not complete.
++	 * @return known timetable duration
++	 */
++	inline int GetTimetableDurationIncomplete() const { return this->timetable_duration; }
++
++	/**
++	 * Must be called if an order's timetable is changed to update internal book keeping.
++	 * @param delta By how many ticks has the timetable duration changed
++	 */
++	void UpdateOrderTimetable(int delta) { this->timetable_duration += delta; }
++
++	/**
++	 * Must be called if the whole timetable is cleared to update internal book keeping.
++	 */
++	void ResetOrderTimetable() { this->timetable_duration = 0; }
++
++	/**
++	 * Free a complete order chain.
++	 * @param keep_orderlist If this is true only delete the orders, otherwise also delete the OrderList.
++	 * @note do not use on "current_order" vehicle orders!
++	 */
++	void FreeChain(bool keep_orderlist = false);
++
++#ifdef _DEBUG
++	/**
++	 * Checks for internal consistency of order list. Triggers assertion if something is wrong.
++	 */
++	void DebugCheckSanity() const;
++#endif
++};
++
++static inline bool IsValidOrderListID(uint index)
++{
++	return index < GetOrderListPoolSize() && GetOrderList(index)->IsValid();
++}
++
+ #define FOR_ALL_ORDERS_FROM(order, start) for (order = GetOrder(start); order != NULL; order = (order->index + 1U < GetOrderPoolSize()) ? GetOrder(order->index + 1U) : NULL) if (order->IsValid())
+ #define FOR_ALL_ORDERS(order) FOR_ALL_ORDERS_FROM(order, 0)
+ 
+diff -r 8d4bdf14adb4 src/order_cmd.cpp
+--- a/src/order_cmd.cpp	Tue Oct 28 23:34:42 2008 +0000
++++ b/src/order_cmd.cpp	Wed Oct 29 16:18:18 2008 +0100
+@@ -4,6 +4,7 @@
+ 
+ #include "stdafx.h"
+ #include "openttd.h"
++#include "debug.h"
+ #include "order_base.h"
+ #include "order_func.h"
+ #include "airport.h"
+@@ -41,6 +42,7 @@ BackuppedOrders _backup_orders_data;
+ BackuppedOrders _backup_orders_data;
+ 
+ DEFINE_OLD_POOL_GENERIC(Order, Order);
++DEFINE_OLD_POOL_GENERIC(OrderList, OrderList);
+ 
+ void Order::Free()
+ {
+@@ -281,6 +283,178 @@ void Order::AssignOrder(const Order &oth
+ 	this->travel_time = other.travel_time;
+ }
+ 
++
++OrderList::OrderList(Order *chain, Vehicle *v)
++	: first(chain), num_orders(0), num_vehicles(1), first_shared(v),
++	  timetable_duration(0)
++{
++	for (Order *o = this->first; o != NULL; o = o->next) {
++		++this->num_orders;
++		this->timetable_duration += o->wait_time + o->travel_time;
++	}
++
++	for (Vehicle *u = v->PreviousShared(); u != NULL; u = u->PreviousShared()) {
++		++this->num_vehicles;
++		this->first_shared = u;
++	}
++
++	for (const Vehicle *u = v->NextShared(); u != NULL; u = u->NextShared()) ++this->num_vehicles;
++}
++
++void OrderList::FreeChain(bool keep_orderlist)
++{
++	Order *next;
++	for(Order *o = this->first; o != NULL; o = next) {
++		next = o->next;
++		delete o;
++	}
++
++	if (keep_orderlist) {
++		this->first = NULL;
++		this->num_orders = 0;
++		this->timetable_duration = 0;
++	} else {
++		delete this;
++	}
++}
++
++Order *OrderList::GetOrderAt(int index) const
++{
++	if (index < 0) return NULL;
++
++	Order *order = this->first;
++
++	while (order != NULL && index-- > 0)
++		order = order->next;
++
++	return order;
++}
++
++void OrderList::InsertOrderAt(Order *new_order, int index)
++{
++	if (this->first == NULL) {
++		this->first = new_order;
++	} else {
++		if (index == 0) {
++			/* Insert as first or only order */
++			new_order->next = this->first;
++			this->first = new_order;
++		} else if (index >= this->num_orders) {
++			/* index is after the last order, add it to the end */
++			this->GetLastOrder()->next = new_order;
++		} else {
++			/* Put the new order in between */
++			Order *order = this->GetOrderAt(index - 1);
++			new_order->next = order->next;
++			order->next = new_order;
++		}
++	}
++	++this->num_orders;
++	this->timetable_duration += new_order->wait_time + new_order->travel_time;
++}
++
++
++void OrderList::DeleteOrderAt(int index)
++{
++	if (index >= this->num_orders) return;
++
++	Order *to_remove;
++
++	if (index == 0) {
++		to_remove = this->first;
++		this->first = to_remove->next;
++	} else {
++		Order *prev = GetOrderAt(index - 1);
++		to_remove = prev->next;
++		prev->next = to_remove->next;
++	}
++	--this->num_orders;
++	this->timetable_duration -= (to_remove->wait_time + to_remove->travel_time);
++	delete to_remove;
++}
++
++void OrderList::MoveOrder(int from, int to)
++{
++	if (from >= this->num_orders || to >= this->num_orders || from == to) return;
++
++	Order *moving_one;
++
++	/* Take the moving order out of the pointer-chain */
++	if (from == 0) {
++		moving_one = this->first;
++		this->first = moving_one->next;
++	} else {
++		Order *one_before = GetOrderAt(from - 1);
++		moving_one = one_before->next;
++		one_before->next = moving_one->next;
++	}
++
++	/* Insert the moving_order again in the pointer-chain */
++	if (to == 0) {
++		moving_one->next = this->first;
++		this->first = moving_one;
++	} else {
++		Order *one_before = GetOrderAt(to - 1);
++		moving_one->next = one_before->next;
++		one_before->next = moving_one;
++	}
++}
++
++void OrderList::RemoveVehicle(Vehicle *v)
++{
++	--this->num_vehicles;
++	if (v == this->first_shared) this->first_shared = v->NextShared();
++}
++
++bool OrderList::IsVehicleInSharedOrdersList(const Vehicle *v) const
++{
++	for (const Vehicle *v_shared = this->first_shared; v_shared != NULL; v_shared = v_shared->NextShared()) {
++		if (v_shared == v) return true;
++	}
++
++	return false;
++}
++
++int OrderList::GetPositionInSharedOrderList(const Vehicle *v) const
++{
++	int count = 0;
++	for (const Vehicle *v_shared = v->PreviousShared(); v_shared != NULL; v_shared = v_shared->PreviousShared()) count++;
++	return count;
++}
++
++bool OrderList::IsCompleteTimetable() const
++{
++	for (Order *o = this->first; o != NULL; o = o->next) {
++		if (!o->IsCompletelyTimetabled()) return false;
++	}
++	return true;
++}
++
++#ifdef _DEBUG
++void OrderList::DebugCheckSanity() const
++{
++	VehicleOrderID check_num_orders = 0;
++	unsigned check_num_vehicles = 0;
++	unsigned check_timetable_duration = 0;
++
++	DEBUG(misc, 6, "Checking OrderList %hu for sanity...", this->index);
++
++	for (const Order *o = this->first; o != NULL; o = o->next) {
++		++check_num_orders;
++		check_timetable_duration += o->wait_time + o->travel_time;
++	}
++	assert(this->num_orders == check_num_orders);
++	assert(this->timetable_duration == check_timetable_duration);
++
++	for (const Vehicle *v = this->first_shared; v != NULL; v = v->NextShared()) {
++		++check_num_vehicles;
++		assert(v->orders == this->first);
++	}
++	assert(this->num_vehicles == check_num_vehicles);
++	DEBUG(misc, 6, "... detected %u orders, %u vehicles, %u ticks", (unsigned)this->num_orders,
++	      this->num_vehicles, this->timetable_duration);
++}
++#endif
+ 
+ /**
+  * Delete all news items regarding defective orders about a vehicle
+@@ -1808,6 +1982,9 @@ void InitializeOrders()
+ 	_Order_pool.CleanPool();
+ 	_Order_pool.AddBlockToPool();
+ 
++	_OrderList_pool.CleanPool();
++	_OrderList_pool.AddBlockToPool();
++
+ 	_backup_orders_tile = 0;
+ }
+ 
+diff -r 8d4bdf14adb4 src/order_type.h
+--- a/src/order_type.h	Tue Oct 28 23:34:42 2008 +0000
++++ b/src/order_type.h	Wed Oct 29 16:18:18 2008 +0100
+@@ -9,6 +9,7 @@
+ 
+ typedef byte VehicleOrderID;  ///< The index of an order within its current vehicle (not pool related)
+ typedef uint16 OrderID;
++typedef uint16 OrderListID;
+ typedef uint16 DestinationID;
+ 
+ enum {
+@@ -149,5 +150,6 @@ enum {
+ };
+ 
+ struct Order;
++struct OrderList;
+ 
+ #endif /* ORDER_TYPE_H */
+diff -r 8d4bdf14adb4 src/vehicle_base.h
+--- a/src/vehicle_base.h	Tue Oct 28 23:34:42 2008 +0000
++++ b/src/vehicle_base.h	Wed Oct 29 16:18:18 2008 +0100
+@@ -498,6 +498,12 @@ public:
+ 	inline Vehicle *NextShared() const { return this->next_shared; }
+ 
+ 	/**
++	 * Get the previous vehicle of the shared vehicle chain
++	 * @return the previous shared vehicle or NULL when there isn't a previous vehicle.
++	 */
++	inline Vehicle *PreviousShared() const { return this->previous_shared; }
++
++	/**
+ 	 * Get the first vehicle of this vehicle chain.
+ 	 * @return the first vehicle of the chain.
+ 	 */

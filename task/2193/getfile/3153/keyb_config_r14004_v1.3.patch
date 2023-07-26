@@ -1,0 +1,2407 @@
+Index: source.list
+===================================================================
+--- source.list	(revision 14004)
++++ source.list	(working copy)
+@@ -31,6 +31,7 @@
+ gfx.cpp
+ gfxinit.cpp
+ heightmap.cpp
++hotkey.cpp
+ landscape.cpp
+ map.cpp
+ md5.cpp
+@@ -190,6 +191,8 @@
+ heightmap.h
+ industry.h
+ industry_type.h
++hotkey_func.h
++hotkey_type.h
+ landscape.h
+ landscape_type.h
+ livery.h
+Index: src/airport_gui.cpp
+===================================================================
+--- src/airport_gui.cpp	(revision 14004)
++++ src/airport_gui.cpp	(working copy)
+@@ -21,6 +21,7 @@
+ #include "station_type.h"
+ #include "tilehighlight_func.h"
+ #include "player_base.h"
++#include "hotkey_type.h"
+ 
+ #include "table/sprites.h"
+ #include "table/strings.h"
+@@ -67,8 +68,8 @@
+ 	BuildAirClick_Demolish,
+ };
+ 
+-struct BuildAirToolbarWindow : Window {
+-	BuildAirToolbarWindow(const WindowDesc *desc, WindowNumber window_number) : Window(desc, window_number)
++struct BuildAirToolbarWindow : HotkeyWindow {
++	BuildAirToolbarWindow(const WindowDesc *desc, WindowNumber window_number) : HotkeyWindow(desc, HKL_AIRPORT, window_number)
+ 	{
+ 		this->FindWindowPlacementAndResize(desc);
+ 		if (_settings_client.gui.link_terraform_toolbar) ShowTerraformToolbar(this);
+@@ -79,6 +80,11 @@
+ 		if (_settings_client.gui.link_terraform_toolbar) DeleteWindowById(WC_SCEN_LAND_GEN, 0);
+ 	}
+ 
++	virtual void HandleProcNr(int proc_nr)
++	{
++		_build_air_button_proc[proc_nr](this);
++	};
++
+ 	virtual void OnPaint()
+ 	{
+ 		this->DrawWidgets();
+@@ -91,17 +97,6 @@
+ 		}
+ 	}
+ 
+-
+-	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+-	{
+-		switch (keycode) {
+-			case '1': BuildAirClick_Airport(this); break;
+-			case '2': BuildAirClick_Demolish(this); break;
+-			default: return ES_NOT_HANDLED;
+-		}
+-		return ES_HANDLED;
+-	}
+-
+ 	virtual void OnPlaceObject(Point pt, TileIndex tile)
+ 	{
+ 		_place_proc(tile);
+Index: src/dock_gui.cpp
+===================================================================
+--- src/dock_gui.cpp	(revision 14004)
++++ src/dock_gui.cpp	(working copy)
+@@ -22,6 +22,7 @@
+ #include "slope_func.h"
+ #include "tilehighlight_func.h"
+ #include "player_base.h"
++#include "hotkey_type.h"
+ 
+ #include "table/sprites.h"
+ #include "table/strings.h"
+@@ -160,8 +161,8 @@
+ 	BuildDocksClick_Aqueduct
+ };
+ 
+-struct BuildDocksToolbarWindow : Window {
+-	BuildDocksToolbarWindow(const WindowDesc *desc, WindowNumber window_number) : Window(desc, window_number)
++struct BuildDocksToolbarWindow : HotkeyWindow {
++	BuildDocksToolbarWindow(const WindowDesc *desc, WindowNumber window_number) : HotkeyWindow(desc, HKL_DOCK, window_number)
+ 	{
+ 		this->FindWindowPlacementAndResize(desc);
+ 		if (_settings_client.gui.link_terraform_toolbar) ShowTerraformToolbar(this);
+@@ -172,6 +173,11 @@
+ 		if (_settings_client.gui.link_terraform_toolbar) DeleteWindowById(WC_SCEN_LAND_GEN, 0);
+ 	}
+ 
++	virtual void HandleProcNr(int proc_nr)
++	{
++		_build_docks_button_proc[proc_nr](this);
++	};
++
+ 	virtual void OnPaint()
+ 	{
+ 		this->SetWidgetsDisabledState(!CanBuildVehicleInfrastructure(VEH_SHIP), DTW_DEPOT, DTW_STATION, DTW_BUOY, WIDGET_LIST_END);
+@@ -183,23 +189,6 @@
+ 		if (widget >= DTW_BUTTONS_BEGIN && widget != DTW_SEPERATOR) _build_docks_button_proc[widget - DTW_BUTTONS_BEGIN](this);
+ 	}
+ 
+-	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+-	{
+-		switch (keycode) {
+-			case '1': BuildDocksClick_Canal(this); break;
+-			case '2': BuildDocksClick_Lock(this); break;
+-			case '3': BuildDocksClick_Demolish(this); break;
+-			case '4': BuildDocksClick_Depot(this); break;
+-			case '5': BuildDocksClick_Dock(this); break;
+-			case '6': BuildDocksClick_Buoy(this); break;
+-			case '7': BuildDocksClick_River(this); break;
+-			case 'B':
+-			case '8': BuildDocksClick_Aqueduct(this); break;
+-			default:  return ES_NOT_HANDLED;
+-		}
+-		return ES_HANDLED;
+-	}
+-
+ 	virtual void OnPlaceObject(Point pt, TileIndex tile)
+ 	{
+ 		_place_proc(tile);
+Index: src/hotkey.cpp
+===================================================================
+--- src/hotkey.cpp	(revision 0)
++++ src/hotkey.cpp	(revision 0)
+@@ -0,0 +1,835 @@
++/** @file hotkey_func.h Handling of configurable hotkeys. */
++
++#include "stdafx.h"
++#include "gfx_type.h"
++#include "settings_type.h"
++#include "hotkey_type.h"
++#include "hotkey_func.h"
++#include "window_gui.h"
++
++/**
++ * A constant defining which bit are used for modifier keys
++ */
++static const uint16 MOD_BITS = WKC_SHIFT | WKC_CTRL | WKC_ALT | WKC_META;
++
++/**
++ * A struct for associating WindowKeyCodes and its string representations
++ */
++struct KeyDescription {
++	WindowKeyCodes keycode;
++	const char *keycode_str;
++};
++
++/**
++ * Descriptions for all recognized special keys
++ */
++static const KeyDescription _special_key_descriptions[] = {
++	/* function keys (12) */
++	{WKC_F1,            "F1"},
++	{WKC_F2,            "F2"},
++	{WKC_F3,            "F3"},
++	{WKC_F4,            "F4"},
++	{WKC_F5,            "F5"},
++	{WKC_F6,            "F6"},
++	{WKC_F7,            "F7"},
++	{WKC_F8,            "F8"},
++	{WKC_F9,            "F9"},
++	{WKC_F10,           "F10"},
++	{WKC_F11,           "F11"},
++	{WKC_F12,           "F12"},
++	/* other special keys (13)*/
++	{WKC_RETURN,        "ENTER"},
++	{WKC_TAB,           "TAB"},
++	{WKC_SPACE,         "SPACE"},
++	{WKC_BACKQUOTE,     "BACKQUOTE"},
++	{WKC_PAUSE,         "PAUSE"},
++	{WKC_ESC,           "ESC"},
++	{WKC_BACKSPACE,     "BACKSPACE"},
++	{WKC_INSERT,        "INS"},
++	{WKC_DELETE,        "DEL"},
++	{WKC_PAGEUP,        "PGUP"},
++	{WKC_PAGEDOWN,      "PGDOWN"},
++	{WKC_END,           "END"},
++	{WKC_HOME,          "HOME"},
++	/* numeric keyboard (15)*/
++	{WKC_NUM_0,         "NUM_0"},
++	{WKC_NUM_1,         "NUM_1"},
++	{WKC_NUM_2,         "NUM_2"},
++	{WKC_NUM_3,         "NUM_3"},
++	{WKC_NUM_4,         "NUM_4"},
++	{WKC_NUM_5,         "NUM_5"},
++	{WKC_NUM_6,         "NUM_6"},
++	{WKC_NUM_7,         "NUM_7"},
++	{WKC_NUM_8,         "NUM_8"},
++	{WKC_NUM_9,         "NUM_9"},
++	{WKC_NUM_MUL,       "NUM_MUL"},
++	{WKC_NUM_DIV,       "NUM_DIV"},
++	{WKC_NUM_MINUS,     "NUM_MINUS"},
++	{WKC_NUM_PLUS,      "NUM_PLUS"},
++	{WKC_NUM_DECIMAL,   "NUM_DECIMAL"},
++	/* Arrow keys (4)*/
++	{WKC_LEFT,          "LEFT"},
++	{WKC_UP,            "UP"},
++	{WKC_RIGHT,         "RIGHT"},
++	{WKC_DOWN,          "DOWN"},
++	/* Other keys (10)*/
++	{WKC_SLASH,         "SLASH"},
++	{WKC_SEMICOLON,     "SEMICOLON"},
++	{WKC_EQUALS,        "EQUALS"},
++	{WKC_L_BRACKET,     "L_BRACKET"},
++	{WKC_BACKSLASH,     "BACKSLASH"},
++	{WKC_R_BRACKET,     "R_BRACKET"},
++	{WKC_SINGLEQUOTE,   "SINGLEQUOTE"},
++	{WKC_COMMA,         "COMMA"},
++	{WKC_PERIOD,        "PERIOD"},
++	{WKC_MINUS,         "MINUS"},
++};
++
++/**
++ * Default hotkeys for the global section
++ */
++static Hotkey _hotkey_global_default[] = {
++	{'C',                        HPN_GLOBAL_SCROLL_TO_CURSOR},
++	{'Z',                        HPN_GLOBAL_ZOOM_TO_CURSOR},
++	{WKC_DELETE,                 HPN_GLOBAL_CLOSE_UNSTICKY_WINDOWS},
++	{WKC_SHIFT | WKC_DELETE,     HPN_GLOBAL_CLOSE_ALL_WINDOWS},
++	{WKC_CTRL | 'R',             HPN_GLOBAL_REFRESH_SCREEN},
++	{WKC_CTRL | '1',             HPN_GLOBAL_TOGGLE_TRANSPARENCY_SIGNS},
++	{WKC_CTRL | '2',             HPN_GLOBAL_TOGGLE_TRANSPARENCY_TREES},
++	{WKC_CTRL | '3',             HPN_GLOBAL_TOGGLE_TRANSPARENCY_HOUSES},
++	{WKC_CTRL | '4',             HPN_GLOBAL_TOGGLE_TRANSPARENCY_INDUSTRIES},
++	{WKC_CTRL | '5',             HPN_GLOBAL_TOGGLE_TRANSPARENCY_BUILDINGS},
++	{WKC_CTRL | '6',             HPN_GLOBAL_TOGGLE_TRANSPARENCY_BRIDGES},
++	{WKC_CTRL | '7',             HPN_GLOBAL_TOGGLE_TRANSPARENCY_STRUCTURES},
++	{WKC_CTRL | '8',             HPN_GLOBAL_TOGGLE_TRANSPARENCY_CATENARY},
++	{WKC_CTRL | '9',             HPN_GLOBAL_TOGGLE_TRANSPARENCY_LOADING},
++	{WKC_CTRL | WKC_SHIFT | '1', HPN_GLOBAL_TOGGLE_INVISIBILITY_SIGNS},
++	{WKC_CTRL | WKC_SHIFT | '2', HPN_GLOBAL_TOGGLE_INVISIBILITY_TREES},
++	{WKC_CTRL | WKC_SHIFT | '3', HPN_GLOBAL_TOGGLE_INVISIBILITY_HOUSES},
++	{WKC_CTRL | WKC_SHIFT | '4', HPN_GLOBAL_TOGGLE_INVISIBILITY_INDUSTRIES},
++	{WKC_CTRL | WKC_SHIFT | '5', HPN_GLOBAL_TOGGLE_INVISIBILITY_BUILDINGS},
++	{WKC_CTRL | WKC_SHIFT | '6', HPN_GLOBAL_TOGGLE_INVISIBILITY_BRIDGES},
++	{WKC_CTRL | WKC_SHIFT | '7', HPN_GLOBAL_TOGGLE_INVISIBILITY_STRUCTURES},
++	{WKC_CTRL | WKC_SHIFT | '8', HPN_GLOBAL_TOGGLE_INVISIBILITY_CATENARY},
++	{'X',                        HPN_GLOBAL_TOGGLE_TRANSPARENCY},
++	{'X' | WKC_CTRL,             HPN_GLOBAL_SHOW_TRANSPARENCY_TOOLBAR},
++	{WKC_RETURN,                 HPN_GLOBAL_SHOW_CHAT_AUTO_WINDOW},
++	{'T',                        HPN_GLOBAL_SHOW_CHAT_AUTO_WINDOW},
++	{WKC_SHIFT | WKC_RETURN,     HPN_GLOBAL_SHOW_CHAT_ALL_WINDOW},
++	{WKC_SHIFT | 'T',            HPN_GLOBAL_SHOW_CHAT_ALL_WINDOW},
++	{WKC_CTRL | WKC_RETURN,      HPN_GLOBAL_SHOW_CHAT_TEAM_WINDOW},
++	{WKC_CTRL | 'T',             HPN_GLOBAL_SHOW_CHAT_TEAM_WINDOW},
++};
++
++/**
++ * Stores relevant info for all defined hotkey commands for the global section.
++ */
++const HotkeyProcInfo _hotkey_global_definitions[] = {
++	{HPN_GLOBAL_SCROLL_TO_CURSOR,                  "ScrollToCursor"},
++	{HPN_GLOBAL_ZOOM_TO_CURSOR,                    "ZoomToCursor"},
++	{HPN_GLOBAL_CLOSE_UNSTICKY_WINDOWS,            "CloseUnstickyWindows"},
++	{HPN_GLOBAL_CLOSE_ALL_WINDOWS,                 "CloseAllWindows"},
++	{HPN_GLOBAL_REFRESH_SCREEN,                    "MarkWholeScreenDirty"},
++	{HPN_GLOBAL_TOGGLE_TRANSPARENCY_SIGNS,         "ToggleTransparencySigns"},
++	{HPN_GLOBAL_TOGGLE_TRANSPARENCY_TREES,         "ToggleTransparencyTrees"},
++	{HPN_GLOBAL_TOGGLE_TRANSPARENCY_HOUSES,        "ToggleTransparencyHouses"},
++	{HPN_GLOBAL_TOGGLE_TRANSPARENCY_INDUSTRIES,    "ToggleTransparencyIndustries"},
++	{HPN_GLOBAL_TOGGLE_TRANSPARENCY_BUILDINGS,     "ToggleTransparencyBuildings"},
++	{HPN_GLOBAL_TOGGLE_TRANSPARENCY_BRIDGES,       "ToggleTransparencyBridges"},
++	{HPN_GLOBAL_TOGGLE_TRANSPARENCY_STRUCTURES,    "ToggleTransparencyStructures"},
++	{HPN_GLOBAL_TOGGLE_TRANSPARENCY_CATENARY,      "ToggleTransparencyCatenary"},
++	{HPN_GLOBAL_TOGGLE_TRANSPARENCY_LOADING,       "ToggleTransparencyLoading"},
++	{HPN_GLOBAL_TOGGLE_INVISIBILITY_SIGNS,         "ToggleInvisibilitySigns"},
++	{HPN_GLOBAL_TOGGLE_INVISIBILITY_TREES,         "ToggleInvisibilityTrees"},
++	{HPN_GLOBAL_TOGGLE_INVISIBILITY_HOUSES,        "ToggleInvisibilityHouses"},
++	{HPN_GLOBAL_TOGGLE_INVISIBILITY_INDUSTRIES,    "ToggleInvisibilityIndustries"},
++	{HPN_GLOBAL_TOGGLE_INVISIBILITY_BUILDINGS,     "ToggleInvisibilityBuildings"},
++	{HPN_GLOBAL_TOGGLE_INVISIBILITY_BRIDGES,       "ToggleInvisibilityBridges"},
++	{HPN_GLOBAL_TOGGLE_INVISIBILITY_STRUCTURES,    "ToggleInvisibilityStructures"},
++	{HPN_GLOBAL_TOGGLE_INVISIBILITY_CATENARY,      "ToggleInvisibilityCatenary"},
++	{HPN_GLOBAL_TOGGLE_INVISIBILITY_TOWNNAMES,     "ToggleInvisibilityTownnames"},
++	{HPN_GLOBAL_TOGGLE_INVISIBILITY_STATIONNAMES,  "ToggleInvisibilityStationnames"},
++	{HPN_GLOBAL_TOGGLE_INVISIBILITY_TEXTSIGNS,     "ToggleInvisibilitySigns"},
++	{HPN_GLOBAL_TOGGLE_INVISIBILITY_WAYPOINTNAMES, "ToggleInvisibilityWaypoints"},
++	{HPN_GLOBAL_TOGGLE_FULL_ANIMATION,             "ToggleFullAnimation"},
++	{HPN_GLOBAL_TOGGLE_FULL_DETAILS,               "ToggleFullDetails"},
++	{HPN_GLOBAL_TOGGLE_TRANSPARENCY,               "ResetRestoreAllTransparency"},
++	{HPN_GLOBAL_SHOW_TRANSPARENCY_TOOLBAR,         "ShowTransparencyToolbar"},
++	{HPN_GLOBAL_SHOW_CHAT_AUTO_WINDOW,             "ShowChatAutoWindow"},
++	{HPN_GLOBAL_SHOW_CHAT_ALL_WINDOW,              "ShowChatAllWindow"},
++	{HPN_GLOBAL_SHOW_CHAT_TEAM_WINDOW,             "ShowChatTeamWindow"},
++	{HPN_GLOBAL_TOGGLE_CONSOLE,                    "ToggleConsole"},
++};
++
++/**
++ * Stores relevant info for all defined hotkey commands for the game section.
++ */
++const HotkeyProcInfo _hotkey_game_definitions[] = {
++	{HPN_GAME_TOGGLE_PAUSE,                 "TogglePause"},
++	{HPN_GAME_TOGGLE_FAST_FORWARD,          "ToggleFastForward"},
++	{HPN_GAME_SHOW_OPTIONS,                 "ShowOptions"},
++	{HPN_GAME_SHOW_DIFFICULTY,              "ShowDifficulty"},
++	{HPN_GAME_SHOW_PATCH_OPTIONS,           "ShowPatchOptions"},
++	{HPN_GAME_SHOW_NEWGRF_OPTIONS,          "ShowNewGRFOptions"},
++	{HPN_GAME_SHOW_SAVE_DIALOG,             "ShowSaveDialog"},
++	{HPN_GAME_SHOW_LOAD_DIALOG,             "ShowLoadDialog"},
++	{HPN_GAME_EXIT_TO_MENU,                 "ExitToMenu"},
++	{HPN_GAME_SHOW_SMALL_MAP,               "ShowSmallMap"},
++	{HPN_GAME_SHOW_EXTRA_VIEWPORT,          "ShowExtraViewPortWindow"},
++	{HPN_GAME_SHOW_SIGN_LIST,               "ShowSignList"},
++	{HPN_GAME_SHOW_TOWN_DIRECTORY,          "ShowTownDirectory"},
++	{HPN_GAME_SHOW_SUBSIDIES_LIST,          "ShowSubsidiesList"},
++	{HPN_GAME_SHOW_STATION_LIST,            "ShowStationList"},
++	{HPN_GAME_SHOW_FINANCES,                "ShowFinances"},
++	{HPN_GAME_SHOW_COMPANY,                 "ShowCompany"},
++	{HPN_GAME_SHOW_OPERATING_PROFIT_GRAPH,  "ShowOperatingProfitGraph"},
++	{HPN_GAME_SHOW_INCOME_GRAPH,            "ShowIncomeGraph"},
++	{HPN_GAME_SHOW_DELIVERED_CARGO_GRAPH,   "ShowDeliveredCargoGraph"},
++	{HPN_GAME_SHOW_PERFORMANCE_GRAPH,       "ShowPerformanceGraph"},
++	{HPN_GAME_SHOW_COMPANY_VALUE_GRAPH,     "ShowCompanyValueGraph"},
++	{HPN_GAME_SHOW_CARGO_PAYMENT_GRAPH,     "ShowCargoPaymentGraph"},
++	{HPN_GAME_SHOW_COMPANY_LEAGUE_TABLE,    "ShowCompanyLeagueTable"},
++	{HPN_GAME_SHOW_PERFORMANCE_RATING,      "ShowPerformanceRating"},
++	{HPN_GAME_SHOW_INDUSTRY_DIRECTORY,      "ShowIndustryDirectory"},
++	{HPN_GAME_BUILD_INDUSTRY_WINDOW,        "ShowBuildIndustryWindow"},
++	{HPN_GAME_SHOW_TRAINS,                  "ShowTrains"},
++	{HPN_GAME_SHOW_ROAD_VEHICLES,           "ShowRoadVehicles"},
++	{HPN_GAME_SHOW_SHIPS,                   "ShowShips"},
++	{HPN_GAME_SHOW_AIRCRAFTS,               "ShowAircrafts"},
++	{HPN_GAME_ZOOM_IN,                      "ZoomIn"},
++	{HPN_GAME_ZOOM_OUT,                     "ZoomOut"},
++	{HPN_GAME_SHOW_BUILD_RAIL_TOOLBAR,      "ShowBuildRailToolbar"},
++	{HPN_GAME_SHOW_BUILD_ROAD_TOOLBAR,      "ShowBuildRoadToolbar"},
++	{HPN_GAME_SHOW_BUILD_DOCKS_TOOLBAR,     "ShowBuildDocksToolbar"},
++	{HPN_GAME_SHOW_BUILD_AIR_TOOLBAR,       "ShowBuildAirToolbar"},
++	{HPN_GAME_SHOW_TERRAFORM_TOOLBAR,       "ShowTerraformToolbar"},
++	{HPN_GAME_SHOW_BUILD_TREES_TOOLBAR,     "ShowBuildTreesToolbar"},
++	{HPN_GAME_PLACE_SIGN,                   "PlaceSign"},
++	{HPN_GAME_SHOW_MUSIC_WINDOW,            "ShowMusicWindow"},
++	{HPN_GAME_SHOW_LAST_NEWS,               "ShowLastNews"},
++	{HPN_GAME_SHOW_NEWS_OPTIONS,            "ShowNewsOptions"},
++	{HPN_GAME_SHOW_NEWS_HISTORY,            "ShowNewsHistory"},
++	{HPN_GAME_SHOW_LAND_INFO,               "ShowLandInfo"},
++	{HPN_GAME_SMALL_SCREENSHOT,             "SmallScreenshot"},
++	{HPN_GAME_WORLD_SCREENSHOT,             "WorldScreenshot"},
++	{HPN_GAME_SHOW_CHEAT_WINDOW,            "ShowCheatWindow"},
++	{HPN_GAME_AUTORAIL,                     "Autorail"},
++};
++
++/**
++ * Stores relevant info for all defined hotkey commands for the editor section.
++ */
++const HotkeyProcInfo _hotkey_editor_definitions[] = {
++	{HPN_EDITOR_TOGGLE_PAUSE,                 "TogglePause"},
++	{HPN_EDITOR_TOGGLE_FAST_FORWARD,          "ToggleFastForward"},
++	{HPN_EDITOR_SHOW_OPTIONS,                 "ShowOptions"},
++	{HPN_EDITOR_SHOW_DIFFICULTY,              "ShowDifficulty"},
++	{HPN_EDITOR_SHOW_PATCH_OPTIONS,           "ShowPatchOptions"},
++	{HPN_EDITOR_SHOW_NEWGRF_OPTIONS,          "ShowNewGRFOptions"},
++	{HPN_EDITOR_SHOW_SAVE_DIALOG,             "ShowSaveDialog"},
++	{HPN_EDITOR_SHOW_LOAD_DIALOG,             "ShowLoadDialog"},
++	{HPN_EDITOR_EXIT_TO_MENU,                 "ExitToMenu"},
++	{HPN_EDITOR_SHOW_SMALL_MAP,               "ShowSmallMap"},
++	{HPN_EDITOR_SHOW_EXTRA_VIEWPORT,          "ShowExtraViewPortWindow"},
++	{HPN_EDITOR_SHOW_SIGN_LIST,               "ShowSignList"},
++	{HPN_EDITOR_SHOW_TOWN_DIRECTORY,          "ShowTownDirectory"},
++	{HPN_EDITOR_ZOOM_IN,                      "ZoomIn"},
++	{HPN_EDITOR_ZOOM_OUT,                     "ZoomOut"},
++	{HPN_EDITOR_SHOW_TERRAFORM_TOOLBAR,       "ShowTerraformToolbar"},
++	{HPN_EDITOR_SHOW_GENERATE_TOWN_WINDOW,    "ShowGenerateTownWindow"},
++	{HPN_EDITOR_SHOW_BUILD_INDUSTRY_WINDOW,   "ShowBuildIndustryWindow"},
++	{HPN_EDITOR_SHOW_BUILD_ROAD_TOOLBAR,      "ShowBuildRailToolbar"},
++	{HPN_EDITOR_SHOW_BUILD_DOCKS_TOOLBAR,     "ShowBuildDocksToolbar"},
++	{HPN_EDITOR_SHOW_BUILD_TREES_TOOLBAR,     "ShowBuildTreesToolbar"},
++	{HPN_EDITOR_PLACE_SIGN,                   "PlaceSign"},
++	{HPN_EDITOR_SHOW_MUSIC_WINDOW,            "ShowMusicWindow"},
++	{HPN_EDITOR_SHOW_LAND_INFO,               "ShowLandInfoWindow"},
++	{HPN_EDITOR_SMALL_SCREENSHOT,             "SmallScreenshot"},
++	{HPN_EDITOR_WORLD_SCREENSHOT,             "WorldScreenshot"},
++};
++
++/**
++ * Stores relevant info for all defined hotkey commands for the orders section.
++ */
++const HotkeyProcInfo _hotkey_orders_definitions[] = {
++	{HPN_ORDERS_SKIP,       "Skip"},
++	{HPN_ORDERS_DELETE,     "Delete"},
++	{HPN_ORDERS_GOTO,       "Goto"},
++	{HPN_ORDERS_NONSTOP,    "Nonstop"},
++	{HPN_ORDERS_FULLLOAD,   "Fullload"},
++	{HPN_ORDERS_UNLOAD,     "Unload"},
++	{HPN_ORDERS_TRANSFER,   "Transfer"},
++	{HPN_ORDERS_SERVICE,    "Service"},
++};
++
++/**
++ * Stores relevant info for all defined hotkey commands for the rail section.
++ */
++const HotkeyProcInfo _hotkey_rail_definitions[] = {
++	{HPN_RAIL_N,            "RailN"},
++	{HPN_RAIL_NE,           "RailNE"},
++	{HPN_RAIL_E,            "RailE"},
++	{HPN_RAIL_NW,           "RailNW"},
++	{HPN_RAIL_AUTO,         "RailAuto"},
++	{HPN_RAIL_DEMOLISH,     "Demolish"},
++	{HPN_RAIL_DEPOT,        "Depot"},
++	{HPN_RAIL_WAYPOINT,     "Waypoint"},
++	{HPN_RAIL_STATION,      "Station"},
++	{HPN_RAIL_SIGNALS,      "Signals"},
++	{HPN_RAIL_BRIDGE,       "Bridge"},
++	{HPN_RAIL_TUNNEL,       "Tunnel"},
++	{HPN_RAIL_REMOVE,       "Remove"},
++	{HPN_RAIL_CONVERT,      "Convert"},
++};
++
++/**
++ * Stores relevant info for all defined hotkey commands for the road section.
++ */
++const HotkeyProcInfo _hotkey_road_definitions[] = {
++	{HPN_ROAD_N,            "RoadN"},
++	{HPN_ROAD_E,            "RoadE"},
++	{HPN_ROAD_AUTO,         "RoadAuto"},
++	{HPN_ROAD_DEMOLISH,     "Demolish"},
++	{HPN_ROAD_DEPOT,        "Depot"},
++	{HPN_ROAD_BUS_STATION,  "BusStation"},
++	{HPN_ROAD_TRUCK_STATION,"TruckStation"},
++	{HPN_ROAD_ONEWAY,       "OneWay"},
++	{HPN_ROAD_BRIDGE,       "Bridge"},
++	{HPN_ROAD_TUNNEL,       "Tunnel"},
++	{HPN_ROAD_REMOVE,       "Remove"},
++};
++
++/**
++ * Stores relevant info for all defined hotkey commands for the dock section.
++ */
++const HotkeyProcInfo _hotkey_dock_definitions[] = {
++	{HPN_DOCK_CANAL,        "Canal"},
++	{HPN_DOCK_LOCK,         "Lock"},
++	{HPN_DOCK_DEMOLISH,     "Demolish"},
++	{HPN_DOCK_DEPOT,        "Depot"},
++	{HPN_DOCK_STATION,      "Dock"},
++	{HPN_DOCK_BUOY,         "Buoy"},
++	{HPN_DOCK_RIVER,        "River"},
++	{HPN_DOCK_AQUEDUCT,     "Aqueduct"},
++};
++
++/**
++ * Stores relevant info for all defined hotkey commands for the airport section.
++ */
++const HotkeyProcInfo _hotkey_airport_definitions[] = {
++	{HPN_AIRPORT_AIRPORT,   "Airport"},
++	{HPN_AIRPORT_DEMOLISH,  "Demolish"},
++};
++
++/**
++ * Stores relevant info for all defined hotkey commands for the terraform_game section.
++ */
++const HotkeyProcInfo _hotkey_terraform_game_definitions[] = {
++	{HPN_TERRAFORM_GAME_LOWER,                "Lower"},
++	{HPN_TERRAFORM_GAME_RAISE,                "Raise"},
++	{HPN_TERRAFORM_GAME_LEVEL,                "Level"},
++	{HPN_TERRAFORM_GAME_DEMOLISH,             "Demolish"},
++	{HPN_TERRAFORM_GAME_BUY_LAND,             "BuyLand"},
++	{HPN_TERRAFORM_GAME_TREES,                "Trees"},
++	{HPN_TERRAFORM_GAME_SIGN,                 "PlaceSign"},
++};
++
++/**
++ * Stores relevant info for all defined hotkey commands for the terraform_game section.
++ */
++const HotkeyProcInfo _hotkey_terraform_editor_definitions[] = {
++	{HPN_TERRAFORM_EDITOR_DEMOLISH,             "Demolish"},
++	{HPN_TERRAFORM_EDITOR_LOWER,                "Lower"},
++	{HPN_TERRAFORM_EDITOR_RAISE,                "Raise"},
++	{HPN_TERRAFORM_EDITOR_LEVEL,                "Level"},
++	{HPN_TERRAFORM_EDITOR_ROCK,                 "Rock"},
++	{HPN_TERRAFORM_EDITOR_DESSERT_LIGHTHOUSE,   "DessertLighthouse"},
++	{HPN_TERRAFORM_EDITOR_TRANSMITTER,          "Transmitter"},
++};
++
++/**
++ * Default hotkeys for the game section
++ */
++static Hotkey _hotkey_game_default[] = {
++	{WKC_F1,                   HPN_GAME_TOGGLE_PAUSE},
++	{WKC_PAUSE,                HPN_GAME_TOGGLE_PAUSE},
++	{WKC_F2,                   HPN_GAME_SHOW_OPTIONS},
++	{WKC_F3,                   HPN_GAME_SHOW_SAVE_DIALOG},
++	{WKC_F4,                   HPN_GAME_SHOW_SMALL_MAP},
++	{WKC_F5,                   HPN_GAME_SHOW_TOWN_DIRECTORY},
++	{WKC_F6,                   HPN_GAME_SHOW_SUBSIDIES_LIST},
++	{WKC_F7,                   HPN_GAME_SHOW_STATION_LIST},
++	{WKC_F8,                   HPN_GAME_SHOW_FINANCES},
++	{WKC_F9,                   HPN_GAME_SHOW_COMPANY},
++	{WKC_F10,                  HPN_GAME_SHOW_OPERATING_PROFIT_GRAPH},
++	{WKC_F11,                  HPN_GAME_SHOW_COMPANY_LEAGUE_TABLE},
++	{WKC_F12,                  HPN_GAME_BUILD_INDUSTRY_WINDOW},
++	{WKC_SHIFT | WKC_F1,       HPN_GAME_SHOW_TRAINS},
++	{WKC_SHIFT | WKC_F2,       HPN_GAME_SHOW_ROAD_VEHICLES},
++	{WKC_SHIFT | WKC_F3,       HPN_GAME_SHOW_SHIPS},
++	{WKC_SHIFT | WKC_F4,       HPN_GAME_SHOW_AIRCRAFTS},
++	{WKC_SHIFT | WKC_F5,       HPN_GAME_ZOOM_IN},
++	{WKC_SHIFT | WKC_F6,       HPN_GAME_ZOOM_OUT},
++	{WKC_SHIFT | WKC_F7,       HPN_GAME_SHOW_BUILD_RAIL_TOOLBAR},
++	{WKC_SHIFT | WKC_F8,       HPN_GAME_SHOW_BUILD_ROAD_TOOLBAR},
++	{WKC_SHIFT | WKC_F9,       HPN_GAME_SHOW_BUILD_DOCKS_TOOLBAR},
++	{WKC_SHIFT | WKC_F10,      HPN_GAME_SHOW_BUILD_AIR_TOOLBAR},
++	{WKC_SHIFT | WKC_F11,      HPN_GAME_SHOW_BUILD_TREES_TOOLBAR},
++	{WKC_SHIFT | WKC_F12,      HPN_GAME_SHOW_MUSIC_WINDOW},
++	{WKC_CTRL | 'S',           HPN_GAME_SMALL_SCREENSHOT},
++	{WKC_CTRL | 'G',           HPN_GAME_WORLD_SCREENSHOT},
++	{WKC_CTRL | WKC_ALT | 'C', HPN_GAME_SHOW_CHEAT_WINDOW},
++	{'L',                      HPN_GAME_SHOW_TERRAFORM_TOOLBAR},
++	{'M',                      HPN_GAME_SHOW_SMALL_MAP},
++	{'V',                      HPN_GAME_SHOW_EXTRA_VIEWPORT},
++	{'A',                      HPN_GAME_AUTORAIL},
++	{WKC_NUM_PLUS,             HPN_GAME_ZOOM_IN},
++	{WKC_EQUALS,               HPN_GAME_ZOOM_IN},
++	{WKC_SHIFT | WKC_EQUALS,   HPN_GAME_ZOOM_IN},
++	{WKC_NUM_MINUS,            HPN_GAME_ZOOM_OUT},
++	{WKC_MINUS,                HPN_GAME_ZOOM_OUT},
++	{WKC_SHIFT | WKC_MINUS,    HPN_GAME_ZOOM_OUT},
++};
++
++/**
++ * Default hotkeys for the editor section
++ */
++static Hotkey _hotkey_editor_default[] = {
++	{WKC_F1,                   HPN_EDITOR_TOGGLE_PAUSE},
++	{WKC_PAUSE,                HPN_EDITOR_TOGGLE_PAUSE},
++	{WKC_F2,                   HPN_EDITOR_SHOW_OPTIONS},
++	{WKC_F3,                   HPN_EDITOR_SHOW_SAVE_DIALOG},
++	{WKC_F4,                   HPN_EDITOR_SHOW_TERRAFORM_TOOLBAR},
++	{WKC_F5,                   HPN_EDITOR_SHOW_GENERATE_TOWN_WINDOW},
++	{WKC_F6,                   HPN_EDITOR_SHOW_BUILD_INDUSTRY_WINDOW},
++	{WKC_F7,                   HPN_EDITOR_SHOW_BUILD_ROAD_TOOLBAR},
++	{WKC_F8,                   HPN_EDITOR_SHOW_BUILD_DOCKS_TOOLBAR},
++	{WKC_F9,                   HPN_EDITOR_SHOW_BUILD_TREES_TOOLBAR},
++	{WKC_F10,                  HPN_EDITOR_PLACE_SIGN},
++	{WKC_F11,                  HPN_EDITOR_SHOW_MUSIC_WINDOW},
++	{WKC_F12,                  HPN_EDITOR_SHOW_LAND_INFO},
++	{WKC_CTRL | 'S',           HPN_EDITOR_SMALL_SCREENSHOT},
++	{WKC_CTRL | 'G',           HPN_EDITOR_WORLD_SCREENSHOT},
++	{WKC_SHIFT | WKC_F5,       HPN_EDITOR_ZOOM_IN},
++	{WKC_SHIFT | WKC_F6,       HPN_EDITOR_ZOOM_OUT},
++	{'L',                      HPN_EDITOR_SHOW_TERRAFORM_TOOLBAR},
++	{'M',                      HPN_EDITOR_SHOW_SMALL_MAP},
++	{'V',                      HPN_EDITOR_SHOW_EXTRA_VIEWPORT},
++	{WKC_NUM_PLUS,             HPN_EDITOR_ZOOM_IN},
++	{WKC_EQUALS,               HPN_EDITOR_ZOOM_IN},
++	{WKC_SHIFT | WKC_EQUALS,   HPN_EDITOR_ZOOM_IN},
++	{WKC_NUM_MINUS,            HPN_EDITOR_ZOOM_OUT},
++	{WKC_MINUS,                HPN_EDITOR_ZOOM_OUT},
++	{WKC_SHIFT | WKC_MINUS,    HPN_EDITOR_ZOOM_OUT},
++};
++
++/**
++ * Default hotkeys for the orders section
++ */
++static Hotkey _hotkey_order_default[] = {
++	{'D', HPN_ORDERS_SKIP},
++	{'F', HPN_ORDERS_DELETE},
++	{'G', HPN_ORDERS_GOTO},
++	{'H', HPN_ORDERS_NONSTOP},
++	{'J', HPN_ORDERS_FULLLOAD},
++	{'K', HPN_ORDERS_UNLOAD},
++	{'T', HPN_ORDERS_TRANSFER},
++	{'S', HPN_ORDERS_SERVICE},
++};
++
++/**
++ * Default hotkeys for the rail section
++ */
++static Hotkey _hotkey_rail_default[] = {
++	{'1', HPN_RAIL_N},
++	{'2', HPN_RAIL_NE},
++	{'3', HPN_RAIL_E},
++	{'4', HPN_RAIL_NW},
++	{'5', HPN_RAIL_AUTO},
++	{'6', HPN_RAIL_DEMOLISH},
++	{'7', HPN_RAIL_DEPOT},
++	{'8', HPN_RAIL_WAYPOINT},
++	{'9', HPN_RAIL_STATION},
++	{'S', HPN_RAIL_SIGNALS},
++	{'B', HPN_RAIL_BRIDGE},
++	{'T', HPN_RAIL_TUNNEL},
++	{'R', HPN_RAIL_REMOVE},
++	{'C', HPN_RAIL_CONVERT},
++};
++
++/**
++ * Default hotkeys for the road section
++ */
++static Hotkey _hotkey_road_default[] = {
++	{'1', HPN_ROAD_N},
++	{'2', HPN_ROAD_E},
++	{'3', HPN_ROAD_AUTO},
++	{'4', HPN_ROAD_DEMOLISH},
++	{'5', HPN_ROAD_DEPOT},
++	{'6', HPN_ROAD_BUS_STATION},
++	{'7', HPN_ROAD_TRUCK_STATION},
++	{'8', HPN_ROAD_ONEWAY},
++	{'B', HPN_ROAD_BRIDGE},
++	{'T', HPN_ROAD_TUNNEL},
++	{'R', HPN_ROAD_REMOVE},
++};
++
++/**
++ * Default hotkeys for the dock section
++ */
++static Hotkey _hotkey_dock_default[] = {
++	{'1', HPN_DOCK_CANAL},
++	{'2', HPN_DOCK_LOCK},
++	{'3', HPN_DOCK_DEMOLISH},
++	{'4', HPN_DOCK_DEPOT},
++	{'5', HPN_DOCK_STATION},
++	{'6', HPN_DOCK_BUOY},
++	{'7', HPN_DOCK_RIVER},
++	{'8', HPN_DOCK_AQUEDUCT},
++	{'B', HPN_DOCK_AQUEDUCT},
++};
++
++/**
++ * Default hotkeys for the airport section
++ */
++static Hotkey _hotkey_airport_default[] = {
++	{'1', HPN_AIRPORT_AIRPORT},
++	{'2', HPN_AIRPORT_DEMOLISH},
++};
++
++/**
++ * Default hotkeys for the terraform section
++ */
++static Hotkey _hotkey_terraform_game_default[] = {
++	{'Q', HPN_TERRAFORM_GAME_LOWER},
++	{'W', HPN_TERRAFORM_GAME_RAISE},
++	{'E', HPN_TERRAFORM_GAME_LEVEL},
++	{'D', HPN_TERRAFORM_GAME_DEMOLISH},
++	{'U', HPN_TERRAFORM_GAME_BUY_LAND},
++	{'I', HPN_TERRAFORM_GAME_TREES},
++	{'O', HPN_TERRAFORM_GAME_SIGN},
++};
++
++/**
++ * Default hotkeys for the terraform section
++ */
++static Hotkey _hotkey_terraform_editor_default[] = {
++	{'D', HPN_TERRAFORM_EDITOR_DEMOLISH},
++	{'Q', HPN_TERRAFORM_EDITOR_LOWER},
++	{'W', HPN_TERRAFORM_EDITOR_RAISE},
++	{'E', HPN_TERRAFORM_EDITOR_LEVEL},
++	{'R', HPN_TERRAFORM_EDITOR_ROCK},
++	{'T', HPN_TERRAFORM_EDITOR_DESSERT_LIGHTHOUSE},
++	{'Y', HPN_TERRAFORM_EDITOR_TRANSMITTER},
++};
++
++/** 
++ * Convert a numeric value of a special key to its string representation.
++ */
++static inline const char *SpecialKeyToStr(const WindowKeyCodes keycode)
++{
++	int count = lengthof(_special_key_descriptions);
++	for (int i = 0; i < count; i++) {
++		if (_special_key_descriptions[i].keycode == keycode) {
++			return _special_key_descriptions[i].keycode_str;
++		}
++	}
++	return NULL;
++}
++
++/** 
++ * Convert a string representation of a special key to its numerical value.
++ */
++static inline WindowKeyCodes StrToSpecialKey(const char *keycode_str)
++{
++	int count = lengthof(_special_key_descriptions);
++	for (int i = 0; i < count; i++) {
++		if (strcasecmp(keycode_str, _special_key_descriptions[i].keycode_str) == 0) {
++			return _special_key_descriptions[i].keycode;
++		}
++	}
++	return WKC_NONE;
++}
++
++/**
++ * Convert a numeric keycode to its string representation.
++ * The format of the string representations looks like:
++ *   [A[C[S[M]]]+]Key
++ * with "Key" being either an ASCII character value key in the range of 
++ * 0-9 or A-Z or one of the special keys described by the 
++ * _special_key_descriptions array
++ *
++ * @param dst A buffer to store the string representation to
++ * @param keycode The uint16 representation of the keycode to be converted
++ * @param last A pointer to the last char of dst
++ * @return A pointer to the first character of the string representation
++ */
++char *KeycodeToStr(char *dst, const uint16 keycode, const char *last)
++{
++	/* BUF_SZ must be at least the sum of
++	 * 4 (max length of modifier keys)
++	 * 1 (the + sign(separator))
++	 * longest_entry(_special_key_descriptions)
++	 * 1 (string termination byte (0x00)) 
++	 */
++	const int BUF_SZ = 32;
++	/* ensure that the buffer for storing the keycode is large enough */
++	assert((last - dst) >= (BUF_SZ - 1));
++	char *p = dst;
++	WindowKeyCodes key = (WindowKeyCodes) (keycode & (~MOD_BITS)); // get the key without modifier keys
++	/* handle the modifier keys */
++	if (keycode & WKC_ALT) { *p = 'A'; p++; }
++	if (keycode & WKC_CTRL) { *p = 'C'; p++; }
++	if (keycode & WKC_SHIFT) { *p = 'S'; p++; }
++	if (keycode & WKC_META) { *p = 'M'; p++; }
++	/* add the separator (if necessary) */
++	if (p > dst) { *p = '+'; p++; }
++	/* handle the single character hotkeys */
++	if ((key >= 'a') && (key <= 'z')) { key = (WindowKeyCodes) (key + 32); } // convert to uppercase
++	if (((key >= 'A') && (key <= 'Z')) || ((key >= '0') && (key <= '9'))) { *p = key; p++; }
++	/* handle special keycodes */
++	else {
++		const char *key_str = SpecialKeyToStr(key);
++		if (key_str != NULL) {
++			int keylen = strlen(key_str);
++			memcpy(p, key_str, keylen);
++			p += keylen;
++		}
++	}
++	/* add the null-termination */
++	*p = 0;
++	return dst;
++}
++
++/**
++ * Convert a string representation of a keycode to its numerical value.
++ * 
++ * @param keycode_str A valid string representation of a keycode to be converted
++ * @return The numerical value of the keycode
++ * @see KeycodeToStr()
++ */
++uint16 StrToKeycode(const char *keycode_str)
++{
++	char *p = (char *)keycode_str;
++	uint16 result = 0;
++	/* First we try to look for the separator between the modifier keys (alt, meta, ctrl...)
++	 * and the `real` keycode. Everything that comes before it, is a modifier key. */
++	while ((*p != '+') && (*p != 0x00)) {
++		switch (*p) {
++			case 'A': result = result | WKC_ALT; break;
++			case 'C': result = result | WKC_CTRL; break;
++			case 'S': result = result | WKC_SHIFT; break;
++			case 'M': result = result | WKC_META; break;
++		}
++		p++;
++	}
++
++	/* if we have no modifier key(s) set, the current result is nonsense and 
++	 * we start the recognition of the `real` keycode at the the start of the string */
++	if (*p != '+') { p = (char *)keycode_str; result = 0; }
++	else { p++; }
++
++	/* At this point, p in either case points to the first char of the actual keycode. */
++	/* If there is only one char left, the ascii code of this char is the keycode. */
++	if (*(p + 1) == 0x00) { 
++		/* take care of the letter-case. */
++		if ((*p >= 'a') && (*p <= 'z')) { result = result | (*p) - 32; }
++		else { result = result | (*p); }
++		}
++	/* otherwise, it must be a special key */
++	else {
++		result = result | StrToSpecialKey(p);
++	}
++	return result;
++}
++
++/**
++ * Get a pointer to the hotkey definition array for this list.
++ *
++ * @return A pointer to the hotkey definition array for this list
++ */
++const HotkeyProcInfo *HotkeyList::GetDefinitions()
++{
++	switch (this->m_list_type) {
++		case HKL_GLOBAL: return _hotkey_global_definitions;
++		case HKL_GAME: return _hotkey_game_definitions;
++		case HKL_EDITOR: return _hotkey_editor_definitions;
++		case HKL_ORDERS: return _hotkey_orders_definitions;
++		case HKL_RAIL: return _hotkey_rail_definitions;
++		case HKL_ROAD: return _hotkey_road_definitions;
++		case HKL_DOCK: return _hotkey_dock_definitions;
++		case HKL_AIRPORT: return _hotkey_airport_definitions;
++		case HKL_TERRAFORM_GAME: return _hotkey_terraform_game_definitions;
++		case HKL_TERRAFORM_EDITOR: return _hotkey_terraform_editor_definitions;
++		default: return NULL;
++	}
++}
++
++/**
++ * Get a pointer to the last valid HotkeyProcInfo value which may be assigned in this list.
++ *
++ * @return A pointer to the last valid HotkeyProcInfo value
++ */
++const HotkeyProcInfo *HotkeyList::GetDefinitionsLast()
++{
++	switch (this->m_list_type) {
++		case HKL_GLOBAL: return lastof(_hotkey_global_definitions);
++		case HKL_GAME: return lastof(_hotkey_game_definitions);
++		case HKL_EDITOR: return lastof(_hotkey_editor_definitions);
++		case HKL_ORDERS: return lastof(_hotkey_orders_definitions);
++		case HKL_RAIL: return lastof(_hotkey_rail_definitions);
++		case HKL_ROAD: return lastof(_hotkey_road_definitions);
++		case HKL_DOCK: return lastof(_hotkey_dock_definitions);
++		case HKL_AIRPORT: return lastof(_hotkey_airport_definitions);
++		case HKL_TERRAFORM_GAME: return lastof(_hotkey_terraform_game_definitions);
++		case HKL_TERRAFORM_EDITOR: return lastof(_hotkey_terraform_editor_definitions);
++		default: return NULL;
++	}
++}
++
++/**
++ * Load all default hotkeys for this list.
++ * Based on the m_list_type value of this object load the default hotkeys.
++ */
++void HotkeyList::LoadDefault()
++{
++	Hotkey *iter = NULL;
++	Hotkey *last = NULL;
++	Hotkey *appended;
++	switch (this->m_list_type) {
++		case HKL_GLOBAL: iter = _hotkey_global_default; last = lastof(_hotkey_global_default); break;
++		case HKL_GAME: iter = _hotkey_game_default; last = lastof(_hotkey_game_default); break;
++		case HKL_EDITOR: iter = _hotkey_editor_default; last = lastof(_hotkey_editor_default); break;
++		case HKL_ORDERS: iter = _hotkey_order_default; last = lastof(_hotkey_order_default); break;
++		case HKL_RAIL: iter = _hotkey_rail_default; last = lastof(_hotkey_rail_default); break;
++		case HKL_ROAD: iter = _hotkey_road_default; last = lastof(_hotkey_road_default); break;
++		case HKL_DOCK: iter = _hotkey_dock_default; last = lastof(_hotkey_dock_default); break;
++		case HKL_AIRPORT: iter = _hotkey_airport_default; last = lastof(_hotkey_airport_default); break;
++		case HKL_TERRAFORM_GAME: iter = _hotkey_terraform_game_default; last = lastof(_hotkey_terraform_game_default); break;
++		case HKL_TERRAFORM_EDITOR: iter = _hotkey_terraform_editor_default; last = lastof(_hotkey_terraform_editor_default); break;
++		default: break;
++	}
++	this->Clear();
++	if (iter != NULL) {
++		while (iter <= last) {
++			appended = this->Append();
++			appended->keycode = iter->keycode;
++			appended->proc_nr = iter->proc_nr;
++			iter++;
++		}
++	}
++};
++
++/**
++ * Append a hotkey to this list.
++ * The command is given as string representation and converted internally to its
++ * corresponding numerical representation.
++ * Causes for not adding a hotkey are an invalid keycode or an invalid command.
++ * 
++ * @param keycode_str The string representation of the keycode to add
++ * @param proc_str The string representation of the command to add
++ * @return true, if the hotkey was actually added, false if not
++ */
++bool HotkeyList::AddHotkeyProc(const char *keycode_str, const char *proc_str)
++{
++	uint16 keycode = StrToKeycode(keycode_str);
++	/* check if the lower bits contain a keycode 
++	 * the highest 4 bits are for modifier keys (alt, ctrl, 
++	 * shift, meta)*/
++	if ((keycode & (~MOD_BITS)) == WKC_NONE) { return false; }
++	return this->AddHotkeyProc(keycode, proc_str);
++};
++
++/**
++ * Append a hotkey to this list.
++ * The command is given as string representation and converted internally to its
++ * corresponding numerical value.
++ * 
++ * @param keycode The numerical value of the keycode to add
++ * @param proc_str The string representation of the command to add
++ * @return true, if the hotkey was actually added, false if not
++ */
++bool HotkeyList::AddHotkeyProc(const uint16 keycode, const char *proc_str)
++{
++	HotkeyProcInfo *iter = (HotkeyProcInfo*) m_hotkey_definitions;
++	if (iter != NULL) {
++		while (iter <= m_hotkey_definitions_last) {
++			if (strcasecmp(iter->proc_str, proc_str) == 0) {
++				Hotkey *appended = this->Append();
++				appended->keycode = keycode;
++				appended->proc_nr = iter->proc_nr;
++				return true;
++			}
++			iter++;
++		}
++	}
++	return false;
++};
++
++/**
++ * Convert a numerical value for a hotkey procedure to its string representation 
++ *
++ * @param proc_nr The numerical representation of a hotkey procedure
++ * @return A char* to the string representation of the specified hotkey procedure
++ */
++const char *HotkeyList::ProcNrToStr(int proc_nr)
++{
++	HotkeyProcInfo *iter = (HotkeyProcInfo*) m_hotkey_definitions;
++	if (iter != NULL) {
++		while (iter <= m_hotkey_definitions_last) {
++			if (iter->proc_nr == proc_nr) {
++				return iter->proc_str;
++			}
++			iter++;
++		}
++	}
++	return NULL;
++}
++
++/** 
++ * A key has been pressed.
++ * For every found match in the HotkeyList for the keycode of this event, the 
++ * HandleProcNr() function is called.
++ *
++ * @param key     the Unicode value of the key.
++ * @param keycode the untranslated key code including shift state.
++ * @return ES_HANDLED if the key press has been handled and no other
++ *         window should receive the event.
++ */
++/* virtual */ Window::EventState HotkeyWindow::OnKeyPress(uint16 key, uint16 keycode)
++{
++	Window::EventState state = Window::ES_NOT_HANDLED;
++	for (uint i = 0; i < this->m_hotkeys->Length(); i++) {
++		if (this->m_hotkeys->Get(i)->keycode == keycode) {
++			this->HandleProcNr(this->m_hotkeys->Get(i)->proc_nr);
++			state = Window::ES_HANDLED;
++		}
++	}
++	return state;
++}
++
++/** 
++ * Assign a HotkeyList from the configuration to this window.
++ *
++ * @param list The list which is assigned.
++ */
++void HotkeyWindow::AssignHotkeyList(HotkeyLists list)
++{
++	/* load the hotkeys from the configuration */
++	this->m_hotkeys = _settings_client.hotkey[list];
++	/* ensure, that we have a HotkeyList */
++	assert(this->m_hotkeys != NULL);
++};
++	
++/** 
++ * Handle the event of a hotkey.
++ * This function executed for every hotkey which matches the
++ * keycode of the HotkeyWindow::OnKeyPress() event.
++ * This function must be overridden by descendants to get any functionality.
++ *
++ * @param proc_nr The numerical representation of the procedure which is handled.
++ */
++/* virtual */ void HotkeyWindow::HandleProcNr(int proc_nr)
++{
++	return;
++}
+Index: src/hotkey_func.h
+===================================================================
+--- src/hotkey_func.h	(revision 0)
++++ src/hotkey_func.h	(revision 0)
+@@ -0,0 +1,13 @@
++/** @file hotkey_func.h Functions related to configurable hotkeys. */
++
++#ifndef HOTKEY_FUNC_H
++#define HOTKEY_FUNC_H
++
++#include "hotkey_type.h"
++#include "stdafx.h"
++#include "window_gui.h"
++
++char *KeycodeToStr(char *dst, const uint16 keycode, const char *last);
++uint16 StrToKeycode(const char *keycode_str);
++
++#endif
+Index: src/hotkey_type.h
+===================================================================
+--- src/hotkey_type.h	(revision 0)
++++ src/hotkey_type.h	(revision 0)
+@@ -0,0 +1,345 @@
++/** @file hotkey_type.h Type declarations for configuable hotkeys. */
++
++#ifndef HOTKEY_TYPE_H
++#define HOTKEY_TYPE_H
++
++#include "stdafx.h"
++#include "core/smallvec_type.hpp"
++#include "window_gui.h"
++
++/**
++ * Enumerate all existing hotkey lists
++ */
++enum HotkeyLists {
++	HKL_BEGIN         = 0,
++	HKL_GLOBAL        = HKL_BEGIN,
++	HKL_GAME,
++	HKL_EDITOR,
++	HKL_ORDERS,
++	HKL_RAIL,
++	HKL_ROAD,
++	HKL_DOCK,
++	HKL_AIRPORT,
++	HKL_TERRAFORM_GAME,
++	HKL_TERRAFORM_EDITOR,
++	HKL_END,
++	INVALID_HKL       = 0xFF,
++};
++
++/**
++ * Enumerate all existing procedures for the global hotkey section.
++ */
++enum HotkeyProcNrGlobal {
++	HPN_GLOBAL_BEGIN                            = 0,
++	HPN_GLOBAL_SCROLL_TO_CURSOR                 = HPN_GLOBAL_BEGIN,
++	HPN_GLOBAL_ZOOM_TO_CURSOR,
++	HPN_GLOBAL_CLOSE_UNSTICKY_WINDOWS,
++	HPN_GLOBAL_CLOSE_ALL_WINDOWS,
++	HPN_GLOBAL_REFRESH_SCREEN,
++	HPN_GLOBAL_TOGGLE_TRANSPARENCY_SIGNS,
++	HPN_GLOBAL_TOGGLE_TRANSPARENCY_TREES,
++	HPN_GLOBAL_TOGGLE_TRANSPARENCY_HOUSES,
++	HPN_GLOBAL_TOGGLE_TRANSPARENCY_INDUSTRIES,
++	HPN_GLOBAL_TOGGLE_TRANSPARENCY_BUILDINGS,
++	HPN_GLOBAL_TOGGLE_TRANSPARENCY_BRIDGES,
++	HPN_GLOBAL_TOGGLE_TRANSPARENCY_STRUCTURES,
++	HPN_GLOBAL_TOGGLE_TRANSPARENCY_CATENARY,
++	HPN_GLOBAL_TOGGLE_TRANSPARENCY_LOADING,
++	HPN_GLOBAL_TOGGLE_INVISIBILITY_SIGNS,
++	HPN_GLOBAL_TOGGLE_INVISIBILITY_TREES,
++	HPN_GLOBAL_TOGGLE_INVISIBILITY_HOUSES,
++	HPN_GLOBAL_TOGGLE_INVISIBILITY_INDUSTRIES,
++	HPN_GLOBAL_TOGGLE_INVISIBILITY_BUILDINGS,
++	HPN_GLOBAL_TOGGLE_INVISIBILITY_BRIDGES,
++	HPN_GLOBAL_TOGGLE_INVISIBILITY_STRUCTURES,
++	HPN_GLOBAL_TOGGLE_INVISIBILITY_CATENARY,
++	HPN_GLOBAL_TOGGLE_INVISIBILITY_TOWNNAMES,
++	HPN_GLOBAL_TOGGLE_INVISIBILITY_STATIONNAMES,
++	HPN_GLOBAL_TOGGLE_INVISIBILITY_TEXTSIGNS,
++	HPN_GLOBAL_TOGGLE_INVISIBILITY_WAYPOINTNAMES,
++	HPN_GLOBAL_TOGGLE_FULL_ANIMATION,
++	HPN_GLOBAL_TOGGLE_FULL_DETAILS,
++	HPN_GLOBAL_TOGGLE_TRANSPARENCY,
++	HPN_GLOBAL_SHOW_TRANSPARENCY_TOOLBAR,
++	HPN_GLOBAL_SHOW_CHAT_AUTO_WINDOW,
++	HPN_GLOBAL_SHOW_CHAT_ALL_WINDOW,
++	HPN_GLOBAL_SHOW_CHAT_TEAM_WINDOW,
++	HPN_GLOBAL_TOGGLE_CONSOLE,
++	HPN_GLOBAL_END,
++};
++
++/**
++ * Enumerate all existing procedures for the game hotkey section.
++ */
++enum HotkeyProcNrGame {
++	HPN_GAME_BEGIN                              = 0,
++	HPN_GAME_TOGGLE_PAUSE                       = HPN_GAME_BEGIN,
++	HPN_GAME_TOGGLE_FAST_FORWARD,
++	HPN_GAME_SHOW_OPTIONS,
++	HPN_GAME_SHOW_DIFFICULTY,
++	HPN_GAME_SHOW_PATCH_OPTIONS,
++	HPN_GAME_SHOW_NEWGRF_OPTIONS,
++	HPN_GAME_SHOW_SAVE_DIALOG,
++	HPN_GAME_SHOW_LOAD_DIALOG,
++	HPN_GAME_EXIT_TO_MENU,
++	HPN_GAME_SHOW_SMALL_MAP,
++	HPN_GAME_SHOW_EXTRA_VIEWPORT,
++	HPN_GAME_SHOW_SIGN_LIST,
++	HPN_GAME_SHOW_TOWN_DIRECTORY,
++	HPN_GAME_SHOW_SUBSIDIES_LIST,
++	HPN_GAME_SHOW_STATION_LIST,
++	HPN_GAME_SHOW_FINANCES,
++	HPN_GAME_SHOW_COMPANY,
++	HPN_GAME_SHOW_OPERATING_PROFIT_GRAPH,
++	HPN_GAME_SHOW_INCOME_GRAPH,
++	HPN_GAME_SHOW_DELIVERED_CARGO_GRAPH,
++	HPN_GAME_SHOW_PERFORMANCE_GRAPH,
++	HPN_GAME_SHOW_COMPANY_VALUE_GRAPH,
++	HPN_GAME_SHOW_CARGO_PAYMENT_GRAPH,
++	HPN_GAME_SHOW_COMPANY_LEAGUE_TABLE,
++	HPN_GAME_SHOW_PERFORMANCE_RATING,
++	HPN_GAME_SHOW_INDUSTRY_DIRECTORY,
++	HPN_GAME_BUILD_INDUSTRY_WINDOW,
++	HPN_GAME_SHOW_TRAINS,
++	HPN_GAME_SHOW_ROAD_VEHICLES,
++	HPN_GAME_SHOW_SHIPS,
++	HPN_GAME_SHOW_AIRCRAFTS,
++	HPN_GAME_ZOOM_IN,
++	HPN_GAME_ZOOM_OUT,
++	HPN_GAME_SHOW_BUILD_RAIL_TOOLBAR,
++	HPN_GAME_SHOW_BUILD_ROAD_TOOLBAR,
++	HPN_GAME_SHOW_BUILD_DOCKS_TOOLBAR,
++	HPN_GAME_SHOW_BUILD_AIR_TOOLBAR,
++	HPN_GAME_SHOW_TERRAFORM_TOOLBAR,
++	HPN_GAME_SHOW_BUILD_TREES_TOOLBAR,
++	HPN_GAME_PLACE_SIGN,
++	HPN_GAME_SHOW_MUSIC_WINDOW,
++	HPN_GAME_SHOW_LAST_NEWS,
++	HPN_GAME_SHOW_NEWS_OPTIONS,
++	HPN_GAME_SHOW_NEWS_HISTORY,
++	HPN_GAME_SHOW_LAND_INFO,
++	HPN_GAME_SMALL_SCREENSHOT,
++	HPN_GAME_WORLD_SCREENSHOT,
++	HPN_GAME_SHOW_CHEAT_WINDOW,
++	HPN_GAME_AUTORAIL,
++	HPN_GAME_END,
++};
++
++/**
++ * Enumerate all existing procedures for the editor hotkey section.
++ */
++enum HotkeyProcNrEditor {
++	HPN_EDITOR_BEGIN                            = 0,
++	HPN_EDITOR_TOGGLE_PAUSE                     = HPN_EDITOR_BEGIN,
++	HPN_EDITOR_TOGGLE_FAST_FORWARD,
++	HPN_EDITOR_SHOW_OPTIONS,
++	HPN_EDITOR_SHOW_DIFFICULTY,
++	HPN_EDITOR_SHOW_PATCH_OPTIONS,
++	HPN_EDITOR_SHOW_NEWGRF_OPTIONS,
++	HPN_EDITOR_SHOW_SAVE_DIALOG,
++	HPN_EDITOR_SHOW_LOAD_DIALOG,
++	HPN_EDITOR_EXIT_TO_MENU,
++	HPN_EDITOR_SHOW_SMALL_MAP,
++	HPN_EDITOR_SHOW_EXTRA_VIEWPORT,
++	HPN_EDITOR_SHOW_SIGN_LIST,
++	HPN_EDITOR_SHOW_TOWN_DIRECTORY,
++	HPN_EDITOR_ZOOM_IN,
++	HPN_EDITOR_ZOOM_OUT,
++	HPN_EDITOR_SHOW_TERRAFORM_TOOLBAR,
++	HPN_EDITOR_SHOW_GENERATE_TOWN_WINDOW,
++	HPN_EDITOR_SHOW_BUILD_INDUSTRY_WINDOW,
++	HPN_EDITOR_SHOW_BUILD_ROAD_TOOLBAR,
++	HPN_EDITOR_SHOW_BUILD_DOCKS_TOOLBAR,
++	HPN_EDITOR_SHOW_BUILD_TREES_TOOLBAR,
++	HPN_EDITOR_PLACE_SIGN,
++	HPN_EDITOR_SHOW_MUSIC_WINDOW,
++	HPN_EDITOR_SHOW_LAND_INFO,
++	HPN_EDITOR_SMALL_SCREENSHOT,
++	HPN_EDITOR_WORLD_SCREENSHOT,
++	HPN_EDITOR_END,
++};
++
++/**
++ * Enumerate all existing procedures for the orders hotkey section.
++ * The order of the items in this enum must correspond with the indices
++ * of the _order_button_proc array in order_gui.cpp
++ */
++enum HotkeyProcNrOrders {
++	HPN_ORDERS_BEGIN                            = 0,
++	HPN_ORDERS_SKIP                             = HPN_ORDERS_BEGIN,
++	HPN_ORDERS_DELETE,
++	HPN_ORDERS_GOTO,
++	HPN_ORDERS_NONSTOP,
++	HPN_ORDERS_FULLLOAD,
++	HPN_ORDERS_UNLOAD,
++	HPN_ORDERS_TRANSFER,
++	HPN_ORDERS_SERVICE,
++	HPN_ORDERS_END,
++};
++
++/**
++ * Enumerate all existing procedures for the rail hotkey section.
++ * The order of the items in this enum must correspond with the indices
++ * of the _build_railroad_button_proc array in rail_gui.cpp
++ */
++enum HotkeyProcNrRail {
++	HPN_RAIL_BEGIN                              = 0,
++	HPN_RAIL_N                                  = HPN_RAIL_BEGIN,
++	HPN_RAIL_NE,
++	HPN_RAIL_E,
++	HPN_RAIL_NW,
++	HPN_RAIL_AUTO,
++	HPN_RAIL_DEMOLISH,
++	HPN_RAIL_DEPOT,
++	HPN_RAIL_WAYPOINT,
++	HPN_RAIL_STATION,
++	HPN_RAIL_SIGNALS,
++	HPN_RAIL_BRIDGE,
++	HPN_RAIL_TUNNEL,
++	HPN_RAIL_REMOVE,
++	HPN_RAIL_CONVERT,
++	HPN_RAIL_END,
++};
++
++/**
++ * Enumerate all existing procedures for the road hotkey section.
++ * The order of the items in this enum must correspond with the indices
++ * of the _build_road_button_proc array in rail_gui.cpp
++ */
++enum HotkeyProcNrRoad {
++	HPN_ROAD_BEGIN                              = 0,
++	HPN_ROAD_N                                  = HPN_ROAD_BEGIN,
++	HPN_ROAD_E,
++	HPN_ROAD_AUTO,
++	HPN_ROAD_DEMOLISH,
++	HPN_ROAD_DEPOT,
++	HPN_ROAD_BUS_STATION,
++	HPN_ROAD_TRUCK_STATION,
++	HPN_ROAD_ONEWAY,
++	HPN_ROAD_BRIDGE,
++	HPN_ROAD_TUNNEL,
++	HPN_ROAD_REMOVE,
++	HPN_ROAD_END,
++};
++
++/**
++ * Enumerate all existing procedures for the dock hotkey section.
++ * The order of the items in this enum must correspond with the indices
++ * of the _build_docks_button_proc array in dock_gui.cpp
++ */
++enum HotkeyProcNrDock {
++	HPN_DOCK_BEGIN                              = 0,
++	HPN_DOCK_CANAL                              = HPN_DOCK_BEGIN,
++	HPN_DOCK_LOCK,
++	HPN_DOCK_NULL,
++	HPN_DOCK_DEMOLISH,
++	HPN_DOCK_DEPOT,
++	HPN_DOCK_STATION,
++	HPN_DOCK_BUOY,
++	HPN_DOCK_RIVER,
++	HPN_DOCK_AQUEDUCT,
++	HPN_DOCK_END,
++};
++
++/**
++ * Enumerate all existing procedures for the airport hotkey section.
++ * The order of the items in this enum must correspond with the indices
++ * of the _build_air_button_proc array in airport_gui.cpp
++ */
++enum HotkeyProcNrAirport {
++	HPN_AIRPORT_BEGIN                           = 0,
++	HPN_AIRPORT_AIRPORT                         = HPN_AIRPORT_BEGIN,
++	HPN_AIRPORT_DEMOLISH,
++	HPN_AIRPORT_END,
++};
++
++/**
++ * Enumerate all existing procedures for the terraform_game hotkey section.
++ * The order of the items in this enum must correspond with the indices
++ * of the _terraform_button_proc array in terraform_gui.cpp
++ */
++enum HotkeyProcNrTerraformGame {
++	HPN_TERRAFORM_GAME_BEGIN                    = 0,
++	HPN_TERRAFORM_GAME_LOWER                    = HPN_TERRAFORM_GAME_BEGIN,
++	HPN_TERRAFORM_GAME_RAISE,
++	HPN_TERRAFORM_GAME_LEVEL,
++	HPN_TERRAFORM_GAME_DEMOLISH,
++	HPN_TERRAFORM_GAME_BUY_LAND,
++	HPN_TERRAFORM_GAME_TREES,
++	HPN_TERRAFORM_GAME_SIGN,
++	HPN_TERRAFORM_GAME_END,
++};
++
++/**
++ * Enumerate all existing procedures for the terraform_editor hotkey section.
++ * The order of the items in this enum must correspond with the indices
++ * of the _editor_terraform_button_proc array in terraform_gui.cpp
++ */
++enum HotkeyProcNrTerraformEditor {
++	HPN_TERRAFORM_EDITOR_BEGIN                  = 0,
++	HPN_TERRAFORM_EDITOR_DEMOLISH               = HPN_TERRAFORM_EDITOR_BEGIN,
++	HPN_TERRAFORM_EDITOR_LOWER,
++	HPN_TERRAFORM_EDITOR_RAISE,
++	HPN_TERRAFORM_EDITOR_LEVEL,
++	HPN_TERRAFORM_EDITOR_ROCK,
++	HPN_TERRAFORM_EDITOR_DESSERT_LIGHTHOUSE,
++	HPN_TERRAFORM_EDITOR_TRANSMITTER,
++	HPN_TERRAFORM_EDITOR_END,
++};
++
++
++/**
++ * A struct for storing additional info for possible commands.
++ * May sometime be extended to store also GUI related stuff (StringID,...).
++ */
++struct HotkeyProcInfo {
++	int proc_nr;            ///< the enum value of the command
++	const char *proc_str;   ///< the string representation of the command
++};
++
++
++/**
++ * Stores the actual hotkey and links a keycode to a command.
++ */
++struct Hotkey {
++	uint16 keycode;
++	int proc_nr;
++};
++
++/**
++ * Class for managing hotkeys.
++ * Define a class for managing the binding and
++ * loading of defaults of the hotkey configuration.
++ */
++struct HotkeyList : SmallVector<Hotkey, sizeof(Hotkey)> {
++	protected:
++		const HotkeyLists m_list_type;
++		const HotkeyProcInfo *m_hotkey_definitions;
++		const HotkeyProcInfo *m_hotkey_definitions_last;
++		const HotkeyProcInfo *GetDefinitions();
++		const HotkeyProcInfo *GetDefinitionsLast();
++	public:
++		HotkeyList(HotkeyLists list_type) : SmallVector<Hotkey, sizeof(Hotkey)>(), m_list_type(list_type), m_hotkey_definitions(GetDefinitions()), m_hotkey_definitions_last(GetDefinitionsLast()) {};
++		void LoadDefault();
++		bool AddHotkeyProc(const char *keycode_str, const char *proc_str);
++		bool AddHotkeyProc(const uint16 keycode, const char *proc_str);
++		const char *ProcNrToStr(int proc_nr);
++};
++
++/**
++ * Hotkey-support for Window class.
++ * Extends the base window class by providing a link to a hotkey list
++ * and an event handler callback function for KeyPress events.
++ */
++struct HotkeyWindow : Window {
++protected:
++	HotkeyList *m_hotkeys;
++	void AssignHotkeyList(HotkeyLists list);
++	virtual void HandleProcNr(int proc_nr);
++public:
++	HotkeyWindow(const WindowDesc *desc, HotkeyLists list, WindowNumber window_number = 0) : Window(desc, window_number) { AssignHotkeyList(list); };
++	HotkeyWindow(int x, int y, int width, int height, WindowClass cls, const Widget *widget, HotkeyLists list): Window(x, y, width, height, cls, widget) { AssignHotkeyList(list); };
++	virtual EventState OnKeyPress(uint16 key, uint16 keycode);
++};
++
++#endif
+Index: src/main_gui.cpp
+===================================================================
+--- src/main_gui.cpp	(revision 14004)
++++ src/main_gui.cpp	(working copy)
+@@ -213,13 +213,164 @@
+ 
+ extern void UpdateAllStationVirtCoord();
+ 
+-struct MainWindow : Window
++struct MainWindow : HotkeyWindow
+ {
+-	MainWindow(int width, int height) : Window(0, 0, width, height, WC_MAIN_WINDOW, NULL)
++	MainWindow(int width, int height) : HotkeyWindow(0, 0, width, height, WC_MAIN_WINDOW, NULL, HKL_GLOBAL)
+ 	{
+ 		InitializeWindowViewport(this, 0, 0, width, height, TileXY(32, 32), ZOOM_LVL_VIEWPORT);
+ 	}
+ 
++	virtual void HandleProcNr(int proc_nr)
++	{
++		switch(proc_nr) {
++			case HPN_GLOBAL_SCROLL_TO_CURSOR: {
++			Point pt = GetTileBelowCursor();
++				if (pt.x != -1) {
++					ScrollMainWindowTo(pt.x, pt.y);
++				}
++				break;
++			}
++			case HPN_GLOBAL_ZOOM_TO_CURSOR: {
++			Point pt = GetTileBelowCursor();
++				if (pt.x != -1) {
++					MaxZoomInOut(ZOOM_IN, this);
++					ScrollMainWindowTo(pt.x, pt.y);
++				}
++				break;
++			}
++			case HPN_GLOBAL_CLOSE_UNSTICKY_WINDOWS: DeleteNonVitalWindows(); break;
++			case HPN_GLOBAL_CLOSE_ALL_WINDOWS: DeleteAllNonVitalWindows(); break;
++			case HPN_GLOBAL_REFRESH_SCREEN: MarkWholeScreenDirty(); break;
++			case HPN_GLOBAL_TOGGLE_TRANSPARENCY_SIGNS:
++				ToggleTransparency(TO_SIGNS);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_TRANSPARENCY_TREES:
++				ToggleTransparency(TO_TREES);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_TRANSPARENCY_HOUSES:
++				ToggleTransparency(TO_HOUSES);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_TRANSPARENCY_INDUSTRIES:
++				ToggleTransparency(TO_INDUSTRIES);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_TRANSPARENCY_BUILDINGS:
++				ToggleTransparency(TO_BUILDINGS);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_TRANSPARENCY_BRIDGES:
++				ToggleTransparency(TO_BRIDGES);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_TRANSPARENCY_STRUCTURES:
++				ToggleTransparency(TO_STRUCTURES);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_TRANSPARENCY_CATENARY:
++				ToggleTransparency(TO_CATENARY);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_TRANSPARENCY_LOADING:
++				ToggleTransparency(TO_LOADING);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_INVISIBILITY_SIGNS:
++				ToggleInvisibilityWithTransparency(TO_SIGNS);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_INVISIBILITY_TREES:
++				ToggleInvisibilityWithTransparency(TO_TREES);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_INVISIBILITY_HOUSES:
++				ToggleInvisibilityWithTransparency(TO_HOUSES);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_INVISIBILITY_INDUSTRIES:
++				ToggleInvisibilityWithTransparency(TO_INDUSTRIES);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_INVISIBILITY_BUILDINGS:
++				ToggleInvisibilityWithTransparency(TO_BUILDINGS);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_INVISIBILITY_BRIDGES:
++				ToggleInvisibilityWithTransparency(TO_BRIDGES);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_INVISIBILITY_STRUCTURES:
++				ToggleInvisibilityWithTransparency(TO_STRUCTURES);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_INVISIBILITY_CATENARY:
++				ToggleInvisibilityWithTransparency(TO_CATENARY);
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_INVISIBILITY_TOWNNAMES: 
++				ToggleBit(_display_opt, DO_SHOW_TOWN_NAMES); 
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_INVISIBILITY_STATIONNAMES: 
++				ToggleBit(_display_opt, DO_SHOW_STATION_NAMES); 
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_INVISIBILITY_TEXTSIGNS: 
++				ToggleBit(_display_opt, DO_SHOW_SIGNS); 
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_INVISIBILITY_WAYPOINTNAMES: 
++				ToggleBit(_display_opt, DO_WAYPOINTS); 
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_FULL_ANIMATION: 
++				ToggleBit(_display_opt, DO_FULL_ANIMATION); 
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_FULL_DETAILS: 
++				ToggleBit(_display_opt, DO_FULL_DETAIL); 
++				MarkWholeScreenDirty();
++				break;
++			case HPN_GLOBAL_TOGGLE_TRANSPARENCY: ResetRestoreAllTransparency(); break;
++			case HPN_GLOBAL_SHOW_TRANSPARENCY_TOOLBAR: ShowTransparencyToolbar(); break;
++#ifdef ENABLE_NETWORK
++			case HPN_GLOBAL_SHOW_CHAT_AUTO_WINDOW: // smart chat; send to team if any, otherwise to all
++				if (_networking) {
++					const NetworkClientInfo *cio = NetworkFindClientInfoFromIndex(_network_own_client_index);
++					bool teamchat = false;
++
++					if (cio == NULL) break;
++
++					/* Only players actually playing can speak to team. Eg spectators cannot */
++					if (_settings_client.gui.prefer_teamchat && IsValidPlayerID(cio->client_playas)) {
++						const NetworkClientInfo *ci;
++						FOR_ALL_ACTIVE_CLIENT_INFOS(ci) {
++							if (ci->client_playas == cio->client_playas && ci != cio) {
++								teamchat = true;
++								break;
++							}
++						}
++					}
++
++					ShowNetworkChatQueryWindow(teamchat ? DESTTYPE_TEAM : DESTTYPE_BROADCAST, cio->client_playas);
++				}
++				break;
++			case HPN_GLOBAL_SHOW_CHAT_ALL_WINDOW: if (_networking) ShowNetworkChatQueryWindow(DESTTYPE_BROADCAST, 0); break;
++			case HPN_GLOBAL_SHOW_CHAT_TEAM_WINDOW:
++				if (_networking) {
++					const NetworkClientInfo *cio = NetworkFindClientInfoFromIndex(_network_own_client_index);
++					if (cio == NULL) break;
++					ShowNetworkChatQueryWindow(DESTTYPE_TEAM, cio->client_playas);
++				}
++				break;
++#endif
++			case HPN_GLOBAL_TOGGLE_CONSOLE: IConsoleSwitch(); break;
++			default: break;
++		}
++	};
++
+ 	virtual void OnPaint()
+ 	{
+ 		this->DrawViewport();
+@@ -252,6 +403,7 @@
+ 		* assertions that are hard to trigger and debug */
+ 		if (IsGeneratingWorld()) return ES_NOT_HANDLED;
+ 
++		/* use hardcoded bindings for quit, console, bounding boxes esc and some debug keycodes */
+ 		if (keycode == WKC_BACKQUOTE) {
+ 			IConsoleSwitch();
+ 			return ES_HANDLED;
+@@ -266,22 +418,9 @@
+ 
+ 		if (_game_mode == GM_MENU) return ES_NOT_HANDLED;
+ 
++		/* all other keys are not valid in GM_MENU */
+ 		switch (keycode) {
+-			case 'C':
+-			case 'Z': {
+-				Point pt = GetTileBelowCursor();
+-				if (pt.x != -1) {
+-					if (keycode == 'Z') MaxZoomInOut(ZOOM_IN, this);
+-					ScrollMainWindowTo(pt.x, pt.y);
+-				}
+-				break;
+-			}
+-
+ 			case WKC_ESC: ResetObjectToPlace(); break;
+-			case WKC_DELETE: DeleteNonVitalWindows(); break;
+-			case WKC_DELETE | WKC_SHIFT: DeleteAllNonVitalWindows(); break;
+-			case 'R' | WKC_CTRL: MarkWholeScreenDirty(); break;
+-
+ #if defined(_DEBUG)
+ 			case '0' | WKC_ALT: // Crash the game
+ 				*(byte*)0 = 0;
+@@ -297,84 +436,12 @@
+ 				UpdateAllStationVirtCoord();
+ 				break;
+ #endif
++		}
+ 
+-			case '1' | WKC_CTRL:
+-			case '2' | WKC_CTRL:
+-			case '3' | WKC_CTRL:
+-			case '4' | WKC_CTRL:
+-			case '5' | WKC_CTRL:
+-			case '6' | WKC_CTRL:
+-			case '7' | WKC_CTRL:
+-			case '8' | WKC_CTRL:
+-			case '9' | WKC_CTRL:
+-				/* Transparency toggle hot keys */
+-				ToggleTransparency((TransparencyOption)(keycode - ('1' | WKC_CTRL)));
+-				MarkWholeScreenDirty();
+-				break;
++		/* handle dynamic keycodes */
++		return HotkeyWindow::OnKeyPress(key, keycode);
++	};
+ 
+-			case '1' | WKC_CTRL | WKC_SHIFT:
+-			case '2' | WKC_CTRL | WKC_SHIFT:
+-			case '3' | WKC_CTRL | WKC_SHIFT:
+-			case '4' | WKC_CTRL | WKC_SHIFT:
+-			case '5' | WKC_CTRL | WKC_SHIFT:
+-			case '6' | WKC_CTRL | WKC_SHIFT:
+-			case '7' | WKC_CTRL | WKC_SHIFT:
+-			case '8' | WKC_CTRL | WKC_SHIFT:
+-				/* Invisibility toggle hot keys */
+-				ToggleInvisibilityWithTransparency((TransparencyOption)(keycode - ('1' | WKC_CTRL | WKC_SHIFT)));
+-				MarkWholeScreenDirty();
+-				break;
+-
+-			case 'X' | WKC_CTRL:
+-				ShowTransparencyToolbar();
+-				break;
+-
+-			case 'X':
+-				ResetRestoreAllTransparency();
+-				break;
+-
+-#ifdef ENABLE_NETWORK
+-			case WKC_RETURN: case 'T': // smart chat; send to team if any, otherwise to all
+-				if (_networking) {
+-					const NetworkClientInfo *cio = NetworkFindClientInfoFromIndex(_network_own_client_index);
+-					bool teamchat = false;
+-
+-					if (cio == NULL) break;
+-
+-					/* Only players actually playing can speak to team. Eg spectators cannot */
+-					if (_settings_client.gui.prefer_teamchat && IsValidPlayerID(cio->client_playas)) {
+-						const NetworkClientInfo *ci;
+-						FOR_ALL_ACTIVE_CLIENT_INFOS(ci) {
+-							if (ci->client_playas == cio->client_playas && ci != cio) {
+-								teamchat = true;
+-								break;
+-							}
+-						}
+-					}
+-
+-					ShowNetworkChatQueryWindow(teamchat ? DESTTYPE_TEAM : DESTTYPE_BROADCAST, cio->client_playas);
+-				}
+-				break;
+-
+-			case WKC_SHIFT | WKC_RETURN: case WKC_SHIFT | 'T': // send text message to all players
+-				if (_networking) ShowNetworkChatQueryWindow(DESTTYPE_BROADCAST, 0);
+-				break;
+-
+-			case WKC_CTRL | WKC_RETURN: case WKC_CTRL | 'T': // send text to all team mates
+-				if (_networking) {
+-					const NetworkClientInfo *cio = NetworkFindClientInfoFromIndex(_network_own_client_index);
+-					if (cio == NULL) break;
+-
+-					ShowNetworkChatQueryWindow(DESTTYPE_TEAM, cio->client_playas);
+-				}
+-				break;
+-#endif
+-
+-			default: return ES_NOT_HANDLED;
+-		}
+-		return ES_HANDLED;
+-	}
+-
+ 	virtual void OnScroll(Point delta)
+ 	{
+ 		ViewPort *vp = IsPtInWindowViewport(this, _cursor.pos.x, _cursor.pos.y);
+Index: src/order_gui.cpp
+===================================================================
+--- src/order_gui.cpp	(revision 14004)
++++ src/order_gui.cpp	(working copy)
+@@ -31,6 +31,7 @@
+ #include "string_func.h"
+ #include "depot_base.h"
+ #include "tilehighlight_func.h"
++#include "hotkey_type.h"
+ 
+ #include "table/sprites.h"
+ #include "table/strings.h"
+@@ -351,7 +352,7 @@
+ 	return order;
+ }
+ 
+-struct OrdersWindow : public Window {
++struct OrdersWindow : public HotkeyWindow {
+ private:
+ 	/** Under what reason are we using the PlaceObject functionality? */
+ 	enum OrderPlaceObjectState {
+@@ -598,13 +599,9 @@
+ 		}
+ 	}
+ 	typedef void Handler(OrdersWindow*, int);
+-	struct KeyToEvent {
+-		uint16 keycode;
+-		Handler *proc;
+-	};
+ 
+ public:
+-	OrdersWindow(const WindowDesc *desc, const Vehicle *v) : Window(desc, v->index)
++	OrdersWindow(const WindowDesc *desc, const Vehicle *v) : HotkeyWindow(desc, HKL_ORDERS, v->index)
+ 	{
+ 		this->caption_color = v->owner;
+ 		this->vscroll.cap = 6;
+@@ -619,6 +616,21 @@
+ 		this->FindWindowPlacementAndResize(desc);
+ 	}
+ 
++	virtual void HandleProcNr(int proc_nr)
++	{
++		static Handler * const _orders_button_proc[] = {
++			OrderClick_Skip,
++			OrderClick_Delete,
++			OrderClick_Goto,
++			OrderClick_Nonstop,
++			OrderClick_FullLoad,
++			OrderClick_Unload,
++			OrderClick_Transfer,
++			OrderClick_Service,
++		};
++		_orders_button_proc[proc_nr](this, -1);
++	};
++
+ 	virtual void OnPaint()
+ 	{
+ 		bool shared_orders = this->vehicle->IsOrderListShared();
+@@ -957,26 +969,8 @@
+ 
+ 	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+ 	{
+-		static const KeyToEvent keytoevent[] = {
+-			{'D', OrderClick_Skip},
+-			{'F', OrderClick_Delete},
+-			{'G', OrderClick_Goto},
+-			{'H', OrderClick_Nonstop},
+-			{'J', OrderClick_FullLoad},
+-			{'K', OrderClick_Unload},
+-			//{'?', OrderClick_Transfer},
+-			//('?', OrderClick_Service},
+-		};
+-
+ 		if (this->vehicle->owner != _local_player) return ES_NOT_HANDLED;
+-
+-		for (uint i = 0; i < lengthof(keytoevent); i++) {
+-			if (keycode == keytoevent[i].keycode) {
+-				keytoevent[i].proc(this, -1);
+-				return ES_HANDLED;
+-			}
+-		}
+-		return ES_NOT_HANDLED;
++		return HotkeyWindow::OnKeyPress(key, keycode);
+ 	}
+ 
+ 	virtual void OnPlaceObject(Point pt, TileIndex tile)
+Index: src/rail_gui.cpp
+===================================================================
+--- src/rail_gui.cpp	(revision 14004)
++++ src/rail_gui.cpp	(working copy)
+@@ -32,6 +32,7 @@
+ #include "widgets/dropdown_func.h"
+ #include "tunnelbridge.h"
+ #include "tilehighlight_func.h"
++#include "hotkey_type.h"
+ 
+ #include "bridge_map.h"
+ #include "rail_map.h"
+@@ -583,40 +584,30 @@
+ 
+ typedef void OnButtonClick(Window *w);
+ 
+-/** Data associated with a push button in the build rail toolbar window */
+-struct RailBuildingGUIButtonData {
+-	uint16 keycode;            ///< Keycode associated with the button
+-	OnButtonClick *click_proc; ///< Procedure to call when button is clicked
++static OnButtonClick * const _build_railroad_button_proc[] = {
++	BuildRailClick_N,
++	BuildRailClick_NE,
++	BuildRailClick_E,
++	BuildRailClick_NW,
++	BuildRailClick_AutoRail,
++	BuildRailClick_Demolish,
++	BuildRailClick_Depot,
++	BuildRailClick_Waypoint,
++	BuildRailClick_Station,
++	BuildRailClick_AutoSignals,
++	BuildRailClick_Bridge,
++	BuildRailClick_Tunnel,
++	BuildRailClick_Remove,
++	BuildRailClick_Convert
+ };
+ 
+ /**
+- * GUI rail-building button data constants.
+- * Offsets match widget order, starting at RTW_BUILD_NS
+- */
+-static const RailBuildingGUIButtonData _rail_build_button_data[] = {
+-	{'1', BuildRailClick_N          },
+-	{'2', BuildRailClick_NE         },
+-	{'3', BuildRailClick_E          },
+-	{'4', BuildRailClick_NW         },
+-	{'5', BuildRailClick_AutoRail   },
+-	{'6', BuildRailClick_Demolish   },
+-	{'7', BuildRailClick_Depot      },
+-	{'8', BuildRailClick_Waypoint   },
+-	{'9', BuildRailClick_Station    },
+-	{'S', BuildRailClick_AutoSignals},
+-	{'B', BuildRailClick_Bridge     },
+-	{'T', BuildRailClick_Tunnel     },
+-	{'R', BuildRailClick_Remove     },
+-	{'C', BuildRailClick_Convert    }
+-};
+-
+-/**
+  * Based on the widget clicked, update the status of the 'remove' button.
+  * @param w              Rail toolbar window
+  * @param clicked_widget Widget clicked in the toolbar
+  */
+-struct BuildRailToolbarWindow : Window {
+-	BuildRailToolbarWindow(const WindowDesc *desc, WindowNumber window_number) : Window(desc, window_number)
++struct BuildRailToolbarWindow : HotkeyWindow {
++	BuildRailToolbarWindow(const WindowDesc *desc, WindowNumber window_number) : HotkeyWindow(desc, HKL_RAIL, window_number)
+ 	{
+ 		this->DisableWidget(RTW_REMOVE);
+ 
+@@ -659,6 +650,15 @@
+ 		}
+ 	}
+ 
++	virtual void HandleProcNr(int proc_nr)
++	{
++		_remove_button_clicked = false;
++		_build_railroad_button_proc[proc_nr](this);
++		this->UpdateRemoveWidgetStatus(proc_nr + RTW_BUILD_NS);
++		if (_ctrl_pressed) RailToolbar_CtrlChanged(this);
++		MarkTileDirty(_thd.pos.x, _thd.pos.y); // redraw tile selection
++	};
++
+ 	virtual void OnPaint()
+ 	{
+ 		this->DrawWidgets();
+@@ -668,29 +668,12 @@
+ 	{
+ 		if (widget >= RTW_BUILD_NS) {
+ 			_remove_button_clicked = false;
+-			_rail_build_button_data[widget - RTW_BUILD_NS].click_proc(this);
++			_build_railroad_button_proc[widget - RTW_BUILD_NS](this);
+ 		}
+ 		this->UpdateRemoveWidgetStatus(widget);
+ 		if (_ctrl_pressed) RailToolbar_CtrlChanged(this);
+ 	}
+ 
+-	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+-	{
+-		EventState state = ES_NOT_HANDLED;
+-		for (uint8 i = 0; i != lengthof(_rail_build_button_data); i++) {
+-			if (keycode == _rail_build_button_data[i].keycode) {
+-				_remove_button_clicked = false;
+-				_rail_build_button_data[i].click_proc(this);
+-				this->UpdateRemoveWidgetStatus(i + RTW_BUILD_NS);
+-				if (_ctrl_pressed) RailToolbar_CtrlChanged(this);
+-				state = ES_HANDLED;
+-				break;
+-			}
+-		}
+-		MarkTileDirty(_thd.pos.x, _thd.pos.y); // redraw tile selection
+-		return state;
+-	}
+-
+ 	virtual void OnPlaceObject(Point pt, TileIndex tile)
+ 	{
+ 		_place_proc(tile);
+@@ -856,7 +839,7 @@
+ 
+ 	_remove_button_clicked = false;
+ 	if (w != NULL && button >= RTW_CLOSEBOX) {
+-		_rail_build_button_data[button].click_proc(w);
++		_build_railroad_button_proc[button](w);
+ 		w->UpdateRemoveWidgetStatus(button + RTW_BUILD_NS);
+ 	}
+ }
+Index: src/road_gui.cpp
+===================================================================
+--- src/road_gui.cpp	(revision 14004)
++++ src/road_gui.cpp	(working copy)
+@@ -25,6 +25,7 @@
+ #include "tunnelbridge.h"
+ #include "tilehighlight_func.h"
+ #include "player_base.h"
++#include "hotkey_type.h"
+ 
+ #include "table/sprites.h"
+ #include "table/strings.h"
+@@ -386,23 +387,8 @@
+ 	BuildRoadClick_Remove
+ };
+ 
+-/** Array with the keycode of the button-clicks for the road-toolbar */
+-static const uint16 _road_keycodes[] = {
+-	'1',
+-	'2',
+-	'3',
+-	'4',
+-	'5',
+-	'6',
+-	'7',
+-	'8',
+-	'B',
+-	'T',
+-	'R',
+-};
+-
+-struct BuildRoadToolbarWindow : Window {
+-	BuildRoadToolbarWindow(const WindowDesc *desc, WindowNumber window_number) : Window(desc, window_number)
++struct BuildRoadToolbarWindow : HotkeyWindow {
++	BuildRoadToolbarWindow(const WindowDesc *desc, WindowNumber window_number) : HotkeyWindow(desc, HKL_ROAD, window_number)
+ 	{
+ 		this->SetWidgetsDisabledState(true,
+ 			RTW_REMOVE,
+@@ -469,6 +455,16 @@
+ 		}
+ 	}
+ 
++	virtual void HandleProcNr(int proc_nr)
++	{
++		_remove_button_clicked = false;
++		_one_way_button_clicked = false;
++		_build_road_button_proc[proc_nr](this);
++		if (_ctrl_pressed) RoadToolbar_CtrlChanged(this);
++		this->UpdateOptionWidgetStatus((RoadToolbarWidgets)(proc_nr + RTW_ROAD_X));
++		MarkTileDirty(_thd.pos.x, _thd.pos.y); // redraw tile selection
++	};
++
+ 	virtual void OnPaint()
+ 	{
+ 		this->SetWidgetsDisabledState(!CanBuildVehicleInfrastructure(VEH_ROAD),
+@@ -490,24 +486,6 @@
+ 		if (_ctrl_pressed) RoadToolbar_CtrlChanged(this);
+ 	}
+ 
+-	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+-	{
+-		EventState state = ES_NOT_HANDLED;
+-		for (uint i = 0; i != lengthof(_road_keycodes); i++) {
+-			if (keycode == _road_keycodes[i]) {
+-				_remove_button_clicked = false;
+-				_one_way_button_clicked = false;
+-				_build_road_button_proc[i](this);
+-				this->UpdateOptionWidgetStatus((RoadToolbarWidgets)(i + RTW_ROAD_X));
+-				if (_ctrl_pressed) RoadToolbar_CtrlChanged(this);
+-				state = ES_HANDLED;
+-				break;
+-			}
+-		}
+-		MarkTileDirty(_thd.pos.x, _thd.pos.y); // redraw tile selection
+-		return state;
+-	}
+-
+ 	virtual void OnPlaceObject(Point pt, TileIndex tile)
+ 	{
+ 		_remove_button_clicked = this->IsWidgetLowered(RTW_REMOVE);
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 14004)
++++ src/settings.cpp	(working copy)
+@@ -63,6 +63,8 @@
+ #include "gamelog.h"
+ #include "station_func.h"
+ #include "settings_func.h"
++#include "hotkey_func.h"
++#include "hotkey_type.h"
+ 
+ #include "table/strings.h"
+ 
+@@ -2021,6 +2023,32 @@
+ 	return first;
+ }
+ 
++static void HotkeyLoadConfig(IniFile *ini, const char *grpname, HotkeyLists list) 
++{
++	IniGroup *group = NULL;
++	IniItem *item;
++
++	/* does it exist? */
++	for (group = ini->group; group != NULL; group = group->next) {
++		int len = strlen(grpname);
++		if (!memcmp(group->name, grpname, len) && group->name[len] == 0) {
++			break;
++		}
++	}
++
++	if (_settings_client.hotkey[list] == NULL) { _settings_client.hotkey[list] = new HotkeyList(list); }
++	else { _settings_client.hotkey[list]->Clear(); }
++
++	if (group == NULL) { _settings_client.hotkey[list]->LoadDefault(); return; }
++
++	for (item = group->item; item != NULL; item = item->next) {
++		/* add the corresponding procedure for the keycode */
++		if (_settings_client.hotkey[list]->AddHotkeyProc(item->name, item->value) == false) {
++			ShowInfoF("ini [%s]: invalid value '%s' for shortcut '%s'", grpname, item->value, item->name);
++		}
++	}
++}
++
+ static void NewsDisplaySaveConfig(IniFile *ini, const char *grpname)
+ {
+ 	IniGroup *group = ini_getgroup(ini, grpname);
+@@ -2090,6 +2118,27 @@
+ 	}
+ }
+ 
++static void HotkeySaveConfig(IniFile *ini, const char *grpname, HotkeyLists list)
++{
++	IniGroup *group = ini_getgroup(ini, grpname); //< this creates the group if it did not exist
++	IniItem **item;
++	Hotkey *hotkey;
++	char keycode_str[32];
++	char *proc_str;
++
++	if (_settings_client.hotkey[list] == NULL) { return; }
++	group->item = NULL;
++	item = &group->item;
++	for (uint i = 0; i < _settings_client.hotkey[list]->Length(); i++) {
++		hotkey = _settings_client.hotkey[list]->Get(i);
++		KeycodeToStr(keycode_str, hotkey->keycode, lastof(keycode_str));
++		proc_str = (char*) _settings_client.hotkey[list]->ProcNrToStr(hotkey->proc_nr);
++		*item = ini_item_alloc(group, keycode_str, strlen(keycode_str));
++		(*item)->value = (char*)pool_strdup(&ini->pool, proc_str, strlen(proc_str));
++		item = &(*item)->next;
++	}
++}
++
+ /* Common handler for saving/loading variables to the configuration file */
+ static void HandleSettingDescs(IniFile *ini, SettingDescProc *proc, SettingDescProcList *proc_list)
+ {
+@@ -2122,6 +2171,16 @@
+ 	_grfconfig_newgame = GRFLoadConfig(ini, "newgrf", false);
+ 	_grfconfig_static  = GRFLoadConfig(ini, "newgrf-static", true);
+ 	NewsDisplayLoadConfig(ini, "news_display");
++	HotkeyLoadConfig(ini, "hotkey_global", HKL_GLOBAL);
++	HotkeyLoadConfig(ini, "hotkey_game", HKL_GAME);
++	HotkeyLoadConfig(ini, "hotkey_editor", HKL_EDITOR);
++	HotkeyLoadConfig(ini, "hotkey_order", HKL_ORDERS);
++	HotkeyLoadConfig(ini, "hotkey_rail", HKL_RAIL);
++	HotkeyLoadConfig(ini, "hotkey_road", HKL_ROAD);
++	HotkeyLoadConfig(ini, "hotkey_dock", HKL_DOCK);
++	HotkeyLoadConfig(ini, "hotkey_airport", HKL_AIRPORT);
++	HotkeyLoadConfig(ini, "hotkey_terraform_game", HKL_TERRAFORM_GAME);
++	HotkeyLoadConfig(ini, "hotkey_terraform_editor", HKL_TERRAFORM_EDITOR);
+ 	CheckDifficultyLevels();
+ 	ini_free(ini);
+ }
+@@ -2140,6 +2199,16 @@
+ 	GRFSaveConfig(ini, "newgrf", _grfconfig_newgame);
+ 	GRFSaveConfig(ini, "newgrf-static", _grfconfig_static);
+ 	NewsDisplaySaveConfig(ini, "news_display");
++	HotkeySaveConfig(ini, "hotkey_global", HKL_GLOBAL);
++	HotkeySaveConfig(ini, "hotkey_game", HKL_GAME);
++	HotkeySaveConfig(ini, "hotkey_editor", HKL_EDITOR);
++	HotkeySaveConfig(ini, "hotkey_order", HKL_ORDERS);
++	HotkeySaveConfig(ini, "hotkey_rail", HKL_RAIL);
++	HotkeySaveConfig(ini, "hotkey_road", HKL_ROAD);
++	HotkeySaveConfig(ini, "hotkey_dock", HKL_DOCK);
++	HotkeySaveConfig(ini, "hotkey_airport", HKL_AIRPORT);
++	HotkeySaveConfig(ini, "hotkey_terraform_game", HKL_TERRAFORM_GAME);
++	HotkeySaveConfig(ini, "hotkey_terraform_editor", HKL_TERRAFORM_EDITOR);
+ 	SaveVersionInConfig(ini);
+ 	ini_save(_config_file, ini);
+ 	ini_free(ini);
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 14004)
++++ src/settings_type.h	(working copy)
+@@ -9,6 +9,7 @@
+ #include "town_type.h"
+ #include "transport_type.h"
+ #include "network/core/config.h"
++#include "hotkey_type.h"
+ 
+ /** Settings related to the difficulty of the game */
+ struct DifficultySettings {
+@@ -335,6 +336,7 @@
+ struct ClientSettings {
+ 	GUISettings          gui;                ///< settings related to the GUI
+ 	NetworkSettings      network;            ///< settings related to the network
++	HotkeyList           *hotkey[HKL_END];  ///< settings related to the keyboard shortcuts
+ };
+ 
+ /** The current settings for this game. */
+Index: src/terraform_gui.cpp
+===================================================================
+--- src/terraform_gui.cpp	(revision 14004)
++++ src/terraform_gui.cpp	(working copy)
+@@ -25,6 +25,7 @@
+ #include "tree_map.h"
+ #include "landscape_type.h"
+ #include "tilehighlight_func.h"
++#include "hotkey_type.h"
+ 
+ #include "table/sprites.h"
+ #include "table/strings.h"
+@@ -139,17 +140,6 @@
+ }
+ 
+ typedef void OnButtonClick(Window *w);
+-
+-static const uint16 _terraform_keycodes[] = {
+-	'Q',
+-	'W',
+-	'E',
+-	'D',
+-	'U',
+-	'I',
+-	'O',
+-};
+-
+ void CcPlaySound1E(bool success, TileIndex tile, uint32 p1, uint32 p2);
+ 
+ static void PlaceProc_BuyLand(TileIndex tile)
+@@ -239,8 +229,8 @@
+ 	TerraformClick_PlaceSign,
+ };
+ 
+-struct TerraformToolbarWindow : Window {
+-	TerraformToolbarWindow(const WindowDesc *desc, WindowNumber window_number) : Window(desc, window_number)
++struct TerraformToolbarWindow : HotkeyWindow {
++	TerraformToolbarWindow(const WindowDesc *desc, WindowNumber window_number) : HotkeyWindow(desc, HKL_TERRAFORM_GAME, window_number)
+ 	{
+ 		this->FindWindowPlacementAndResize(desc);
+ 	}
+@@ -259,16 +249,10 @@
+ 		if (widget >= TTW_BUTTONS_START) _terraform_button_proc[widget - TTW_BUTTONS_START](this);
+ 	}
+ 
+-	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
++	virtual void HandleProcNr(int proc_nr)
+ 	{
+-		for (uint i = 0; i != lengthof(_terraform_keycodes); i++) {
+-			if (keycode == _terraform_keycodes[i]) {
+-				_terraform_button_proc[i](this);
+-				return ES_HANDLED;
+-			}
+-		}
+-		return ES_NOT_HANDLED;
+-	}
++		_terraform_button_proc[proc_nr](this);
++	};
+ 
+ 	virtual void OnPlaceObject(Point pt, TileIndex tile)
+ 	{
+@@ -529,16 +513,6 @@
+ 	HandlePlacePushButton(w, ETTW_PLACE_TRANSMITTER, SPR_CURSOR_TRANSMITTER, VHM_RECT, PlaceProc_Transmitter);
+ }
+ 
+-static const uint16 _editor_terraform_keycodes[] = {
+-	'D',
+-	'Q',
+-	'W',
+-	'E',
+-	'R',
+-	'T',
+-	'Y'
+-};
+-
+ typedef void OnButtonClick(Window *w);
+ static OnButtonClick * const _editor_terraform_button_proc[] = {
+ 	EditorTerraformClick_Dynamite,
+@@ -578,13 +552,18 @@
+ 	}
+ }
+ 
+-struct ScenarioEditorLandscapeGenerationWindow : Window {
+-	ScenarioEditorLandscapeGenerationWindow(const WindowDesc *desc, WindowNumber window_number) : Window(desc, window_number)
++struct ScenarioEditorLandscapeGenerationWindow : HotkeyWindow {
++	ScenarioEditorLandscapeGenerationWindow(const WindowDesc *desc, WindowNumber window_number) : HotkeyWindow(desc, HKL_TERRAFORM_EDITOR, window_number)
+ 	{
+ 		this->widget[ETTW_PLACE_DESERT_LIGHTHOUSE].tooltips = (_settings_game.game_creation.landscape == LT_TROPIC) ? STR_028F_DEFINE_DESERT_AREA : STR_028D_PLACE_LIGHTHOUSE;
+ 		this->FindWindowPlacementAndResize(desc);
+ 	}
+ 
++	virtual void HandleProcNr(int proc_nr)
++	{
++		_editor_terraform_button_proc[proc_nr](this);
++	};
++
+ 	virtual void OnPaint() {
+ 		this->DrawWidgets();
+ 
+@@ -602,17 +581,6 @@
+ 		}
+ 	}
+ 
+-	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+-	{
+-		for (uint i = 0; i != lengthof(_editor_terraform_keycodes); i++) {
+-			if (keycode == _editor_terraform_keycodes[i]) {
+-				_editor_terraform_button_proc[i](this);
+-				return ES_HANDLED;
+-			}
+-		}
+-		return ES_NOT_HANDLED;
+-	}
+-
+ 	virtual void OnClick(Point pt, int widget)
+ 	{
+ 		if (IsInsideMM(widget, ETTW_BUTTONS_START, ETTW_BUTTONS_END)) {
+Index: src/toolbar_gui.cpp
+===================================================================
+--- src/toolbar_gui.cpp	(revision 14004)
++++ src/toolbar_gui.cpp	(working copy)
+@@ -38,6 +38,7 @@
+ #include "console_gui.h"
+ #include "news_gui.h"
+ #include "tilehighlight_func.h"
++#include "hotkey_type.h"
+ 
+ #include "network/network.h"
+ #include "network/network_gui.h"
+@@ -881,8 +882,8 @@
+ 	ToolbarSwitchClick,
+ };
+ 
+-struct MainToolbarWindow : Window {
+-	MainToolbarWindow(const WindowDesc *desc) : Window(desc)
++struct MainToolbarWindow : HotkeyWindow {
++	MainToolbarWindow(const WindowDesc *desc) : HotkeyWindow(desc, HKL_GAME)
+ 	{
+ 		this->SetWidgetDisabledState(TBN_PAUSE, _networking && !_network_server); // if not server, disable pause button
+ 		this->SetWidgetDisabledState(TBN_FASTFORWARD, _networking); // if networking, disable fast-forward button
+@@ -918,49 +919,60 @@
+ 		if (_game_mode != GM_MENU && !this->IsWidgetDisabled(widget)) _toolbar_button_procs[widget](this);
+ 	}
+ 
+-	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
++	virtual void HandleProcNr(int proc_nr)
+ 	{
+-		switch (keycode) {
+-			case WKC_F1: case WKC_PAUSE: ToolbarPauseClick(this); break;
+-			case WKC_F2: ShowGameOptions(); break;
+-			case WKC_F3: MenuClickSaveLoad(); break;
+-			case WKC_F4: ShowSmallMap(); break;
+-			case WKC_F5: ShowTownDirectory(); break;
+-			case WKC_F6: ShowSubsidiesList(); break;
+-			case WKC_F7: ShowPlayerStations(_local_player); break;
+-			case WKC_F8: ShowPlayerFinances(_local_player); break;
+-			case WKC_F9: ShowPlayerCompany(_local_player); break;
+-			case WKC_F10: ShowOperatingProfitGraph(); break;
+-			case WKC_F11: ShowCompanyLeagueTable(); break;
+-			case WKC_F12: ShowBuildIndustryWindow(); break;
+-			case WKC_SHIFT | WKC_F1: ShowVehicleListWindow(_local_player, VEH_TRAIN); break;
+-			case WKC_SHIFT | WKC_F2: ShowVehicleListWindow(_local_player, VEH_ROAD); break;
+-			case WKC_SHIFT | WKC_F3: ShowVehicleListWindow(_local_player, VEH_SHIP); break;
+-			case WKC_SHIFT | WKC_F4: ShowVehicleListWindow(_local_player, VEH_AIRCRAFT); break;
+-			case WKC_NUM_PLUS: // Fall through
+-			case WKC_EQUALS: // Fall through
+-			case WKC_SHIFT | WKC_EQUALS: // Fall through
+-			case WKC_SHIFT | WKC_F5: ToolbarZoomInClick(this); break;
+-			case WKC_NUM_MINUS: // Fall through
+-			case WKC_MINUS: // Fall through
+-			case WKC_SHIFT | WKC_MINUS: // Fall through
+-			case WKC_SHIFT | WKC_F6: ToolbarZoomOutClick(this); break;
+-			case WKC_SHIFT | WKC_F7: if (CanBuildVehicleInfrastructure(VEH_TRAIN)) ShowBuildRailToolbar(_last_built_railtype, -1); break;
+-			case WKC_SHIFT | WKC_F8: ShowBuildRoadToolbar(_last_built_roadtype); break;
+-			case WKC_SHIFT | WKC_F9: ShowBuildDocksToolbar(); break;
+-			case WKC_SHIFT | WKC_F10: if (CanBuildVehicleInfrastructure(VEH_AIRCRAFT)) ShowBuildAirToolbar(); break;
+-			case WKC_SHIFT | WKC_F11: ShowBuildTreesToolbar(); break;
+-			case WKC_SHIFT | WKC_F12: ShowMusicWindow(); break;
+-			case WKC_CTRL  | 'S': MenuClickSmallScreenshot(); break;
+-			case WKC_CTRL  | 'G': MenuClickWorldScreenshot(); break;
+-			case WKC_CTRL | WKC_ALT | 'C': if (!_networking) ShowCheatWindow(); break;
+-			case 'A': if (CanBuildVehicleInfrastructure(VEH_TRAIN)) ShowBuildRailToolbar(_last_built_railtype, 4); break; // Invoke Autorail
+-			case 'L': ShowTerraformToolbar(); break;
+-			case 'M': ShowSmallMap(); break;
+-			case 'V': ShowExtraViewPortWindow(); break;
+-			default: return ES_NOT_HANDLED;
++		switch(proc_nr) {
++			case HPN_GAME_TOGGLE_PAUSE: ToolbarPauseClick(this); break;
++			case HPN_GAME_TOGGLE_FAST_FORWARD: ToolbarFastForwardClick(this); break;
++			case HPN_GAME_SHOW_OPTIONS: ShowGameOptions(); break;
++			case HPN_GAME_SHOW_DIFFICULTY: ShowGameDifficulty(); break;
++			case HPN_GAME_SHOW_PATCH_OPTIONS: ShowPatchesSelection(); break;
++			case HPN_GAME_SHOW_NEWGRF_OPTIONS: ShowNewGRFSettings(!_networking, true, true, &_grfconfig); break;
++			case HPN_GAME_SHOW_SAVE_DIALOG: ShowSaveLoadDialog(SLD_SAVE_GAME); break;
++			case HPN_GAME_SHOW_LOAD_DIALOG: ShowSaveLoadDialog(SLD_LOAD_GAME); break;
++			case HPN_GAME_EXIT_TO_MENU: AskExitToGameMenu(); break;
++			case HPN_GAME_SHOW_SMALL_MAP: ShowSmallMap(); break;
++			case HPN_GAME_SHOW_EXTRA_VIEWPORT: ShowExtraViewPortWindow(); break;
++			case HPN_GAME_SHOW_SIGN_LIST: ShowSignList(); break;
++			case HPN_GAME_SHOW_TOWN_DIRECTORY: ShowTownDirectory(); break;
++			case HPN_GAME_SHOW_SUBSIDIES_LIST: ShowSubsidiesList(); break;
++			case HPN_GAME_SHOW_STATION_LIST: ShowPlayerStations(_local_player); break;
++			case HPN_GAME_SHOW_FINANCES: ShowPlayerFinances(_local_player); break;
++			case HPN_GAME_SHOW_COMPANY: ShowPlayerCompany(_local_player); break;
++			case HPN_GAME_SHOW_OPERATING_PROFIT_GRAPH: ShowOperatingProfitGraph(); break;
++			case HPN_GAME_SHOW_INCOME_GRAPH: ShowIncomeGraph(); break;
++			case HPN_GAME_SHOW_DELIVERED_CARGO_GRAPH: ShowDeliveredCargoGraph(); break;
++			case HPN_GAME_SHOW_PERFORMANCE_GRAPH: ShowPerformanceHistoryGraph(); break;
++			case HPN_GAME_SHOW_COMPANY_VALUE_GRAPH: ShowCompanyValueGraph(); break;
++			case HPN_GAME_SHOW_CARGO_PAYMENT_GRAPH: ShowCargoPaymentRates(); break;
++			case HPN_GAME_SHOW_COMPANY_LEAGUE_TABLE: ShowCompanyLeagueTable(); break;
++			case HPN_GAME_SHOW_PERFORMANCE_RATING: ShowPerformanceRatingDetail(); break;
++			case HPN_GAME_SHOW_INDUSTRY_DIRECTORY: ShowIndustryDirectory(); break;
++			case HPN_GAME_BUILD_INDUSTRY_WINDOW: ShowBuildIndustryWindow(); break;
++			case HPN_GAME_SHOW_TRAINS: ShowVehicleListWindow(_local_player, VEH_TRAIN); break;
++			case HPN_GAME_SHOW_ROAD_VEHICLES: ShowVehicleListWindow(_local_player, VEH_ROAD); break;
++			case HPN_GAME_SHOW_SHIPS: ShowVehicleListWindow(_local_player, VEH_SHIP); break;
++			case HPN_GAME_SHOW_AIRCRAFTS: ShowVehicleListWindow(_local_player, VEH_AIRCRAFT); break;
++			case HPN_GAME_ZOOM_IN: ToolbarZoomInClick(this); break;
++			case HPN_GAME_ZOOM_OUT: ToolbarZoomOutClick(this); break;
++			case HPN_GAME_SHOW_BUILD_RAIL_TOOLBAR: if (CanBuildVehicleInfrastructure(VEH_TRAIN)) ShowBuildRailToolbar(_last_built_railtype, -1); break;
++			case HPN_GAME_SHOW_BUILD_ROAD_TOOLBAR: ShowBuildRoadToolbar(_last_built_roadtype); break;
++			case HPN_GAME_SHOW_BUILD_DOCKS_TOOLBAR: ShowBuildDocksToolbar(); break;
++			case HPN_GAME_SHOW_BUILD_AIR_TOOLBAR: if (CanBuildVehicleInfrastructure(VEH_AIRCRAFT)) ShowBuildAirToolbar(); break;
++			case HPN_GAME_SHOW_TERRAFORM_TOOLBAR: ShowTerraformToolbar(); break;
++			case HPN_GAME_SHOW_BUILD_TREES_TOOLBAR: ShowBuildTreesToolbar(); break;
++			case HPN_GAME_PLACE_SIGN: SelectSignTool(); break;
++			case HPN_GAME_SHOW_MUSIC_WINDOW: ShowMusicWindow(); break;
++			case HPN_GAME_SHOW_LAST_NEWS: ShowLastNewsMessage(); break;
++			case HPN_GAME_SHOW_NEWS_OPTIONS: ShowMessageOptions(); break;
++			case HPN_GAME_SHOW_NEWS_HISTORY: ShowMessageHistory(); break;
++			case HPN_GAME_SHOW_LAND_INFO: PlaceLandBlockInfo(); break;
++			case HPN_GAME_SMALL_SCREENSHOT: MenuClickSmallScreenshot(); break;
++			case HPN_GAME_WORLD_SCREENSHOT: MenuClickWorldScreenshot(); break;
++			case HPN_GAME_SHOW_CHEAT_WINDOW: if (!_networking) ShowCheatWindow(); break;
++			case HPN_GAME_AUTORAIL: if (CanBuildVehicleInfrastructure(VEH_TRAIN)) ShowBuildRailToolbar(_last_built_railtype, 4); break;
++			default: break;
+ 		}
+-		return ES_HANDLED;
+ 	}
+ 
+ 	virtual void OnPlaceObject(Point pt, TileIndex tile)
+@@ -1084,9 +1096,9 @@
+ 	ToolbarHelpClick,
+ };
+ 
+-struct ScenarioEditorToolbarWindow : Window {
++struct ScenarioEditorToolbarWindow : HotkeyWindow {
+ public:
+-	ScenarioEditorToolbarWindow(const WindowDesc *desc) : Window(desc)
++	ScenarioEditorToolbarWindow(const WindowDesc *desc) : HotkeyWindow(desc, HKL_EDITOR)
+ 	{
+ 		CLRBITS(this->flags4, WF_WHITE_BORDER_MASK);
+ 
+@@ -1095,6 +1107,39 @@
+ 		DoZoomInOutWindow(ZOOM_NONE, this);
+ 	}
+ 
++	virtual void HandleProcNr(int proc_nr)
++	{
++		switch(proc_nr) {
++			case HPN_EDITOR_TOGGLE_PAUSE: ToolbarPauseClick(this); break;
++			case HPN_EDITOR_TOGGLE_FAST_FORWARD: ToolbarFastForwardClick(this); break;
++			case HPN_EDITOR_SHOW_OPTIONS: ShowGameOptions(); break;
++			case HPN_EDITOR_SHOW_DIFFICULTY: ShowGameDifficulty(); break;
++			case HPN_EDITOR_SHOW_PATCH_OPTIONS: ShowPatchesSelection(); break;
++			case HPN_EDITOR_SHOW_NEWGRF_OPTIONS: ShowNewGRFSettings(!_networking, true, true, &_grfconfig); break;
++			case HPN_EDITOR_SHOW_SAVE_DIALOG: ShowSaveLoadDialog(SLD_SAVE_SCENARIO); break;
++			case HPN_EDITOR_SHOW_LOAD_DIALOG: ShowSaveLoadDialog(SLD_LOAD_SCENARIO); break;
++			case HPN_EDITOR_EXIT_TO_MENU: AskExitToGameMenu(); break;
++			case HPN_EDITOR_SHOW_SMALL_MAP: ShowSmallMap(); break;
++			case HPN_EDITOR_SHOW_EXTRA_VIEWPORT: ShowExtraViewPortWindow(); break;
++			case HPN_EDITOR_SHOW_SIGN_LIST: ShowSignList(); break;
++			case HPN_EDITOR_SHOW_TOWN_DIRECTORY: ShowTownDirectory(); break;
++			case HPN_EDITOR_ZOOM_IN: ToolbarZoomInClick(this); break;
++			case HPN_EDITOR_ZOOM_OUT: ToolbarZoomOutClick(this); break;
++			case HPN_EDITOR_SHOW_TERRAFORM_TOOLBAR: ToolbarScenGenLand(this); break;
++			case HPN_EDITOR_SHOW_GENERATE_TOWN_WINDOW: ToolbarScenGenTown(this); break;
++			case HPN_EDITOR_SHOW_BUILD_INDUSTRY_WINDOW: ToolbarScenGenIndustry(this); break;
++			case HPN_EDITOR_SHOW_BUILD_ROAD_TOOLBAR: ToolbarScenBuildRoad(this); break;
++			case HPN_EDITOR_SHOW_BUILD_DOCKS_TOOLBAR: ToolbarScenBuildDocks(this); break;
++			case HPN_EDITOR_SHOW_BUILD_TREES_TOOLBAR: ToolbarScenPlantTrees(this); break;
++			case HPN_EDITOR_PLACE_SIGN: ToolbarScenPlaceSign(this); break;
++			case HPN_EDITOR_SHOW_MUSIC_WINDOW: ShowMusicWindow(); break;
++			case HPN_EDITOR_SHOW_LAND_INFO: PlaceLandBlockInfo(); break;
++			case HPN_EDITOR_SMALL_SCREENSHOT: MenuClickSmallScreenshot(); break;
++			case HPN_EDITOR_WORLD_SCREENSHOT: MenuClickWorldScreenshot(); break;
++			default: break;
++		}
++	};
++
+ 	virtual void OnPaint()
+ 	{
+ 		this->SetWidgetDisabledState(TBSE_DATEBACKWARD, _settings_newgame.game_creation.starting_year <= MIN_YEAR);
+@@ -1123,44 +1168,6 @@
+ 		_scen_toolbar_button_procs[widget](this);
+ 	}
+ 
+-	virtual EventState OnKeyPress(uint16 key, uint16 keycode)
+-	{
+-		switch (keycode) {
+-			case WKC_F1: case WKC_PAUSE: ToolbarPauseClick(this); break;
+-			case WKC_F2: ShowGameOptions(); break;
+-			case WKC_F3: MenuClickSaveLoad(); break;
+-			case WKC_F4: ToolbarScenGenLand(this); break;
+-			case WKC_F5: ToolbarScenGenTown(this); break;
+-			case WKC_F6: ToolbarScenGenIndustry(this); break;
+-			case WKC_F7: ToolbarScenBuildRoad(this); break;
+-			case WKC_F8: ToolbarScenBuildDocks(this); break;
+-			case WKC_F9: ToolbarScenPlantTrees(this); break;
+-			case WKC_F10: ToolbarScenPlaceSign(this); break;
+-			case WKC_F11: ShowMusicWindow(); break;
+-			case WKC_F12: PlaceLandBlockInfo(); break;
+-			case WKC_CTRL | 'S': MenuClickSmallScreenshot(); break;
+-			case WKC_CTRL | 'G': MenuClickWorldScreenshot(); break;
+-
+-			/* those following are all fall through */
+-			case WKC_NUM_PLUS:
+-			case WKC_EQUALS:
+-			case WKC_SHIFT | WKC_EQUALS:
+-			case WKC_SHIFT | WKC_F5: ToolbarZoomInClick(this); break;
+-
+-			/* those following are all fall through */
+-			case WKC_NUM_MINUS:
+-			case WKC_MINUS:
+-			case WKC_SHIFT | WKC_MINUS:
+-			case WKC_SHIFT | WKC_F6: ToolbarZoomOutClick(this); break;
+-
+-			case 'L': ShowEditorTerraformToolbar(); break;
+-			case 'M': ShowSmallMap(); break;
+-			case 'V': ShowExtraViewPortWindow(); break;
+-			default: return ES_NOT_HANDLED;
+-		}
+-		return ES_HANDLED;
+-	}
+-
+ 	virtual void OnPlaceObject(Point pt, TileIndex tile)
+ 	{
+ 		_place_proc(tile);
+Index: src/window.cpp
+===================================================================
+--- src/window.cpp	(revision 14004)
++++ src/window.cpp	(working copy)
+@@ -1676,6 +1676,10 @@
+ 				w->window_class != WC_COMPANY_PASSWORD_WINDOW) {
+ 			continue;
+ 		}
++		/* the main toolbar window is on top, but should handle the shortcut only if 
++		 * no other window does. so we skip it for now and check later again */
++		if (w->window_class == WC_MAIN_TOOLBAR) continue;
++		
+ 		if (w->OnKeyPress(key, keycode) == Window::ES_HANDLED) return;
+ 	}
+ 

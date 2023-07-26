@@ -1,0 +1,98 @@
+Index: src/network/core/tcp.h
+===================================================================
+--- src/network/core/tcp.h	(revision 14528)
++++ src/network/core/tcp.h	(working copy)
+@@ -69,7 +69,7 @@
+ 	char text[80];     ///< possible text sent for name changes etc
+ 	uint32 frame;      ///< the frame in which this packet is executed
+ 	byte callback;     ///< any callback function executed upon successful completion of the command
+-	bool my_cmd;       ///< did the command originate from "me"
++	uint16 client_index; ///< client that issued this command
+ };
+ 
+ /** Status of a client */
+Index: src/network/network_server.cpp
+===================================================================
+--- src/network/network_server.cpp	(revision 14528)
++++ src/network/network_server.cpp	(working copy)
+@@ -494,7 +494,7 @@
+ 	p->Send_string(cp->text);
+ 	p->Send_uint8 (cp->callback);
+ 	p->Send_uint32(cp->frame);
+-	p->Send_bool  (cp->my_cmd);
++	p->Send_uint16(cp->client_index);
+ 
+ 	cs->Send_Packet(p);
+ }
+@@ -876,6 +876,8 @@
+ 	}
+ 
+ 	ci = DEREF_CLIENT_INFO(cs);
++	
++	cp->client_index = ci->client_index;
+ 
+ 	/* Check if cp->cmd is valid */
+ 	if (!IsValidCommand(cp->cmd)) {
+@@ -934,13 +936,11 @@
+ 			// Callbacks are only send back to the client who sent them in the
+ 			//  first place. This filters that out.
+ 			cp->callback = (new_cs != cs) ? 0 : callback;
+-			cp->my_cmd = (new_cs == cs);
+ 			NetworkAddCommandQueue(new_cs, cp);
+ 		}
+ 	}
+ 
+ 	cp->callback = 0;
+-	cp->my_cmd = false;
+ 	// Queue the command on the server
+ 	if (_local_command_queue == NULL) {
+ 		_local_command_queue = cp;
+Index: src/network/network_data.cpp
+===================================================================
+--- src/network/network_data.cpp	(revision 14528)
++++ src/network/network_data.cpp	(working copy)
+@@ -63,10 +63,10 @@
+ 		 *   which gives about the same speed as most clients.
+ 		 */
+ 		c.frame = _frame_counter_max + 1;
++		c.client_index = _network_own_client_index;
+ 
+ 		CommandPacket *new_cp = MallocT<CommandPacket>(1);
+ 		*new_cp = c;
+-		new_cp->my_cmd = true;
+ 		if (_local_command_queue == NULL) {
+ 			_local_command_queue = new_cp;
+ 		} else {
+@@ -87,6 +87,7 @@
+ 	}
+ 
+ 	c.frame = 0; // The client can't tell which frame, so just make it 0
++	c.client_index = 0; // this value is ignored by the server anyway
+ 
+ 	/* Clients send their command to the server and forget all about the packet */
+ 	SEND_COMMAND(PACKET_CLIENT_COMMAND)(&c);
+@@ -103,9 +104,9 @@
+ 		cp->callback = 0;
+ 	}
+ 
+-	DebugDumpCommands("ddc:cmd:%d;%d;%d;%d;%d;%d;%d;%s\n", _date, _date_fract, (int)cp->company, cp->tile, cp->p1, cp->p2, cp->cmd, cp->text);
++	DebugDumpCommands("ddc:cmd:%d;%d;%u;%d;%d;%d;%d;%d;%s\n", _date, _date_fract, cp->client_index, (int)cp->company, cp->tile, cp->p1, cp->p2, cp->cmd, cp->text);
+ 
+-	DoCommandP(cp->tile, cp->p1, cp->p2, _callback_table[cp->callback], cp->cmd | CMD_NETWORK_COMMAND, cp->my_cmd);
++	DoCommandP(cp->tile, cp->p1, cp->p2, _callback_table[cp->callback], cp->cmd | CMD_NETWORK_COMMAND, cp->client_index == _network_own_client_index);
+ }
+ 
+ #endif /* ENABLE_NETWORK */
+Index: src/network/network_client.cpp
+===================================================================
+--- src/network/network_client.cpp	(revision 14528)
++++ src/network/network_client.cpp	(working copy)
+@@ -693,7 +693,7 @@
+ 	p->Recv_string(cp->text, sizeof(cp->text));
+ 	cp->callback = p->Recv_uint8();
+ 	cp->frame    = p->Recv_uint32();
+-	cp->my_cmd   = p->Recv_bool();
++	cp->client_index = p->Recv_uint16();
+ 	cp->next     = NULL;
+ 
+ 	// The server did send us this command..

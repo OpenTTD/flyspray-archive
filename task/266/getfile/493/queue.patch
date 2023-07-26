@@ -1,0 +1,1476 @@
+Index: aircraft_cmd.c
+===================================================================
+--- aircraft_cmd.c	(revision 7326)
++++ aircraft_cmd.c	(working copy)
+@@ -25,6 +25,7 @@
+ #include "newgrf_text.h"
+ #include "newgrf_sound.h"
+ #include "date.h"
++#include "queue.h"
+ 
+ static bool AirportMove(Vehicle *v, const AirportFTAClass *apc);
+ static bool AirportSetBlocks(Vehicle *v, AirportFTA *current_pos, const AirportFTAClass *apc);
+@@ -35,7 +36,7 @@
+ static void CrashAirplane(Vehicle *v);
+ 
+ static void AircraftNextAirportPos_and_Order(Vehicle *v);
+-static byte GetAircraftFlyingAltitude(const Vehicle *v);
++static uint32 GetAircraftFlyingAltitude(Vehicle *v);
+ 
+ static const SpriteID _aircraft_sprite[] = {
+ 	0x0EB5, 0x0EBD, 0x0EC5, 0x0ECD,
+@@ -372,6 +373,8 @@
+ 		v->random_bits = VehicleRandomBits();
+ 		u->random_bits = VehicleRandomBits();
+ 
++	    v->u.air.desired_speed = 1;
++
+ 		VehiclePositionChanged(v);
+ 		VehiclePositionChanged(u);
+ 
+@@ -790,7 +793,7 @@
+ 	EndVehicleMove(u);
+ }
+ 
+-static void SetAircraftPosition(Vehicle *v, int x, int y, int z)
++static void SetAircraftPosition(Vehicle *v, int x, int y, uint32 z)
+ {
+ 	Vehicle *u;
+ 	int safe_x;
+@@ -862,17 +865,35 @@
+ 	}
+ }
+ 
+-static bool UpdateAircraftSpeed(Vehicle *v)
++static int UpdateAircraftSpeed(Vehicle *v)
+ {
+-	uint spd = v->acceleration * 2;
++	uint16 spd = v->acceleration * 2;
+ 	byte t;
++	uint16 new_speed;
++	
++	new_speed = v->max_speed * _patches.aircraft_speed_coeff;
+ 
+-	v->subspeed = (t=v->subspeed) + (byte)spd;
+-	spd = min(v->cur_speed + (spd >> 8) + (v->subspeed < t), v->max_speed);
++	// Don't go faster than max
++	if(v->u.air.desired_speed > new_speed) {
++		v->u.air.desired_speed = new_speed;
++	}
+ 
++	//spd = v->cur_speed + v->acceleration;
++	v->subspeed = (t=v->subspeed) + (uint16)spd;
++	spd = min( v->cur_speed + (spd >> 8) + (v->subspeed < t), new_speed);
++
+ 	// adjust speed for broken vehicles
+-	if (v->vehstatus & VS_AIRCRAFT_BROKEN) spd = min(spd, 27);
++	if(v->vehstatus&VS_AIRCRAFT_BROKEN) spd = min(spd, v->max_speed / 3 * _patches.aircraft_speed_coeff);
+ 
++	if(v->u.air.state == FLYING && v->subtype == 0 && v->u.air.desired_speed == 0) {
++		if(spd > 0)
++			spd = 0;
++	}
++
++	// If landing, do not speed up!
++	if((v->u.air.state == LANDING || v->u.air.state == ENDLANDING) && spd > 15 * _patches.aircraft_speed_coeff)
++		spd = min(v->cur_speed, spd);
++
+ 	//updates statusbar only if speed have changed to save CPU time
+ 	if (spd != v->cur_speed) {
+ 		v->cur_speed = spd;
+@@ -884,32 +905,66 @@
+ 
+ 	if (spd == 0) return false;
+ 
+-	if ((byte)++spd == 0) return true;
++	if ((uint32)++spd == 0)
++		return true;
+ 
+-	v->progress = (t = v->progress) - (byte)spd;
+ 
+-	return t < v->progress;
++	spd += v->progress;
++	v->progress = (byte)spd;
++	return (spd >> 8);
+ }
+ 
+ // get Aircraft running altitude
+-static byte GetAircraftFlyingAltitude(const Vehicle *v)
++static uint32 GetAircraftFlyingAltitude(Vehicle *v)
+ {
+-	switch (v->max_speed) {
+-		case 37: return 162;
+-		case 74: return 171;
+-		default: return 180;
++	uint32 queue_adjust;
++	uint32 maxz;
++	
++	queue_adjust = 0;
++	if(v->queue_item != NULL)
++		queue_adjust = 32 * v->queue_item->queue->getPos(v->queue_item->queue, v)-1;
++	
++	maxz = 162;
++	if(v->max_speed > 37) {
++		maxz = 171;
++		if(v->max_speed > 74) {
++			maxz = 180;
++		}
+ 	}
++
++	return maxz + queue_adjust;
+ }
+ 
++/* returns true if staying in the same tile */
++bool GetNewAircraftPos(Vehicle *v, GetNewVehiclePosResult *gp, int tilesMoved)
++{
++	static const int8 _delta_coord[16] = {
++		-1,-1,-1, 0, 1, 1, 1, 0, /* x */
++		-1, 0, 1, 1, 1, 0,-1,-1, /* y */
++	};
++
++	int x = v->x_pos + _delta_coord[v->direction] * tilesMoved;
++	int y = v->y_pos + _delta_coord[v->direction + 8] * tilesMoved;
++
++	gp->x = x;
++	gp->y = y;
++	gp->old_tile = v->tile;
++	gp->new_tile = TileVirtXY(x,y);
++	return gp->old_tile == gp->new_tile;
++}
++
+ static bool AircraftController(Vehicle *v)
+ {
+ 	Station *st;
+ 	const AirportMovingData *amd;
+ 	Vehicle *u;
+-	byte z,newdir,maxz,curz;
++	byte newdir;
+ 	GetNewVehiclePosResult gp;
+-	uint dist;
++	uint dist, desired_dist;
+ 	int x,y;
++	int tilesMoved;
++	uint32 z,maxz,curz;
++	bool checkSuccess;
+ 
+ 	st = GetStation(v->u.air.targetairport);
+ 
+@@ -936,7 +991,7 @@
+ 			if (--u->cur_speed == 32) SndPlayVehicleFx(SND_18_HELICOPTER, v);
+ 		} else {
+ 			u->cur_speed = 32;
+-			if (UpdateAircraftSpeed(v)) {
++			if (UpdateAircraftSpeed(v) >= 1) {
+ 				v->tile = 0;
+ 
+ 				// Reached altitude?
+@@ -952,7 +1007,7 @@
+ 
+ 	// Helicopter landing.
+ 	if (amd->flag & AMED_HELI_LOWER) {
+-		if (UpdateAircraftSpeed(v)) {
++		if (UpdateAircraftSpeed(v) >= 1) {
+ 			if (st->airport_tile == 0) {
+ 				// FIXME - AircraftController -> if station no longer exists, do not land
+ 				// helicopter will circle until sign disappears, then go to next order
+@@ -988,6 +1043,107 @@
+ 	// Get distance from destination pos to current pos.
+ 	dist = myabs(x + amd->x - v->x_pos) +  myabs(y + amd->y - v->y_pos);
+ 
++	// Clear queues when there's no patch
++	if(_patches.aircraft_queueing == false && v->queue_item != NULL) {
++		v->queue_item->queue->del(v->queue_item->queue, v);
++		v->z_pos = GetAircraftFlyingAltitude(v);		
++	}
++
++	// If target airport is VERY busy (queue larger than 3), always add to queue
++	if(st->airport_queue->size > 3  && v->u.air.state == FLYING) {
++		// If it's already in the queue, don't re-add it
++		// Otherwise, add it to queue - but don't add helicopters!
++		// otherwise, helicopters will be part of the queue and can't land separately!
++		if(v->queue_item == NULL && (_patches.aircraft_queueing == true && v->subtype != 0)) {
++			// Add to queue
++			checkSuccess = st->airport_queue->push(st->airport_queue, v);
++			assert(checkSuccess);
++		}
++	}
++
++	// If the aircraft is flying and is within range of an airport, add it to the queue
++	if(dist < 1000 && v->u.air.state == FLYING) {
++		// If it's already in the queue, don't re-add it
++		// Otherwise, add it to queue - but don't add helicopters!
++		// otherwise, helicopters will be part of the queue and can't land separately!
++		if(v->queue_item == NULL && _patches.aircraft_queueing == true && v->subtype != 0) {
++			// Add to queue
++			st->airport_queue->push(st->airport_queue, v);
++		}
++	}
++
++	// If aircraft is broken, force to the end of the queue
++	if(v->vehstatus&VS_AIRCRAFT_BROKEN && v->u.air.state == FLYING && v->queue_breakdown == false)
++	{
++		if(_patches.aircraft_queueing == true && v->subtype != 0 && _patches.aircraft_broke_priority)
++		{
++			if(v->queue_item != NULL) {
++				// First, take it off existing queue
++				v->queue_item->queue->del(v->queue_item->queue, v);
++			}
++
++			// Then, add to top of queue instead of the bottom
++			st->airport_queue->pushBack(st->airport_queue, v);
++
++			// Set flag to ensure it doesn't attempt to repeat
++			// adding to the queue unneccessarily.
++			v->queue_breakdown = true;
++		}
++	}
++
++	// Calculate desired distance
++	if(v->subtype != 0) {
++		// Aircraft (Note to self: Original distance multiplier was 250)
++		// Increased to see if it helps
++		if(v->queue_item != NULL)
++			desired_dist = v->queue_item->queue->getPos(v->queue_item->queue, v) * 300;
++		else
++			desired_dist = st->airport_queue->size * 300;
++	} else {
++		// Helicopters
++		if(v->queue_item != NULL)
++			desired_dist = v->queue_item->queue->getPos(v->queue_item->queue, v) * 75;
++		else
++			desired_dist = st->helicopter_queue->size * 75;
++	}
++
++	// Add helicopters to their own queue, if in range of airport
++	if(dist < 1000 && v->u.air.state == FLYING && v->subtype == 0 && v->queue_item == NULL) {
++		st->helicopter_queue->push(st->helicopter_queue, v);
++	}
++
++	// Try to reach desired distance
++	if(myabs(desired_dist - dist) < 10) {
++		// At or close to desired distance, maintain a good cruising speed
++		v->u.air.desired_speed = min(v->max_speed * _patches.aircraft_speed_coeff, 36 * _patches.aircraft_speed_coeff);
++	} else {
++		if(dist < desired_dist && v->queue_item != NULL) {
++			// Too close, slow down, but only if not near end of queue
++			if(v->queue_item->queue->getPos(v->queue_item->queue, v) > 2)
++				v->u.air.desired_speed = min(v->max_speed * _patches.aircraft_speed_coeff, 15 * _patches.aircraft_speed_coeff);
++			else
++				v->u.air.desired_speed = v->u.air.desired_speed = min(v->max_speed * _patches.aircraft_speed_coeff, 36 * _patches.aircraft_speed_coeff);
++		} else {
++			// Too far, speed up
++			v->u.air.desired_speed = v->max_speed * _patches.aircraft_speed_coeff;
++		}
++	}
++
++	// All helicopters other than one in front stay in line
++	if(v->queue_item != NULL) {
++		if(v->u.air.state == FLYING && v->subtype == 0
++			&& v->queue_item->queue->getPos(v->queue_item->queue, v) != 1) {
++			if(dist < desired_dist) {
++				v->cur_speed = 0;
++				v->u.air.desired_speed = 0;
++			}
++		}
++	}
++
++	// Slow down if above desired speed
++	if(v->u.air.state == FLYING && v->cur_speed > v->u.air.desired_speed)
++			v->cur_speed--;
++
+ 	// Need exact position?
+ 	if (!(amd->flag & AMED_EXACTPOS) && dist <= (amd->flag & AMED_SLOWTURN ? 8U : 4U))
+ 		return true;
+@@ -1007,7 +1163,8 @@
+ 			return true;
+ 		}
+ 
+-		if (!UpdateAircraftSpeed(v)) return false;
++		if (UpdateAircraftSpeed(v) < 1)
++			return false;
+ 
+ 		v->direction = ChangeDir(v->direction, dirdiff > DIRDIFF_REVERSE ? DIRDIFF_45LEFT : DIRDIFF_45RIGHT);
+ 		v->cur_speed >>= 1;
+@@ -1018,7 +1175,9 @@
+ 
+ 	if (!(amd->flag & AMED_NOSPDCLAMP) && v->cur_speed > 12) v->cur_speed = 12;
+ 
+-	if (!UpdateAircraftSpeed(v)) return false;
++	tilesMoved = UpdateAircraftSpeed(v);
++	if(tilesMoved < 1)
++		return false;
+ 
+ 	if (v->load_unload_time_rem != 0) v->load_unload_time_rem--;
+ 
+@@ -1035,7 +1194,7 @@
+ 	}
+ 
+ 	// Move vehicle.
+-	GetNewVehiclePos(v, &gp);
++	GetNewAircraftPos(v, &gp, tilesMoved);
+ 	v->tile = gp.new_tile;
+ 
+ 	// If vehicle is in the air, use tile coordinate 0.
+@@ -1071,19 +1230,36 @@
+ 		}
+ 	}
+ 
++	// Slow down fast aircraft as they approach the airport
++	if(dist < 500 && v->cur_speed > 592)
++	{
++		v->cur_speed -=2;
++	}
++
+ 	// We've landed. Decrase speed when we're reaching end of runway.
+ 	if (amd->flag & AMED_BRAKE) {
+ 		curz = GetSlopeZ(x, y) + 1;
+ 
+-		if (z > curz) {
+-			z--;
+-		} else if (z < curz) {
+-			z++;
+-		}
++		// We've landed, so clamp aircraft to the ground
++		z = GetSlopeZ(x, y) + 1;
+ 
+ 		if (dist < 64 && v->cur_speed > 12) v->cur_speed -= 4;
+ 	}
+ 
++	curz = z;
++	if(v->queue_item != NULL)
++	{
++		curz = GetAircraftFlyingAltitude(v);
++	}
++
++	if(curz < z)
++	{
++		z--;
++	} else if(curz > z)
++	{
++		z++;
++	}
++
+ 	SetAircraftPosition(v, gp.x, gp.y, z);
+ 	return false;
+ }
+@@ -1093,7 +1269,7 @@
+ {
+ 	uint32 r;
+ 	Station *st;
+-	int z;
++	uint32 z;
+ 
+ 	v->u.air.crashed_counter++;
+ 
+@@ -1593,7 +1769,11 @@
+ 	byte landingtype;
+ 	AirportFTA *current;
+ 	uint16 tcur_speed, tsubspeed;
++	bool can_land;
++	bool checkSuccess;
++	can_land = false;
+ 
++	// Get the target airport
+ 	st = GetStation(v->u.air.targetairport);
+ 	// flying device is accepted at this station
+ 	// small airport --> no helicopters (AIRCRAFT_ONLY)
+@@ -1610,12 +1790,74 @@
+ 		current = apc->layout[v->u.air.pos].next;
+ 		while (current != NULL) {
+ 			if (current->heading == landingtype) {
++
++
++				// Check to see if we're going to land at an airport.
++
++				// Fisrt, check queue - if we are on top, or if it's empty,
++				// we can land.
++
++				// Just in case the code in AircraftController code misses,
++				// We check before the aircraft lands.
++
++				// If it's already in the queue, don't re-add it
++				// Otherwise, add it to queue - but do helicopters seperately!
++				// Otherwise, helicopters will be part of the queue and can't land separately!
++				if(!(v->queue_item != NULL) && (_patches.aircraft_queueing == true && v->subtype != 0)) {
++					// Add to queue
++					checkSuccess = st->airport_queue->push(st->airport_queue, v);
++					assert(checkSuccess);
++				}
++
++				if(!(v->queue_item != NULL) && (_patches.aircraft_queueing == true && v->subtype == 0)) {
++					// Add to queue
++					checkSuccess = st->helicopter_queue->push(st->helicopter_queue, v);
++					assert(checkSuccess);
++				}
+ 				// save speed before, since if AirportHasBlock is false, it resets them to 0
+ 				// we don't want that for plane in air
+ 				// hack for speed thingie
+ 				tcur_speed = v->cur_speed;
+ 				tsubspeed = v->subspeed;
+-				if (!AirportHasBlock(v, current, apc)) {
++
++				// If we're on top, go in
++				if(st->airport_queue->getTop(st->airport_queue) == v && (_patches.aircraft_queueing == true && v->subtype != 0)) {
++					if (!AirportHasBlock(v, current, apc)) {			
++						can_land = true;
++						st->airport_queue->pop(st->airport_queue);
++					} else {
++						can_land = false;
++					}
++				}
++
++				// Helicopters have their own queue
++				if(v->subtype == 0 && st->helicopter_queue->getTop(st->helicopter_queue) == v && _patches.aircraft_queueing == true) {
++					if (!AirportHasBlock(v, current, apc)) {
++						can_land = true;
++						st->helicopter_queue->pop(st->helicopter_queue);
++					} else {
++						can_land = false;
++					}
++				} else {
++					if(v->subtype == 0) {
++						can_land = false;
++						if(st->helicopter_queue->getPos(st->helicopter_queue, v) != 1)
++						{
++							v->u.air.desired_speed = 0;
++						}
++					}
++				}
++
++				if(_patches.aircraft_queueing == false) { // || v->subtype == 0
++					if (!AirportHasBlock(v, current, apc)) {			
++						can_land = true;
++					} else {
++						can_land = false;
++					}
++				}
++
++
++				if(can_land == true) {
+ 					v->u.air.state = landingtype; // LANDING / HELILANDING
+ 					// it's a bit dirty, but I need to set position to next position, otherwise
+ 					// if there are multiple runways, plane won't know which one it took (because
+Index: aircraft_gui.c
+===================================================================
+--- aircraft_gui.c	(revision 7326)
++++ aircraft_gui.c	(working copy)
+@@ -235,14 +235,14 @@
+ 			switch (v->current_order.type) {
+ 			case OT_GOTO_STATION: {
+ 				SetDParam(0, v->current_order.dest);
+-				SetDParam(1, v->cur_speed * 128 / 10);
++				SetDParam(1, (v->cur_speed * 128 / 10) / _patches.aircraft_speed_coeff);
+ 				str = STR_HEADING_FOR_STATION + _patches.vehicle_speed;
+ 			} break;
+ 
+ 			case OT_GOTO_DEPOT: {
+ 				/* Aircrafts always go to a station, even if you say depot */
+ 				SetDParam(0, v->current_order.dest);
+-				SetDParam(1, v->cur_speed * 128 / 10);
++				SetDParam(1, (v->cur_speed * 128 / 10) / _patches.aircraft_speed_coeff);
+ 				if (HASBIT(v->current_order.flags, OFB_HALT_IN_DEPOT) && !HASBIT(v->current_order.flags, OFB_PART_OF_ORDERS)) {
+ 					str = STR_HEADING_FOR_HANGAR + _patches.vehicle_speed;
+ 				} else {
+@@ -257,7 +257,7 @@
+ 			default:
+ 				if (v->num_orders == 0) {
+ 					str = STR_NO_ORDERS + _patches.vehicle_speed;
+-					SetDParam(0, v->cur_speed * 128 / 10);
++					SetDParam(0, (v->cur_speed * 128 / 10) / _patches.aircraft_speed_coeff);
+ 				} else {
+ 					str = STR_EMPTY;
+ 				}
+Index: economy.c
+===================================================================
+--- economy.c	(revision 7326)
++++ economy.c	(working copy)
+@@ -1352,7 +1352,17 @@
+ 				st->time_since_unload = 0;
+ 
+ 				unloading_time += v->cargo_count; /* TTDBUG: bug in original TTD */
+-				if (just_arrived) profit += DeliverGoods(v->cargo_count, v->cargo_type, v->cargo_source, last_visited, v->cargo_days);
++
++				/* Aircraft planespeed patch: don't let profit get out of control because
++				 * aircraft are delivering in very short time!
++				 */
++				 if (just_arrived) {
++					if(v->type == VEH_Aircraft)
++						profit += DeliverGoods(v->cargo_count, v->cargo_type, v->cargo_source, last_visited, v->cargo_days * _patches.aircraft_speed_coeff);
++					else
++						profit += DeliverGoods(v->cargo_count, v->cargo_type, v->cargo_source, last_visited, v->cargo_days);
++				 }
++
+ 				result |= 1;
+ 				if (_patches.gradual_loading) {
+ 					v->cargo_count -= min(load_amount, v->cargo_count);
+@@ -1365,15 +1375,27 @@
+ 				uint16 amount_unloaded = _patches.gradual_loading ? min(v->cargo_count, load_amount) : v->cargo_count;
+ 				/* unload goods and let it wait at the station */
+ 				st->time_since_unload = 0;
++
++				/* Aircraft planespeed patch: don't let profit get out of control because
++				 * aircraft are delivering in very short time!
++				 */
+ 				if (just_arrived && (u->current_order.flags & OF_TRANSFER)) {
+-					v_profit = GetTransportedGoodsIncome(
+-						v->cargo_count,
+-						DistanceManhattan(GetStation(v->cargo_source)->xy, GetStation(last_visited)->xy),
+-						v->cargo_days,
+-						v->cargo_type) * 3 / 2;
+-
++					if(v->type == VEH_Aircraft) {
++						v_profit = GetTransportedGoodsIncome(
++								v->cargo_count,
++								DistanceManhattan(GetStation(v->cargo_source)->xy, GetStation(last_visited)->xy),
++								v->cargo_days * _patches.aircraft_speed_coeff,
++								v->cargo_type) * 3 / 2;
++					} else {
++						v_profit = GetTransportedGoodsIncome(
++								v->cargo_count,
++								DistanceManhattan(GetStation(v->cargo_source)->xy, GetStation(last_visited)->xy),
++								v->cargo_days,
++								v->cargo_type) * 3 / 2;
++					}
+ 					v_profit_total += v_profit;
+ 				}
++			
+ 
+ 				unloading_time += v->cargo_count;
+ 				t = GB(ge->waiting_acceptance, 0, 12);
+Index: functions.h
+===================================================================
+--- functions.h	(revision 7326)
++++ functions.h	(working copy)
+@@ -18,7 +18,7 @@
+ 
+ bool IsValidTile(TileIndex tile);
+ 
+-static inline Point RemapCoords(int x, int y, int z)
++static inline Point RemapCoords(int x, int y, uint32 z)
+ {
+ #if !defined(NEW_ROTATION)
+ 	Point pt;
+Index: lang/american.txt
+===================================================================
+--- lang/american.txt	(revision 7326)
++++ lang/american.txt	(working copy)
+@@ -1127,6 +1127,10 @@
+ STR_CONFIG_PATCHES_YAPF_ROAD                                    :{LTBLUE}Use YAPF for roadvehs: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_YAPF_RAIL                                    :{LTBLUE}Use YAPF for trains: {ORANGE}{STRING}
+ 
++STR_CONFIG_PATCHES_AIRQUEUE										:{LTBLUE}Queue aircraft at airports{ORANGE}
++STR_CONFIG_PATCHES_AIR_COEFF									:{LTBLUE}Aircraft speedup (1=TTD default, 8=realistic):{ORANGE} {STRING}
++STR_CONFIG_PATCHES_PRIORITY_BROKEN								:{LTBLUE}Give priority to broken aircraft{ORANGE}
++
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :Sub-tropical landscape
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 7326)
++++ lang/english.txt	(working copy)
+@@ -1131,6 +1131,10 @@
+ STR_CONFIG_PATCHES_YAPF_ROAD                                    :{LTBLUE}Use YAPF for roadvehs: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_YAPF_RAIL                                    :{LTBLUE}Use YAPF for trains: {ORANGE}{STRING1}
+ 
++STR_CONFIG_PATCHES_AIRQUEUE										:{LTBLUE}Queue aircraft at airports{ORANGE}
++STR_CONFIG_PATCHES_AIR_COEFF									:{LTBLUE}Aircraft speedup (1=TTD default, 8=realistic):{ORANGE} {STRING}
++STR_CONFIG_PATCHES_PRIORITY_BROKEN								:{LTBLUE}Give priority to broken aircraft{ORANGE}
++
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :Sub-tropical landscape
+Index: order_cmd.c
+===================================================================
+--- order_cmd.c	(revision 7326)
++++ order_cmd.c	(working copy)
+@@ -478,11 +478,30 @@
+ 		order->type = OT_NOTHING;
+ 		order->next = NULL;
+ 
++		if (v->type == VEH_Aircraft) {
++			/* Take out of airport queue
++			 */
++			if(v->queue_item != NULL)
++			{
++				v->queue_item->queue->del(v->queue_item->queue, v);
++			}
++		}
++
++
+ 		u = GetFirstVehicleFromSharedList(v);
+ 		DeleteOrderWarnings(u);
+ 		for (; u != NULL; u = u->next_shared) {
+ 			u->num_orders--;
+ 
++			if (u->type == VEH_Aircraft) {
++				/* Take out of airport queue
++				*/
++				if(u->queue_item != NULL)
++				{
++					u->queue_item->queue->del(u->queue_item->queue, u);
++				}
++			}
++
+ 			if (sel_ord < u->cur_order_index)
+ 				u->cur_order_index--;
+ 
+@@ -544,8 +563,17 @@
+ 		InvalidateVehicleOrder(v);
+ 	}
+ 
++	if (v->type == VEH_Aircraft) {
++		InvalidateWindowClasses(WC_AIRCRAFT_LIST);
++		/* Take out of airport queue
++		 */
++		if(v->queue_item != NULL)
++		{
++			v->queue_item->queue->del(v->queue_item->queue, v);
++		}
++	}
++
+ 	/* We have an aircraft/ship, they have a mini-schedule, so update them all */
+-	if (v->type == VEH_Aircraft) InvalidateWindowClasses(WC_AIRCRAFT_LIST);
+ 	if (v->type == VEH_Ship) InvalidateWindowClasses(WC_SHIPS_LIST);
+ 
+ 	return 0;
+@@ -585,6 +613,16 @@
+ 		return CMD_ERROR;
+ 	}
+ 
++		//TODO: Is this the right place to put this?
++		if (v->type == VEH_Aircraft) {
++			InvalidateWindowClasses(WC_AIRCRAFT_LIST);
++			/* Take out of airport queue
++			*/
++			if(v->queue_item != NULL) {
++				v->queue_item->queue->del(v->queue_item->queue, v);
++			}
++		}
++
+ 	if (flags & DC_EXEC) {
+ 		switch (p2) {
+ 		case OFB_FULL_LOAD:
+@@ -1047,7 +1085,27 @@
+ 					order->dest == destination) {
+ 				order->type = OT_DUMMY;
+ 				order->flags = 0;
++
++				if (v->type == VEH_Aircraft) {
++					/* Take out of airport queue
++					 */
++					if(v->queue_item != NULL)
++					{
++						v->queue_item->queue->del(v->queue_item->queue, v);
++					}
++				}
++
+ 				invalidate = true;
++
++
++
++
++
++
++
++
++
++
+ 			}
+ 		}
+ 
+@@ -1115,10 +1173,8 @@
+ 		return;
+ 	}
+ 
+-	/* Remove the orders */
++	// *AHEM* you use "cur" without ever setting it to something?
+ 	cur = v->orders;
+-	v->orders = NULL;
+-	v->num_orders = 0;
+ 
+ 	if (cur != NULL) {
+ 		/* Delete the vehicle list of shared orders, if any */
+@@ -1135,10 +1191,20 @@
+ 	}
+ 
+ 	while (cur != NULL) {
++		if (v->type == VEH_Aircraft) {
++			/* Take out of airport queue
++			*/
++			if(v->queue_item != NULL)
++			{
++				v->queue_item->queue->del(v->queue_item->queue, v);
++			}
++		}
++
+ 		next = cur->next;
+ 		DeleteOrder(cur);
+ 		cur = next;
+ 	}
++
+ }
+ 
+ /**
+Index: queue.c
+===================================================================
+--- queue.c	(revision 7326)
++++ queue.c	(working copy)
+@@ -3,6 +3,7 @@
+ #include "stdafx.h"
+ #include "openttd.h"
+ #include "queue.h"
++#include "vehicle.h"
+ 
+ static void Stack_Clear(Queue* q, bool free_values)
+ {
+@@ -110,6 +111,18 @@
+ 	return result;
+ }
+ 
++static void* Fifo_GetTop(Queue* q)
++{
++	void* result;
++	if (q->data.fifo.head == q->data.fifo.tail)
++		return NULL;
++	result = q->data.fifo.elements[q->data.fifo.tail];
++
++	// Only getting top, do not take off
++	//q->data.fifo.tail = (q->data.fifo.tail + 1) % q->data.fifo.max_size;
++	return result;
++}
++
+ static bool Fifo_Delete(Queue* q, void* item, int priority)
+ {
+ 	return false;
+@@ -127,6 +140,7 @@
+ 	q->data.fifo.tail = 0;
+ 	q->data.fifo.elements = malloc(max_size * sizeof(*q->data.fifo.elements));
+ 	q->freeq = false;
++	q->getTop = Fifo_GetTop;
+ 	return q;
+ }
+ 
+@@ -734,3 +748,269 @@
+ {
+ 	return h->size;
+ }
++
++// Returns success
++bool VPush(VehicleQueue *q, Vehicle *v)
++{
++	VQueueItem* newItem;
++
++	// Do not push NULLs
++	assert(v != NULL);
++
++	if(q->size == 0x7FFFFFFF)
++		return false;
++
++	newItem = malloc(sizeof(VQueueItem));
++
++	if(newItem == NULL)
++		return false;
++
++	if(q->size == 0) {
++		assert(q->top == NULL);
++		assert(q->bottom == NULL);
++		newItem->data = v;
++		newItem->position = 1;
++		newItem->queue = q;
++		newItem->above = NULL;
++		newItem->below = NULL;
++		q->bottom = newItem;
++		q->top = newItem;
++		v->queue_item = newItem;
++		q->size = 1;
++		return true;
++	}
++
++	q->bottom->below = newItem;
++	newItem->above = q->bottom;
++	newItem->below = NULL;
++	newItem->data = v;
++	newItem->position = q->bottom->position + 1;
++	newItem->queue = q;
++	v->queue_item = newItem;
++	q->bottom = newItem;
++	q->size++;
++	return true;
++}
++
++// Pushes back onto the top (like a stack) instead of the bottom (like a queue)
++// Returns success
++bool VPushBack(VehicleQueue *q, Vehicle *v)
++{
++	VQueueItem* newItem;
++
++	// Do not push NULLs
++	assert(v != NULL);
++
++	if(q->size == 0x7FFFFFFF)
++		return false;
++
++	newItem = malloc(sizeof(VQueueItem));
++
++	if(newItem == NULL)
++		return false;
++
++	if(q->size == 0) {
++		assert(q->top == NULL);
++		assert(q->bottom == NULL);
++		newItem->data = v;
++		newItem->position = 1;
++		newItem->queue = q;
++		newItem->above = NULL;
++		newItem->below = NULL;
++		q->bottom = newItem;
++		q->top = newItem;
++		v->queue_item = newItem;
++		q->size = 1;
++		return true;
++	}
++
++	q->top->above = newItem;
++	newItem->below = q->top;
++	newItem->above = NULL;
++	newItem->data = v;
++	newItem->position = 1;
++	newItem->queue = q;
++	v->queue_item = newItem;
++	q->top = newItem;
++	q->size++;
++
++	// Numbering is messed up now
++	q->dirty = true;
++	return true;
++}
++
++// Returns vehicle popped
++Vehicle* VPop(VehicleQueue *q)
++{
++	Vehicle* v;
++	VQueueItem* oldItem;
++	if(q->size == 0)
++		return NULL;
++
++	oldItem = q->top;
++
++	assert(oldItem != NULL);
++
++	q->top->data->queue_breakdown = false;
++
++
++	q->top = oldItem->below;
++	if(q->top != NULL)
++		q->top->above = NULL;
++
++	// Had one item, now empty
++	if(q->size == 1) {
++		q->bottom = NULL;
++		q->top = NULL;
++		q->size = 0;
++		q->offset = 0;
++		q->dirty = false;
++		v = oldItem->data;
++		v->queue_item = NULL;
++		free(oldItem);
++		return v;
++	}
++
++	// Top was above bottom - now top *IS* bottom
++	if(q->size == 2)
++		q->bottom->above = NULL;
++
++	v = oldItem->data;
++
++	v->queue_item = NULL;
++
++	free(oldItem);
++
++	q->offset++;
++	q->size--;
++
++	if(q->offset > 0x7FFFFFFF) {
++		q->dirty = true;
++		q->clean(q);
++	}
++	return v;
++}
++
++Vehicle* VGetTop(VehicleQueue *q)
++{
++	if(q->size != 0)
++		return q->top->data;
++	else
++		return NULL;
++}
++
++void VClean(VehicleQueue *q)
++{
++	bool done;
++	uint32 currentSize;
++	VQueueItem* currItem;
++	done = false;
++
++	// Empty queue
++	if(q->top == NULL) {
++		assert(q->bottom == NULL);
++		assert(q->size == 0);
++		q->offset = 0;
++		q->dirty = false;
++		return;
++	}
++
++	currItem = q->top;
++	q->offset = 0;
++
++	currentSize = 1;
++	while(done == false) {
++		currItem->position = currentSize;
++		currItem = currItem->below;
++		if(currItem == NULL) {
++			done = true;
++			assert(q->size == currentSize);
++		}
++		currentSize++;
++	}
++
++	// Congrats! We now have a clean queue!
++	q->dirty = false;
++	return;
++}
++
++void VClear(VehicleQueue *q)
++{
++	while(q->pop(q) != NULL) {
++		// What? Expecting something? The clearing is done
++		// in the while statement above - I don't need anything here!
++	}
++	q->clean(q);
++	return;
++}
++
++// This is one of the special functions - allows item to take itself off
++// the queue no matter where in the queue it is!
++void VDelete(VehicleQueue *q, Vehicle *v)
++{
++	VQueueItem* current;
++	VQueueItem* above;
++	VQueueItem* below;
++
++	current = v->queue_item;
++	if(current == NULL)
++		return;
++	
++	v->queue_breakdown = false;
++
++	if(current == q->top)
++		q->top = current->below;
++
++	if(current == q->bottom)
++		q->bottom = current->above;
++
++	above = current->above;
++	below = current->below;
++
++	if(above != NULL)
++		above->below = below;
++	
++	if(below != NULL)
++		below->above = above;
++
++	v->queue_item = NULL;
++
++	free(current);
++
++	q->size--;
++	q->dirty = true;
++}
++
++// Returns 0 if item does not exist, returns position otherwise.
++uint32 VGetPos(VehicleQueue *q, Vehicle *v)
++{
++	if(q->dirty)
++		q->clean(q);
++
++	if(v->queue_item == NULL)
++		return 0;
++
++	return v->queue_item->position - q->offset;
++}
++
++VehicleQueue* new_VQueue(void)
++{
++	VehicleQueue* q = malloc(sizeof(VehicleQueue));
++
++	q->push = VPush;
++	q->pushBack = VPushBack;
++	q->pop = VPop;
++	q->getTop = VGetTop;
++	q->clean = VClean;
++	q->clear = VClear;
++	q->del = VDelete;
++	q->getPos = VGetPos;
++
++	q->size = 0;
++	q->offset = 0;
++	q->top = NULL;
++	q->bottom = NULL;
++	q->dirty = false;
++	
++	return q;
++}
+Index: queue.h
+===================================================================
+--- queue.h	(revision 7326)
++++ queue.h	(working copy)
+@@ -16,6 +16,9 @@
+ typedef void Queue_ClearProc(Queue* q, bool free_values);
+ typedef void Queue_FreeProc(Queue* q, bool free_values);
+ 
++// Get top without popping
++typedef void* Queue_GetTopProc(Queue* q);
++
+ typedef struct InsSortNode InsSortNode;
+ struct InsSortNode {
+ 	void* item;
+@@ -58,6 +61,11 @@
+ 	 * items are free()'d too.
+ 	 */
+ 	Queue_FreeProc* free;
++	/* Obtains the top of the queue, allowing the user to look at the 
++	 * queue without destroying it.
++	 * WARNING: ONLY IMPLEMENTED IN FIFO SO FAR!
++	 */
++	Queue_GetTopProc* getTop;
+ 
+ 	union {
+ 		struct {
+@@ -205,4 +213,80 @@
+  */
+ uint Hash_Size(const Hash* h);
+ 
++/* 
++ * NOT part of normal Queue structures defined above!
++ * This is a special queue designed to have special behaviors
++ * for the aircraft queueing algorithm, which has special requirements ;).
++ * Note that this is NOT a priority queue!
++ */
++typedef struct VehicleQueue VehicleQueue;
++
++// O(1), always
++typedef bool VQueue_PushProc(VehicleQueue* q, Vehicle* item);
++// O(1), but sets dirty flag
++typedef bool VQueue_PushBackProc(VehicleQueue* q, Vehicle* item);
++// O(1), unless offset is > 2147483647 - then O(n) -- increments offset
++typedef Vehicle* VQueue_PopProc(VehicleQueue* q);
++// O(1)
++typedef Vehicle* VQueue_GetTopProc(VehicleQueue* q);
++// O(n) -- Rebuilds the "position"s, resets the offset, asserts the size.
++typedef void VQueue_CleanProc(VehicleQueue* q);
++// O(n)
++typedef void VQueue_ClearProc(VehicleQueue* q);
++// O(1) -- sets dirty bit
++typedef void VQueue_DeleteProc(VehicleQueue* q, Vehicle* item);
++// O(1) if not dirty, otherwise O(n) -- Gets current position in queue.
++typedef uint32 VQueue_GetPosProc(VehicleQueue* q, Vehicle* item);
++// O(1)
++typedef bool VQueue_InitProc(VehicleQueue* q);
++
++//typedef void VQueue_FreeProc(Queue* q, bool free_values);
++
++/*
++ * WARNING: Do NOT directly manipulate data inside this queue!
++ * Queue is *very* sensitive and will toss assertions if it detects
++ * improper values!
++ */
++typedef struct VQueueItem VQueueItem;
++struct VQueueItem
++{
++	Vehicle *data;
++	// Position in queue
++	uint32 position;
++	VQueueItem *below;
++	VQueueItem *above;
++
++	// Queue item belongs to (so we can have reverse lookups)
++	VehicleQueue *queue;
++};
++
++struct VehicleQueue
++{
++	// Ahh, yes! Classic C functional programming!
++	// Should really be converted to C++, though . . .
++	VQueue_PushProc*	push;
++	VQueue_PushBackProc*	pushBack;
++	VQueue_PopProc*		pop;
++	VQueue_GetTopProc*	getTop;
++	VQueue_CleanProc*	clean;
++	VQueue_ClearProc*	clear;
++	VQueue_DeleteProc*	del;
++	VQueue_GetPosProc*	getPos;
++	//VQueue_InitProc*	init;
++
++	VQueueItem* top;
++	VQueueItem* bottom;
++
++	// Dirty means "position" in VQueueItems is incorrect
++	// and needs to be rebuilt.
++    bool dirty;	
++	uint32 size;
++
++	// Offset for "position" in queue - allows for O(1) pushes & pops
++	uint32 offset;
++};
++
++VehicleQueue *new_VQueue(void);
++
++
+ #endif /* QUEUE_H */
+Index: settings.c
+===================================================================
+--- settings.c	(revision 7326)
++++ settings.c	(working copy)
+@@ -1323,6 +1323,7 @@
+ 	SDT_BOOL(Patches, wagon_speed_limits,            0, 0,  true,                    STR_CONFIG_PATCHES_WAGONSPEEDLIMITS,     NULL),
+ 	SDT_CONDBOOL(Patches, disable_elrails, 38, SL_MAX_VERSION, 0, 0, false,          STR_CONFIG_PATCHES_DISABLE_ELRAILS,      SettingsDisableElrail),
+ 	SDT_CONDVAR(Patches, freight_trains, SLE_UINT8, 39, SL_MAX_VERSION, 0, 0, 1, 1, 255, 1, STR_CONFIG_PATCHES_FREIGHT_TRAINS, NULL),
++	SDT_VAR(Patches,  aircraft_speed_coeff, SLE_UINT16, 0, 0, 1,    1,     8,0, STR_CONFIG_PATCHES_AIR_COEFF,             NULL),
+ 
+ 	/***************************************************************************/
+ 	/* Station section of the GUI-configure patches window */
+@@ -1336,6 +1337,8 @@
+ 	SDT_BOOL(Patches, serviceathelipad,        0, 0,  true,        STR_CONFIG_PATCHES_SERVICEATHELIPAD,   NULL),
+ 	SDT_BOOL(Patches, modified_catchment,      0, 0,  true,        STR_CONFIG_PATCHES_CATCHMENT,          NULL),
+ 	SDT_CONDBOOL(Patches, gradual_loading, 40, SL_MAX_VERSION, 0, 0,  true, STR_CONFIG_PATCHES_GRADUAL_LOADING,    NULL),
++	SDT_BOOL(Patches, aircraft_queueing,       0, 0,  false,   STR_CONFIG_PATCHES_AIRQUEUE,          NULL),
++	SDT_BOOL(Patches, aircraft_broke_priority, 0, 0,  false,   STR_CONFIG_PATCHES_PRIORITY_BROKEN,   NULL),
+ 
+ 	/***************************************************************************/
+ 	/* Economy section of the GUI-configure patches window */
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 7326)
++++ settings_gui.c	(working copy)
+@@ -596,6 +596,8 @@
+ 	"serviceathelipad",
+ 	"modified_catchment",
+ 	"gradual_loading",
++	"aircraft_queueing",
++	"aircraft_broke_priority",
+ };
+ 
+ static const char *_patches_economy[] = {
+@@ -649,6 +651,7 @@
+ 	"wagon_speed_limits",
+ 	"disable_elrails",
+ 	"freight_trains",
++	"aircraft_speed_coeff",
+ };
+ 
+ typedef struct PatchEntry {
+@@ -891,7 +894,7 @@
+ {   WWT_CLOSEBOX,   RESIZE_NONE,    10,     0,    10,     0,    13, STR_00C5,                        STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    10,    11,   369,     0,    13, STR_CONFIG_PATCHES_CAPTION,      STR_018C_WINDOW_TITLE_DRAG_THIS},
+ {      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    14,    41, 0x0,                             STR_NULL},
+-{      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    42,   370, 0x0,                             STR_NULL},
++{      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    42,   386, 0x0,                             STR_NULL},
+ 
+ {    WWT_TEXTBTN,   RESIZE_NONE,     3,    10,    96,    16,    27, STR_CONFIG_PATCHES_GUI,          STR_NULL},
+ {    WWT_TEXTBTN,   RESIZE_NONE,     3,    97,   183,    16,    27, STR_CONFIG_PATCHES_CONSTRUCTION, STR_NULL},
+@@ -903,7 +906,7 @@
+ };
+ 
+ static const WindowDesc _patches_selection_desc = {
+-	WDP_CENTER, WDP_CENTER, 370, 371,
++	WDP_CENTER, WDP_CENTER, 370, 387,
+ 	WC_GAME_OPTIONS,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET,
+ 	_patches_selection_widgets,
+Index: station.h
+===================================================================
+--- station.h	(revision 7326)
++++ station.h	(working copy)
+@@ -80,6 +80,8 @@
+ 	//uint16 airport_flags;
+ 	uint32 airport_flags;
+ 	StationID index;
++	VehicleQueue *airport_queue;			// airport queue
++	VehicleQueue *helicopter_queue;			// airport queue
+ 
+ 	byte last_vehicle_type;
+ 	GoodsEntry goods[NUM_CARGO];
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 7326)
++++ station_cmd.c	(working copy)
+@@ -464,6 +464,9 @@
+ 		ge->feeder_profit = 0;
+ 	}
+ 
++	st->airport_queue = new_VQueue();
++	st->helicopter_queue = new_VQueue();
++
+ 	st->random_bits = Random();
+ 	st->waiting_triggers = 0;
+ 
+@@ -1766,6 +1769,9 @@
+ 		InvalidateWindow(WC_STATION_LIST, st->owner);
+ 	}
+ 
++	st->airport_queue = new_VQueue();
++	st->helicopter_queue = new_VQueue();
++
+ 	return cost;
+ }
+ 
+@@ -2411,6 +2417,18 @@
+ 	DeleteSubsidyWithStation(index);
+ 
+ 	free(st->speclist);
++	free(st->airport_queue);
++
++	st->helicopter_queue->clear(st->helicopter_queue);
++	free(st->helicopter_queue);
++
++
++	st->airport_queue->clear(st->airport_queue);
++	free(st->airport_queue);
++
++	st->helicopter_queue->clear(st->helicopter_queue);
++	free(st->helicopter_queue);
++
+ }
+ 
+ void DeleteAllPlayerStations(void)
+@@ -3094,6 +3112,9 @@
+ 				InitializeRoadStop(st->truck_stops, NULL, st->lorry_tile_obsolete, st->index);
+ 			}
+ 		}
++
++	st->airport_queue = new_VQueue();
++	st->helicopter_queue = new_VQueue();
+ 	}
+ 
+ 	/* This is to ensure all pointers are within the limits of _stations_size */
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 7326)
++++ train_cmd.c	(working copy)
+@@ -1588,7 +1588,7 @@
+ 		swap_int32(&a->x_pos, &b->x_pos);
+ 		swap_int32(&a->y_pos, &b->y_pos);
+ 		swap_tile(&a->tile, &b->tile);
+-		swap_byte(&a->z_pos, &b->z_pos);
++		swap_uint32(&a->z_pos, &b->z_pos);
+ 
+ 		SwapTrainFlags(&a->u.rail.flags, &b->u.rail.flags);
+ 
+Index: variables.h
+===================================================================
+--- variables.h	(revision 7326)
++++ variables.h	(working copy)
+@@ -187,6 +187,10 @@
+ 	bool ainew_active;                  // Is the new AI active?
+ 	bool ai_in_multiplayer;             // Do we allow AIs in multiplayer
+ 
++	bool aircraft_queueing; // Aircraft queueing patch
++	bool aircraft_broke_priority; // Give priority to broken aircraft?
++	uint aircraft_speed_coeff; // Coefficient of aircraft speed, based on Benben's patch
++
+ 	/*
+ 	 * New Path Finding
+ 	 */
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 7326)
++++ vehicle.c	(working copy)
+@@ -258,6 +258,8 @@
+ 	memset(v, 0, sizeof(Vehicle));
+ 	v->index = index;
+ 
++	v->queue_item = NULL;
++
+ 	assert(v->orders == NULL);
+ 
+ 	v->left_coord = INVALID_COORD;
+@@ -268,6 +270,14 @@
+ 	v->next_shared = NULL;
+ 	v->prev_shared = NULL;
+ 	v->depot_list  = NULL;
++	v->queue_breakdown = false;
++	v->queue_item = NULL;
++	/* random_bits is used to pick out a random sprite for vehicles
++	    which are technical the same (newgrf stuff).
++	   Because RandomRange() results in desyncs, and because it does
++	    not really matter that one client has other visual vehicles than
++	    the other, it can be InteractiveRandomRange() without any problem
++	*/
+ 	v->random_bits = 0;
+ 	return v;
+ }
+@@ -2912,12 +2922,13 @@
+ 	SLE_CONDVAR(Vehicle, dest_tile,            SLE_FILE_U16 | SLE_VAR_U32,  0, 5),
+ 	SLE_CONDVAR(Vehicle, dest_tile,            SLE_UINT32,                  6, SL_MAX_VERSION),
+ 
+-	SLE_CONDVAR(Vehicle, x_pos,                SLE_FILE_U16 | SLE_VAR_U32,  0, 5),
+-	SLE_CONDVAR(Vehicle, x_pos,                SLE_UINT32,                  6, SL_MAX_VERSION),
+-	SLE_CONDVAR(Vehicle, y_pos,                SLE_FILE_U16 | SLE_VAR_U32,  0, 5),
+-	SLE_CONDVAR(Vehicle, y_pos,                SLE_UINT32,                  6, SL_MAX_VERSION),
+-	    SLE_VAR(Vehicle, z_pos,                SLE_UINT8),
+-	    SLE_VAR(Vehicle, direction,            SLE_UINT8),
++	SLE_CONDVAR(Vehicle,x_pos,				SLE_FILE_U16 | SLE_VAR_U32, 0, 5),
++	SLE_CONDVAR(Vehicle,x_pos,				SLE_UINT32, 6, SL_MAX_VERSION),
++	SLE_CONDVAR(Vehicle,y_pos,				SLE_FILE_U16 | SLE_VAR_U32, 0, 5),
++	SLE_CONDVAR(Vehicle,y_pos,				SLE_UINT32, 6, SL_MAX_VERSION),
++	SLE_CONDVAR(Vehicle,z_pos,				SLE_FILE_U8 | SLE_VAR_U32, 0, 20),
++	SLE_CONDVAR(Vehicle,z_pos,				SLE_UINT32, 21, SL_MAX_VERSION),
++	SLE_VAR(Vehicle,direction,				SLE_UINT8),
+ 
+ 	    SLE_VAR(Vehicle, cur_image,            SLE_UINT16),
+ 	    SLE_VAR(Vehicle, spritenum,            SLE_UINT8),
+@@ -2928,11 +2939,13 @@
+ 	    SLE_VAR(Vehicle, y_offs,               SLE_INT8),
+ 	    SLE_VAR(Vehicle, engine_type,          SLE_UINT16),
+ 
+-	    SLE_VAR(Vehicle, max_speed,            SLE_UINT16),
+-	    SLE_VAR(Vehicle, cur_speed,            SLE_UINT16),
+-	    SLE_VAR(Vehicle, subspeed,             SLE_UINT8),
+-	    SLE_VAR(Vehicle, acceleration,         SLE_UINT8),
+-	    SLE_VAR(Vehicle, progress,             SLE_UINT8),
++	SLE_VAR(Vehicle,max_speed,				SLE_UINT16),
++	SLE_VAR(Vehicle,cur_speed,				SLE_UINT16),
++	SLE_VAR(Vehicle,subspeed,					SLE_UINT8),
++	SLE_CONDVAR(Vehicle,acceleration,			SLE_FILE_U8 | SLE_VAR_U16, 0, 20),
++	SLE_CONDVAR(Vehicle,acceleration,			SLE_UINT16, 21, SL_MAX_VERSION),
++	SLE_CONDVAR(Vehicle,progress,					SLE_FILE_U8 | SLE_VAR_U16, 0, 20),
++	SLE_CONDVAR(Vehicle,progress,					SLE_UINT16, 21, SL_MAX_VERSION),
+ 
+ 	    SLE_VAR(Vehicle, vehstatus,            SLE_UINT8),
+ 	SLE_CONDVAR(Vehicle, last_station_visited, SLE_FILE_U8  | SLE_VAR_U16,  0, 4),
+@@ -3068,6 +3081,9 @@
+ 
+ 	SLE_CONDVARX(offsetof(Vehicle, u) + offsetof(VehicleAir, previous_pos),    SLE_UINT8,                 2, SL_MAX_VERSION),
+ 
++	// TODO: Make sure this is correct!
++	SLE_CONDVARX(offsetof(Vehicle,u)+offsetof(VehicleAir,desired_speed),	SLE_UINT16, 21, SL_MAX_VERSION),
++
+ 	// reserve extra space in savegame here. (currently 15 bytes)
+ 	SLE_CONDNULL(15,                                                                                      2, SL_MAX_VERSION),
+ 
+Index: vehicle.h
+===================================================================
+--- vehicle.h	(revision 7326)
++++ vehicle.h	(working copy)
+@@ -6,6 +6,7 @@
+ #include "pool.h"
+ #include "order.h"
+ #include "rail.h"
++#include "queue.h"
+ 
+ enum {
+ 	VEH_Invalid  = 0x00,
+@@ -111,6 +112,8 @@
+ 	byte previous_pos;
+ 	StationID targetairport;
+ 	byte state;
++	uint16 desired_speed;	// Speed aircraft desires to maintain, used to
++							// decrease traffic to busy airports.
+ } VehicleAir;
+ 
+ typedef struct VehicleRoad {
+@@ -160,7 +163,7 @@
+ 
+ 	int32 x_pos;             // coordinates
+ 	int32 y_pos;
+-	byte z_pos;
++	uint32 z_pos;		// Was byte, changed for aircraft queueing
+ 	byte direction;          // facing
+ 
+ 	byte spritenum;          // currently displayed sprite index
+@@ -180,11 +183,11 @@
+ 	byte random_bits;
+ 	byte waiting_triggers;   // triggers to be yet matched
+ 
+-	uint16 max_speed;        // maximum speed
+-	uint16 cur_speed;        // current speed
+-	byte subspeed;           // fractional speed
+-	byte acceleration;       // used by train & aircraft
+-	byte progress;
++	uint16 max_speed;	// maximum speed
++	uint16 cur_speed;	// current speed
++	byte subspeed;		// fractional speed
++	uint16 acceleration; // used by train & aircraft
++	uint16 progress;
+ 	uint32 motion_counter;
+ 
+ 	byte vehstatus;          // Status
+@@ -241,6 +244,12 @@
+ 	int32 profit_last_year;
+ 	uint32 value;
+ 
++	// Current position in a vehicle queue - can only belong to one queue at a time
++	VQueueItem* queue_item;
++
++	// True if the aircraft is already put on the top of the queue due to a breakdown
++	bool queue_breakdown;
++
+ 	union {
+ 		VehicleRail rail;
+ 		VehicleAir air;
+Index: viewport.c
+===================================================================
+--- viewport.c	(revision 7326)
++++ viewport.c	(working copy)
+@@ -61,7 +61,7 @@
+ 	struct TileSpriteToDraw *next;
+ 	int32 x;
+ 	int32 y;
+-	byte z;
++	uint32 z;
+ } TileSpriteToDraw;
+ 
+ typedef struct ChildScreenSpriteToDraw {
+@@ -83,8 +83,8 @@
+ 	int32 ymax;
+ 	ChildScreenSpriteToDraw *child;
+ 	byte unk16;
+-	byte zmin;
+-	byte zmax;
++	uint32 zmin;
++	uint32 zmax;
+ } ParentSpriteToDraw;
+ 
+ // Quick hack to know how much memory to reserve when allocating from the spritelist
+@@ -454,7 +454,7 @@
+ 	_offset_ground_sprites = true;
+ }
+ 
+-static void AddCombinedSprite(uint32 image, int x, int y, byte z)
++static void AddCombinedSprite(uint32 image, int x, int y, int z)
+ {
+ 	const ViewportDrawer *vd = _cur_vd;
+ 	Point pt = RemapCoords(x, y, z);
+@@ -470,7 +470,7 @@
+ }
+ 
+ 
+-void AddSortableSpriteToDraw(uint32 image, int x, int y, int w, int h, byte dz, byte z)
++void AddSortableSpriteToDraw(uint32 image, int x, int y, int w, int h, uint32 dz, uint32 z)
+ {
+ 	ViewportDrawer *vd = _cur_vd;
+ 	ParentSpriteToDraw *ps;
+Index: viewport.h
+===================================================================
+--- viewport.h	(revision 7326)
++++ viewport.h	(working copy)
+@@ -44,7 +44,7 @@
+ 
+ void DrawGroundSprite(uint32 image);
+ void DrawGroundSpriteAt(uint32 image, int32 x, int32 y, byte z);
+-void AddSortableSpriteToDraw(uint32 image, int x, int y, int w, int h, byte dz, byte z);
++void AddSortableSpriteToDraw(uint32 image, int x, int y, int w, int h, uint32 dz, uint32 z);
+ void *AddStringToDraw(int x, int y, StringID string, uint32 params_1, uint32 params_2);
+ void AddChildSpriteScreen(uint32 image, int x, int y);
+ 

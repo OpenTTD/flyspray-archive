@@ -1,0 +1,119 @@
+From b89a924d06575e58d40836d4f057cc46ce72474e Mon Sep 17 00:00:00 2001
+From: Michael Lutz <michi@icosahedron.de>
+Date: Tue, 2 Sep 2008 22:07:32 +0200
+Subject: -Fix [FS#2263]: A train inside a wormhole could free the reservation of another train inside the wormhole.
+
+---
+ src/train_cmd.cpp  |   21 ++++++++++++---------
+ src/vehicle.cpp    |    8 +++++---
+ src/vehicle_func.h |    2 +-
+ 3 files changed, 18 insertions(+), 13 deletions(-)
+
+diff --git a/src/train_cmd.cpp b/src/train_cmd.cpp
+index 42e1d02..e66271a 100644
+--- a/src/train_cmd.cpp
++++ b/src/train_cmd.cpp
+@@ -2426,7 +2426,7 @@ static bool CheckTrainStayInDepot(Vehicle *v)
+ }
+ 
+ /** Clear the reservation of a tile that was just left by a wagon on track_dir. */
+-static void ClearPathReservation(TileIndex tile, Trackdir track_dir)
++static void ClearPathReservation(const Vehicle *v, TileIndex tile, Trackdir track_dir)
+ {
+ 	DiagDirection dir = TrackdirToExitdir(track_dir);
+ 
+@@ -2435,12 +2435,15 @@ static void ClearPathReservation(TileIndex tile, Trackdir track_dir)
+ 		if (GetTunnelBridgeDirection(tile) == ReverseDiagDir(dir)) {
+ 			TileIndex end = GetOtherTunnelBridgeEnd(tile);
+ 
+-			SetTunnelBridgeReservation(tile, false);
+-			SetTunnelBridgeReservation(end, false);
++			if (GetVehicleTunnelBridge(tile, end, v) == NULL) {
++				/* Free the reservation only if no other train is on the tiles. */
++				SetTunnelBridgeReservation(tile, false);
++				SetTunnelBridgeReservation(end, false);
+ 
+-			if (_settings_client.gui.show_track_reservation) {
+-				MarkTileDirtyByTile(tile);
+-				MarkTileDirtyByTile(end);
++				if (_settings_client.gui.show_track_reservation) {
++					MarkTileDirtyByTile(tile);
++					MarkTileDirtyByTile(end);
++				}
+ 			}
+ 		}
+ 	} else if (IsRailwayStationTile(tile)) {
+@@ -2499,7 +2502,7 @@ void FreeTrainTrackReservation(const Vehicle *v, TileIndex origin, Trackdir orig
+ 		}
+ 
+ 		/* Don't free first station/bridge/tunnel if we are on it. */
+-		if (free_tile || (!(ft.m_is_station && GetStationIndex(ft.m_new_tile) == station_id) && !ft.m_is_tunnel && !ft.m_is_bridge)) ClearPathReservation(tile, td);
++		if (free_tile || (!(ft.m_is_station && GetStationIndex(ft.m_new_tile) == station_id) && !ft.m_is_tunnel && !ft.m_is_bridge)) ClearPathReservation(v, tile, td);
+ 
+ 		free_tile = true;
+ 	}
+@@ -3404,7 +3407,7 @@ static void SetVehicleCrashed(Vehicle *v)
+ 		 * and any railway station paltform reservation. */
+ 		FreeTrainTrackReservation(v);
+ 		for (const Vehicle *u = v; u != NULL; u = u->Next()) {
+-			ClearPathReservation(u->tile, GetVehicleTrackdir(u));
++			ClearPathReservation(u, u->tile, GetVehicleTrackdir(u));
+ 			if (IsTileType(u->tile, MP_TUNNELBRIDGE)) {
+ 				/* ClearPathReservation will not free the wormhole exit
+ 				 * if the train has just entered the wormhole. */
+@@ -3705,7 +3708,7 @@ static void TrainController(Vehicle *v, Vehicle *nomove, bool update_image)
+ 					}
+ 
+ 					/* Clear any track reservation when the last vehicle leaves the tile */
+-					if (v->Next() == NULL) ClearPathReservation(v->tile, GetVehicleTrackdir(v));
++					if (v->Next() == NULL) ClearPathReservation(v, v->tile, GetVehicleTrackdir(v));
+ 
+ 					v->tile = gp.new_tile;
+ 
+diff --git a/src/vehicle.cpp b/src/vehicle.cpp
+index 870c135..1990cfc 100644
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -208,6 +208,7 @@ Vehicle *FindVehicleBetween(TileIndex from, TileIndex to, byte z, bool without_c
+ static Vehicle *GetVehicleTunnelBridgeProc(Vehicle *v, void *data)
+ {
+ 	if (v->type != VEH_TRAIN && v->type != VEH_ROAD && v->type != VEH_SHIP) return NULL;
++	if (v == (const Vehicle *)data) return NULL;
+ 
+ 	_error_message = VehicleInTheWayErrMsg(v);
+ 	return v;
+@@ -217,14 +218,15 @@ static Vehicle *GetVehicleTunnelBridgeProc(Vehicle *v, void *data)
+  * Finds vehicle in tunnel / bridge
+  * @param tile first end
+  * @param endtile second end
++ * @param ignore Ignore this vehicle when searching
+  * @return pointer to vehicle found
+  */
+-Vehicle *GetVehicleTunnelBridge(TileIndex tile, TileIndex endtile)
++Vehicle *GetVehicleTunnelBridge(TileIndex tile, TileIndex endtile, const Vehicle *ignore)
+ {
+-	Vehicle *v = (Vehicle*)VehicleFromPos(tile, NULL, &GetVehicleTunnelBridgeProc);
++	Vehicle *v = (Vehicle*)VehicleFromPos(tile, (void *)ignore, &GetVehicleTunnelBridgeProc);
+ 	if (v != NULL) return v;
+ 
+-	return (Vehicle*)VehicleFromPos(endtile, NULL, &GetVehicleTunnelBridgeProc);
++	return (Vehicle*)VehicleFromPos(endtile, (void *)ignore, &GetVehicleTunnelBridgeProc);
+ }
+ 
+ 
+diff --git a/src/vehicle_func.h b/src/vehicle_func.h
+index ce0c740..d1b2dde 100644
+--- a/src/vehicle_func.h
++++ b/src/vehicle_func.h
+@@ -51,7 +51,7 @@ uint32 VehicleEnterTile(Vehicle *v, TileIndex tile, int x, int y);
+ 
+ StringID VehicleInTheWayErrMsg(const Vehicle* v);
+ Vehicle *FindVehicleBetween(TileIndex from, TileIndex to, byte z, bool without_crashed = false);
+-Vehicle *GetVehicleTunnelBridge(TileIndex tile, TileIndex endtile);
++Vehicle *GetVehicleTunnelBridge(TileIndex tile, TileIndex endtile, const Vehicle *ignore = NULL);
+ 
+ void DecreaseVehicleValue(Vehicle *v);
+ void CheckVehicleBreakdown(Vehicle *v);
+-- 
+1.5.6.4
+

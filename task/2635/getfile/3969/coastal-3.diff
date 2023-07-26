@@ -1,0 +1,112 @@
+Index: src/town_cmd.cpp
+===================================================================
+--- src/town_cmd.cpp	(revision 15495)
++++ src/town_cmd.cpp	(working copy)
+@@ -1556,6 +1556,76 @@
+ 	return CommandCost();
+ }
+ 
++/* CircularTileSearch callback; finds the nearest land tile */
++static bool FindNearestLand(TileIndex tile, void *user_data)
++{
++  return IsTileType(tile, MP_CLEAR) && GetTileSlope(tile, NULL) != SLOPE_FLAT;
++}
++
++/* CircularTileSearch callback; finds the nearest water tile */
++static bool FindNearestWater(TileIndex tile, void *user_data)
++{
++  return IsTileType(tile, MP_WATER);
++}
++
++// tile holds the tile that was found
++// max holds the distance that tile is from the water
++// radius tells us how far to search
++struct spot_data { TileIndex tile; uint max; uint radius; };
++
++/* CircularTileSearch callback; finds the tile furthest from any
++   water. slightly bit tricky, since it has to do a search of it's own
++   in order to find the distance to the water from each square in the
++   radius.
++
++   Also, this never returns true, because it needs to take into
++   account all locations being searched before it knows which is the
++   furthest.
++ */
++static bool FindFurthestFromWater(TileIndex tile, void *user_data)
++{
++  spot_data *sp = (spot_data*)user_data;
++  TileIndex water = tile;
++  // CircularTileSearch is kinda funny; only an odd radius gives the
++  // correct result in this case, although the difference is rarely
++  // important.
++  if (CircularTileSearch(&water, sp->radius + sp->radius % 2,
++                         FindNearestWater, NULL))
++  {
++    uint dist = DistanceManhattan(tile, water);
++    if (IsTileType(tile, MP_CLEAR) &&
++        GetTileSlope(tile, NULL) == SLOPE_FLAT &&
++        dist > sp->max)
++    {
++      sp->tile = tile;
++      sp->max = dist;
++    }
++  }
++
++  return false;
++}
++
++/* given a spot on the map (presumed to be a water tile), find a good
++   coastal spot to build a city. We don't want to build too close to
++   the edge if we can help it (since that retards city growth) hence
++   the search within a search within a search. O(n*m^2), where n is
++   how far to search for land, and m is how far inland to look for a
++   flat spot. */
++static TileIndex FindNearestGoodCoastalTownSpot(TileIndex tile)
++{
++  spot_data sp = { INVALID_TILE, 0, 10 };
++
++  TileIndex coast = tile;
++  if (CircularTileSearch(&coast, 40, FindNearestLand, NULL))
++  {
++    CircularTileSearch(&coast, sp.radius, FindFurthestFromWater, &sp);
++    return sp.tile;
++  }
++
++  // if we get here, all we can do is give up and return the original tile
++  return tile;
++}
++
+ Town *CreateRandomTown(uint attempts, TownSize size, bool city, TownLayout layout)
+ {
+ 	if (!Town::CanAllocateItem()) return NULL;
+@@ -1572,6 +1642,15 @@
+ 				break;
+ 			default: break;
+ 		}
++
++        /* if we tried to place the town on water, slide it over onto
++           the nearest likely-looking spot */
++        if (IsTileType(tile, MP_WATER))
++        {
++          tile = FindNearestGoodCoastalTownSpot(tile);
++          if (tile == INVALID_TILE) continue;
++        }
++
+ 		if (DistanceFromEdge(tile) < 20) continue;
+ 
+ 		/* Make sure the tile is plain */
+@@ -1589,7 +1668,13 @@
+ 		Town *t = new Town(tile);
+ 
+ 		DoCreateTown(t, tile, townnameparts, size, city, layout);
+-		return t;
++
++        // this apparently didn't happen very often before, but it was
++        // always a possibility
++        if (t->population > 0)
++          return t;
++        else
++          delete t;
+ 	} while (--attempts != 0);
+ 
+ 	return NULL;

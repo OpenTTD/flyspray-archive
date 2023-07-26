@@ -1,0 +1,134 @@
+diff -r 3a21d5db7ac8 -r 56e7f4b4313b src/settings_gui.cpp
+--- a/src/settings_gui.cpp	Sun Nov 16 10:15:09 2008 +0100
++++ b/src/settings_gui.cpp	Sun Nov 16 10:33:00 2008 +0100
+@@ -585,8 +585,16 @@
+ 
+ static const int SETTING_HEIGHT = 11;         ///< Height of a single patch setting in the tree view
+ 
++
++/** PatchEntry flags */
++enum PatchEntryFlags {
++	PEF_LEFT_DEPRESSED  = 0x01, ///< Of a numeric patch entry, the left button is depressed
++	PEF_RIGHT_DEPRESSED = 0x02, ///< Of a numeric patch entry, the right button is depressed
++};
++
+ /** Data structure describing a single patch in a tab */
+ struct PatchEntry {
++	uint16 flags;               ///< Flags of the pach entry. @see PatchEntryFlags
+ 	const char *name;           ///< Name of the setting
+ 	const SettingDesc *setting; ///< Setting description of the patch
+ 	uint index;                 ///< Index of the setting in the settings table
+@@ -594,7 +602,9 @@
+ 	PatchEntry(const char *nm);
+ 
+ 	void Init();
+-	void Draw(GameSettings *patches_ptr, int x, int y, int state);
++	void Draw(GameSettings *patches_ptr, int x, int y);
++
++	void SetButtons(uint16 new_value);
+ private:
+ 	void DrawPatch(GameSettings *patches_ptr, const SettingDesc *sd, int x, int y, int state);
+ };
+@@ -610,7 +620,7 @@
+ /* == PatchEntry methods == */
+ 
+ /** Constructor a patch setting */
+-PatchEntry::PatchEntry(const char *nm): name(nm), setting(NULL), index(0) { }
++PatchEntry::PatchEntry(const char *nm): flags(0), name(nm), setting(NULL), index(0) { }
+ 
+ /** Initialization of a patch entry */
+ void PatchEntry::Init()
+@@ -624,12 +634,26 @@
+  * @param patches_ptr Pointer to current values of all settings
+  * @param x           Left-most position in window/panel to start drawing
+  * @param y           Upper-most position in window/panel to start drawing
+- * @param state       State of the left + right arrow buttons to draw for the setting
+  */
+-void PatchEntry::Draw(GameSettings *patches_ptr, int x, int y, int state)
++void PatchEntry::Draw(GameSettings *patches_ptr, int x, int y)
+ {
++	int state = flags & (PEF_LEFT_DEPRESSED | PEF_RIGHT_DEPRESSED);
+ 	DrawPatch(patches_ptr, setting, x, y, state);
+ }
++
++/**
++ * Set the button-depressed flags (PEF_LEFT_DEPRESSED and PEF_RIGHT_DEPRESSED) to a specified value
++ * @param new_val New value for the button flags
++ * @see PatchEntryFlags
++ */
++void PatchEntry::SetButtons(uint16 new_val)
++{
++	const int BUTTON_FLAGS = PEF_LEFT_DEPRESSED | PEF_RIGHT_DEPRESSED;
++
++	assert((new_val & ~BUTTON_FLAGS) == 0); // Should not touch any flags outside the buttons
++	flags = (flags & ~BUTTON_FLAGS) | new_val;
++}
++
+ 
+ /**
+  * Draw setting value (button + text + current value)
+@@ -849,7 +873,7 @@
+ 
+ 	int page;
+ 	int entry;
+-	int click;
++	PatchEntry *depressed_entry; ///< If non-NULL, pointer to a clicked numeric patch setting (with a depressed left or right button)
+ 
+ 	PatchesSelectionWindow(const WindowDesc *desc) : Window(desc)
+ 	{
+@@ -870,6 +894,8 @@
+ 				page->Init();
+ 			first_time = false;
+ 		}
++
++		depressed_entry = NULL; // No numeric patch setting buttons are depressed
+ 
+ 		page = 0;
+ 		this->vscroll.pos = 0;
+@@ -896,7 +922,7 @@
+ 		int x = SETTINGTREE_LEFT_OFFSET;
+ 		int y = SETTINGTREE_TOP_OFFSET;
+ 		for (uint i = vscroll.pos; i != page->num && i < vscroll.pos + vscroll.cap; i++) {
+-			page->entries[i].Draw(patches_ptr, x, y, this->click - (i * 2));
++			page->entries[i].Draw(patches_ptr, x, y);
+ 			y += SETTING_HEIGHT;
+ 		}
+ 	}
+@@ -960,7 +986,11 @@
+ 
+ 						/* Set up scroller timeout for numeric values */
+ 						if (value != oldvalue && !(sd->desc.flags & SGF_MULTISTRING)) {
+-							this->click = btn * 2 + 1 + ((x >= 10) ? 1 : 0);
++							if (depressed_entry != NULL) // If another entry has depressed buttons, release them
++								depressed_entry->SetButtons(0);
++
++							depressed_entry = &page->entries[btn];
++							depressed_entry->SetButtons((x >= 10) ? PEF_RIGHT_DEPRESSED : PEF_LEFT_DEPRESSED);
+ 							this->flags4 |= WF_TIMEOUT_BEGIN;
+ 							_left_button_clicked = false;
+ 						}
+@@ -987,6 +1017,10 @@
+ 
+ 			case PATCHSEL_INTERFACE: case PATCHSEL_CONSTRUCTION: case PATCHSEL_VEHICLES:
+ 			case PATCHSEL_STATIONS:  case PATCHSEL_ECONOMY:      case PATCHSEL_COMPETITORS:
++				if (depressed_entry != NULL) { // If at the current page an entry has depressed buttons, release them
++					depressed_entry->SetButtons(0);
++					depressed_entry = NULL;
++				}
+ 				this->RaiseWidget(this->page + PATCHSEL_INTERFACE);
+ 				this->page = widget - PATCHSEL_INTERFACE;
+ 				this->LowerWidget(this->page + PATCHSEL_INTERFACE);
+@@ -999,8 +1033,11 @@
+ 
+ 	virtual void OnTimeout()
+ 	{
+-		this->click = 0;
+-		this->SetDirty();
++		if (depressed_entry != NULL) { // On timeout, release any depressed buttons
++			depressed_entry->SetButtons(0);
++			depressed_entry = NULL;
++			this->SetDirty();
++		}
+ 	}
+ 
+ 	virtual void OnQueryTextFinished(char *str)

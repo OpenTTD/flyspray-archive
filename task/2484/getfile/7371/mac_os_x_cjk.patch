@@ -1,0 +1,493 @@
+Index: src/video/cocoa/cocoa_v.h
+===================================================================
+--- src/video/cocoa/cocoa_v.h	(revision 22139)
++++ src/video/cocoa/cocoa_v.h	(working copy)
+@@ -124,6 +124,10 @@
+ 
+ uint QZ_ListModes(OTTD_Point *modes, uint max_modes, CGDirectDisplayID display_id, int display_depth);
+ 
++void QZ_KeyEvent(unsigned short keycode, unsigned short unicode, BOOL down);
++
++void QZ_DoUnsidedModifiers(unsigned int newMods);
++
+ /** Category of NSCursor to allow cursor showing/hiding */
+ @interface NSCursor (OTTD_QuickdrawCursor)
+ + (NSCursor *) clearCocoaCursor;
+@@ -149,6 +153,7 @@
+ @interface OTTD_CocoaView : NSView {
+ 	CocoaSubdriver *driver;
+ 	NSTrackingRectTag trackingtag;
++    NSRect oldFocusedRect;
+ }
+ - (void)setDriver:(CocoaSubdriver*)drv;
+ - (void)drawRect:(NSRect)rect;
+Index: src/video/cocoa/ime.h
+===================================================================
+--- src/video/cocoa/ime.h	(revision 0)
++++ src/video/cocoa/ime.h	(revision 0)
+@@ -0,0 +1,62 @@
++/*
++ * Copyright (C) 2009 Apple Inc. All Rights Reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. ``AS IS'' AND ANY
++ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL APPLE INC. OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
++ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
++ * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
++ */
++
++#import <Cocoa/Cocoa.h>
++#include "../../stdafx.h" // for __LP64__
++#include "../../os/macosx/macos.h" // for MAC_OS_X_VERSION_*
++
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6
++@class TextInputPanel;
++#endif
++#if !__LP64__
++#define WindowClass CarbonWindowClass // conflicts with OpenTTD's WindowClass
++#import <Carbon/Carbon.h>
++#undef WindowClass
++#endif
++
++@interface IMEController : NSObject {
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6
++    TextInputPanel *_panel;
++#endif
++#if !__LP64__
++    TSMDocumentID tsmDoc;
++    EventHandlerRef unicodeKeyEventHandler;
++    NSString *inputString;
++#endif
++}
++
+++ (IMEController *)sharedIMEController;
++- (NSRect)frame;
++- (void)setFrame:(NSRect)frame inWindow:(NSWindow*)window;
++- (void)cancel;
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6
++- (NSTextInputContext *)inputContext;
++#endif
++#if !__LP64__
++- (OSStatus)unicodeKeyEvent:(EventRef)event;
++#endif
++- (BOOL)interpretKeyEvent:(NSEvent *)event string:(NSString **)string;
++
++@end
+Index: src/video/cocoa/cocoa_v.mm
+===================================================================
+--- src/video/cocoa/cocoa_v.mm	(revision 22139)
++++ src/video/cocoa/cocoa_v.mm	(working copy)
+@@ -31,6 +31,9 @@
+ #include "../../blitter/factory.hpp"
+ #include "../../fileio_func.h"
+ #include "../../gfx_func.h"
++#include "../../window_gui.h"
++#include "ime.h"
++#include "cocoa_keys.h"
+ 
+ #import <sys/param.h> /* for MAXPATHLEN */
+ 
+@@ -624,6 +627,73 @@
+ 	if (_cocoa_subdriver != NULL) UndrawMouseCursor();
+ 	_cursor.in_window = false;
+ }
++
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6
++- (NSTextInputContext *)inputContext
++{
++	IMEController *ime = [ IMEController sharedIMEController ];
++	return [ ime inputContext ];
++}
++#endif
++
++- (NSRect)focusedRect
++{
++	NSRect rect = NSZeroRect;
++	if (_focused_window == NULL) return rect;
++	if (_focused_window->window_class == WC_CONSOLE) {
++		// console has focus
++		rect.origin.x = _focused_window->left;
++		rect.origin.y = [self bounds].size.height - (_focused_window->top + _focused_window->height);
++		rect.size.width = _focused_window->width;
++		rect.size.height = _focused_window->height;
++	} else if (_focused_window->nested_focus && _focused_window->nested_focus->type == WWT_EDITBOX) {
++		// a field has focus
++		const NWidgetCore * focusField = _focused_window->nested_focus;
++		rect.origin.x = focusField->pos_x + _focused_window->left;
++		rect.origin.y = [self bounds].size.height - (_focused_window->top + focusField->pos_y + focusField->current_y);
++		rect.size.width = focusField->current_x;
++		rect.size.height = focusField->current_y;
++	}
++	
++	return rect;
++}
++
++- (void)keyDown:(NSEvent*)event
++{
++	IMEController *ime = [ IMEController sharedIMEController ];
++	NSString *chars = nil;
++	NSRect focusedRect = [self focusedRect];
++	if (!NSEqualRects(focusedRect, NSZeroRect) && !NSEqualRects(focusedRect, oldFocusedRect)) {
++		// set input panel position (only works on 10.6+)
++		NSRect inputPanelRect = [ ime frame ];
++		inputPanelRect.origin = [self convertPoint:focusedRect.origin toView:nil ];
++		inputPanelRect.origin.y -= inputPanelRect.size.height;
++		inputPanelRect.size.width = focusedRect.size.width;
++		[ ime setFrame:inputPanelRect inWindow:[ self window ] ];
++		oldFocusedRect = focusedRect;
++	}
++	
++	// interpret key
++	if (!NSEqualRects(focusedRect, NSZeroRect) && [ ime interpretKeyEvent:event string:&chars ]) {
++		// text input
++		for (uint i = 0; i < [ chars length ]; i++) {
++			/* QZ_KeyEvent with QZ_RETURN and a unicode character won't input text, but we must watch for when the return key was pressed */
++			QZ_KeyEvent([ chars isEqualToString:@"\r" ] || ([ chars length ] == 1 && [ event keyCode ] != QZ_RETURN) ? [ event keyCode ] : 0, [ chars characterAtIndex:i ], YES);
++		}
++		// allow closing the console with japanese input on <10.6
++		if ([ chars length ] == 0 && ([ event keyCode ] == QZ_BACKQUOTE || [ event keyCode ] == QZ_BACKQUOTE2)) {
++			QZ_KeyEvent([ event keyCode ], 0, YES);
++		}
++	} else {
++		// nothing special
++		chars = [ event characters ];
++		QZ_KeyEvent([ event keyCode ], [ chars length ] ? [ chars characterAtIndex:0 ] : 0, YES);
++	}
++	
++	// hide input panel if the field is no longer focused
++	if (NSEqualRects([self focusedRect], NSZeroRect)) [ ime cancel ];
++}
++
+ @end
+ 
+ 
+Index: src/video/cocoa/ime.mm
+===================================================================
+--- src/video/cocoa/ime.mm	(revision 0)
++++ src/video/cocoa/ime.mm	(revision 0)
+@@ -0,0 +1,263 @@
++/*
++ * Copyright (C) 2009 Apple Inc. All Rights Reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. ``AS IS'' AND ANY
++ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL APPLE INC. OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
++ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
++ * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
++ */
++
++#import "ime.h"
++
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6
++@interface TextInputPanel : NSPanel {
++    NSTextView *_inputTextView;
++}
++
++- (NSTextInputContext *)_inputContext;
++- (BOOL)_interpretKeyEvent:(NSEvent *)event string:(NSString **)string;
++- (void)_cancel;
++
++@end
++
++#define kInputPanelHeight 20
++#define kInputPanelWindowStyle (NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask | NSUtilityWindowMask | (1 << 9) | (1 << 10))
++
++@implementation TextInputPanel
++
++- (void)dealloc
++{
++    [[NSNotificationCenter defaultCenter] removeObserver:self];
++    [_inputTextView release];
++    [super dealloc];
++}
++
++- (id)init
++{
++    self = [super initWithContentRect:NSZeroRect styleMask:kInputPanelWindowStyle backing:NSBackingStoreBuffered defer:YES];
++    if (!self)
++        return nil;
++    
++    // Set the frame size.
++    NSRect visibleFrame = [[NSScreen mainScreen] visibleFrame];
++    NSRect frame = NSMakeRect(visibleFrame.origin.x, visibleFrame.origin.y, visibleFrame.size.width, kInputPanelHeight);
++     
++    [self setFrame:frame display:NO];
++        
++    _inputTextView = [[NSTextView alloc] initWithFrame:[self.contentView frame]];        
++    _inputTextView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable | NSViewMaxXMargin | NSViewMinXMargin | NSViewMaxYMargin | NSViewMinYMargin;
++        
++    NSScrollView* scrollView = [[NSScrollView alloc] initWithFrame:[self.contentView frame]];
++    scrollView.documentView = _inputTextView;
++    self.contentView = scrollView;
++    [scrollView release];
++        
++    [self setFloatingPanel:YES];
++    
++    [[NSNotificationCenter defaultCenter] addObserver:self
++                                             selector:@selector(_keyboardInputSourceChanged:)
++                                             /* string instead of symbol, otherwise we get a dyld: symbol not found error when launching on <10.6 */
++                                                 name:@"NSTextInputContextKeyboardSelectionDidChangeNotification"
++                                               object:nil];
++
++    return self;
++}
++
++- (void)_keyboardInputSourceChanged:(NSNotification *)notification
++{
++    [self _cancel];
++}
++
++- (BOOL)_interpretKeyEvent:(NSEvent *)event string:(NSString **)string
++{
++    BOOL hadMarkedText = [_inputTextView hasMarkedText];
++ 
++    *string = nil;
++    
++    if (![[_inputTextView inputContext] handleEvent:event])
++        return NO;
++    
++    if ([_inputTextView hasMarkedText]) {
++        // Don't show the input method window for dead keys
++        if ([[event characters] length] > 0)
++            [self orderFront:nil];
++
++        return YES;
++    }
++    
++    if (hadMarkedText) {
++        [self orderOut:nil];
++
++        NSString *text = [[_inputTextView textStorage] string];
++        if ([text length] > 0)
++            *string = [[text copy] autorelease];
++    }
++            
++    [_inputTextView setString:@""];
++    return hadMarkedText;
++}
++
++- (NSTextInputContext *)_inputContext
++{
++    return [_inputTextView inputContext];
++}
++
++- (void)_cancel
++{
++    [_inputTextView setString:@""];
++    [self orderOut:nil];
++}
++
++@end
++#endif
++
++#if !__LP64__
++extern "C" long TSMProcessRawKeyEvent(EventRef carbonEvent);
++
++OSStatus _UnicodeKeyEventHandler (EventHandlerCallRef inHandlerRef, EventRef inEvent, void *self) {
++    return [(IMEController*)self unicodeKeyEvent:inEvent];
++}
++#endif
++
++@implementation IMEController
++
+++ (IMEController *)sharedIMEController
++{
++    static IMEController *_IMEController;
++    if (!_IMEController)
++        _IMEController = [[IMEController alloc] init];
++    
++    return _IMEController;
++}
++
++- (id)init
++{
++    if (!(self = [super init])) return nil;
++
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6
++    if (MacOSVersionIsAtLeast(10, 6, 0)) {
++        _panel = [[TextInputPanel alloc] init];
++        return self;
++    }
++#endif
++
++#if !__LP64__
++    // create TSM document
++    InterfaceTypeList interfaceTypes = {kUnicodeDocumentInterfaceType};
++    OSErr err = NewTSMDocument(1, interfaceTypes, &tsmDoc, NULL);
++    if (err == noErr) {
++        UseInputWindow(tsmDoc, true);
++    }
++
++    // install input event handler
++    EventTypeSpec events[] = { { kEventClassTextInput, kEventTextInputUnicodeForKeyEvent } };
++    InstallEventHandler(GetEventDispatcherTarget(), NewEventHandlerUPP(_UnicodeKeyEventHandler), GetEventTypeCount(events), events, self, &unicodeKeyEventHandler);
++#endif
++    
++    return self;
++}
++
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6
++- (NSTextInputContext *)inputContext
++{
++    return [_panel _inputContext];
++}
++#endif
++
++#if !__LP64__
++- (OSStatus)unicodeKeyEvent:(EventRef)event 
++{
++    EventRef keyEvent = NULL;
++    OSStatus err = GetEventParameter(event, kEventParamTextInputSendKeyboardEvent, typeEventRef, NULL, sizeof(EventRef), NULL, &keyEvent);
++    if (err != noErr || keyEvent == NULL) return err;
++    
++    // got key event, now get text
++    UInt32 size;
++    err = GetEventParameter(keyEvent, kEventParamKeyUnicodes, typeUnicodeText, NULL, 0, &size, NULL);
++    if (err != noErr) return err;
++    NSMutableData *data = [NSMutableData dataWithLength:size];
++    err = GetEventParameter(keyEvent, kEventParamKeyUnicodes, typeUnicodeText, NULL, size, NULL, [data mutableBytes]);
++    if (err != noErr) return err;
++    [inputString release];
++    inputString = [[NSString alloc] initWithCharacters:(const unichar*)[data mutableBytes] length:size/sizeof(UniChar)];
++    return noErr;
++}
++#endif
++
++- (BOOL)interpretKeyEvent:(NSEvent *)event string:(NSString **)string
++{
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6
++    if (MacOSVersionIsAtLeast(10, 6, 0)) {
++        return [_panel _interpretKeyEvent:event string:string];
++    }
++#endif
++#if !__LP64__
++    ActivateTSMDocument(tsmDoc);
++    // TSMProcessRawKeyEvent will call the event handler we installed earlier, which will unicodeKeyEvent: and create inputString
++    TSMProcessRawKeyEvent((EventRef)[event _eventRef]); // what does this function return?
++    *string = [inputString autorelease];
++    inputString = nil;
++    return YES;
++#endif
++    NSText *fieldEditor = [[event window] fieldEditor:YES forObject:nil];
++    [fieldEditor setString:@""];
++    [fieldEditor interpretKeyEvents: [NSArray arrayWithObject:event]];
++    *string = [ event characters ];
++    return YES;
++}
++
++- (NSRect)frame
++{
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6
++    if (MacOSVersionIsAtLeast(10, 6, 0)) {
++        return [_panel frame];
++    }
++#endif
++    return NSZeroRect;
++}
++
++- (void)setFrame:(NSRect)frame inWindow:(NSWindow*)window
++{
++    frame.origin = [window convertBaseToScreen:frame.origin];
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6
++    if (MacOSVersionIsAtLeast(10, 6, 0)) {
++        [_panel setFrame:frame display:YES];
++        return;
++    }
++#endif
++#if !__LP64__
++    FixTSMDocument(tsmDoc);
++#endif
++}
++
++- (void)cancel
++{
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6
++    if (MacOSVersionIsAtLeast(10, 6, 0)) {
++        [_panel _cancel];
++        return;
++    }
++#endif
++#if !__LP64__
++    FixTSMDocument(tsmDoc);
++#endif
++}
++@end
++
++
+Index: src/video/cocoa/event.mm
+===================================================================
+--- src/video/cocoa/event.mm	(revision 22139)
++++ src/video/cocoa/event.mm	(working copy)
+@@ -253,7 +253,7 @@
+ 	return key << 16;
+ }
+ 
+-static void QZ_KeyEvent(unsigned short keycode, unsigned short unicode, BOOL down)
++void QZ_KeyEvent(unsigned short keycode, unsigned short unicode, BOOL down)
+ {
+ 	switch (keycode) {
+ 		case QZ_UP:    SB(_dirkeys, 1, 1, down); break;
+@@ -280,7 +280,7 @@
+ 	}
+ }
+ 
+-static void QZ_DoUnsidedModifiers(unsigned int newMods)
++void QZ_DoUnsidedModifiers(unsigned int newMods)
+ {
+ 	const int mapping[] = { QZ_CAPSLOCK, QZ_LSHIFT, QZ_LCTRL, QZ_LALT, QZ_LMETA };
+ 
+@@ -488,6 +488,12 @@
+ #endif
+ 
+ 		case NSKeyDown:
++			if (!_fullscreen) {
++				/* handle event in the view, to support complex input */
++				[ NSApp sendEvent:event ];
++				break;
++			}
++
+ 			/* Quit, hide and minimize */
+ 			switch ([ event keyCode ]) {
+ 				case QZ_q:
+Index: source.list
+===================================================================
+--- source.list	(revision 22139)
++++ source.list	(working copy)
+@@ -961,6 +961,7 @@
+ 	#end
+ 
+ 	#if COCOA
++		video/cocoa/ime.mm
+ 		video/cocoa/cocoa_v.mm
+ 		video/cocoa/event.mm
+ 		video/cocoa/fullscreen.mm

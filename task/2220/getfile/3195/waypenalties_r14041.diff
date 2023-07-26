@@ -1,0 +1,305 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 14041)
++++ src/settings.cpp	(working copy)
+@@ -1644,6 +1644,7 @@
+ 	SDT_CONDBOOL(GameSettings, order.timetabling,                               67, SL_MAX_VERSION, 0, 0,  true,                    STR_CONFIG_PATCHES_TIMETABLE_ALLOW,        NULL),
+ 	 SDT_CONDVAR(GameSettings, vehicle.plane_speed,                  SLE_UINT8, 90, SL_MAX_VERSION, 0, 0,     4,     1,       4, 0, STR_CONFIG_PATCHES_PLANE_SPEED,            NULL),
+ 	SDT_CONDBOOL(GameSettings, vehicle.dynamic_engines,                         95, SL_MAX_VERSION, 0,NN, false,                    STR_CONFIG_PATCHES_DYNAMIC_ENGINES,        NULL),
++	SDT_CONDBOOL(GameSettings, vehicle.custom_waypoint_penalties,              101, SL_MAX_VERSION, 0,NN,  true,                    STR_CONFIG_PATCHES_CUSTOM_WAYPOINT_PENALTY,NULL),
+ 
+ 	    SDT_BOOL(GameSettings, station.join_stations,                                               0, 0,  true,                    STR_CONFIG_PATCHES_JOINSTATIONS,           NULL),
+  SDTC_CONDBOOL(              gui.sg_full_load_any,                             0,             92, 0, 0 , true,                    STR_NULL,                                  NULL),
+@@ -1743,6 +1744,7 @@
+ 	 SDT_CONDVAR(GameSettings, pf.yapf.road_curve_penalty,                     SLE_UINT, 33, SL_MAX_VERSION, 0, 0,     1 * YAPF_TILE_LENGTH,  0, 1000000, 0, STR_NULL,         NULL),
+ 	 SDT_CONDVAR(GameSettings, pf.yapf.road_crossing_penalty,                  SLE_UINT, 33, SL_MAX_VERSION, 0, 0,     3 * YAPF_TILE_LENGTH,  0, 1000000, 0, STR_NULL,         NULL),
+ 	 SDT_CONDVAR(GameSettings, pf.yapf.road_stop_penalty,                      SLE_UINT, 47, SL_MAX_VERSION, 0, 0,     8 * YAPF_TILE_LENGTH,  0, 1000000, 0, STR_NULL,         NULL),
++	 SDT_CONDVAR(GameSettings, pf.yapf.default_waypoint_penalty,               SLE_UINT,101, SL_MAX_VERSION, 0, 0,     0 * YAPF_TILE_LENGTH,  0,   20000, 0, STR_NULL,         NULL),
+ 
+ 	 SDT_CONDVAR(GameSettings, game_creation.land_generator,                  SLE_UINT8, 30, SL_MAX_VERSION, 0,MS,     1,                     0,       1, 0, STR_CONFIG_PATCHES_LAND_GENERATOR,        NULL),
+ 	 SDT_CONDVAR(GameSettings, game_creation.oil_refinery_limit,              SLE_UINT8, 30, SL_MAX_VERSION, 0, 0,    32,                    12,      48, 0, STR_CONFIG_PATCHES_OIL_REF_EDGE_DISTANCE, NULL),
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 14041)
++++ src/lang/english.txt	(working copy)
+@@ -1061,6 +1061,7 @@
+ STR_CONFIG_PATCHES_STOP_ON_TOWN_ROAD                            :{LTBLUE}Allow drive-through road stops on town owned roads: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_ADJACENT_STATIONS                            :{LTBLUE}Allow building adjacent stations: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_DYNAMIC_ENGINES                              :{LTBLUE}Enable multiple NewGRF engine sets: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_CUSTOM_WAYPOINT_PENALTY                      :{LTBLUE}Enable user-configurable waypoint pathfinder penalties: {ORANGE}{STRING}
+ 
+ STR_CONFIG_PATCHES_SMALL_AIRPORTS                               :{LTBLUE}Always allow small airports: {ORANGE}{STRING1}
+ 
+@@ -1270,8 +1271,11 @@
+ STR_WAYPOINT_VIEWPORT_TINY                                      :{TINYFONT}{WHITE}{WAYPOINT}
+ STR_WAYPOINT_RAW                                                :{WAYPOINT}
+ STR_EDIT_WAYPOINT_NAME                                          :{WHITE}Edit waypoint name
++STR_WAYPOINT_PENALTY                                            :{NUM}
++STR_EDIT_WAYPOINT_PENALTY                                       :{WHITE}Edit waypoint pathfinder penalty
+ 
+ STR_CANT_CHANGE_WAYPOINT_NAME                                   :{WHITE}Can't change waypoint name...
++STR_CANT_CHANGE_WAYPOINT_PENALTY                                :{WHITE}Can't change waypoint penalty...
+ STR_CONVERT_RAIL_TO_WAYPOINT_TIP                                :{BLACK}Convert rail to waypoint
+ STR_CANT_BUILD_TRAIN_WAYPOINT                                   :{WHITE}Can't build train waypoint here...
+ STR_CANT_REMOVE_TRAIN_WAYPOINT                                  :{WHITE}Can't remove train waypoint here...
+Index: src/settings_gui.cpp
+===================================================================
+--- src/settings_gui.cpp	(revision 14041)
++++ src/settings_gui.cpp	(working copy)
+@@ -706,6 +706,7 @@
+ 	"vehicle.plane_speed",
+ 	"order.timetabling",
+ 	"vehicle.dynamic_engines",
++	"vehicle.custom_waypoint_penalties",
+ };
+ 
+ struct PatchEntry {
+Index: src/npf.cpp
+===================================================================
+--- src/npf.cpp	(revision 14041)
++++ src/npf.cpp	(working copy)
+@@ -19,6 +19,7 @@
+ #include "tunnel_map.h"
+ #include "network/network.h"
+ #include "water_map.h"
++#include "waypoint.h"
+ #include "tunnelbridge_map.h"
+ #include "functions.h"
+ #include "vehicle_base.h"
+@@ -349,6 +350,7 @@
+ 
+ 		case MP_RAILWAY:
+ 			cost = _trackdir_length[trackdir]; /* Should be different for diagonal tracks */
++			if (IsRailWaypoint(tile)) cost += GetWaypointByTile(tile)->GetPenalty();
+ 			break;
+ 
+ 		case MP_ROAD: /* Railway crossing */
+Index: src/saveload.cpp
+===================================================================
+--- src/saveload.cpp	(revision 14041)
++++ src/saveload.cpp	(working copy)
+@@ -36,7 +36,7 @@
+ 
+ #include "table/strings.h"
+ 
+-extern const uint16 SAVEGAME_VERSION = 100;
++extern const uint16 SAVEGAME_VERSION = 101;
+ 
+ SavegameType _savegame_type; ///< type of savegame we are loading
+ 
+Index: src/waypoint.cpp
+===================================================================
+--- src/waypoint.cpp	(revision 14041)
++++ src/waypoint.cpp	(working copy)
+@@ -412,6 +412,37 @@
+ }
+ 
+ /**
++ * change a waypoint penalty.
++ * @param tile unused
++ * @param flags type of operation
++ * @param p1 id of waypoint
++ * @param p2 new penalty
++ * @return cost of operation or error
++ */
++CommandCost CmdChangeWaypointPenalty(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++{
++	Waypoint *wp;
++	
++	if (!_settings_game.vehicle.custom_waypoint_penalties) return CMD_ERROR;
++
++	if (!IsValidWaypointID(p1)) return CMD_ERROR;
++
++	wp = GetWaypoint(p1);
++	if (!CheckTileOwnership(wp->xy)) return CMD_ERROR;
++	
++	if ( _settings_game.pf.pathfinder_for_trains < VPF_NPF) return CMD_ERROR;
++	
++	if (p2 > 20000) return CMD_ERROR;
++	
++	if (flags & DC_EXEC) {
++		wp->has_penalty = true;
++		wp->penalty = p2;
++	}
++	
++	return CommandCost();
++}
++
++/**
+  * This hacks together some dummy one-shot Station structure for a waypoint.
+  * @param tile on which to work
+  * @return pointer to a Station
+@@ -452,6 +483,7 @@
+ Waypoint::Waypoint(TileIndex tile)
+ {
+ 	this->xy = tile;
++	this->penalty = _settings_game.pf.yapf.default_waypoint_penalty;
+ }
+ 
+ Waypoint::~Waypoint()
+@@ -466,6 +498,7 @@
+ 	this->xy = 0;
+ }
+ 
++
+ /**
+  * Fix savegames which stored waypoints in their old format
+  */
+@@ -499,13 +532,15 @@
+ 	SLE_CONDVAR(Waypoint, string,     SLE_STRINGID,                0, 83),
+ 	SLE_CONDSTR(Waypoint, name,       SLE_STR, 0,                 84, SL_MAX_VERSION),
+ 	    SLE_VAR(Waypoint, deleted,    SLE_UINT8),
++	SLE_CONDVAR(Waypoint, penalty,    SLE_UINT32,                101, SL_MAX_VERSION),
++	SLE_CONDVAR(Waypoint, has_penalty,SLE_BOOL,                  101, SL_MAX_VERSION),
+ 
+ 	SLE_CONDVAR(Waypoint, build_date, SLE_FILE_U16 | SLE_VAR_I32,  3, 30),
+ 	SLE_CONDVAR(Waypoint, build_date, SLE_INT32,                  31, SL_MAX_VERSION),
+ 	SLE_CONDVAR(Waypoint, localidx,   SLE_UINT8,                   3, SL_MAX_VERSION),
+ 	SLE_CONDVAR(Waypoint, grfid,      SLE_UINT32,                 17, SL_MAX_VERSION),
+ 
+-	SLE_END()
++	 SLE_END()
+ };
+ 
+ static void Save_WAYP()
+Index: src/waypoint.h
+===================================================================
+--- src/waypoint.h	(revision 14041)
++++ src/waypoint.h	(working copy)
+@@ -12,6 +12,7 @@
+ #include "station_type.h"
+ #include "town_type.h"
+ #include "viewport_type.h"
++#include "settings_type.h"
+ 
+ DECLARE_OLD_POOL(Waypoint, Waypoint, 3, 8000)
+ 
+@@ -22,6 +23,9 @@
+ 	uint16 town_cn;    ///< The Nth waypoint for this town (consecutive number)
+ 	StringID string;   ///< C000-C03F have special meaning in old games
+ 	char *name;        ///< Custom name. If not set, town + town_cn is used for naming
++	
++	uint32 penalty;    ///< the penalty set up by the user
++	bool has_penalty;  ///< if the user set up a penalty or to use the default
+ 
+ 	ViewportSign sign; ///< Dimensions of sign (not saved)
+ 	Date build_date;   ///< Date of construction
+@@ -34,6 +38,8 @@
+ 
+ 	Waypoint(TileIndex tile = 0);
+ 	~Waypoint();
++	
++	inline uint32 Waypoint::GetPenalty() const { return(_settings_game.vehicle.custom_waypoint_penalties && this->has_penalty ? this->penalty : _settings_game.pf.yapf.default_waypoint_penalty); }
+ 
+ 	inline bool IsValid() const { return this->xy != 0; }
+ };
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revision 14041)
++++ src/command.cpp	(working copy)
+@@ -198,6 +198,7 @@
+ DEF_COMMAND(CmdChangeTimetable);
+ DEF_COMMAND(CmdSetVehicleOnTime);
+ DEF_COMMAND(CmdAutofillTimetable);
++DEF_COMMAND(CmdChangeWaypointPenalty);
+ #undef DEF_COMMAND
+ 
+ /**
+@@ -346,6 +347,7 @@
+ 	{CmdChangeTimetable,                     0}, /* CMD_CHANGE_TIMETABLE */
+ 	{CmdSetVehicleOnTime,                    0}, /* CMD_SET_VEHICLE_ON_TIME */
+ 	{CmdAutofillTimetable,                   0}, /* CMD_AUTOFILL_TIMETABLE */
++	{CmdChangeWaypointPenalty,               0}, /* CMD_CHANGE_WAYPOINT_PENALTY */
+ };
+ 
+ /*!
+Index: src/settings_type.h
+===================================================================
+--- src/settings_type.h	(revision 14041)
++++ src/settings_type.h	(working copy)
+@@ -205,6 +205,7 @@
+ 	uint32 road_curve_penalty;               ///< penalty for curves
+ 	uint32 road_crossing_penalty;            ///< penalty for level crossing
+ 	uint32 road_stop_penalty;                ///< penalty for going through a drive-through road stop
++	uint32 default_waypoint_penalty;         ///< default penalty for going through a waypoint
+ 	bool   rail_firstred_twoway_eol;         ///< treat first red two-way signal as dead end
+ 	uint32 rail_firstred_penalty;            ///< penalty for first red signal
+ 	uint32 rail_firstred_exit_penalty;       ///< penalty for first red exit signal
+@@ -285,6 +286,7 @@
+ 	bool   never_expire_vehicles;            ///< never expire vehicles
+ 	byte   extend_vehicle_life;              ///< extend vehicle life by this many years
+ 	byte   road_side;                        ///< the side of the road vehicles drive on
++	bool   custom_waypoint_penalties;        ///< enable user-configurable waypoint penalties 
+ };
+ 
+ /** Settings related to the economy. */
+Index: src/command_type.h
+===================================================================
+--- src/command_type.h	(revision 14041)
++++ src/command_type.h	(working copy)
+@@ -278,6 +278,7 @@
+ 	CMD_CHANGE_TIMETABLE,             ///< change the timetable for a vehicle
+ 	CMD_SET_VEHICLE_ON_TIME,          ///< set the vehicle on time feature (timetable)
+ 	CMD_AUTOFILL_TIMETABLE,           ///< autofill the timetable
++	CMD_CHANGE_WAYPOINT_PENALTY,      ///< change waypoint penalty
+ };
+ 
+ /**
+Index: src/yapf/yapf_costrail.hpp
+===================================================================
+--- src/yapf/yapf_costrail.hpp	(revision 14041)
++++ src/yapf/yapf_costrail.hpp	(working copy)
+@@ -6,6 +6,7 @@
+ #define  YAPF_COSTRAIL_HPP
+ 
+ #include "../pbs.h"
++#include "../waypoint.h"
+ 
+ template <class Types>
+ class CYapfCostRailT
+@@ -128,6 +129,10 @@
+ 					if (IsLevelCrossing(tile))
+ 						cost += Yapf().PfGetSettings().rail_crossing_penalty;
+ 					break;
++					
++					case MP_RAILWAY:
++						if (IsRailWaypoint(tile)) cost += GetWaypointByTile(tile)->GetPenalty();
++					break;
+ 
+ 				default:
+ 					break;
+Index: src/main_gui.cpp
+===================================================================
+--- src/main_gui.cpp	(revision 14041)
++++ src/main_gui.cpp	(working copy)
+@@ -81,6 +81,10 @@
+ 		DoCommandP(0, money_c, id, CcGiveMoney, CMD_GIVE_MONEY | CMD_MSG(STR_INSUFFICIENT_FUNDS));
+ 	} break;
+ #endif /* ENABLE_NETWORK */
++	case 4: { // change waypoint penalty
++		uint32 penalty = Clamp(atoi(str), 0, 20000);
++		DoCommandP(0, id, penalty, NULL, CMD_CHANGE_WAYPOINT_PENALTY | CMD_MSG(STR_CANT_CHANGE_WAYPOINT_PENALTY));
++	} break;
+ 		default: NOT_REACHED();
+ 	}
+ 
+@@ -143,9 +147,16 @@
+ 	}
+ 
+ 	_rename_id = id;
+-	_rename_what = 1;
+-	SetDParam(0, id);
+-	ShowQueryString(STR_WAYPOINT_RAW, STR_EDIT_WAYPOINT_NAME, 30, 180, NULL, CS_ALPHANUMERAL);
++	if (_ctrl_pressed && _settings_game.pf.pathfinder_for_trains > VPF_NTP && _settings_game.vehicle.custom_waypoint_penalties) {
++		_rename_what = 4;
++		SetDParam(0, wp->penalty);
++		ShowQueryString(STR_WAYPOINT_PENALTY, STR_EDIT_WAYPOINT_PENALTY, 6, 180, NULL, CS_NUMERAL);
++	}
++	else {
++		_rename_what = 1;
++		SetDParam(0, id);
++		ShowQueryString(STR_WAYPOINT_RAW, STR_EDIT_WAYPOINT_NAME, 30, 180, NULL, CS_ALPHANUMERAL);
++	}
+ }
+ 
+ 

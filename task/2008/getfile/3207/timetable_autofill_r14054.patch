@@ -1,0 +1,268 @@
+Index: src/command.cpp
+===================================================================
+--- src/command.cpp	(revision 14054)
++++ src/command.cpp	(working copy)
+@@ -198,6 +198,7 @@
+ DEF_COMMAND(CmdChangeTimetable);
+ DEF_COMMAND(CmdSetVehicleOnTime);
+ DEF_COMMAND(CmdAutofillTimetable);
++DEF_COMMAND(CmdClearTimetable);
+ #undef DEF_COMMAND
+ 
+ /**
+@@ -346,6 +347,7 @@
+ 	{CmdChangeTimetable,                     0}, /* CMD_CHANGE_TIMETABLE */
+ 	{CmdSetVehicleOnTime,                    0}, /* CMD_SET_VEHICLE_ON_TIME */
+ 	{CmdAutofillTimetable,                   0}, /* CMD_AUTOFILL_TIMETABLE */
++	{CmdClearTimetable,                      0}, /* CMD_CLEAR_TIMETABLE */	
+ };
+ 
+ /*!
+Index: src/command_type.h
+===================================================================
+--- src/command_type.h	(revision 14054)
++++ src/command_type.h	(working copy)
+@@ -278,6 +278,7 @@
+ 	CMD_CHANGE_TIMETABLE,             ///< change the timetable for a vehicle
+ 	CMD_SET_VEHICLE_ON_TIME,          ///< set the vehicle on time feature (timetable)
+ 	CMD_AUTOFILL_TIMETABLE,           ///< autofill the timetable
++	CMD_CLEAR_TIMETABLE,              ///< clear the timetable
+ };
+ 
+ /**
+Index: src/lang/english.txt
+===================================================================
+--- src/lang/english.txt	(revision 14054)
++++ src/lang/english.txt	(working copy)
+@@ -2879,6 +2879,7 @@
+ STR_TIMETABLE_WAIT_TIME_TOOLTIP                                 :{BLACK}Change the amount of time that the highlighted order should take
+ STR_TIMETABLE_CLEAR_TIME_TOOLTIP                                :{BLACK}Clear the amount of time for the highlighted order
+ STR_TIMETABLE_RESET_LATENESS_TOOLTIP                            :{BLACK}Reset the lateness counter, so the vehicle will be on time
++STR_TIMETABLE_CLEAR_TIMETABLE_TOOLTIP                           :{BLACK}Clear the entire timetable
+ STR_SERVICE_HINT                                                :{BLACK}Skip this order unless a service is needed
+ STR_VEHICLE_INFO_COST_WEIGHT_SPEED_POWER                        :{BLACK}Cost: {CURRENCY} Weight: {WEIGHT_S}{}Speed: {VELOCITY}  Power: {POWER}{}Running Cost: {CURRENCY}/yr{}Capacity: {CARGO}
+ STR_885C_BROKEN_DOWN                                            :{RED}Broken down
+@@ -2900,6 +2901,7 @@
+ STR_886B_CAN_T_RENAME_TRAIN_VEHICLE                             :{WHITE}Can't rename train vehicle type...
+ STR_CLEAR_TIME                                                  :{BLACK}Clear Time
+ STR_RESET_LATENESS                                              :{BLACK}Reset Late Counter
++STR_CLEAR_TIMETABLE                                             :{BLACK}Clear Timetable
+ 
+ STR_TRAIN_STOPPING                                              :{RED}Stopping
+ STR_TRAIN_STOPPING_VEL                                          :{RED}Stopping, {VELOCITY}
+Index: src/order_gui.cpp
+===================================================================
+--- src/order_gui.cpp	(revision 14054)
++++ src/order_gui.cpp	(working copy)
+@@ -1195,6 +1195,7 @@
+ 
+ 	DeleteWindowById(WC_VEHICLE_ORDERS, veh);
+ 	DeleteWindowById(WC_VEHICLE_DETAILS, veh);
++	DeleteWindowById(WC_VEHICLE_TIMETABLE, veh);
+ 
+ 	if (v->owner != _local_player) {
+ 		new OrdersWindow(&_other_orders_desc, v);
+Index: src/timetable_cmd.cpp
+===================================================================
+--- src/timetable_cmd.cpp	(revision 14054)
++++ src/timetable_cmd.cpp	(working copy)
+@@ -148,18 +148,8 @@
+ 
+ 	if (flags & DC_EXEC) {
+ 		if (p2 == 1) {
+-			/* Start autofilling the timetable, which clears all the current
+-			 * timings and clears the "timetable has started" bit. */
++			/* Start autofilling the timetable */
+ 			SetBit(v->vehicle_flags, VF_AUTOFILL_TIMETABLE);
+-			ClrBit(v->vehicle_flags, VF_TIMETABLE_STARTED);
+-
+-			for (Order *order = GetVehicleOrder(v, 0); order != NULL; order = order->next) {
+-				order->wait_time = 0;
+-				order->travel_time = 0;
+-			}
+-
+-			v->current_order.wait_time = 0;
+-			v->current_order.travel_time = 0;
+ 		} else {
+ 			ClrBit(v->vehicle_flags, VF_AUTOFILL_TIMETABLE);
+ 		}
+@@ -172,6 +162,44 @@
+ 	return CommandCost();
+ }
+ 
++
++/**
++ * Clear the vehicle's timetable.
++ * @param tile Not used.
++ * @param flags Operation to perform.
++ * @param p1 Vehicle index.
++ * @param p2 Not used.
++ */
++CommandCost CmdClearTimetable(TileIndex tile, uint32 flags, uint32 p1, uint32 p2)
++{
++	if (!_settings_game.order.timetabling) return CMD_ERROR;
++
++	VehicleID veh = GB(p1, 0, 16);
++	if (!IsValidVehicleID(veh)) return CMD_ERROR;
++
++	Vehicle *v = GetVehicle(veh);
++	if (!CheckOwnership(v->owner)) return CMD_ERROR;
++
++	if (flags & DC_EXEC) {
++		/* Reset the timetable, and clear the "timetable has started" bit. */
++		ClrBit(v->vehicle_flags, VF_TIMETABLE_STARTED);
++		for (Order *order = GetVehicleOrder(v, 0); order != NULL; order = order->next) {
++			order->wait_time = 0;
++			order->travel_time = 0;
++		}
++
++		v->current_order.wait_time = 0;
++		v->current_order.travel_time = 0;
++	}
++
++	for (v = GetFirstVehicleFromSharedList(v); v != NULL; v = v->next_shared) {
++		InvalidateWindow(WC_VEHICLE_TIMETABLE, v->index);
++	}
++
++	return CommandCost();
++}
++
++
+ void UpdateVehicleTimetable(Vehicle *v, bool travelling)
+ {
+ 	uint timetabled = travelling ? v->current_order.travel_time : v->current_order.wait_time;
+@@ -188,8 +216,6 @@
+ 		return;
+ 	}
+ 
+-	if (!HasBit(v->vehicle_flags, VF_TIMETABLE_STARTED)) return;
+-
+ 	if (HasBit(v->vehicle_flags, VF_AUTOFILL_TIMETABLE)) {
+ 		if (timetabled == 0) {
+ 			/* Round the time taken up to the nearest day, as this will avoid
+@@ -201,10 +227,6 @@
+ 				ChangeTimetable(v, v->cur_order_index, time_taken, travelling);
+ 			}
+ 			return;
+-		} else if (v->cur_order_index == 0) {
+-			/* Otherwise if we're at the beginning and it already has a value,
+-			 * assume that autofill is finished and turn it off again. */
+-			ClrBit(v->vehicle_flags, VF_AUTOFILL_TIMETABLE);
+ 		}
+ 	}
+ 
+Index: src/timetable_gui.cpp
+===================================================================
+--- src/timetable_gui.cpp	(revision 14054)
++++ src/timetable_gui.cpp	(working copy)
+@@ -8,6 +8,7 @@
+ #include "command_func.h"
+ #include "gui.h"
+ #include "window_gui.h"
++#include "window_func.h"
+ #include "textbuf_gui.h"
+ #include "cargotype.h"
+ #include "strings_func.h"
+@@ -24,7 +25,6 @@
+ 	TTV_WIDGET_CLOSEBOX = 0,
+ 	TTV_CAPTION,
+ 	TTV_ORDER_VIEW,
+-	TTV_STICKY,
+ 	TTV_TIMETABLE_PANEL,
+ 	TTV_SCROLLBAR,
+ 	TTV_SUMMARY_PANEL,
+@@ -32,6 +32,7 @@
+ 	TTV_CLEAR_TIME,
+ 	TTV_RESET_LATENESS,
+ 	TTV_AUTOFILL,
++	TTV_CLEAR_TIMETABLE,
+ 	TTV_EMPTY,
+ 	TTV_RESIZE,
+ };
+@@ -99,11 +100,13 @@
+ 
+ 			this->EnableWidget(TTV_RESET_LATENESS);
+ 			this->EnableWidget(TTV_AUTOFILL);
++			this->EnableWidget(TTV_CLEAR_TIMETABLE);
+ 		} else {
+ 			this->DisableWidget(TTV_CHANGE_TIME);
+ 			this->DisableWidget(TTV_CLEAR_TIME);
+ 			this->DisableWidget(TTV_RESET_LATENESS);
+ 			this->DisableWidget(TTV_AUTOFILL);
++			this->DisableWidget(TTV_CLEAR_TIMETABLE);
+ 		}
+ 
+ 		this->SetWidgetLoweredState(TTV_AUTOFILL, HasBit(v->vehicle_flags, VF_AUTOFILL_TIMETABLE));
+@@ -234,7 +237,7 @@
+ 				ShowQueryString(current, STR_TIMETABLE_CHANGE_TIME, 31, 150, this, CS_NUMERAL);
+ 			} break;
+ 
+-			case TTV_CLEAR_TIME: { /* Clear waiting time button. */
++			case TTV_CLEAR_TIME: { /* Clear order time button. */
+ 				uint32 p1 = PackTimetableArgs(v, this->sel_index);
+ 				DoCommandP(0, p1, 0, NULL, CMD_CHANGE_TIMETABLE | CMD_MSG(STR_CAN_T_TIMETABLE_VEHICLE));
+ 			} break;
+@@ -246,6 +249,10 @@
+ 			case TTV_AUTOFILL: /* Autofill the timetable. */
+ 				DoCommandP(0, v->index, HasBit(v->vehicle_flags, VF_AUTOFILL_TIMETABLE) ? 0 : 1, NULL, CMD_AUTOFILL_TIMETABLE | CMD_MSG(STR_CAN_T_TIMETABLE_VEHICLE));
+ 				break;
++
++			case TTV_CLEAR_TIMETABLE: /* Clear timetable time button. */
++				DoCommandP(0, v->index, 0, NULL, CMD_CLEAR_TIMETABLE | CMD_MSG(STR_CAN_T_TIMETABLE_VEHICLE));
++			break;
+ 		}
+ 
+ 		this->SetDirty();
+@@ -277,18 +284,18 @@
+ static const Widget _timetable_widgets[] = {
+ 	{   WWT_CLOSEBOX,   RESIZE_NONE,   COLOUR_GREY,     0,    10,     0,    13, STR_00C5,                   STR_018B_CLOSE_WINDOW},                // TTV_WIDGET_CLOSEBOX
+ 	{    WWT_CAPTION,   RESIZE_RIGHT,  COLOUR_GREY,    11,   326,     0,    13, STR_TIMETABLE_TITLE,        STR_018C_WINDOW_TITLE_DRAG_THIS},      // TTV_CAPTION
+-	{ WWT_PUSHTXTBTN,   RESIZE_LR,     COLOUR_GREY,   327,   387,     0,    13, STR_ORDER_VIEW,             STR_ORDER_VIEW_TOOLTIP},               // TTV_ORDER_VIEW
+-	{  WWT_STICKYBOX,   RESIZE_LR,     COLOUR_GREY,   388,   399,     0,    13, STR_NULL,                   STR_STICKY_BUTTON},                    // TTV_STICKY
++	{ WWT_PUSHTXTBTN,   RESIZE_LR,     COLOUR_GREY,   327,   399,     0,    13, STR_ORDER_VIEW,             STR_ORDER_VIEW_TOOLTIP},               // TTV_ORDER_VIEW
+ 
+ 	{      WWT_PANEL,   RESIZE_RB,     COLOUR_GREY,     0,   387,    14,    95, STR_NULL,                   STR_TIMETABLE_TOOLTIP},                // TTV_TIMETABLE_PANEL
+ 	{  WWT_SCROLLBAR,   RESIZE_LRB,    COLOUR_GREY,   388,   399,    14,    95, STR_NULL,                   STR_0190_SCROLL_BAR_SCROLLS_LIST},     // TTV_SCROLLBAR
+ 
+ 	{      WWT_PANEL,   RESIZE_RTB,    COLOUR_GREY,     0,   399,    96,   117, STR_NULL,                   STR_NULL},                             // TTV_SUMMARY_PANEL
+ 
+-	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,     0,   109,   118,   129, STR_TIMETABLE_CHANGE_TIME,  STR_TIMETABLE_WAIT_TIME_TOOLTIP},      // TTV_CHANGE_TIME
+-	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,   110,   219,   118,   129, STR_CLEAR_TIME,             STR_TIMETABLE_CLEAR_TIME_TOOLTIP},     // TTV_CLEAR_TIME
+-	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,   220,   337,   118,   129, STR_RESET_LATENESS,         STR_TIMETABLE_RESET_LATENESS_TOOLTIP}, // TTV_RESET_LATENESS
+-	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,   338,   387,   118,   129, STR_TIMETABLE_AUTOFILL,     STR_TIMETABLE_AUTOFILL_TOOLTIP},       // TTV_AUTOFILL
++	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,     0,    77,   118,   129, STR_TIMETABLE_CHANGE_TIME,  STR_TIMETABLE_WAIT_TIME_TOOLTIP},      // TTV_CHANGE_TIME
++	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,    78,   144,   118,   129, STR_CLEAR_TIME,             STR_TIMETABLE_CLEAR_TIME_TOOLTIP},     // TTV_CLEAR_TIME
++	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,   145,   232,   118,   129, STR_RESET_LATENESS,         STR_TIMETABLE_RESET_LATENESS_TOOLTIP}, // TTV_RESET_LATENESS
++	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,   233,   309,   118,   129, STR_TIMETABLE_AUTOFILL,     STR_TIMETABLE_AUTOFILL_TOOLTIP},       // TTV_AUTOFILL
++	{ WWT_PUSHTXTBTN,   RESIZE_TB,     COLOUR_GREY,   310,   387,   118,   129, STR_CLEAR_TIMETABLE,        STR_TIMETABLE_CLEAR_TIMETABLE_TOOLTIP},// TTV_CLEAR_TIMETABLE
+ 
+ 	{      WWT_PANEL,   RESIZE_RTB,    COLOUR_GREY,   388,   387,   118,   129, STR_NULL,                   STR_NULL},                             // TTV_EMPTY
+ 	{  WWT_RESIZEBOX,   RESIZE_LRTB,   COLOUR_GREY,   388,   399,   118,   129, STR_NULL,                   STR_RESIZE_BUTTON},                    // TTV_RESIZE
+@@ -299,11 +306,14 @@
+ static const WindowDesc _timetable_desc = {
+ 	WDP_AUTO, WDP_AUTO, 400, 130, 400, 130,
+ 	WC_VEHICLE_TIMETABLE, WC_VEHICLE_VIEW,
+-	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON | WDF_RESIZABLE,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_RESIZABLE,
+ 	_timetable_widgets,
+ };
+ 
+ void ShowTimetableWindow(const Vehicle *v)
+ {
++	DeleteWindowById(WC_VEHICLE_ORDERS, v->index);
++	DeleteWindowById(WC_VEHICLE_DETAILS, v->index);
++	DeleteWindowById(WC_VEHICLE_TIMETABLE, v->index);
+ 	AllocateWindowDescFront<TimetableWindow>(&_timetable_desc, v->index);
+ }
+Index: src/vehicle_gui.cpp
+===================================================================
+--- src/vehicle_gui.cpp	(revision 14054)
++++ src/vehicle_gui.cpp	(working copy)
+@@ -1544,6 +1544,7 @@
+ {
+ 	DeleteWindowById(WC_VEHICLE_ORDERS, v->index);
+ 	DeleteWindowById(WC_VEHICLE_DETAILS, v->index);
++	DeleteWindowById(WC_VEHICLE_TIMETABLE, v->index);
+ 	AllocateWindowDescFront<VehicleDetailsWindow>(&_vehicle_details_desc, v->index);
+ }
+ 
